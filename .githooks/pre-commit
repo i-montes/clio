@@ -1,0 +1,4 @@
+#!/bin/sh
+# S-43: reject commits that contain secrets.
+command -v gitleaks >/dev/null 2>&1 || { echo "pre-commit: gitleaks is not installed" >&2; exit 1; }
+exec gitleaks git --pre-commit --staged --redact --verbose

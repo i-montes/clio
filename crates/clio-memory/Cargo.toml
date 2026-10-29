@@ -1,0 +1,16 @@
+[package]
+name = "clio-memory"
+description = "Generic memory engine on SQLite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+telemetry = []
+
+[dependencies]
+clio-store = { path = "../clio-store", version = "0.0.0" }
+
+[lints]
+workspace = true

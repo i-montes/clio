@@ -1,0 +1,23 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "bench not set up yet"
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "chaos not set up yet"
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "fuzz not set up yet (S-48)"
