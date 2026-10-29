@@ -2,6 +2,10 @@
 
 Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-53): [`docs/security.md`](docs/security.md). Decisions: [`docs/decisions/`](docs/decisions/).
 
+## Architecture
+
+![Clio architecture](docs/clio-architecture.svg)
+
 ## Setup
 
 Requires the Rust toolchain from `rust-toolchain.toml`, plus `just`, `gitleaks`, `cargo-deny` and `cargo-audit`.
