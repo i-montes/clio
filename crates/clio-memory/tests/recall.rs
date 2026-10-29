@@ -171,6 +171,30 @@ fn t06_t17_recall_with_dates() {
     assert_eq!(ids(&r), [late.memory]);
 }
 
+/// Acceptance 14: similar memories that say different things live side by side and both come back.
+#[test]
+fn t14_similar_but_different_memories_both_come_back() {
+    let f = fixture_with(embedder());
+    let a = f
+        .engine
+        .propose(prop(f.scope, f.person, "vive en Medellín"))
+        .unwrap();
+    let b = f
+        .engine
+        .propose(prop(f.scope, f.person, "vive en Bogotá"))
+        .unwrap();
+    f.engine.embed_pending(100).unwrap();
+    assert_eq!((a.kind, b.kind), (OpKind::Add, OpKind::Add));
+    for m in [a.memory, b.memory] {
+        assert_eq!(f.engine.get(m).unwrap().state, State::Active);
+    }
+    let got = ids(&recall(&f, "dónde vive"));
+    assert!(
+        got.contains(&a.memory) && got.contains(&b.memory),
+        "{got:?}"
+    );
+}
+
 #[test]
 fn recall_hit_carries_score_breakdown() {
     let (f, made) = loaded(true);

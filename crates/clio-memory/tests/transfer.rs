@@ -1008,7 +1008,7 @@ fn export_to_file_creates_a_private_file_and_never_overwrites() {
 // ---- telemetry is optional, and absent means absent ----
 
 #[test]
-fn no_telemetry_table_exists_and_the_schema_is_the_expected_set() {
+fn t21_no_telemetry_table_exists_and_the_schema_is_the_expected_set() {
     let f = populated();
     let conn = rusqlite::Connection::open(&f.path).unwrap();
     let mut names: Vec<String> = conn

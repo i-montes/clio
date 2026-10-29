@@ -19,7 +19,7 @@ just audit   # cargo-deny and cargo-audit (S-41)
 
 ## Layout
 
-- `crates/clio-store`, `crates/clio-memory`: generic, publishable on their own; they depend on no other Clio crate.
+- `crates/clio-memory`: generic, publishable on its own; depends on no other Clio crate.
 - `crates/*`: the rest of Clio (placeholders for now).
 - `adapters/pi`, `apps/pwa`, `infra`, `testing/*`: placeholders.
 

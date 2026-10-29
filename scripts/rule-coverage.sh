@@ -21,3 +21,22 @@ if [ "$count" -gt 0 ]; then
   echo "warning: rules without a test:"
   echo "$missing" | sed 's/^/  /'
 fi
+
+# Acceptance tests: the numbered list under "Pruebas de aceptación" in docs/specs/<crate>-spec-v*.md.
+# A test covers number n when it is named t<n>_… (t06_t17_… covers both) or says "spec-<crate> #<n>".
+for spec in docs/specs/*-spec-v*.md; do
+  [ -e "$spec" ] || continue
+  name=$(basename "$spec" | sed -E 's/-spec-v.*//')
+  want=$(awk '/^#+ .*Pruebas de aceptación/{on=1; next} /^#/{on=0} on && /^[0-9]+\./{sub(/\..*/, ""); print}' "$spec" | sort -u)
+  have=$({ grep -rhoE 'fn t[0-9]+(_t[0-9]+)*_' "crates/$name" 2>/dev/null | grep -oE 't[0-9]+' | tr -d t
+           grep -rhoE "spec-$name #[0-9]+" "crates/$name" 2>/dev/null | grep -oE '[0-9]+$'
+         } | sed -E 's/^0+//' | sort -u || true)
+  gap=$(comm -23 <(echo "$want") <(echo "$have") | sort -n)
+  n=$(echo "$want" | grep -c . || true)
+  g=$(echo "$gap" | grep -c . || true)
+  echo "spec-$name: $((n - g))/$n acceptance tests have a test"
+  if [ "$g" -gt 0 ]; then
+    echo "warning: spec-$name acceptance tests without a test:"
+    echo "$gap" | sed 's/^/  #/'
+  fi
+done

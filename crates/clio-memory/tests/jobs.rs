@@ -1157,3 +1157,37 @@ fn run_jobs_can_be_limited_to_one_kind() {
         "the other kind was left alone"
     );
 }
+
+/// Acceptance 7: with no decider plugins nothing deletes on its own; forgetting only archives.
+#[test]
+fn t07_without_plugins_nothing_is_ever_deleted() {
+    let f = old_world();
+    let topic = |c| Proposal {
+        topic_key: Some("ciudad".into()),
+        ..prop(f.scope, f.person, c)
+    };
+    let made: Vec<_> = [
+        prop(f.scope, f.person, "vive en Medellín"),
+        prop(f.scope, f.person, "vive en Medellín"),
+        Proposal {
+            kind: MemoryType::Episodic,
+            ..prop(f.scope, f.person, "fue al cine el sábado")
+        },
+        topic("vive en Cali"),
+        topic("vive en Bogotá"),
+    ]
+    .into_iter()
+    .map(|p| f.engine.propose(p).unwrap().memory)
+    .collect();
+    f.clock.set(1000 + 365 * DAY);
+    decay(&f);
+    f.engine
+        .run_jobs(&RunOpts {
+            allow_heavy: true,
+            ..RunOpts::default()
+        })
+        .unwrap();
+    for m in made {
+        assert!(f.engine.get(m).is_ok(), "{m:?} was deleted");
+    }
+}

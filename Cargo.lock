@@ -155,10 +155,6 @@ name = "clio-policy"
 version = "0.0.0"
 
 [[package]]
-name = "clio-store"
-version = "0.0.0"
-
-[[package]]
 name = "clio-trace"
 version = "0.0.0"
 

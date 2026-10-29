@@ -1,11 +1,11 @@
-//! OS-specific code, isolated per decision 0002. Only Linux is implemented.
+//! OS-specific code, isolated per decision 0002. Linux and macOS share one Unix module.
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::*;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!(
     "clio-memory has no platform module for this OS; see docs/decisions/0002-platform-compatibility.md"
 );
