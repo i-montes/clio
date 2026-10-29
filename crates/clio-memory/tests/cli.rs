@@ -671,3 +671,73 @@ fn run_jobs_exits_1_when_a_job_failed() {
     assert_eq!(code(&o), 1, "{}", out(&o));
     assert!(out(&o).contains("failed 1"), "{}", out(&o));
 }
+
+/// A new file with one scope, made through the library: the CLI cannot do it (S-25).
+fn new_db_with_scope(dir: &Path) -> std::path::PathBuf {
+    let db = dir.join("new.db");
+    let engine = Engine::open(&db, OpenMode::ReadWrite, Arc::new(SystemClock)).unwrap();
+    engine.create_scope("work", "es").unwrap();
+    db
+}
+
+#[test]
+fn remember_writes_through_the_normal_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = new_db_with_scope(dir.path());
+    let o = run(
+        Some(&db),
+        &[
+            "remember",
+            "work",
+            "vive",
+            "en",
+            "Medellín",
+            "--topic",
+            "ciudad",
+        ],
+    );
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert!(out(&o).contains("Add"), "{}", out(&o));
+    let o = run(Some(&db), &["remember", "work", "vive en Medellín"]);
+    assert!(out(&o).contains("Noop"), "same content twice: {}", out(&o));
+    let listed = out(&run(Some(&db), &["list", "work", "--state", "active"]));
+    assert!(listed.contains("Medellín"), "{listed}");
+    assert!(out(&run(Some(&db), &["recall", "work", "Medellín"])).contains("Medellín"));
+}
+
+#[test]
+fn remember_as_an_agent_goes_through_the_agent_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = new_db_with_scope(dir.path());
+    let o = run(
+        Some(&db),
+        &[
+            "--actor",
+            "claude",
+            "remember",
+            "work",
+            "el CLI no crea ámbitos",
+            "--kind",
+            "episodic",
+        ],
+    );
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    let got = out(&run(Some(&db), &["get", "1"]));
+    assert!(got.contains("Agent") && got.contains("Episodic"), "{got}");
+}
+
+#[test]
+fn remember_needs_an_existing_scope_and_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("x.db");
+    let o = run(Some(&db), &["remember", "work", "algo"]);
+    assert_eq!(code(&o), 1);
+    assert!(err(&o).contains("database not found"), "{}", err(&o));
+    assert!(!db.exists(), "remember must not create the file");
+    let db = new_db_with_scope(dir.path());
+    let o = run(Some(&db), &["remember", "otro", "algo"]);
+    assert_eq!(code(&o), 1);
+    assert!(err(&o).contains("unknown scope"), "{}", err(&o));
+    let o = run(Some(&db), &["remember", "work", "algo", "--kind", "raro"]);
+    assert_eq!(code(&o), 2);
+}

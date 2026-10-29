@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use clio_memory::{JobState, MemoryId, OpId, Origin, Signal, State};
+use clio_memory::{JobState, MemoryId, MemoryType, OpId, Origin, Signal, State};
 
 pub const USAGE: &str = "\
 usage: clio-memory --db PATH [--actor NAME] [--model DIR] [--json] <command> [args]
@@ -21,6 +21,10 @@ inspect (open the file read-only; never write):
   context SCOPE TEXT...       the prompt context for TEXT (fixed blocks + recall)
 
 change (open the file read-write; fail if another program holds its write lock):
+  remember SCOPE TEXT... [--kind K] [--topic T] [--source S]
+                              propose one memory through the normal rules (K: working|episodic|
+                              semantic|procedural, default semantic); with --actor NAME it is
+                              an agent's memory, without it a person's
   promote ID                  accept a quarantined memory
   archive ID                  take a memory out of circulation (nothing is deleted)
   revert OP                   undo one operation (see `history`)
@@ -77,6 +81,13 @@ pub enum Command {
     },
     Export {
         path: PathBuf,
+    },
+    Remember {
+        scope: String,
+        text: String,
+        kind: MemoryType,
+        topic: Option<String>,
+        source: Option<String>,
     },
     Promote {
         id: MemoryId,
@@ -248,6 +259,18 @@ fn parse_origin(s: &str) -> Result<Origin, UsageError> {
     }
 }
 
+fn parse_kind(s: &str) -> Result<MemoryType, UsageError> {
+    match s {
+        "working" => Ok(MemoryType::Working),
+        "episodic" => Ok(MemoryType::Episodic),
+        "semantic" => Ok(MemoryType::Semantic),
+        "procedural" => Ok(MemoryType::Procedural),
+        _ => usage(format!(
+            "unknown kind {s:?} (working|episodic|semantic|procedural)"
+        )),
+    }
+}
+
 fn parse_signal(s: &str) -> Result<Signal, UsageError> {
     match s {
         "useful" => Ok(Signal::Useful),
@@ -351,6 +374,21 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, UsageErro
         "export" => Command::Export {
             path: PathBuf::from(rest.one("PATH")?),
         },
+        "remember" => {
+            let kind = rest
+                .flag("--kind")?
+                .map_or(Ok(MemoryType::Semantic), |k| parse_kind(&k))?;
+            let topic = rest.flag("--topic")?;
+            let source = rest.flag("--source")?;
+            let (scope, text) = rest.with_text("SCOPE")?;
+            Command::Remember {
+                scope,
+                text,
+                kind,
+                topic,
+                source,
+            }
+        }
         "promote" => Command::Promote {
             id: parse_id(&rest.one("ID")?)?,
         },

@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clio_memory::{
-    ActorId, ActorKind, Engine, Error, ImportOpts, JobKind, JobState, OpenMode, Quota, RunOpts,
-    Signal, SystemClock,
+    ActorId, ActorKind, Engine, Error, ImportOpts, JobKind, JobState, OpenMode, Origin, Proposal,
+    Quota, RunOpts, Signal, SystemClock,
 };
 
 use crate::args::{Cli, Command};
@@ -17,6 +17,12 @@ use crate::output::{clean, line};
 /// The CLI's own actors are people at a keyboard, not agents under a rate limit.
 const CLI_QUOTA: Quota = Quota {
     max: 1_000_000,
+    window_secs: 3600,
+};
+
+/// An agent that remembers through the CLI still answers to a quota.
+const AGENT_QUOTA: Quota = Quota {
+    max: 200,
     window_secs: 3600,
 };
 
@@ -32,6 +38,41 @@ pub fn run(cli: &Cli) -> Result<ExitCode, String> {
     let engine = open_write(cli)?;
     let fail = |e: Error| e.to_string();
     match &cli.command {
+        Command::Remember {
+            scope,
+            text,
+            kind,
+            topic,
+            source,
+        } => {
+            let scope = scope_id(&engine, scope)?;
+            let (actor, origin) = match &cli.actor {
+                Some(name) => (
+                    ensure_actor(&engine, name, ActorKind::Agent, &[ActorKind::Agent])?,
+                    Origin::Agent,
+                ),
+                None => (person(&engine, cli)?, Origin::User),
+            };
+            let o = engine
+                .propose(Proposal {
+                    scope,
+                    actor,
+                    kind: *kind,
+                    content: text.clone(),
+                    topic_key: topic.clone(),
+                    origin,
+                    session: None,
+                    episode: None,
+                    source: source.clone(),
+                    valid_from: None,
+                    valid_to: None,
+                })
+                .map_err(fail)?;
+            line(&format!(
+                "{:?} m{} (op {}) · {:?}",
+                o.kind, o.memory.0, o.op.0, o.state
+            ));
+        }
         Command::Promote { id } => {
             let actor = person(&engine, cli)?;
             let op = engine.promote(*id, actor).map_err(fail)?;
@@ -280,9 +321,16 @@ fn ensure_actor(
                 .collect::<Vec<_>>()
                 .join(" or ")
         )),
-        None => engine
-            .register_actor(name, kind, CLI_QUOTA)
-            .map_err(|e| e.to_string()),
+        None => {
+            let quota = if kind == ActorKind::Agent {
+                AGENT_QUOTA
+            } else {
+                CLI_QUOTA
+            };
+            engine
+                .register_actor(name, kind, quota)
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
