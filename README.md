@@ -22,3 +22,5 @@ just audit   # cargo-deny and cargo-audit (S-41)
 - `crates/clio-store`, `crates/clio-memory`: generic, publishable on their own; they depend on no other Clio crate.
 - `crates/*`: the rest of Clio (placeholders for now).
 - `adapters/pi`, `apps/pwa`, `infra`, `testing/*`: placeholders.
+
+Platform-specific code (Linux only for now) is isolated and marked by name, never mixed into shared code. See [`docs/decisions/0002-platform-compatibility.md`](docs/decisions/0002-platform-compatibility.md).
