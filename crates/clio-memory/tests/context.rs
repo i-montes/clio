@@ -413,7 +413,8 @@ fn t20_compact_context_is_cheaper_than_json() {
             },
         )
         .unwrap();
-    assert!(ApproxTokens.count(&compact) < ApproxTokens.count(&json));
+    // measured at about a tenth; half leaves room for the approximate counter
+    assert!(ApproxTokens.count(&compact) * 2 <= ApproxTokens.count(&json));
 }
 
 #[test]

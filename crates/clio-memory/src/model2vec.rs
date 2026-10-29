@@ -1,5 +1,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use model2vec_rs::model::StaticModel;
 use sha2::{Digest, Sha256};
@@ -7,10 +9,79 @@ use sha2::{Digest, Sha256};
 use crate::embed::{Embedder, catch_panic};
 use crate::error::{Error, Result};
 
-/// Embeddings from a Model2Vec static model (no GPU). The model is read from a local
-/// directory; this crate never downloads anything.
+/// How long the model stays in memory after its last use.
+const DEFAULT_IDLE: Duration = Duration::from_secs(300);
+
+struct Slot<T> {
+    value: Option<T>,
+    used: Instant,
+}
+
+/// A value that is dropped after `idle` without use and loaded again on the next use.
+struct IdleCache<T> {
+    slot: Arc<Mutex<Slot<T>>>,
+    load: Box<dyn Fn() -> Result<T> + Send + Sync>,
+}
+
+impl<T: Send + 'static> IdleCache<T> {
+    /// `idle: None` keeps the value for good. A watcher thread ends when the cache is dropped.
+    fn new(
+        first: T,
+        idle: Option<Duration>,
+        load: impl Fn() -> Result<T> + Send + Sync + 'static,
+    ) -> Self {
+        let slot = Arc::new(Mutex::new(Slot {
+            value: Some(first),
+            used: Instant::now(),
+        }));
+        if let Some(idle) = idle {
+            let weak = Arc::downgrade(&slot);
+            let poll = (idle / 4).max(Duration::from_millis(10));
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(poll);
+                    let Some(slot) = weak.upgrade() else { break };
+                    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                    if slot.used.elapsed() >= idle {
+                        slot.value = None;
+                    }
+                }
+            });
+        }
+        Self {
+            slot,
+            load: Box::new(load),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&T) -> R) -> Result<R> {
+        let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.value.is_none() {
+            slot.value = Some((self.load)()?);
+        }
+        slot.used = Instant::now();
+        slot.value
+            .as_ref()
+            .map(f)
+            .ok_or(Error::Embedding("model not loaded".into()))
+    }
+
+    #[cfg(test)]
+    fn loaded(&self) -> bool {
+        self.slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .value
+            .is_some()
+    }
+}
+
+/// Embeddings from a Model2Vec static model (CPU only: encoding a query takes microseconds, so a
+/// GPU would add nothing). The model is read from a local directory; this crate never downloads
+/// anything. It takes about 1 GB of memory, so it is dropped after five idle minutes and read
+/// again on the next use.
 pub struct Model2VecEmbedder {
-    model: StaticModel,
+    model: IdleCache<StaticModel>,
     id: String,
     dim: usize,
 }
@@ -69,14 +140,18 @@ fn fingerprint(dir: &Path) -> Result<String> {
 impl Model2VecEmbedder {
     /// `dir` holds the model files (`model.safetensors`, `tokenizer.json`, `config.json`).
     pub fn from_dir(dir: &Path) -> Result<Self> {
+        Self::from_dir_idle(dir, Some(DEFAULT_IDLE))
+    }
+
+    /// Like `from_dir`, with the idle time after which the model leaves memory (`None`: never).
+    pub fn from_dir_idle(dir: &Path, idle: Option<Duration>) -> Result<Self> {
         if !dir.is_dir() {
             return Err(Error::Embedding(format!(
                 "{} is not a directory",
                 dir.display()
             )));
         }
-        let model = StaticModel::from_pretrained(dir, None, None, None)
-            .map_err(|e| Error::Embedding(e.to_string()))?;
+        let model = read_model(dir)?;
         let dim = model.encode_single("a").len();
         if dim == 0 {
             return Err(Error::Embedding("model produced an empty vector".into()));
@@ -84,9 +159,29 @@ impl Model2VecEmbedder {
         let name = dir
             .file_name()
             .map_or_else(|| "model".into(), |n| n.to_string_lossy().into_owned());
-        let id = format!("model2vec:{name}:{dim}:{}", fingerprint(dir)?);
-        Ok(Self { model, id, dim })
+        let print = fingerprint(dir)?;
+        let id = format!("model2vec:{name}:{dim}:{print}");
+        let dir = dir.to_path_buf();
+        // a reload must find the same files, or old and new vectors would mix
+        let reload = move || {
+            if fingerprint(&dir)? != print {
+                return Err(Error::Embedding(format!(
+                    "the model files in {} changed while it was unloaded",
+                    dir.display()
+                )));
+            }
+            read_model(&dir)
+        };
+        Ok(Self {
+            model: IdleCache::new(model, idle, reload),
+            id,
+            dim,
+        })
     }
+}
+
+fn read_model(dir: &Path) -> Result<StaticModel> {
+    StaticModel::from_pretrained(dir, None, None, None).map_err(|e| Error::Embedding(e.to_string()))
 }
 
 impl Embedder for Model2VecEmbedder {
@@ -100,13 +195,45 @@ impl Embedder for Model2VecEmbedder {
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let owned: Vec<String> = texts.iter().map(|t| (*t).to_string()).collect();
-        catch_panic(|| self.model.encode(&owned))
+        self.model.with(|m| catch_panic(|| m.encode(&owned)))?
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn idle_value_is_dropped_and_loaded_again_on_use() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&loads);
+        let cache = IdleCache::new(1, Some(Duration::from_millis(40)), move || {
+            Ok(counter.fetch_add(1, Ordering::SeqCst) + 100)
+        });
+        assert_eq!(cache.with(|v| *v).unwrap(), 1, "the first value is kept");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!cache.loaded(), "nobody used it, so it left memory");
+        assert_eq!(cache.with(|v| *v).unwrap(), 100);
+        assert_eq!(cache.with(|v| *v).unwrap(), 100, "used again: not reloaded");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn without_an_idle_time_the_value_stays() {
+        let cache = IdleCache::new(1, None, || Ok(2));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(cache.loaded());
+    }
+
+    #[test]
+    fn a_failed_reload_is_an_error_not_a_panic() {
+        let cache = IdleCache::new(1, Some(Duration::from_millis(20)), || {
+            Err(Error::Embedding("gone".into()))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(cache.with(|v| *v).is_err());
+    }
 
     #[test]
     fn fingerprint_follows_the_weights_and_ignores_other_files() {

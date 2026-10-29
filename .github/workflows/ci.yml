@@ -23,6 +23,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      # Acceptance 25: recall over 50k memories in under 150 ms; ignored in the normal run because it builds a big file
+      - run: cargo test --release -p clio-memory --test recall t25 -- --ignored
+        if: matrix.os == 'ubuntu-latest'
 
   deny:
     runs-on: ubuntu-latest
