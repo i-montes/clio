@@ -3,9 +3,17 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# Unmaintained (not vulnerable) crates that only the optional `model2vec` feature of clio-memory
+# pulls in, through `tokenizers`. Revisit when model2vec-rs moves to a newer tokenizers.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; build-time macro, reached only via tokenizers (feature model2vec)" },
+    { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained; progress-bar formatting, reached only via tokenizers (feature model2vec)" },
+]
 
 [licenses]
-allow = ["MIT", "Apache-2.0"]
+# Unicode-3.0 (unicode-ident, unicode-normalization) and Zlib (foldhash, tinyvec) are permissive
+# and OSI approved; unicode-ident is in nearly every Rust dependency tree.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.9
 
 [licenses.private]

@@ -1,0 +1,5 @@
+# Synthetic secrets used on purpose to test the secret detector of clio-memory (S-18).
+# Each fingerprint is one exact finding (commit:file:rule:line), not a path, so real secrets elsewhere are still caught.
+2ce540cec74d3bccf5bf5b592b7a071063582ff2:crates/clio-memory/tests/context.rs:generic-api-key:107
+473ffcdd323498ab708453487325037817d78279:crates/clio-memory/src/secrets.rs:jwt:54
+473ffcdd323498ab708453487325037817d78279:crates/clio-memory/src/secrets.rs:aws-access-token:51
