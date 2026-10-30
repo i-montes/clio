@@ -86,14 +86,14 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### clio-trace mínimo
 
-- [ ] **057** Esquema SQLite de tramos con ids, tamaños, tiempos y decisiones, nunca texto (D15, D23)
-- [ ] **058** Capa propia de nombres encima de las convenciones `gen_ai.*` de OpenTelemetry (las convenciones aún cambian)
-- [ ] **059** Tokens de entrada y salida por llamada al modelo
-- [ ] **060** Tabla de precios versionada y costo calculado con modelo, proveedor y tokens
-- [ ] **061** `traceparent` que viaja por cada tramo y mensaje
-- [ ] **062** Archivo aparte (`clio-trace.db`) con permisos 0600, separado de la memoria
-- [ ] **063** Contenido de prompts apagado por defecto (S-46)
-- [ ] **064** prueba: con el contenido apagado, ningún tramo trae texto (S-46)
+- [x] **057** Esquema SQLite de tramos con ids, tamaños, tiempos y decisiones, nunca texto (D15, D23)
+- [x] **058** Capa propia de nombres encima de las convenciones `gen_ai.*` de OpenTelemetry (las convenciones aún cambian)
+- [x] **059** Tokens de entrada y salida por llamada al modelo
+- [x] **060** Tabla de precios versionada y costo calculado con modelo, proveedor y tokens
+- [x] **061** `traceparent` que viaja por cada tramo y mensaje
+- [x] **062** Archivo aparte (`clio-trace.db`) con permisos 0600, separado de la memoria
+- [x] **063** Contenido de prompts apagado por defecto (S-46)
+- [x] **064** prueba: con el contenido apagado, ningún tramo trae texto (S-46)
 - [ ] **065** Guardar la versión de cada prompt usada en cada traza
 - [ ] **066** Registrar cada cambio de estado de un contrato en la traza
 
