@@ -121,6 +121,15 @@ name = "clio-diagnosis"
 version = "0.0.0"
 
 [[package]]
+name = "clio-fake-llm"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "clio-gateway"
 version = "0.0.0"
 
