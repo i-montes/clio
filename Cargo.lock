@@ -109,6 +109,13 @@ name = "clio-brain"
 version = "0.0.0"
 
 [[package]]
+name = "clio-canaries"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "clio-contract"
 version = "0.0.0"
 

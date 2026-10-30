@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "testing/fake-llm"]
+members = ["crates/*", "testing/fake-llm", "testing/canaries"]
 
 [workspace.package]
 version = "0.0.0"

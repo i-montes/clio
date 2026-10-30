@@ -77,8 +77,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **048** `testing/fake-llm`: pasar las grabaciones por el detector de secretos antes de guardarlas
 - [x] **049** prueba: dos corridas en modo reproducción dan exactamente el mismo resultado
 - [ ] **050** Reloj inyectable en `clio-core` para todo lo que dependa del tiempo (clio-memory conserva el suyo; sin dependencia entre ambos)
-- [ ] **051** `testing/canaries`: generar secretos falsos únicos por corrida
-- [ ] **052** `testing/canaries`: escáner que busca los señuelos (en claro, base64 y codificados para URL) en trazas, logs, payloads, memoria y contexto
+- [x] **051** `testing/canaries`: generar secretos falsos únicos por corrida
+- [x] **052** `testing/canaries`: escáner que busca los señuelos (en claro, base64 y codificados para URL) en trazas, logs, payloads, memoria y contexto
 - [ ] **053** prueba: un señuelo que aparece en una traza hace fallar la compuerta
 - [ ] **054** Datos sintéticos: generador de memoria y archivos de prueba, nunca datos reales
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1)
