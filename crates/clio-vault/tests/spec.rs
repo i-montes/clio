@@ -426,3 +426,74 @@ fn the_vault_file_is_mode_0600() {
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
 }
+
+// S-21 (task 260): the secrets whose period ran out are found and rotated with the injected clock.
+#[test]
+fn rotation_due_is_found_and_rotated_by_the_clock() {
+    let e = env();
+    let old = format!("{}-old", e.canaries.value("notion").unwrap());
+    let mut s = spec("slow", &old, &[("t", "x.test")]);
+    s.rotate_every_ms = Some(1_000);
+    e.vault.put(&e.person, s).unwrap();
+    assert!(e.vault.due_for_rotation(e.clock.now_ms()).is_empty());
+    e.clock.advance(1_000);
+    assert_eq!(e.vault.due_for_rotation(e.clock.now_ms()), ["slow"]);
+    let fresh = format!("{}-new", e.canaries.value("github").unwrap());
+    let done = e
+        .vault
+        .rotate_due(&e.person, |m| (m.name == "slow").then(|| fresh.clone()));
+    assert_eq!(done.len(), 1);
+    assert!(done[0].1.is_ok());
+    // The period restarted: nothing is due now, and the value changed.
+    assert!(e.vault.due_for_rotation(e.clock.now_ms()).is_empty());
+    let v = e.vault.resolve(&e.gw, "slow", "t", "x.test", "t").unwrap();
+    assert_eq!(v.expose(), fresh);
+}
+
+// S-18, S-20 (task 272): a lazy unlock filters the values it has not loaded, from digests only,
+// and a first resolve loads the real one.
+#[test]
+fn lazy_unlock_filters_secrets_it_has_not_loaded() {
+    let path = tmp("lazy");
+    let e = env_at(Some(&path));
+    let github = e.canaries.value("github").unwrap().to_string();
+    let notion = e.canaries.value("notion").unwrap().to_string();
+    let clock = e.clock.clone();
+    drop(e.vault);
+    let v = Vault::open(&path, clock).unwrap();
+    assert!(v.unlock_lazy("wrong", &["notion"]).is_err());
+    v.unlock_lazy(PASS, &["notion"]).unwrap();
+    let text = format!("a {github} b {} c {notion} d", b64(&github));
+    let out = v.scrubber().scrub(&text);
+    assert!(!out.contains(&github) && !out.contains(&notion), "{out}");
+    assert!(out.contains("[secreto:github tachado]"), "{out}");
+    assert_eq!(
+        v.scrubber().scrub("plain text, nothing here"),
+        "plain text, nothing here"
+    );
+    // After the first use it is a full needle again, and still scrubbed.
+    v.resolve(
+        &GatewayCap::for_gateway(),
+        "github",
+        "git",
+        "github.com",
+        "t",
+    )
+    .unwrap();
+    assert!(!v.scrubber().scrub(&github).contains(&github));
+}
+
+// S-21: `check` answers without handing the value, and a refusal is audited and alerted.
+#[test]
+fn check_answers_without_the_value_and_audits_refusals() {
+    let e = env();
+    let ok = |dom| e.vault.check(&e.gw, "notion", "notion-api", dom, "t");
+    assert!(ok(Some("api.notion.com")).is_ok());
+    assert!(ok(None).is_ok());
+    let r = e
+        .vault
+        .check(&e.gw, "notion", "notion-api", Some("evil.test"), "t9");
+    assert!(matches!(r, Err(VaultError::Denied(_))));
+    assert_eq!(e.vault.alerts().len(), 1);
+    assert_eq!(e.vault.audit(&e.person).len(), 1);
+}

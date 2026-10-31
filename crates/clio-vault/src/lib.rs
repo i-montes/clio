@@ -5,9 +5,16 @@
 //! with XChaCha20-Poly1305; the master key comes from a passphrase (Argon2id) and is never
 //! written to disk. A fresh or restarted vault is locked: nothing resolves until `unlock`.
 
+#[cfg(unix)]
+mod client;
 mod crypto;
+pub mod proto;
 mod scrub;
+#[cfg(unix)]
+pub mod server;
 
+#[cfg(unix)]
+pub use client::VaultClient;
 pub use scrub::{Form, Redaction, Scrubber};
 
 use clio_core::Clock;
@@ -54,8 +61,8 @@ impl std::error::Error for VaultError {}
 type Result<T> = std::result::Result<T, VaultError>;
 
 /// Proof that the caller is the gateway. `resolve` and `issue_token` ask for it.
-/// shortcut: in one process this is a convention, not a wall; the wall is the vault running as
-/// its own user behind a 0600 Unix socket (task 233/234, not built yet).
+/// shortcut: in one process this is a convention, not a wall; the wall is the vault server
+/// (`server`): the gateway socket and the person socket are separate 0600 Unix sockets.
 /// ```compile_fail
 /// let _ = clio_vault::GatewayCap(());
 /// ```
@@ -74,6 +81,14 @@ impl GatewayCap {
 /// let _ = clio_vault::PersonCap(());
 /// ```
 pub struct PersonCap(());
+
+impl PersonCap {
+    /// Only the person-socket handler of the vault server calls this: whoever can connect to
+    /// that socket is the person (task 266). `unlock` and `init` hand out the same capability.
+    pub fn for_person_socket() -> Self {
+        Self(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
@@ -199,14 +214,14 @@ impl fmt::Debug for BackupKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     Allowed,
     Denied(String),
 }
 
 /// One resolution attempt (never the value).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub at_ms: i64,
     pub name: String,
@@ -218,7 +233,7 @@ pub struct AuditEntry {
 }
 
 /// Raised when a resolution is refused; the gateway should surface it to the person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alert {
     pub at_ms: i64,
     pub name: String,
@@ -244,6 +259,9 @@ pub struct Telemetry {
 struct Stored {
     meta: Meta,
     blob: Vec<u8>,
+    /// Sealed digests of the value's forms, so a lazy unlock can filter it without decrypting it.
+    #[serde(default)]
+    prints: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -290,6 +308,10 @@ impl fmt::Debug for Vault {
             i.secrets.len()
         )
     }
+}
+
+fn prints_aad(name: &str) -> Vec<u8> {
+    [b"prints:", name.as_bytes()].concat()
 }
 
 fn valid_name(n: &str) -> bool {
@@ -374,15 +396,39 @@ impl Vault {
 
     /// Unlocks with the passphrase (terminal in this phase). Teaches the scrubber every value.
     pub fn unlock(&self, passphrase: &str) -> Result<PersonCap> {
+        self.unlock_with(passphrase, None)
+    }
+
+    /// Task 272: like `unlock`, but only the secrets in `eager` (the model provider's key, say)
+    /// are decrypted now. The others reach the scrubber as keyed digests only, and become full
+    /// values at their first `resolve`. A file written before digests existed is decrypted once
+    /// to make them, and the value is dropped at once.
+    pub fn unlock_lazy(&self, passphrase: &str, eager: &[&str]) -> Result<PersonCap> {
+        self.unlock_with(passphrase, Some(eager))
+    }
+
+    fn unlock_with(&self, passphrase: &str, eager: Option<&[&str]>) -> Result<PersonCap> {
         let mut i = self.inner();
         let key = crypto::derive(passphrase, &i.salt)?;
         if crypto::open(&key, b"check", &i.check).as_deref() != Some(FILE_CHECK) {
             return Err(VaultError::BadPassphrase);
         }
         for s in i.secrets.values() {
-            if let Some(v) = crypto::open(&key, s.meta.name.as_bytes(), &s.blob) {
-                self.scrubber
-                    .add(&s.meta.name, &String::from_utf8_lossy(&v));
+            let name = &s.meta.name;
+            if eager.is_none_or(|e| e.contains(&name.as_str())) {
+                if let Some(v) = crypto::open(&key, name.as_bytes(), &s.blob) {
+                    self.scrubber.add(name, &String::from_utf8_lossy(&v));
+                }
+                continue;
+            }
+            let prints = crypto::open(&key, &prints_aad(name), &s.prints)
+                .and_then(|p| serde_json::from_slice(&p).ok())
+                .or_else(|| {
+                    let v = crypto::open(&key, name.as_bytes(), &s.blob)?;
+                    Some(scrub::prints(&String::from_utf8_lossy(&v)))
+                });
+            if let Some(p) = prints {
+                self.scrubber.add_masked(name, &p);
             }
         }
         i.key = Some(key);
@@ -397,6 +443,11 @@ impl Vault {
         i.key = None;
         i.tokens.clear();
         i.locked_since.get_or_insert(self.clock.now_ms());
+    }
+
+    /// The injected clock's time.
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
     }
 
     pub fn is_locked(&self) -> bool {
@@ -417,6 +468,7 @@ impl Vault {
                 .map(|s| Stored {
                     meta: s.meta.clone(),
                     blob: s.blob.clone(),
+                    prints: s.prints.clone(),
                 })
                 .collect(),
         };
@@ -437,6 +489,9 @@ impl Vault {
         let mut i = self.inner();
         let key = i.key.ok_or(VaultError::Locked)?;
         let blob = crypto::seal(&key, spec.name.as_bytes(), spec.value.as_bytes())?;
+        let prints = serde_json::to_vec(&scrub::prints(&spec.value))
+            .map_err(|e| VaultError::Io(e.to_string()))?;
+        let prints = crypto::seal(&key, &prints_aad(&spec.name), &prints)?;
         self.scrubber.add(&spec.name, &spec.value);
         let meta = Meta {
             name: spec.name.clone(),
@@ -449,7 +504,7 @@ impl Vault {
             state: State::Active,
             last_used_ms: None,
         };
-        i.secrets.insert(spec.name, Stored { meta, blob });
+        i.secrets.insert(spec.name, Stored { meta, blob, prints });
         self.save(&i)
     }
 
@@ -470,6 +525,42 @@ impl Vault {
                 expires_at_ms: meta.expires_at_ms,
             },
         )
+    }
+
+    /// Task 260: names of the active secrets whose rotation period has run out at `now_ms`.
+    pub fn due_for_rotation(&self, now_ms: i64) -> Vec<String> {
+        self.inner()
+            .secrets
+            .values()
+            .map(|s| &s.meta)
+            .filter(|m| m.state == State::Active)
+            .filter(|m| {
+                m.rotate_every_ms
+                    .is_some_and(|r| now_ms >= m.rotated_at_ms + r)
+            })
+            .map(|m| m.name.clone())
+            .collect()
+    }
+
+    /// Task 260: rotates every secret that is due now (the injected clock). `new_value` makes the
+    /// replacement for one secret (the provider call is not this crate's job); `None` skips it.
+    /// Returns each due name with the outcome. The scheduler that calls this is another phase.
+    pub fn rotate_due(
+        &self,
+        cap: &PersonCap,
+        mut new_value: impl FnMut(&Meta) -> Option<String>,
+    ) -> Vec<(String, Result<()>)> {
+        let mut done = Vec::new();
+        for name in self.due_for_rotation(self.clock.now_ms()) {
+            let Ok(meta) = self.get_meta(&name) else {
+                continue;
+            };
+            if let Some(v) = new_value(&meta) {
+                let r = self.rotate(cap, &name, &v);
+                done.push((name, r));
+            }
+        }
+        done
     }
 
     /// Takes effect at once: the next `resolve` or token use fails.
@@ -591,6 +682,75 @@ impl Vault {
         self.resolve_inner(&name, tool, domain, trace_id, true)
     }
 
+    /// Asks whether `name` may be used by `tool` towards `domain` (None: no destination), without
+    /// handing out the value. A refusal is audited and alerted like a failed `resolve`.
+    pub fn check(
+        &self,
+        _cap: &GatewayCap,
+        name: &str,
+        tool: &str,
+        domain: Option<&str>,
+        trace_id: &str,
+    ) -> Result<()> {
+        let mut i = self.inner();
+        let now = self.clock.now_ms();
+        let verdict = Self::verdict(&i, name, tool, domain, now);
+        if let Err(e) = &verdict {
+            let at = [name, tool, domain.unwrap_or(""), trace_id];
+            Self::deny(&mut i, now, at, false, e);
+        }
+        verdict
+    }
+
+    fn verdict(i: &Inner, name: &str, tool: &str, domain: Option<&str>, now: i64) -> Result<()> {
+        let allows = |d: &Dest| domain.map_or(d.tool == tool, |x| d.allows(tool, x));
+        match (&i.key, i.secrets.get(name)) {
+            (None, _) => Err(VaultError::Locked),
+            (_, None) => Err(VaultError::NotFound),
+            (_, Some(s)) if s.meta.state == State::Revoked => Err(VaultError::Revoked),
+            (_, Some(s)) if s.meta.expires_at_ms.is_some_and(|e| now >= e) => {
+                Err(VaultError::Expired)
+            }
+            (_, Some(s)) if !s.meta.destinations.iter().any(allows) => {
+                Err(VaultError::Denied(format!(
+                    "{name} is not allowed for {tool} -> {}",
+                    domain.unwrap_or("(none)")
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Audit entry, counter and (for a destination refusal) alert, for one refused attempt.
+    fn deny(
+        i: &mut Inner,
+        now: i64,
+        [name, tool, domain, trace]: [&str; 4],
+        via_token: bool,
+        e: &VaultError,
+    ) {
+        i.audit.push(AuditEntry {
+            at_ms: now,
+            name: name.to_string(),
+            tool: tool.to_string(),
+            domain: domain.to_string(),
+            trace_id: trace.to_string(),
+            via_token,
+            outcome: Outcome::Denied(e.to_string()),
+        });
+        i.denials += 1;
+        if matches!(e, VaultError::Denied(_)) {
+            i.alerts.push(Alert {
+                at_ms: now,
+                name: name.to_string(),
+                tool: tool.to_string(),
+                domain: domain.to_string(),
+                trace_id: trace.to_string(),
+                reason: e.to_string(),
+            });
+        }
+    }
+
     fn resolve_inner(
         &self,
         name: &str,
@@ -601,53 +761,36 @@ impl Vault {
     ) -> Result<SecretValue> {
         let mut i = self.inner();
         let now = self.clock.now_ms();
-        let verdict = match (&i.key, i.secrets.get(name)) {
-            (None, _) => Err(VaultError::Locked),
-            (_, None) => Err(VaultError::NotFound),
-            (_, Some(s)) if s.meta.state == State::Revoked => Err(VaultError::Revoked),
-            (_, Some(s)) if s.meta.expires_at_ms.is_some_and(|e| now >= e) => {
-                Err(VaultError::Expired)
-            }
-            (_, Some(s)) if !s.meta.destinations.iter().any(|d| d.allows(tool, domain)) => Err(
-                VaultError::Denied(format!("{name} is not allowed for {tool} -> {domain}")),
-            ),
-            (Some(key), Some(s)) => crypto::open(key, name.as_bytes(), &s.blob)
+        let verdict = Self::verdict(&i, name, tool, Some(domain), now).and_then(|()| {
+            let (Some(key), Some(s)) = (&i.key, i.secrets.get(name)) else {
+                return Err(VaultError::NotFound);
+            };
+            crypto::open(key, name.as_bytes(), &s.blob)
                 .map(|v| String::from_utf8_lossy(&v).into_owned())
-                .ok_or(VaultError::Crypto),
-        };
-        let entry = |outcome| AuditEntry {
-            at_ms: now,
-            name: name.to_string(),
-            tool: tool.to_string(),
-            domain: domain.to_string(),
-            trace_id: trace_id.to_string(),
-            via_token,
-            outcome,
-        };
+                .ok_or(VaultError::Crypto)
+        });
         match verdict {
             Ok(value) => {
-                i.audit.push(entry(Outcome::Allowed));
+                i.audit.push(AuditEntry {
+                    at_ms: now,
+                    name: name.to_string(),
+                    tool: tool.to_string(),
+                    domain: domain.to_string(),
+                    trace_id: trace_id.to_string(),
+                    via_token,
+                    outcome: Outcome::Allowed,
+                });
                 *i.resolutions
                     .entry(format!("{name} -> {domain}"))
                     .or_default() += 1;
                 if let Some(s) = i.secrets.get_mut(name) {
                     s.meta.last_used_ms = Some(now);
                 }
+                self.scrubber.promote(name, &value);
                 Ok(SecretValue(value))
             }
             Err(e) => {
-                i.audit.push(entry(Outcome::Denied(e.to_string())));
-                i.denials += 1;
-                if matches!(e, VaultError::Denied(_)) {
-                    i.alerts.push(Alert {
-                        at_ms: now,
-                        name: name.to_string(),
-                        tool: tool.to_string(),
-                        domain: domain.to_string(),
-                        trace_id: trace_id.to_string(),
-                        reason: e.to_string(),
-                    });
-                }
+                Self::deny(&mut i, now, [name, tool, domain, trace_id], via_token, &e);
                 Err(e)
             }
         }
