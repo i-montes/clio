@@ -16,6 +16,12 @@ Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría 
 - **Dato nuevo:** la última publicación de Pi en npm es de mayo de 2026; si el proyecto se detuvo, conviene saberlo antes de depender de él.
 - **Si no decides:** se sigue con el bucle propio; no se pierde nada.
 
+### 2 bis. Usuario propio del vault y dueño de cada socket · tarea 233 en producción
+El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero con un solo usuario del sistema la separación es una convención, no una pared. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Va con la decisión del servidor (punto 1).
+
+### 2 ter. ¿Parar la tarea tras N negaciones seguidas de la pasarela?
+Hoy el cortacircuito solo frena lo que correría solo; lo que acaba el bucle es el tope de pasos. Añadir un `Stop::Denials` cortaría antes a un modelo que insiste con herramientas prohibidas. Es más estricto: ¿lo quieres? Por defecto no.
+
 ### 3. Topes de gasto en el panel de cada proveedor · tarea 281 (S-45)
 Se configura en la web del proveedor, no en código. Hoy se usa solo el modelo gratuito, así que el riesgo es nulo; hazlo antes de usar un modelo de pago.
 
@@ -36,6 +42,8 @@ Se pegó en el chat de esta sesión. Rótala cuando termines de probar. Después
 | — | `/rápido` fuerza nivel 1 y gana sobre «posible irreversible» | que lo irreversible siempre suba a 2 |
 | — | El triaje «pregunta corta» = 12 palabras o menos; listas de verbos cortas y sin afinar con casos reales | afinar con el banco |
 | — | La pasarela nunca permite lo irreversible por política: siempre pide aprobación | permitirlo con una política que cubra todo (fase 5) |
+| — | Rutas protegidas del agente: `extensions`, `skills`, `.pi`, `.claude`, `.git` (una tarea que escriba en `.git` se niega) | ampliar o quitar `.git` |
+| — | real-02: el README ahora dice «redondeo hacia arriba en la mitad» (antes ambiguo; el agente falló 6 de 6 por eso) | dejarla ambigua como prueba de especificación |
 | — | Modelo gratuito para pruebas: `opencode-go/beam-free` (no `iceman-contributor-free`, que deja entrenar con tus prompts) | un modelo de pago |
 
 ## Cosas que quedan por hacer y no son decisiones
