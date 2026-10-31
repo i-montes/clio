@@ -1,7 +1,7 @@
 """Drives `clio` inside a real pseudo-terminal (stdlib only) and prints a JSON verdict.
 
 usage: python3 -I pty_driver.py SCENARIO CONFIG_JSON
-SCENARIO: quit | ctrl_c | panic | help_when_piped | live | cancel
+SCENARIO: quit | ctrl_c | panic | help_when_piped | live | cancel | views | debug_env
 The raw terminal stream is not parsed (a diff-based renderer repaints only changed cells), so the
 scenarios check what is robust: the alternate-screen and cursor sequences, the terminal modes,
 the exit status, and effects on the disk.
@@ -142,8 +142,8 @@ out = {}
 if scenario in ("quit", "ctrl_c"):
     pid, fd = spawn()
     out["alt_on"] = pump(fd, lambda: ALT_ON in buf)
-    pump(fd, lambda: b"Inicio" in buf)
-    out["title_drawn"] = b"Inicio" in buf
+    pump(fd, lambda: b"recientes" in buf)
+    out["title_drawn"] = b"recientes" in buf
     out["during"] = modes(fd)
     os.write(fd, b"q" if scenario == "quit" else b"\x03")
     out["code"] = finish(pid, fd)
@@ -169,7 +169,7 @@ elif scenario == "help_when_piped":
     out["escapes"] = b"\x1b" in p.stdout
 elif scenario in ("live", "cancel"):
     pid, fd = spawn()
-    pump(fd, lambda: b"Inicio" in buf)
+    pump(fd, lambda: b"recientes" in buf)
     time.sleep(0.3)
     os.write(fd, b"n")
     time.sleep(0.3)
@@ -208,6 +208,40 @@ elif scenario in ("live", "cancel"):
         time.sleep(0.4)
         os.write(fd, b"q")
     out["code"] = finish(pid, fd)
+    out["after"] = modes(fd)
+elif scenario in ("views", "debug_env"):
+    # The keys of the redesign, with a finished run on disk: debug (Ctrl-D), the context layers
+    # (c), the usage table (U), the help (?), redraw (Ctrl-L), and a clean exit. The terminal
+    # stream is a diff, so each step only looks at what was written after the key.
+    pid, fd = spawn({"CLIO_DEBUG": "1"} if scenario == "debug_env" else None)
+    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    if scenario == "debug_env":
+        out["debug_from_env"] = pump(fd, lambda: b"debug" in buf, 5)
+    else:
+        out["debug_before"] = b"debug" in buf
+        mark = len(buf)
+        os.write(fd, b"\x04")  # Ctrl-D
+        out["debug_on"] = pump(fd, lambda: b"debug" in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"c")
+        out["context"] = pump(fd, lambda: b"prompt de sistema" in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"U")
+        out["usage"] = pump(fd, lambda: b"acum." in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"?")
+        out["help"] = pump(fd, lambda: b"atajos" in buf[mark:], 8)
+        os.write(fd, b"?")
+        time.sleep(0.2)
+        os.write(fd, b"\x1b")  # back to the home screen
+        time.sleep(0.2)
+        os.write(fd, b"\x0c")  # Ctrl-L: redraw
+        time.sleep(0.3)
+        os.write(fd, b"\x04")  # debug off
+        time.sleep(0.2)
+    os.write(fd, b"q")
+    out["code"] = finish(pid, fd)
+    out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
     out["after"] = modes(fd)
 else:
     sys.exit("unknown scenario")

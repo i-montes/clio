@@ -1,5 +1,5 @@
 //! TUI tests with no terminal: keys against `update`, drawing against `TestBackend`, and hostile
-//! text against both.
+//! text against both. The tests of the context, usage and debug views are in `tests_views`.
 
 #![allow(clippy::unwrap_used)]
 
@@ -21,25 +21,31 @@ use super::theme::Theme;
 use crate::cli::doctor::{Check, Report};
 use crate::cli::runs::{RunInfo, RunSummary, Status};
 use crate::cli::ui::Level;
+use crate::cli::usage::{RunLimits, RunUsage};
 
 // ------------------------------------------------------------ helpers
 
-fn key(c: KeyCode) -> Input {
+pub(super) fn key(c: KeyCode) -> Input {
     Input::Key(KeyEvent::new(c, KeyModifiers::NONE))
 }
-fn ch(c: char) -> Input {
+pub(super) fn ch(c: char) -> Input {
     key(KeyCode::Char(c))
 }
-fn ctrl(c: char) -> Input {
+pub(super) fn ctrl(c: char) -> Input {
     Input::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
 }
 
-fn app() -> App {
-    App::new("/home/ivan/proyecto", Theme { color: true })
+pub(super) const THEME: Theme = Theme {
+    color: true,
+    unicode: true,
+};
+
+pub(super) fn app() -> App {
+    App::new("/home/ivan/proyecto", THEME)
 }
 
 /// Feeds inputs one by one, collecting every command.
-fn feed(mut a: App, inputs: Vec<Input>) -> (App, Vec<Cmd>) {
+pub(super) fn feed(mut a: App, inputs: Vec<Input>) -> (App, Vec<Cmd>) {
     let mut all = Vec::new();
     for i in inputs {
         let (n, c) = update(a, i);
@@ -49,7 +55,7 @@ fn feed(mut a: App, inputs: Vec<Input>) -> (App, Vec<Cmd>) {
     (a, all)
 }
 
-fn summary(id: &str, ending: &str, files: &[&str]) -> RunSummary {
+pub(super) fn summary(id: &str, ending: &str, files: &[&str]) -> RunSummary {
     RunSummary {
         id: id.into(),
         workspace: "/home/ivan/proyecto".into(),
@@ -58,13 +64,15 @@ fn summary(id: &str, ending: &str, files: &[&str]) -> RunSummary {
         level: "Simple".into(),
         steps: 7,
         elapsed_ms: 12_300,
+        input_tokens: 12_400,
+        output_tokens: 3_100,
         modified: files.iter().map(|s| (*s).to_owned()).collect(),
         final_message: Some("Arreglé parse_date.\nNo pude correr las pruebas.".into()),
         ..RunSummary::default()
     }
 }
 
-fn info(id: &str, status: Status, instr: &str, files: &[&str]) -> RunInfo {
+pub(super) fn info(id: &str, status: Status, instr: &str, files: &[&str]) -> RunInfo {
     RunInfo {
         id: id.into(),
         status,
@@ -75,20 +83,29 @@ fn info(id: &str, status: Status, instr: &str, files: &[&str]) -> RunInfo {
     }
 }
 
-const ID1: &str = "20261031-181646-5a67";
-const ID2: &str = "20261030-090000-0b1c";
-const ID3: &str = "20261029-120000-ffff";
+pub(super) const ID1: &str = "20261031-181646-5a67";
+pub(super) const ID2: &str = "20261030-090000-0b1c";
+pub(super) const ID3: &str = "20261029-120000-ffff";
 
-fn with_runs() -> App {
+pub(super) const LIMITS: RunLimits = RunLimits {
+    max_steps: 40,
+    max_seconds: 600,
+    max_cost_micro: 100_000,
+};
+
+pub(super) fn with_runs() -> App {
     let mut a = app();
     a.home.header = Some(Header {
-        provider: "opencode-go".into(),
         model: "beam-free".into(),
         key: KeyState::Present,
         vault: "sin crear (opcional)".into(),
         config_error: None,
+        limits: LIMITS,
+        window: 128_000,
+        window_known: true,
     });
     a.home.doctor = Some((12, 3, 0));
+    a.home.last_usage = super::tests_views::usage_with_context();
     a.home.runs = vec![
         info(
             ID1,
@@ -107,7 +124,7 @@ fn with_runs() -> App {
     a
 }
 
-fn row(kind: char, rel: &str, diff: &str) -> Row {
+pub(super) fn row(kind: char, rel: &str, diff: &str) -> Row {
     Row {
         kind,
         rel: rel.into(),
@@ -117,7 +134,7 @@ fn row(kind: char, rel: &str, diff: &str) -> Row {
 
 const DIFF: &str = "--- a/dates.py\n+++ b/dates.py\n@@ -1,3 +1,3 @@\n def parse(s):\n-    return int(s)\n+    return None\n x = 1\n";
 
-fn detail(id: &str, status: Status) -> Detail {
+pub(super) fn detail(id: &str, status: Status) -> Detail {
     Detail {
         info: info(
             id,
@@ -136,11 +153,12 @@ fn detail(id: &str, status: Status) -> Detail {
         sel: 0,
         in_diff: false,
         scroll: 0,
+        usage: super::tests_views::usage_with_context(),
         view_h: Cell::new(10),
     }
 }
 
-fn open_detail(a: App, d: Detail, diff: bool) -> App {
+pub(super) fn open_detail(a: App, d: Detail, diff: bool) -> App {
     update(
         a,
         Input::Bg(Bg::Detail {
@@ -151,7 +169,7 @@ fn open_detail(a: App, d: Detail, diff: bool) -> App {
     .0
 }
 
-fn screen_text(a: &App, w: u16, h: u16) -> String {
+pub(super) fn screen_text(a: &App, w: u16, h: u16) -> String {
     let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
     t.draw(|f| draw(f, a)).unwrap();
     let buf = t.backend().buffer();
@@ -166,7 +184,7 @@ fn screen_text(a: &App, w: u16, h: u16) -> String {
 }
 
 /// No cell of the screen may hold a control character or a deceptive format character.
-fn assert_clean(screen: &str) {
+pub(super) fn assert_clean(screen: &str) {
     for c in screen.chars() {
         let bad = (c.is_control() && c != '\n')
             || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{FEFF}');
@@ -177,8 +195,20 @@ fn assert_clean(screen: &str) {
     }
 }
 
-fn sizes() -> [(u16, u16); 3] {
-    [(80, 24), (200, 50), (42, 11)]
+/// The sizes every screen is drawn at: the minimum, the usual one, a wide one and a huge one.
+pub(super) const SIZES: [(u16, u16); 4] = [(60, 16), (80, 24), (120, 30), (200, 50)];
+
+/// The text has the exact shape of the terminal: nothing wider or taller was drawn.
+pub(super) fn assert_fits(t: &str, w: u16, h: u16) {
+    assert_eq!(t.lines().count(), usize::from(h), "{t}");
+    assert!(
+        t.lines().all(|l| l.chars().count() == usize::from(w)),
+        "{t}"
+    );
+}
+
+fn sizes() -> [(u16, u16); 5] {
+    [(60, 16), (80, 24), (120, 30), (200, 50), (42, 11)]
 }
 
 // ------------------------------------------------------------ update: keys
@@ -232,10 +262,92 @@ fn home_keys_new_refresh_doctor_help_quit() {
     let (a, _) = feed(a, vec![key(KeyCode::Esc), ch('?')]);
     assert_eq!(a.screen, Screen::Help);
     let (a, _) = feed(a, vec![ch('x')]);
-    assert_eq!(a.screen, Screen::Home, "any key leaves the help");
+    assert_eq!(
+        a.screen,
+        Screen::Help,
+        "a key the help does not use changes nothing"
+    );
+    let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
+    assert_eq!(a.screen, Screen::Home);
     assert!(!a.quit);
+    let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
+    assert!(!a.quit, "Esc at home does not leave: q does");
     assert!(feed(a, vec![ch('q')]).0.quit);
     assert!(feed(with_runs(), vec![ctrl('c')]).0.quit);
+}
+
+#[test]
+fn help_returns_to_where_it_was_opened_from() {
+    for open in [ch('n'), ch('D')] {
+        let (a, _) = feed(with_runs(), vec![open]);
+        // The new job takes F1 (a `?` is text there); the doctor takes `?`.
+        let help = if a.screen == Screen::NewRun {
+            key(KeyCode::F(1))
+        } else {
+            ch('?')
+        };
+        let from = a.screen;
+        let (a, _) = feed(a, vec![help]);
+        assert_eq!(a.screen, Screen::Help);
+        let (a, _) = feed(a, vec![ch('?')]);
+        assert_eq!(a.screen, from);
+    }
+}
+
+#[test]
+fn ctrl_l_asks_for_a_redraw_and_ctrl_d_flips_debug_on_every_screen() {
+    let mut screens = vec![with_runs()];
+    screens.push(feed(with_runs(), vec![ch('n')]).0);
+    screens.push(feed(with_runs(), vec![ch('D')]).0);
+    screens.push(open_detail(
+        with_runs(),
+        detail(ID1, Status::Pending),
+        false,
+    ));
+    screens.push(open_detail(with_runs(), detail(ID1, Status::Pending), true));
+    screens.push(feed(with_runs(), vec![ch('c')]).0);
+    screens.push(feed(with_runs(), vec![ch('?')]).0);
+    let mut live = with_runs();
+    live.screen = Screen::Live;
+    screens.push(live);
+    for a in screens {
+        let screen = a.screen;
+        let (b, cmds) = feed(a, vec![ctrl('l')]);
+        assert_eq!(cmds, vec![Cmd::Redraw], "{screen:?}");
+        assert_eq!(b.screen, screen, "redrawing changes no screen");
+        let (b, cmds) = feed(b, vec![ctrl('d')]);
+        assert_eq!(cmds, vec![Cmd::Debug(true)], "{screen:?}");
+        assert!(
+            b.debug
+                && b.flash
+                    .as_deref()
+                    .is_some_and(|f| f.contains("debug activado"))
+        );
+        assert_eq!(b.screen, screen, "toggling debug changes no screen");
+        let (b, cmds) = feed(b, vec![ctrl('d')]);
+        assert_eq!(cmds, vec![Cmd::Debug(false)]);
+        assert!(!b.debug);
+    }
+}
+
+#[test]
+fn ctrl_d_is_debug_and_a_plain_d_is_still_the_diff() {
+    let (a, cmds) = feed(with_runs(), vec![ctrl('d')]);
+    assert!(
+        a.debug && cmds == vec![Cmd::Debug(true)],
+        "no diff was opened"
+    );
+    let (_, cmds) = feed(a, vec![ch('d')]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::LoadDetail {
+            id: ID1.into(),
+            diff: true
+        }]
+    );
+    // In the text fields Ctrl-D is still debug and never types a `d`.
+    let (a, _) = feed(with_runs(), vec![ch('n'), ctrl('d')]);
+    assert!(a.debug && a.new_run.instruction.is_empty());
 }
 
 #[test]
@@ -375,6 +487,15 @@ fn new_run_rejects_an_invalid_folder_and_edits_the_fields() {
 }
 
 #[test]
+fn letters_are_text_in_the_new_job_even_the_ones_that_are_shortcuts_elsewhere() {
+    let (a, _) = feed(with_runs(), vec![ch('n')]);
+    let (a, _) = feed(a, "qcUdau?/jk".chars().map(ch).collect());
+    assert_eq!(a.new_run.instruction, "qcUdau?/jk");
+    assert_eq!(a.screen, Screen::NewRun);
+    assert!(!a.quit);
+}
+
+#[test]
 fn pasted_text_is_cleaned_and_cannot_press_enter() {
     let (a, _) = feed(app(), vec![ch('n')]);
     let (a, cmds) = feed(
@@ -397,6 +518,15 @@ fn pasted_text_is_cleaned_and_cannot_press_enter() {
     assert!(matches!(cmds[0], Cmd::Check { .. }));
 }
 
+pub(super) fn started() -> Bg {
+    Bg::Started {
+        id: ID1.into(),
+        files: 3,
+        workspace: "/home/ivan/proyecto".into(),
+        usage: RunUsage::new(128_000, true, LIMITS),
+    }
+}
+
 #[test]
 fn live_run_shows_events_and_cancel_asks_twice() {
     let (a, _) = feed(with_runs(), vec![ch('n'), ch('x')]);
@@ -408,12 +538,7 @@ fn live_run_shows_events_and_cancel_asks_twice() {
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(matches!(cmds[0], Cmd::Start { .. }));
     let events = vec![
-        Bg::Started {
-            id: ID1.into(),
-            files: 3,
-            max_steps: 40,
-            max_seconds: 600,
-        },
+        started(),
         Bg::Agent(Event::Started {
             level: TaskLevel::Simple,
         }),
@@ -450,8 +575,12 @@ fn live_run_shows_events_and_cancel_asks_twice() {
             );
             assert!(t.contains("S-16") && t.contains("1234 car."), "{t}");
             assert!(
-                t.contains("2/40") && t.contains("5s/600s") && t.contains("contaminada"),
+                t.contains("2/40") && t.contains("5 s/10 min") && t.contains("externo"),
                 "{t}"
+            );
+            assert!(
+                !t.contains("contaminada") && !t.contains("leyó archivos"),
+                "the long warning is gone; `externo` says it"
             );
         }
     }
@@ -460,6 +589,17 @@ fn live_run_shows_events_and_cancel_asks_twice() {
     assert!(a.live.cancelling && !a.quit);
     assert!(screen_text(&a, 80, 24).contains("cancelando"));
     // The second press leaves right away (the run stays incomplete; the original was never touched).
+    let (a, cmds) = feed(a, vec![ctrl('c')]);
+    assert!(cmds.is_empty() && a.quit);
+}
+
+#[test]
+fn ctrl_c_cancels_a_live_run_and_the_second_press_quits() {
+    let mut a = app();
+    a.screen = Screen::Live;
+    let (a, cmds) = feed(a, vec![ctrl('c')]);
+    assert_eq!(cmds, vec![Cmd::Cancel]);
+    assert!(!a.quit);
     let (a, cmds) = feed(a, vec![ctrl('c')]);
     assert!(cmds.is_empty() && a.quit);
 }
@@ -521,8 +661,11 @@ fn detail_selects_files_scrolls_the_diff_and_goes_back() {
     assert_eq!(a.detail.as_ref().unwrap().sel, 1);
     let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
     assert!(!a.detail.as_ref().unwrap().in_diff && a.screen == Screen::Detail);
-    let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
-    assert_eq!((a.screen, cmds), (Screen::Home, vec![Cmd::LoadHome]));
+    // `d` opens the diff of the chosen file too.
+    let (a, _) = feed(a, vec![ch('d')]);
+    assert!(a.detail.as_ref().unwrap().in_diff);
+    let (a, _) = feed(a, vec![ch('q'), key(KeyCode::Esc)]);
+    assert_eq!(a.screen, Screen::Home);
 }
 
 #[test]
@@ -537,10 +680,16 @@ fn detail_diff_scroll_follows_the_viewport() {
     let (a, _) = feed(a, vec![ch('G')]);
     let t = screen_text(&a, 80, 24);
     assert!(t.contains("+line 59"), "{t}");
-    let (a, _) = feed(a, vec![key(KeyCode::PageUp)]);
+    let (a, _) = feed(a, vec![ctrl('b')]);
     assert!(a.detail.as_ref().unwrap().scroll < 63 - 10);
+    let (a, _) = feed(a, vec![key(KeyCode::PageDown)]);
+    let page_down = a.detail.as_ref().unwrap().scroll;
+    let (a, _) = feed(a, vec![key(KeyCode::PageUp)]);
+    assert!(a.detail.as_ref().unwrap().scroll < page_down);
     let (a, _) = feed(a, vec![ch('g')]);
     assert_eq!(a.detail.as_ref().unwrap().scroll, 0);
+    let (a, _) = feed(a, vec![ctrl('f')]);
+    assert!(a.detail.as_ref().unwrap().scroll > 0, "Ctrl-F pages down");
 }
 
 #[test]
@@ -592,9 +741,87 @@ fn doctor_screen_scrolls_and_repeats() {
     assert_eq!((a.doctor.scroll, cmds), (1, vec![Cmd::RunDoctor]));
 }
 
+// ------------------------------------------------------------ the list filter
+
+#[test]
+fn slash_filters_the_list_and_the_selection_follows_the_filter() {
+    let (a, _) = feed(with_runs(), vec![ch('/')]);
+    assert!(a.home.filtering);
+    // In the filter the letters are text, not shortcuts.
+    let (a, cmds) = feed(a, "readme".chars().map(ch).collect());
+    assert!(cmds.is_empty() && a.home.filter == "readme");
+    assert_eq!(a.home.visible(), vec![1]);
+    let t = screen_text(&a, 80, 24);
+    assert!(t.contains("/readme") && t.contains("1 de 3"), "{t}");
+    assert!(
+        t.contains("agrega un README") && !t.contains("arregla parse_date en"),
+        "{t}"
+    );
+    // Enter leaves the typing and keeps the filter; the keys are shortcuts again.
+    let (a, _) = feed(a, vec![key(KeyCode::Enter)]);
+    assert!(!a.home.filtering && a.home.filter == "readme");
+    let (a2, cmds) = feed(a.clone_for_test_filter(), vec![key(KeyCode::Enter)]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::LoadDetail {
+            id: ID2.into(),
+            diff: false
+        }],
+        "the run opened is the one the filter shows"
+    );
+    assert_eq!(a2.home.sel, 0);
+    // Esc clears it.
+    let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
+    assert!(a.home.filter.is_empty() && a.home.visible().len() == 3);
+}
+
+#[test]
+fn the_filter_matches_status_and_id_and_says_when_nothing_matches() {
+    let (a, _) = feed(with_runs(), vec![ch('/')]);
+    let (a, _) = feed(a, "fallido".chars().map(ch).collect());
+    assert_eq!(a.home.visible(), vec![2]);
+    let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
+    assert!(
+        !a.home.filtering && a.home.filter.is_empty(),
+        "Esc while typing clears and leaves"
+    );
+    let (a, _) = feed(a, vec![ch('/')]);
+    let (a, _) = feed(a, "0b1c".chars().map(ch).collect());
+    assert_eq!(a.home.visible(), vec![1]);
+    let (a, _) = feed(a, "zzz".chars().map(ch).collect());
+    assert!(a.home.visible().is_empty());
+    let t = screen_text(&a, 80, 24);
+    assert!(
+        t.contains("Ningún run coincide") && t.contains("0 de 3"),
+        "{t}"
+    );
+    let (a, cmds) = feed(a, vec![key(KeyCode::Enter), key(KeyCode::Enter)]);
+    assert!(cmds.is_empty() && a.flash.is_some(), "nothing to open");
+    // Backspace edits the filter.
+    let (a, _) = feed(
+        a,
+        vec![
+            ch('/'),
+            key(KeyCode::Backspace),
+            key(KeyCode::Backspace),
+            key(KeyCode::Backspace),
+        ],
+    );
+    assert_eq!(a.home.filter, "0b1c");
+    assert_eq!(a.home.visible(), vec![1]);
+}
+
+#[test]
+fn a_filter_with_hostile_text_is_drawn_clean() {
+    let (a, _) = feed(with_runs(), vec![ch('/')]);
+    let (a, _) = feed(a, vec![ch('a'), ch('\u{202E}'), ch('b')]);
+    let t = screen_text(&a, 80, 24);
+    assert_clean(&t);
+}
+
 // ------------------------------------------------------------ drawing
 
-fn report() -> Report {
+pub(super) fn report() -> Report {
     Report {
         checks: vec![
             Check {
@@ -622,18 +849,15 @@ fn report() -> Report {
 }
 
 #[test]
-fn home_draws_status_and_runs_without_overflow() {
+fn home_draws_state_and_runs_without_overflow() {
     for (w, h) in sizes() {
         let t = screen_text(&with_runs(), w, h);
         assert_clean(&t);
-        assert_eq!(t.lines().count(), usize::from(h));
-        assert!(t.lines().all(|l| l.chars().count() == usize::from(w)));
+        assert_fits(&t, w, h);
         if w >= 80 {
-            assert!(
-                t.contains("opencode-go / beam-free") && t.contains("presente"),
-                "{t}"
-            );
-            assert!(t.contains("12 ok · 3 avisos · 0 fallos"), "{t}");
+            assert!(t.contains("clio · proyecto · beam-free"), "{t}");
+            assert!(t.contains("clave presente"), "{t}");
+            assert!(t.contains("doctor: 12 ok · 3 avisos · 0 fallos"), "{t}");
             assert!(
                 t.contains("1031-1816-5a67") && t.contains("pendiente de revisar"),
                 "{t}"
@@ -641,7 +865,7 @@ fn home_draws_status_and_runs_without_overflow() {
             assert!(t.contains("aplicado") && t.contains("fallido"), "{t}");
             assert!(t.contains("arregla parse_date en dates.py"), "{t}");
             assert!(
-                t.contains("n nuevo") && t.contains("D doctor") && t.contains("q salir"),
+                t.contains("n nuevo") && t.contains("/ filtrar") && t.contains("q salir"),
                 "{t}"
             );
         }
@@ -654,13 +878,39 @@ fn home_draws_status_and_runs_without_overflow() {
 }
 
 #[test]
-fn home_header_reports_a_missing_key_and_a_broken_config() {
+fn home_reports_a_missing_key_and_a_broken_config() {
     let mut a = with_runs();
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
-    assert!(screen_text(&a, 80, 24).contains("falta"));
+    assert!(screen_text(&a, 80, 24).contains("falta la clave"));
     a.home.header.as_mut().unwrap().config_error =
         Some("config.json: no existe (ejecuta `clio init` primero)".into());
     assert!(screen_text(&a, 100, 24).contains("ejecuta `clio init` primero"));
+}
+
+#[test]
+fn there_are_no_boxes_except_in_dialogs() {
+    let boxes = ['╭', '╮', '╰', '╯', '│', '┌', '┐', '└', '┘', '╔', '═'];
+    let (new, _) = feed(with_runs(), vec![ch('n')]);
+    let screens = [
+        with_runs(),
+        new,
+        open_detail(with_runs(), detail(ID1, Status::Pending), false),
+        open_detail(with_runs(), detail(ID1, Status::Pending), true),
+        feed(with_runs(), vec![ch('c')]).0,
+        feed(with_runs(), vec![ch('U')]).0,
+        feed(with_runs(), vec![ch('?')]).0,
+        feed(with_runs(), vec![ch('D')]).0,
+    ];
+    for a in &screens {
+        for (w, h) in SIZES {
+            let t = screen_text(a, w, h);
+            assert!(
+                !t.chars().any(|c| boxes.contains(&c)),
+                "{:?}\n{t}",
+                a.screen
+            );
+        }
+    }
 }
 
 #[test]
@@ -680,11 +930,11 @@ fn new_run_draws_the_checks_and_the_exclusions() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("Carpeta del proyecto") && t.contains("/home/ivan/proyecto"),
+                t.contains("Carpeta") && t.contains("/home/ivan/proyecto"),
                 "{t}"
             );
             assert!(
-                t.contains("arregla algo") && t.contains("se copiarán 12 archivos (3.0 MB)"),
+                t.contains("arregla algo") && t.contains("se copiarán 12 archivos (3,0 MB)"),
                 "{t}"
             );
             assert!(t.contains("parecen secretos: .env, id_rsa"), "{t}");
@@ -714,7 +964,7 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
                 "{t}"
             );
             assert!(
-                t.contains("Archivos cambiados (2)")
+                t.contains("archivos cambiados (2)")
                     && t.contains("M dates.py")
                     && t.contains("A docs/new.md"),
                 "{t}"
@@ -732,7 +982,7 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
             && t.contains("@@ -1,3 +1,3 @@"),
         "{t}"
     );
-    // Colors: + green, - red, @@ cyan.
+    // Colors: + green, - red; the hunk header is dim (cyan is only for the selection).
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
     term.draw(|f| draw(f, &a)).unwrap();
     let buf = term.backend().buffer();
@@ -742,12 +992,21 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
         for (tag, color) in [
             ("+    return None", ratatui::style::Color::Green),
             ("-    return int(s)", ratatui::style::Color::Red),
-            ("@@ -1,3", ratatui::style::Color::Cyan),
         ] {
             if let Some(x) = line.find(tag) {
                 let col = line[..x].chars().count() as u16;
                 seen.insert(tag, buf[(col, y)].fg == color);
             }
+        }
+        if let Some(x) = line.find("@@ -1,3") {
+            let col = line[..x].chars().count() as u16;
+            seen.insert(
+                "hunk",
+                buf[(col, y)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::DIM)
+                    && buf[(col, y)].fg != ratatui::style::Color::Cyan,
+            );
         }
     }
     assert_eq!(seen.len(), 3, "{seen:?}");
@@ -765,29 +1024,75 @@ fn doctor_draws_marks_and_one_hint_per_warning() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("PASS") && t.contains("WARN") && t.contains("FAIL"),
+                t.contains("✓  /home") && t.contains("!  no hay clave") && t.contains("✗  /x/y"),
                 "{t}"
             );
             assert!(
                 t.contains("→ Ponla en OPENCODE_API_KEY") && t.contains("→ chmod 700 /x/y"),
                 "{t}"
             );
-            assert!(t.contains("Doctor: 1 ok · 1 aviso · 1 fallo"), "{t}");
+            assert!(t.contains("doctor: 1 ok · 1 aviso · 1 fallo"), "{t}");
         }
     }
 }
 
 #[test]
-fn help_and_tiny_terminals() {
-    let mut a = with_runs();
+fn help_lists_this_screens_keys_in_one_short_view() {
+    let (mut a, _) = feed(with_runs(), vec![ch('?')]);
+    let t = screen_text(&a, 80, 24);
+    assert_fits(&t, 80, 24);
+    for want in [
+        "atajos",
+        "Enter",
+        "abrir",
+        "filtrar",
+        "contexto",
+        "uso",
+        "refrescar",
+        "doctor",
+        "salir",
+        "Ctrl-D",
+        "modo debug",
+        "Ctrl-L",
+        "redibujar",
+        "aplicar",
+        "deshacer",
+    ] {
+        assert!(t.contains(want), "{want}\n{t}");
+    }
+    // Another screen has another list.
     a.screen = Screen::Help;
+    a.before_help = Screen::Live;
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("Clio trabaja en una COPIA") && t.contains("termina tras el paso en curso"),
-        "the whole help fits in 80x24\n{t}"
+        t.contains("cancelar") && t.contains("tiempo / debug"),
+        "{t}"
     );
-    let t = screen_text(&a, 30, 8);
-    assert!(t.contains("Terminal muy pequeña"), "{t}");
+    assert!(!t.contains("filtrar"), "{t}");
+    // At the minimum size every key is still there (two columns), and a long list would scroll.
+    let t = screen_text(&a, 60, 16);
+    assert_fits(&t, 60, 16);
+    for want in ["Ctrl-C", "Tab", "Ctrl-B", "Ctrl-D", "Ctrl-L", "redibujar"] {
+        assert!(t.contains(want), "{want}\n{t}");
+    }
+    a.before_help = Screen::Home;
+    let t = screen_text(&a, 60, 16);
+    assert_fits(&t, 60, 16);
+    let (b, _) = feed(a, vec![ch('G')]);
+    assert_fits(&screen_text(&b, 60, 16), 60, 16);
+}
+
+#[test]
+fn tiny_terminals_get_a_message_and_nothing_panics() {
+    let mut a = with_runs();
+    for (w, h) in [(59, 16), (60, 15), (30, 8), (1, 1)] {
+        let t = screen_text(&a, w, h);
+        if w > 10 {
+            assert!(t.contains("Terminal muy pequeña") || h < 4, "{w}x{h}\n{t}");
+        }
+    }
+    let t = screen_text(&a, 59, 16);
+    assert!(t.contains("60x16"), "{t}");
     // No size may panic, whatever the screen.
     for s in [
         Screen::Home,
@@ -795,21 +1100,34 @@ fn help_and_tiny_terminals() {
         Screen::Live,
         Screen::Doctor,
         Screen::Help,
+        Screen::Context,
+        Screen::Usage,
     ] {
         a.screen = s;
-        for (w, h) in [(1, 1), (10, 3), (40, 10), (60, 12), (120, 8)] {
+        for (w, h) in [
+            (1, 1),
+            (10, 3),
+            (40, 10),
+            (60, 12),
+            (120, 8),
+            (60, 16),
+            (61, 17),
+        ] {
             screen_text(&a, w, h);
         }
     }
     a = open_detail(a, detail(ID1, Status::Pending), true);
-    for (w, h) in [(40, 10), (60, 12), (100, 30)] {
+    for (w, h) in [(40, 10), (60, 12), (100, 30), (60, 16)] {
         screen_text(&a, w, h);
     }
 }
 
 #[test]
-fn without_color_the_theme_uses_no_colors() {
-    let t = Theme { color: false };
+fn without_color_the_theme_uses_no_colors_and_no_unicode_has_ascii_stand_ins() {
+    let t = Theme {
+        color: false,
+        unicode: false,
+    };
     for s in [
         t.ok(),
         t.warn(),
@@ -819,10 +1137,33 @@ fn without_color_the_theme_uses_no_colors() {
         t.hunk(),
         t.accent(),
         t.key(),
+        t.selected(),
+        t.level(95),
     ] {
         assert!(s.fg.is_none(), "{s:?}");
     }
-    let c = Theme { color: true };
+    for sym in [
+        t.dot(),
+        t.sel(),
+        t.check(),
+        t.bang(),
+        t.cross(),
+        t.up(),
+        t.down(),
+        t.rule(),
+        t.ellipsis(),
+        t.arrow(),
+        t.cursor(),
+        t.rule_v(),
+        t.spinner(0),
+        &t.bar(50, 10),
+    ] {
+        assert!(sym.is_ascii(), "{sym:?}");
+    }
+    let c = Theme {
+        color: true,
+        unicode: true,
+    };
     assert_eq!(c.ok().fg, Some(ratatui::style::Color::Green));
     // Only the basic palette: nothing indexed or RGB, so the terminal's theme decides.
     for s in [
@@ -834,17 +1175,51 @@ fn without_color_the_theme_uses_no_colors() {
         c.hunk(),
         c.accent(),
         c.key(),
+        c.selected(),
     ] {
         assert!(!matches!(
             s.fg,
             Some(ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(_))
         ));
     }
+    // One accent: only the selection and the focus are cyan.
+    assert_eq!(c.accent().fg, Some(ratatui::style::Color::Cyan));
+    assert_eq!(c.selected().fg, Some(ratatui::style::Color::Cyan));
+    assert_eq!(c.key().fg, None);
+    assert_eq!(c.hunk().fg, None);
+}
+
+#[test]
+fn every_screen_is_plain_ascii_without_unicode() {
+    let ascii = Theme {
+        color: false,
+        unicode: false,
+    };
+    let mut screens = vec![with_runs(), super::tests_views::live_app()];
+    screens.push(open_detail(
+        with_runs(),
+        detail(ID1, Status::Pending),
+        false,
+    ));
+    screens.push(feed(with_runs(), vec![ch('c')]).0);
+    screens.push(feed(with_runs(), vec![ch('U')]).0);
+    for mut a in screens {
+        a.theme = ascii;
+        for (w, h) in [(80, 24), (120, 30)] {
+            let t = screen_text(&a, w, h);
+            // The names of runs and files are Spanish text; the interface's own symbols are ASCII.
+            let odd: Vec<char> = t
+                .chars()
+                .filter(|c| !c.is_ascii() && !"áéíóúñÁÉÍÓÚÑü¿¡…·".contains(*c))
+                .collect();
+            assert!(odd.is_empty(), "{:?} {odd:?}\n{t}", a.screen);
+        }
+    }
 }
 
 // ------------------------------------------------------------ hostile text
 
-const HOSTILE: &[&str] = &[
+pub(super) const HOSTILE: &[&str] = &[
     "evil\u{1b}[2Jname.txt",
     "title\u{1b}]0;pwned-title\u{7}.txt",
     "ok\rOVERWRITTEN.txt",
@@ -892,6 +1267,7 @@ fn hostile_file_names_diffs_and_messages_never_reach_the_screen_raw() {
                     sel,
                     in_diff: diff_mode,
                     scroll: 0,
+                    usage: RunUsage::default(),
                     view_h: Cell::new(10),
                 },
                 diff_mode,
@@ -977,99 +1353,6 @@ fn hostile_doctor_and_notice_text_is_cleaned() {
     );
 }
 
-/// Prints every screen as text (for the docs): `cargo test -p clio-brain --bin clio print_screens -- --ignored --nocapture`.
-#[test]
-#[ignore = "prints the screens; not a check"]
-fn print_screens() {
-    let show = |name: &str, a: &App| println!("===== {name} =====\n{}", screen_text(a, 80, 24));
-    show("home", &with_runs());
-    let (mut a, _) = feed(with_runs(), vec![ch('n')]);
-    a.new_run.instruction = "arregla parse_date en dates.py".into();
-    a.new_run.check = Some(Ok(Preview {
-        workspace: "/home/ivan/proyecto".into(),
-        files: 12,
-        bytes: 3 * 1024 * 1024,
-        secrets: vec![".env".into()],
-        skipped: vec![".git".into(), "node_modules".into()],
-        symlinks: vec![],
-    }));
-    show("new_run", &a);
-    let mut l = app();
-    l.screen = Screen::Live;
-    l.live.begin(ID1.into(), 12, 40, 600);
-    l.live.on_event(&Event::Started {
-        level: TaskLevel::Simple,
-    });
-    for (n, (tool, target, out, rule, ran)) in [
-        (
-            "list_dir",
-            ".",
-            Outcome::Allow,
-            "step-8-reversible-in-sandbox",
-            true,
-        ),
-        (
-            "read_file",
-            "dates.py",
-            Outcome::Allow,
-            "step-8-reversible-in-sandbox",
-            true,
-        ),
-        (
-            "write_file",
-            ".git/hooks/pre-commit",
-            Outcome::Deny,
-            "S-16",
-            false,
-        ),
-        (
-            "write_file",
-            "dates.py",
-            Outcome::Allow,
-            "step-8-reversible-in-sandbox",
-            true,
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        l.live.on_event(&Event::Step { n: n as u32 + 1 });
-        l.live.on_event(&Event::Tool {
-            name: tool.into(),
-            target: target.into(),
-            outcome: out,
-            rule: rule.into(),
-            ran,
-            result_chars: 812,
-            tainted: n > 0,
-        });
-    }
-    l.now_ms = 14_000;
-    show("live", &l);
-    let a = open_detail(with_runs(), detail(ID1, Status::Pending), false);
-    show("detail", &a);
-    let a = open_detail(with_runs(), detail(ID1, Status::Pending), true);
-    show("detail_diff", &a);
-    let (a, _) = feed(
-        open_detail(with_runs(), detail(ID1, Status::Pending), false),
-        vec![
-            ch('a'),
-            Input::Bg(Bg::Planned(Ok(Planned {
-                id: ID1.into(),
-                files: 2,
-                workspace: "/home/ivan/proyecto".into(),
-            }))),
-        ],
-    );
-    show("confirm", &a);
-    let mut a = with_runs();
-    a.screen = Screen::Doctor;
-    a.doctor.set(report());
-    show("doctor", &a);
-    a.screen = Screen::Help;
-    show("help", &a);
-}
-
 // ------------------------------------------------------------ terminal restoration
 
 #[test]
@@ -1082,7 +1365,7 @@ fn restoring_the_terminal_twice_is_harmless() {
 impl App {
     /// A second copy of the pieces a test needs (the app is not `Clone`: it holds a channel-free
     /// but large state, and cloning it for real use is never wanted).
-    fn clone_for_test(&self) -> App {
+    pub(super) fn clone_for_test(&self) -> App {
         let mut b = App::new("/home/ivan/proyecto", self.theme);
         b.screen = self.screen;
         b.home.runs = self.home.runs.clone();
@@ -1098,8 +1381,16 @@ impl App {
             sel: d.sel,
             in_diff: d.in_diff,
             scroll: d.scroll,
+            usage: d.usage.clone(),
             view_h: Cell::new(d.view_h.get()),
         });
+        b
+    }
+
+    /// The same, keeping the list filter.
+    fn clone_for_test_filter(&self) -> App {
+        let mut b = self.clone_for_test();
+        b.home.filter.clone_from(&self.home.filter);
         b
     }
 }

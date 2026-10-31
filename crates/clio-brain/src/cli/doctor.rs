@@ -1,4 +1,5 @@
-//! `clio doctor`: Clio's own checks, then the host script of `infra/local/check-host.sh`.
+//! `clio doctor`: Clio's own checks, then the host script of `infra/local/check-host.sh` (run in
+//! its embedded mode, which leaves out the checks Clio did itself: each appears once).
 //! `collect` gathers the checks as data; the plain command and the TUI both show them.
 
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -209,7 +210,12 @@ fn find_host_check() -> Option<PathBuf> {
 }
 
 fn host_lines(o: &mut Report, script: &Path) {
-    let out = match Command::new("bash").arg(script).output() {
+    // The script skips what `collect` already checked itself, so nothing appears twice.
+    let out = match Command::new("bash")
+        .arg(script)
+        .env("CLIO_DOCTOR_EMBEDDED", "1")
+        .output()
+    {
         Ok(out) => out,
         Err(e) => {
             o.say(

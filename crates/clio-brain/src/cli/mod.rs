@@ -4,6 +4,7 @@
 //! decides what goes back to the original (S-14).
 
 pub mod apply;
+pub mod debug;
 pub mod diff;
 pub mod doctor;
 pub mod home;
@@ -11,6 +12,7 @@ pub mod jail;
 pub mod runs;
 pub mod tui;
 pub mod ui;
+pub mod usage;
 pub mod vault;
 pub mod work;
 

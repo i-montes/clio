@@ -1,13 +1,15 @@
 //! "New job": the folder and the instruction, with the same checks as `clio run` shown before
-//! anything starts, and what will be left out of the copy.
+//! anything starts, and what will be left out of the copy. The focused field has the accent
+//! color and a cursor; nothing is boxed.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
-use super::app::{App, Cmd, Screen, clean, is_ctrl_c};
+use super::app::{App, Cmd, Screen, clean, section};
+use super::keys::{Act, Ctx, lookup};
 use super::sanitize;
 use crate::cli::work::Scan;
 
@@ -87,20 +89,25 @@ pub fn opened(app: &mut App) -> Vec<Cmd> {
 
 pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let n = &mut app.new_run;
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = k.modifiers.contains(KeyModifiers::ALT);
-    match k.code {
-        KeyCode::Esc => return app.go_home(),
-        _ if is_ctrl_c(k) => return app.go_home(),
-        KeyCode::Tab | KeyCode::BackTab => {
+    match lookup(Ctx::NewRun, k) {
+        Some(Act::Back) => return app.go_home(),
+        Some(Act::Help) => app.open_help(),
+        Some(Act::Tab) => {
             n.focus = match n.focus {
                 Field::Dir => Field::Instruction,
                 Field::Instruction => Field::Dir,
             };
         }
-        KeyCode::Enter if alt && n.focus == Field::Instruction => n.instruction.push('\n'),
-        KeyCode::Char('j') if ctrl && n.focus == Field::Instruction => n.instruction.push('\n'),
-        KeyCode::Enter => {
+        Some(Act::Newline) => {
+            if n.focus == Field::Instruction {
+                n.instruction.push('\n');
+            }
+        }
+        Some(Act::Clear) => {
+            n.field().clear();
+            return after_edit(app);
+        }
+        Some(Act::Open) => {
             if n.focus == Field::Dir {
                 n.focus = Field::Instruction;
             } else if n.can_launch() {
@@ -116,22 +123,22 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                 app.flash = Some("escribe qué quieres que haga Clio".into());
             }
         }
-        KeyCode::Char('u') if ctrl => {
-            n.field().clear();
-            return after_edit(app);
-        }
-        KeyCode::Backspace => {
-            n.field().pop();
-            return after_edit(app);
-        }
-        KeyCode::Char(c) if !ctrl && !alt => {
-            if c.is_control() {
-                return vec![];
+        _ => match k.code {
+            KeyCode::Backspace => {
+                n.field().pop();
+                return after_edit(app);
             }
-            n.field().push(c);
-            return after_edit(app);
-        }
-        _ => {}
+            KeyCode::Char(c)
+                if !c.is_control()
+                    && !k
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                n.field().push(c);
+                return after_edit(app);
+            }
+            _ => {}
+        },
     }
     vec![]
 }
@@ -156,55 +163,68 @@ pub fn paste(app: &mut App, text: &str) -> Vec<Cmd> {
 }
 
 fn mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)).replace('.', ",")
 }
+
+const LABEL_W: usize = 14;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let n = &app.new_run;
-    let [dir_a, instr_a, info_a] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(5),
+    let instr_h = u16::try_from(
+        n.instruction.lines().count().max(1) + usize::from(n.instruction.ends_with('\n')),
+    )
+    .unwrap_or(4)
+    .clamp(1, 4);
+    let [dir_a, _, instr_a, _, info_a] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(instr_h),
+        Constraint::Length(1),
         Constraint::Min(3),
     ])
     .areas(area);
-    let field = |title: &str, focused: bool| {
-        Block::new()
-            .borders(Borders::ALL)
-            .border_type(if focused {
-                BorderType::Thick
-            } else {
-                BorderType::Rounded
-            })
-            .border_style(if focused { t.accent() } else { t.plain() })
-            .title(Span::styled(format!(" {title} "), t.bold()))
+    let cursor = |focused: bool| Span::styled(if focused { t.cursor() } else { "" }, t.accent());
+    let label = |text: &str, focused: bool| {
+        Span::styled(
+            format!("{text:<LABEL_W$}"),
+            if focused { t.accent() } else { t.dim() },
+        )
     };
-    let cursor = |focused: bool| Span::styled(if focused { "▏" } else { "" }, t.accent());
     f.render_widget(
         Paragraph::new(Line::from(vec![
+            label("Carpeta", n.focus == Field::Dir),
             Span::raw(clean(&n.dir)),
             cursor(n.focus == Field::Dir),
-        ]))
-        .block(field("Carpeta del proyecto", n.focus == Field::Dir)),
+        ])),
         dir_a,
     );
-    let mut lines: Vec<Line> = sanitize::multiline(&n.instruction)
+    let text = sanitize::multiline(&n.instruction);
+    let mut lines: Vec<Line> = text
         .split('\n')
-        .map(|l| Line::from(l.to_owned()))
+        .enumerate()
+        .map(|(i, l)| {
+            let head = if i == 0 {
+                label("Instrucción", n.focus == Field::Instruction)
+            } else {
+                Span::raw(" ".repeat(LABEL_W))
+            };
+            Line::from(vec![head, Span::raw(l.to_owned())])
+        })
         .collect();
     if n.instruction.is_empty() && n.focus != Field::Instruction {
-        lines = vec![Line::from(Span::styled(
-            "(escribe qué quieres que haga Clio)",
-            t.dim(),
-        ))];
+        lines = vec![Line::from(vec![
+            label("Instrucción", false),
+            Span::styled("(escribe qué quieres que haga Clio)", t.dim()),
+        ])];
     }
     if let Some(last) = lines.last_mut() {
         last.spans.push(cursor(n.focus == Field::Instruction));
     }
+    // Keep the end of a long instruction in view.
+    let skip = lines.len().saturating_sub(usize::from(instr_a.height));
     f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(field("Instrucción", n.focus == Field::Instruction)),
+        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).wrap(Wrap { trim: false }),
         instr_a,
     );
 
@@ -212,22 +232,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     match &n.check {
         None => info.push(Line::from(Span::styled("comprobando la carpeta…", t.dim()))),
         Some(Err(e)) => info.push(Line::from(vec![
-            Span::styled("✗ ", t.fail()),
+            Span::styled(format!("{} ", t.cross()), t.fail()),
             Span::styled(clean(e), t.fail()),
         ])),
         Some(Ok(p)) => {
             info.push(Line::from(vec![
-                Span::styled("✓ ", t.ok()),
+                Span::styled(format!("{} ", t.check()), t.ok()),
                 Span::raw(format!(
                     "se copiarán {} archivos ({})",
                     p.files,
                     mb(p.bytes)
                 )),
             ]));
-            info.push(Line::from(Span::styled(
-                "NO se copiarán a la copia de trabajo:",
-                t.bold(),
-            )));
+            info.push(section(
+                t,
+                "NO se copiarán a la copia de trabajo",
+                area.width,
+            ));
             let group = |label: &str, v: &[String], info: &mut Vec<Line>| {
                 if !v.is_empty() {
                     let shown: Vec<String> = v.iter().take(8).map(|s| clean(s)).collect();
@@ -237,7 +258,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                         String::new()
                     };
                     info.push(Line::from(vec![
-                        Span::styled(format!("  {label}: "), t.warn()),
+                        Span::styled(format!("{label}: "), t.warn()),
                         Span::raw(format!("{}{more}", shown.join(", "))),
                     ]));
                 }
@@ -246,18 +267,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             group("carpetas pesadas o internas", &p.skipped, &mut info);
             group("enlaces simbólicos", &p.symlinks, &mut info);
             info.push(Line::from(Span::styled(
-                "  siempre: .git, node_modules, target, .venv, __pycache__, .env*, *.pem, *.key, id_rsa*, id_ed25519*, .ssh, .aws, credentials*",
+                "siempre: .git, node_modules, target, .venv, __pycache__, .env*, *.pem, *.key, id_rsa*, id_ed25519*, .ssh, .aws, credentials*",
                 t.dim(),
             )));
         }
     }
-    f.render_widget(
-        Paragraph::new(info).wrap(Wrap { trim: false }).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(Span::styled(" Qué se va a copiar ", t.bold())),
-        ),
-        info_a,
-    );
+    f.render_widget(Paragraph::new(info).wrap(Wrap { trim: false }), info_a);
 }
