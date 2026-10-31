@@ -21,6 +21,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The jail tests need bubblewrap and unprivileged user namespaces. On the Ubuntu runner install
+      # it and lift Ubuntu's restriction (the runner is throwaway), then probe. If it works the jail
+      # tests become mandatory (CLIO_REQUIRE_JAIL); if not, say so loudly instead of skipping quietly.
+      - name: Jail (bubblewrap) probe
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if bwrap --unshare-all --ro-bind / / true 2>/dev/null && command -v prlimit >/dev/null; then
+            echo "::notice::bwrap works on this runner: the jail tests run for real and are mandatory"
+            echo "CLIO_REQUIRE_JAIL=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::bwrap or user namespaces are NOT available on this runner: the jail tests are skipped, not verified here"
+          fi
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features

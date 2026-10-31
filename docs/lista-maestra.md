@@ -253,7 +253,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 - [x] **183** Orden de evaluación, paso 9: una política que cubra todas las dimensiones permite (se conecta en la fase 5)
 - [x] **184** Orden de evaluación, paso 10: si no, aprobación sobre el hash de la acción
 - [x] **185** Comandos: lista de binarios permitidos con argumentos separados (argv), nunca `sh -c` (S-12)
-- [ ] **186** Un shell libre solo dentro de un contenedor desechable, sin secretos y sin red por defecto (S-12)
+- [x] **186** Un shell libre solo dentro de un contenedor desechable, sin secretos y sin red por defecto (S-12)
 - [x] **187** prueba: argumentos con `;`, `|`, `$(...)` y comillas no escapan (S-12)
 - [x] **188** Rutas canonizadas antes de compararlas con la raíz permitida (S-13)
 - [x] **189** prueba: rutas con `..` y enlaces simbólicos hacia fuera se rechazan (S-13)
