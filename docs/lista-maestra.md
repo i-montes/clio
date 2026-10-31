@@ -51,12 +51,12 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 ### Terreno
 
 - [x] **030** Subir el commit local `8cd2730` (prueba de independencia de clio-memory)
-- [ ] **031** Arreglar el CI: todas las ejecuciones terminan en `startup_failure` (revisar facturación y permisos de Actions)
-- [ ] **032** Confirmar que el CI corre en verde en Linux y macOS tras arreglarlo
-- [ ] **033** Confirmar que `cargo-deny` y `cargo-audit` corren en el CI y que fallan con una vulnerabilidad sembrada (S-41)
-- [ ] **034** Confirmar que `Cargo.lock` está versionado y que el CI falla si cambia sin revisión (S-41)
+- [x] **031** Arreglar el CI: todas las ejecuciones terminan en `startup_failure` (revisar facturación y permisos de Actions)
+- [x] **032** Confirmar que el CI corre en verde en Linux y macOS tras arreglarlo
+- [x] **033** Confirmar que `cargo-deny` y `cargo-audit` corren en el CI y que fallan con una vulnerabilidad sembrada (S-41)
+- [x] **034** Confirmar que `Cargo.lock` está versionado y que el CI falla si cambia sin revisión (S-41)
 - [ ] **035** Mantener `unsafe_code = forbid` y exigir revisión explícita para cualquier excepción (S-41)
-- [ ] **036** Probar el hook de pre-commit con una llave falsa: el commit se rechaza (S-43)
+- [x] **036** Probar el hook de pre-commit con una llave falsa: el commit se rechaza (S-43)
 - [ ] **037** Pasar cada spec del artefacto a `docs/specs/<crate>-spec-v0.1.md` con su sección «Pruebas de aceptación» numerada, para que `rule-coverage.sh` las cuente
 - [ ] **038** Pasar la pestaña de seguridad completa a `docs/security.md` y mantenerla sincronizada con el artefacto
 - [ ] **039** Reconciliar el artefacto con el spec del repo en conflictos (el artefacto aún dice «en conflicto»)
