@@ -1,0 +1,762 @@
+//! The minimum agent, end to end: triage, contract (level 2 and up), a loop of model turns where
+//! every tool call goes through the gateway and then the node executor inside the sandbox, with
+//! the control layer on every step. Time comes from a `Clock`; the model is a trait.
+//!
+//! Turn protocol (plain text, so any chat model can speak it): the model answers with ONE JSON
+//! object per turn, `{"tool": "...", "args": {...}}` or `{"final": "..."}`.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+
+use clio_contract as contract;
+use clio_core::{Clock, Effect, Level};
+use clio_gateway::{
+    ActionRequest, ArgKind, ArgSpec, Budget as GwBudget, Decision, Egress, Gateway, Outcome, Rules,
+    SessionInfo, Source, ToolDecl, wrap_untrusted,
+};
+use clio_node::{Action as NodeAction, EffectLog, Registry, Sandbox};
+use clio_triage::{PersonMessage, TriageInput, Triager};
+use clio_vault::Scrubber;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::control::{Budget, Controller, DayBudget, OutputFilter, Stop};
+
+/// One chat message. Same JSON as the bench's `Request` messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Msg {
+    pub role: String,
+    pub content: String,
+}
+
+impl Msg {
+    fn new(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Reply {
+    pub text: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Something that answers a conversation. Closures `FnMut(&[Msg]) -> String` are models too
+/// (scripted ones, for tests).
+pub trait Model {
+    fn complete(&mut self, messages: &[Msg]) -> Result<Reply, String>;
+}
+
+impl<F: FnMut(&[Msg]) -> String> Model for F {
+    fn complete(&mut self, messages: &[Msg]) -> Result<Reply, String> {
+        Ok(Reply {
+            text: self(messages),
+            ..Reply::default()
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct WireRequest<'a> {
+    model: &'a str,
+    messages: &'a [Msg],
+    tools: Vec<String>,
+    max_tokens: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct WireResponse {
+    content: String,
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+}
+
+/// A real model reached through a program that reads a `Request` as JSON on stdin and writes a
+/// `Response` as JSON on stdout (the contract of `clio-bench --cmd`). No HTTP and no keys here.
+/// A failed call or an empty answer is retried after each pause in `backoff_ms` (quota and
+/// network errors pass).
+/// shortcut: one process per call, and the sleeps block; fine for a bench, not for a server.
+pub struct CommandModel {
+    pub program: String,
+    pub args: Vec<String>,
+    pub model: String,
+    pub max_tokens: u32,
+    pub backoff_ms: Vec<u64>,
+}
+
+impl CommandModel {
+    pub fn new(program: &str, args: &[String], model: &str) -> Self {
+        Self {
+            program: program.into(),
+            args: args.to_vec(),
+            model: model.into(),
+            max_tokens: 4096,
+            backoff_ms: vec![5_000, 20_000, 60_000],
+        }
+    }
+
+    fn once(&self, messages: &[Msg]) -> Result<Reply, String> {
+        let fail = |m: String| format!("{}: {m}", self.program);
+        let mut child = Command::new(&self.program)
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| fail(e.to_string()))?;
+        let body = serde_json::to_vec(&WireRequest {
+            model: &self.model,
+            messages,
+            tools: vec![],
+            max_tokens: Some(self.max_tokens),
+        })
+        .map_err(|e| fail(e.to_string()))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| fail("no stdin".into()))?
+            .write_all(&body)
+            .map_err(|e| fail(e.to_string()))?;
+        let out = child.wait_with_output().map_err(|e| fail(e.to_string()))?;
+        if !out.status.success() {
+            let err: String = String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(300)
+                .collect();
+            return Err(fail(format!("exit {}: {}", out.status, err.trim())));
+        }
+        let r: WireResponse =
+            serde_json::from_slice(&out.stdout).map_err(|e| fail(format!("bad answer: {e}")))?;
+        // An empty answer is the provider hiccuping, not a move of the model: ask again.
+        if r.content.trim().is_empty() {
+            return Err(fail("empty answer".into()));
+        }
+        Ok(Reply {
+            text: r.content,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+        })
+    }
+}
+
+impl Model for CommandModel {
+    fn complete(&mut self, messages: &[Msg]) -> Result<Reply, String> {
+        let mut result = self.once(messages);
+        for pause in self.backoff_ms.clone() {
+            if result.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+            result = self.once(messages);
+        }
+        result
+    }
+}
+
+/// What the model asked for in one turn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Turn {
+    Tool { name: String, args: Value },
+    Final(String),
+}
+
+/// The first JSON object in `text` that is a turn. Tolerates fences and text around it.
+pub fn parse_turn(text: &str) -> Result<Turn, String> {
+    let mut saw_object = false;
+    for (i, _) in text.match_indices('{') {
+        let mut it = serde_json::Deserializer::from_str(&text[i..]).into_iter::<Value>();
+        let Some(Ok(Value::Object(o))) = it.next() else {
+            continue;
+        };
+        saw_object = true;
+        if let Some(f) = o.get("final") {
+            return Ok(Turn::Final(
+                f.as_str().map_or_else(|| f.to_string(), str::to_owned),
+            ));
+        }
+        if let Some(name) = o.get("tool").and_then(Value::as_str) {
+            let args = o.get("args").cloned().unwrap_or(Value::Object(Map::new()));
+            return Ok(Turn::Tool {
+                name: name.into(),
+                args,
+            });
+        }
+    }
+    Err(if saw_object {
+        "the JSON object has neither \"tool\" nor \"final\"".into()
+    } else {
+        "no valid JSON object found".into()
+    })
+}
+
+/// Why the loop ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// The model said it is done (not verified by anything outside it).
+    Final,
+    Stopped(Stop),
+    ModelError(String),
+    /// Level 3 needs a person to approve the contract and nobody did.
+    NeedsApproval,
+}
+
+/// The closing report: done, pending, next step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosingReport {
+    pub done: Vec<String>,
+    pub pending: Vec<String>,
+    pub next_step: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentOutcome {
+    pub ending: Ending,
+    pub final_message: Option<String>,
+    pub level: Level,
+    pub steps: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_micro: u64,
+    pub elapsed_ms: i64,
+    /// Tool calls the gateway denied or left waiting for a person.
+    pub denied: u32,
+    pub tainted: bool,
+    pub contract_state: Option<contract::State>,
+    pub report: ClosingReport,
+    pub transcript: Vec<Msg>,
+}
+
+pub struct AgentConfig {
+    pub task_id: String,
+    pub system_prompt: String,
+    /// For the trace, e.g. `clio-agent@1`.
+    pub prompt_version: String,
+    pub budget: Budget,
+    pub day_max_cost_micro: u64,
+    /// Micro-USD per million tokens.
+    pub price_in_micro_per_mtok: u64,
+    pub price_out_micro_per_mtok: u64,
+    /// Where the contract record goes: a folder OUTSIDE the workspace.
+    pub run_dir: PathBuf,
+    /// Never below this, whatever triage says (tests use it to force the contract path).
+    pub min_level: Level,
+    /// Level 3 only: a person already approved the contract (a bench has no one to ask).
+    pub person_approves_long: bool,
+    pub max_result_chars: usize,
+}
+
+impl AgentConfig {
+    pub fn new(task_id: &str, system_prompt: &str, run_dir: &Path) -> Self {
+        Self {
+            task_id: task_id.into(),
+            system_prompt: system_prompt.into(),
+            prompt_version: "clio-agent@1".into(),
+            budget: Budget {
+                max_steps: 40,
+                max_ms: 600_000,
+                max_cost_micro: 100_000,
+                max_repeats: 4,
+                max_retries: 3,
+            },
+            day_max_cost_micro: u64::MAX,
+            price_in_micro_per_mtok: 0,
+            price_out_micro_per_mtok: 0,
+            run_dir: run_dir.into(),
+            min_level: Level::Direct,
+            person_approves_long: false,
+            max_result_chars: 12_000,
+        }
+    }
+}
+
+/// A person who can say yes to an action the gateway wants to ask about.
+pub trait Asker {
+    fn approve(&self, decision: &Decision, tool: &str, args: &Map<String, Value>) -> bool;
+}
+
+/// Nobody is there: every question is a no.
+pub struct NobodyHome;
+
+impl Asker for NobodyHome {
+    fn approve(&self, _: &Decision, _: &str, _: &Map<String, Value>) -> bool {
+        false
+    }
+}
+
+/// An approval the gateway's decision produced for exactly this action.
+struct Approved(String);
+
+impl clio_node::Approval for Approved {
+    fn is_valid_for(&self, hash: &str) -> bool {
+        self.0 == hash
+    }
+}
+
+fn digest_hex(s: &str) -> String {
+    Sha256::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The declared arguments of the basic tools (the registry holds code, not schemas).
+fn arg_specs(tool: &str) -> Vec<ArgSpec> {
+    let a = |name: &str, kind| ArgSpec {
+        name: name.into(),
+        kind,
+        required: true,
+    };
+    match tool {
+        "write_file" => vec![a("path", ArgKind::Path), a("content", ArgKind::Text)],
+        _ => vec![a("path", ArgKind::Path)],
+    }
+}
+
+/// The tool section of the prompt, from the registry: name, arguments, what it does.
+pub fn tool_help(registry: &Registry) -> String {
+    registry
+        .visible()
+        .iter()
+        .map(|t| {
+            let args: Vec<String> = arg_specs(&t.name)
+                .iter()
+                .map(|a| format!("\"{}\"", a.name))
+                .collect();
+            format!(
+                "- {} (args: {}): {}",
+                t.name,
+                args.join(", "),
+                t.description
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub struct AgentLoop {
+    clock: Arc<dyn Clock>,
+    cfg: AgentConfig,
+    gateway: Gateway,
+    executor: clio_node::Executor,
+    descriptions: Vec<(String, String)>,
+    pub scrubber: Option<Scrubber>,
+    pub filter: Option<Box<dyn OutputFilter>>,
+    pub asker: Box<dyn Asker>,
+}
+
+impl AgentLoop {
+    /// `workdir` is the only place the agent may touch. `scratch` and `cfg.run_dir` must be
+    /// outside it.
+    pub fn new(
+        clock: Arc<dyn Clock>,
+        cfg: AgentConfig,
+        workdir: &Path,
+        scratch: &Path,
+    ) -> Result<Self, String> {
+        let e = |x: &dyn std::fmt::Display| x.to_string();
+        let registry = Registry::basic().map_err(|x| e(&x))?;
+        let mut tools = Vec::new();
+        let mut descriptions = Vec::new();
+        for t in registry.visible() {
+            let hash = digest_hex(&t.description);
+            tools.push(ToolDecl {
+                name: t.name.clone(),
+                version: "1".into(),
+                effect: t.effect.unwrap_or(Effect::Irreversible),
+                egress: Egress::None,
+                description_hash: hash.clone(),
+                args: arg_specs(&t.name),
+            });
+            descriptions.push((t.name.clone(), hash));
+        }
+        let gateway = Gateway::new(Rules {
+            sandbox_root: workdir.to_path_buf(),
+            allowed_binaries: vec![],
+            trusted_domains: vec![],
+            protected_paths: vec![],
+            day_zero_complete: false,
+            breaker_threshold: 3,
+            tools,
+            secret_bindings: vec![],
+        })?;
+        std::fs::create_dir_all(&cfg.run_dir).map_err(|x| e(&x))?;
+        let log = EffectLog::open(&cfg.run_dir.join("effects.jsonl")).map_err(|x| e(&x))?;
+        let sandbox = Sandbox::new(workdir, scratch).map_err(|x| e(&x))?;
+        Ok(Self {
+            clock,
+            cfg,
+            gateway,
+            executor: clio_node::Executor {
+                registry,
+                sandbox,
+                log,
+            },
+            descriptions,
+            scrubber: None,
+            filter: None,
+            asker: Box::new(NobodyHome),
+        })
+    }
+
+    pub fn gateway(&self) -> &Gateway {
+        &self.gateway
+    }
+
+    fn cost(&self, r: &Reply) -> u64 {
+        let micro = u128::from(r.input_tokens) * u128::from(self.cfg.price_in_micro_per_mtok)
+            + u128::from(r.output_tokens) * u128::from(self.cfg.price_out_micro_per_mtok);
+        micro.div_ceil(1_000_000) as u64
+    }
+
+    /// Scrub, cut, filter and wrap a tool result as data the model must not obey.
+    fn present(&self, source: Source, raw: &str) -> String {
+        let mut text = self
+            .scrubber
+            .as_ref()
+            .map_or_else(|| raw.to_owned(), |s| s.scrub(raw));
+        if text.chars().count() > self.cfg.max_result_chars {
+            text = text
+                .chars()
+                .take(self.cfg.max_result_chars)
+                .collect::<String>()
+                + "\n[truncated]";
+        }
+        if let Some(f) = &self.filter {
+            text = f
+                .filter(&text)
+                .unwrap_or_else(|why| format!("[withheld: {why}]"));
+        }
+        wrap_untrusted(source, &text)
+    }
+
+    pub fn run(
+        &mut self,
+        model: &mut dyn Model,
+        instruction: &str,
+    ) -> Result<AgentOutcome, String> {
+        let clock = self.clock.clone();
+        let id = self.cfg.task_id.clone();
+
+        // 1. Triage, over the person's message only (S-07).
+        let mut triager = Triager::rules_only(clock.clone());
+        let input = TriageInput::new(PersonMessage::from_person(instruction), "local", "person");
+        let level = triager.triage(&input).0.level.max(self.cfg.min_level);
+
+        // 2. Contract, level 2 and up: objective = the person's instruction, saved outside the workspace.
+        let record = self.cfg.run_dir.join("contract.json");
+        let mut contract = None;
+        if level >= Level::Full {
+            let b = self.cfg.budget;
+            let mut c = contract::Contract::draft(
+                format!("{id}-contract"),
+                level,
+                instruction,
+                contract::Origin::Person,
+                format!("{id}-trace"),
+                clock.as_ref(),
+            )
+            .map_err(|x| x.to_string())?;
+            let p = contract::Actor::Person;
+            let ce = |x: contract::Error| x.to_string();
+            c.set_scope(
+                p,
+                contract::Scope {
+                    included: vec![".".into()],
+                    excluded: vec![],
+                },
+            )
+            .map_err(ce)?;
+            c.set_budget(
+                p,
+                contract::Budget {
+                    max_steps: u64::from(b.max_steps),
+                    max_ms: b.max_ms,
+                    max_cost_micro_cents: b.max_cost_micro.saturating_mul(100),
+                },
+            )
+            .map_err(ce)?;
+            c.add_criterion(contract::Criterion::new(
+                "the objective is met",
+                Some(contract::Check {
+                    kind: contract::CheckKind::Command,
+                    detail: "a check outside the model".into(),
+                }),
+            ));
+            let digest =
+                (level == Level::Long && self.cfg.person_approves_long).then(|| c.digest());
+            if level == Level::Long && digest.is_none() {
+                return Ok(self.outcome_without_loop(level, Ending::NeedsApproval));
+            }
+            c.approve(p, digest.as_deref(), clock.as_ref())
+                .map_err(ce)?;
+            c.start(&record, clock.as_ref()).map_err(ce)?;
+            contract = Some(c);
+        }
+
+        // 3. The loop.
+        let mut ctl = Controller::new(clock.clone(), &id, level, self.cfg.budget);
+        let mut day = DayBudget::new(self.cfg.day_max_cost_micro);
+        let mut session = clio_gateway::Session::new(format!("{id}-session"));
+        let plan: Vec<String> = if level >= Level::Full {
+            self.descriptions.iter().map(|(n, _)| n.clone()).collect()
+        } else {
+            vec![]
+        };
+        let system = format!(
+            "{}\n\nTools:\n{}",
+            self.cfg.system_prompt,
+            tool_help(&self.executor.registry)
+        );
+        let mut messages = vec![Msg::new("system", system), Msg::new("user", instruction)];
+        let (mut tin, mut tout, mut denied, mut n_calls) = (0u64, 0u64, 0u32, 0u32);
+        let mut done: Vec<String> = Vec::new();
+        let (ending, final_message) = loop {
+            // Hard stop before spending on a model call.
+            if let Err(s) = ctl.check_limits(0, &mut day) {
+                break (Ending::Stopped(s), None);
+            }
+            let reply = match model.complete(&messages) {
+                Ok(r) => r,
+                Err(m) => break (Ending::ModelError(m), None),
+            };
+            tin += u64::from(reply.input_tokens);
+            tout += u64::from(reply.output_tokens);
+            let cost = self.cost(&reply);
+            messages.push(Msg::new("assistant", reply.text.clone()));
+            let turn = parse_turn(&reply.text);
+            let key = match &turn {
+                Ok(Turn::Tool { name, args }) => format!("{name}:{args}"),
+                Ok(Turn::Final(_)) => "final".to_owned(),
+                Err(_) => "invalid".to_owned(),
+            };
+            if let Err(s) = ctl.begin_step(&key, cost, &mut day) {
+                break (Ending::Stopped(s), None);
+            }
+            if let Some(c) = contract.as_mut() {
+                // The contract mirrors the budget; if it closes itself the controller stops us next turn.
+                let _ = c.spend(1, cost.saturating_mul(100), clock.as_ref());
+            }
+            match turn {
+                Err(why) => messages.push(Msg::new(
+                    "user",
+                    format!(
+                        "[protocol error] {why}. Reply with exactly one JSON object: {{\"tool\":\"<name>\",\"args\":{{...}}}} or {{\"final\":\"<message>\"}}."
+                    ),
+                )),
+                Ok(Turn::Final(m)) => break (Ending::Final, Some(m)),
+                Ok(Turn::Tool { name, args }) => {
+                    n_calls += 1;
+                    let (text, ok) = self.call_tool(
+                        &name,
+                        args,
+                        n_calls,
+                        level,
+                        &plan,
+                        &mut session,
+                        ctl.checkpoint().cost_micro,
+                    );
+                    match ok {
+                        Some(effect_line) => done.extend(effect_line),
+                        None => denied += 1,
+                    }
+                    messages.push(Msg::new("user", text));
+                }
+            }
+        };
+
+        // 4. Closing: report and contract state.
+        let stop = match &ending {
+            Ending::Stopped(s) => Some(*s),
+            _ => None,
+        };
+        let mut pending = Vec::new();
+        let next_step = match &ending {
+            Ending::Final => {
+                pending.push("nothing outside the model has verified the result".into());
+                "run the checks on the result".to_owned()
+            }
+            Ending::Stopped(s) => {
+                pending.push(format!("the task was not finished: stopped by {s:?}"));
+                "look at what was done and raise the budget or split the task".into()
+            }
+            Ending::ModelError(m) => {
+                pending.push(format!("the model could not be reached: {m}"));
+                "try again when the model answers".into()
+            }
+            Ending::NeedsApproval => {
+                pending.push("the contract was not approved".into());
+                "ask the person to approve the contract".into()
+            }
+        };
+        let contract_state = contract.map(|mut c| {
+            let next = next_step.clone();
+            let ck = clock.as_ref();
+            if !c.state().is_closed() {
+                let _ = if stop.is_some() || !matches!(ending, Ending::Final) {
+                    c.close_failed(&next, ck)
+                } else {
+                    c.block(ck) // done by the model's word only: waits for a check from outside
+                };
+            }
+            let _ = c.save(&record);
+            c.state()
+        });
+        let cp = ctl.checkpoint();
+        Ok(AgentOutcome {
+            ending,
+            final_message,
+            level,
+            steps: cp.steps,
+            input_tokens: tin,
+            output_tokens: tout,
+            cost_micro: cp.cost_micro,
+            elapsed_ms: cp.elapsed_ms,
+            denied,
+            tainted: session.tainted(),
+            contract_state,
+            report: ClosingReport {
+                done,
+                pending,
+                next_step,
+            },
+            transcript: messages,
+        })
+    }
+
+    fn outcome_without_loop(&self, level: Level, ending: Ending) -> AgentOutcome {
+        AgentOutcome {
+            ending,
+            final_message: None,
+            level,
+            steps: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_micro: 0,
+            elapsed_ms: 0,
+            denied: 0,
+            tainted: false,
+            contract_state: None,
+            report: ClosingReport {
+                done: vec![],
+                pending: vec!["the contract was not approved".into()],
+                next_step: "ask the person to approve the contract".into(),
+            },
+            transcript: vec![],
+        }
+    }
+
+    /// One tool call: gateway first, executor only on an allow. Returns the message for the model
+    /// and `Some(done lines)` when the call ran, `None` when it did not.
+    #[allow(clippy::too_many_arguments)]
+    fn call_tool(
+        &self,
+        name: &str,
+        args: Value,
+        n: u32,
+        level: Level,
+        plan: &[String],
+        session: &mut clio_gateway::Session,
+        spent: u64,
+    ) -> (String, Option<Vec<String>>) {
+        let Value::Object(map) = args else {
+            return (
+                "[protocol error] \"args\" must be a JSON object".into(),
+                None,
+            );
+        };
+        let req = ActionRequest {
+            tool: name.into(),
+            version: "1".into(),
+            description_hash: self
+                .descriptions
+                .iter()
+                .find(|(t, _)| t == name)
+                .map(|(_, h)| h.clone())
+                .unwrap_or_default(),
+            args: map.clone(),
+            node: "local".into(),
+            session: SessionInfo {
+                id: session.id().into(),
+                parent: None,
+                level,
+                tainted: session.tainted(),
+                subagent: false,
+            },
+            actor: "agent".into(),
+            budget: GwBudget {
+                spent,
+                limit: self.cfg.budget.max_cost_micro,
+            },
+            plan: plan.to_vec(),
+        };
+        let d = self.gateway.decide_or_deny(&req);
+        let allowed = match d.outcome {
+            Outcome::Allow => true,
+            Outcome::Ask => self.asker.approve(&d, name, &map),
+            Outcome::Deny => false,
+        };
+        if !allowed {
+            let why = if d.outcome == Outcome::Ask {
+                format!(
+                    "it needs a person's approval and nobody is available ({})",
+                    d.reason
+                )
+            } else {
+                d.reason.clone()
+            };
+            return (
+                format!("[gateway] {name} was not run (rule {}): {why}", d.rule),
+                None,
+            );
+        }
+        let action = NodeAction {
+            id: format!("{}-{n}", self.cfg.task_id),
+            tool: name.into(),
+            args: Value::Object(map.clone()),
+        };
+        let approval = Approved(action.hash());
+        match self.executor.execute(&action, &approval) {
+            Ok(out) => {
+                let effect = self
+                    .executor
+                    .registry
+                    .get(name)
+                    .and_then(|f| f.tool.effect)
+                    .unwrap_or(Effect::Irreversible);
+                let (source, raw) = match (name, out.result.get("content").and_then(Value::as_str))
+                {
+                    ("read_file", Some(c)) => (Source::File, c.to_owned()),
+                    ("list_dir", _) => (Source::File, out.result.to_string()),
+                    _ => (Source::ToolResult, out.result.to_string()),
+                };
+                if source == Source::File {
+                    // S-05: anything that came from a file marks the session, for the gateway too.
+                    session.mark_external(Source::File);
+                    self.gateway.mark_tainted(session.id());
+                }
+                let lines = if effect > Effect::Read {
+                    vec![format!(
+                        "{name} {}",
+                        map.get("path").and_then(Value::as_str).unwrap_or("")
+                    )]
+                } else {
+                    vec![]
+                };
+                (
+                    format!("Result of {name}:\n{}", self.present(source, &raw)),
+                    Some(lines),
+                )
+            }
+            Err(e) => (format!("[error] {name} failed: {e}"), Some(vec![])),
+        }
+    }
+}

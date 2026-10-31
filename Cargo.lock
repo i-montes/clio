@@ -187,11 +187,15 @@ dependencies = [
 name = "clio-bench"
 version = "0.0.0"
 dependencies = [
+ "clio-brain",
+ "clio-core",
  "clio-fake-llm",
  "clio-trace",
+ "clio-vault",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -199,9 +203,16 @@ name = "clio-brain"
 version = "0.0.0"
 dependencies = [
  "clio-canaries",
+ "clio-contract",
  "clio-core",
+ "clio-gateway",
+ "clio-node",
+ "clio-triage",
+ "clio-vault",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
