@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use serde::{Deserialize, Serialize};
 
 use super::ui::{Level, Style};
@@ -208,6 +209,17 @@ pub fn init(dirs: &Dirs) -> Res<()> {
     made(&dirs.runs)?;
     made(dirs.need_runtime()?)?;
 
+    // The memory file lives here and nowhere else; it is created now so the first run finds it.
+    match MemoryLink::open_write(&dirs.data, &EmbedModel::none()) {
+        Ok(link) => {
+            let (a, q, _) = link.counts().unwrap_or((0, 0, 0));
+            println!(
+                "{ok}  memoria      {} (0600; {a} recuerdos, {q} en cuarentena)",
+                MemoryLink::db_path(&dirs.data).display()
+            );
+        }
+        Err(e) => println!("{}  memoria: {e}", st.mark(Level::Warn)),
+    }
     let cfg = dirs.config_file();
     if cfg.exists() {
         println!("{ok}  ya existe    {} (se deja como está)", cfg.display());

@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod home;
 pub mod keys;
 pub mod live;
+pub mod memory;
 pub mod meter;
 pub mod new_run;
 pub mod sanitize;
@@ -21,6 +22,8 @@ pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_memory;
 #[cfg(test)]
 mod tests_views;
 
@@ -33,6 +36,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clio_brain::agent::{Event, Observer};
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
+use clio_memory::Signal;
 use crossterm::event::{self, Event as Term, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -44,6 +49,7 @@ use ratatui::backend::CrosstermBackend;
 use self::app::{App, Bg, Cmd, Input, Planned, draw, update};
 use self::detail::Detail;
 use self::home::{Header, KeyState};
+use self::memory::MemoryData;
 use self::new_run::Preview;
 use super::apply;
 use super::debug::DebugCtl;
@@ -51,6 +57,12 @@ use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::runs::{self, RunOpts};
 use super::usage::{self, RunLimits, RunUsage};
 use super::{Res, work};
+
+fn memory_id(s: &str) -> Result<clio_memory::MemoryId, String> {
+    s.parse::<i64>()
+        .map(clio_memory::MemoryId)
+        .map_err(|_| format!("id de recuerdo no válido: {s}"))
+}
 
 static IN_TUI: AtomicBool = AtomicBool::new(false);
 
@@ -302,6 +314,42 @@ impl Ctx {
                     seq,
                     result: r.and_then(|x| x),
                 },
+            ),
+            Cmd::LoadMemory => self.spawn(
+                |d, _| MemoryData::load(d),
+                |r| Bg::Memory(r.and_then(|x| x).map(Box::new)),
+            ),
+            Cmd::MemoryPromote { id } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    link.promote(memory_id(&id)?)?;
+                    Ok::<_, String>(format!("aprobado: m{id}; desde ahora se recuerda"))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::MemoryArchive { id } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    link.archive(memory_id(&id)?)?;
+                    Ok::<_, String>(format!("archivado: m{id}; ya no se recuerda"))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::MemoryFeedback { id, useful } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let signal = if useful {
+                        Signal::Useful
+                    } else {
+                        Signal::Wrong
+                    };
+                    link.feedback(clio_memory::MemoryId(id), signal)?;
+                    Ok::<_, String>(format!(
+                        "anotado para m{id}: {} (nunca borra el recuerdo)",
+                        if useful { "útil" } else { "equivocado" }
+                    ))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
             ),
             Cmd::Redraw => {}
             Cmd::Debug(on) => self.debug.set(on),

@@ -18,6 +18,7 @@ use super::doctor::DoctorView;
 use super::home::{Header, Home};
 use super::keys::{self, Act, Ctx};
 use super::live::Live;
+use super::memory::{MemoryData, MemoryView};
 use super::new_run::{NewRun, Preview};
 use super::sanitize;
 use super::theme::Theme;
@@ -36,6 +37,7 @@ pub enum Screen {
     Help,
     Context,
     Usage,
+    Memory,
 }
 
 /// Something to do outside of `update`.
@@ -64,6 +66,18 @@ pub enum Cmd {
     },
     Undo {
         id: String,
+    },
+    LoadMemory,
+    MemoryPromote {
+        id: String,
+    },
+    MemoryArchive {
+        id: String,
+    },
+    /// Useful (true) or wrong (false) for one memory a run recalled.
+    MemoryFeedback {
+        id: i64,
+        useful: bool,
     },
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),
@@ -94,6 +108,7 @@ pub enum Bg {
         diff: bool,
     },
     Planned(Result<Planned, String>),
+    Memory(Result<Box<MemoryData>, String>),
     Done(Result<String, String>),
 }
 
@@ -103,6 +118,8 @@ pub struct Planned {
     pub workspace: String,
 }
 
+// One value per frame or event, moved once: boxing `Bg` would only add an allocation per agent event.
+#[allow(clippy::large_enum_variant)]
 pub enum Input {
     Key(KeyEvent),
     Paste(String),
@@ -114,6 +131,9 @@ pub enum Input {
 pub enum Action {
     Apply,
     Undo,
+    /// A memory: `Confirm::id` is its number and `Confirm::workspace` its text.
+    Promote,
+    Archive,
 }
 
 /// A question that needs a `y`.
@@ -141,6 +161,7 @@ pub struct App {
     pub live: Live,
     pub detail: Option<Detail>,
     pub doctor: DoctorView,
+    pub memory: MemoryView,
     pub confirm: Option<Confirm>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
@@ -168,6 +189,7 @@ impl App {
             live: Live::default(),
             detail: None,
             doctor: DoctorView::default(),
+            memory: MemoryView::default(),
             confirm: None,
             flash: None,
             notice: None,
@@ -205,6 +227,8 @@ impl App {
             Screen::Context => Ctx::Context,
             Screen::Usage => Ctx::Usage,
             Screen::Help => Ctx::Help,
+            Screen::Memory if self.memory.filtering => Ctx::MemoryFilter,
+            Screen::Memory => Ctx::Memory,
         }
     }
 
@@ -222,10 +246,12 @@ impl App {
     /// The screen whose run the views show: for the overlays, the one they were opened from.
     pub fn data_screen(&self) -> Screen {
         match self.screen {
+            Screen::Memory => Screen::Home,
             Screen::Context | Screen::Usage => self.back,
             Screen::Help if matches!(self.before_help, Screen::Context | Screen::Usage) => {
                 self.back
             }
+            Screen::Help if self.before_help == Screen::Memory => Screen::Home,
             Screen::Help => self.before_help,
             s => s,
         }
@@ -327,6 +353,7 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 Screen::Live => super::live::key(app, &k),
                 Screen::Detail => super::detail::key(app, &k),
                 Screen::Doctor => super::doctor::key(app, &k),
+                Screen::Memory => super::memory::key(app, &k),
                 Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
             }
         }
@@ -345,6 +372,8 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     match c.action {
         Action::Apply => vec![Cmd::Apply { id: c.id }],
         Action::Undo => vec![Cmd::Undo { id: c.id }],
+        Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
+        Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
     }
 }
 
@@ -419,9 +448,25 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.notice = Some(e);
             vec![]
         }
+        Bg::Memory(r) => {
+            app.memory.loading = false;
+            match r {
+                Ok(d) => {
+                    app.memory.error = None;
+                    app.memory.data = Some(*d);
+                    let n = app.memory.visible().len();
+                    app.memory.sel = app.memory.sel.min(n.saturating_sub(1));
+                }
+                Err(e) => app.memory.error = Some(e),
+            }
+            vec![]
+        }
         Bg::Done(Ok(msg)) => {
             app.flash = Some(msg);
             let mut cmds = vec![Cmd::LoadHome];
+            if app.screen == Screen::Memory {
+                cmds.push(Cmd::LoadMemory);
+            }
             if let (Screen::Detail, Some(d)) = (app.screen, &app.detail) {
                 cmds.push(Cmd::LoadDetail {
                     id: d.info.id.clone(),
@@ -479,6 +524,7 @@ fn screen_name(app: &App) -> &'static str {
         Screen::Help => "ayuda",
         Screen::Context => "contexto",
         Screen::Usage => "uso",
+        Screen::Memory => "memoria",
     }
 }
 
@@ -604,6 +650,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Doctor => super::doctor::draw(f, body, app),
         Screen::Context => meter::draw_context(f, body, app),
         Screen::Usage => meter::draw_usage(f, body, app),
+        Screen::Memory => super::memory::draw(f, body, app),
         Screen::Help => meter::draw_help(f, body, app),
     }
     if let Some(msg) = &app.flash {
@@ -626,6 +673,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         let verb = match c.action {
             Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
             Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
+            Action::Promote => format!(
+                "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
+                c.id
+            ),
+            Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
         };
         let lines = vec![
             Line::from(Span::styled(verb, t.bold())),

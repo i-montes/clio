@@ -59,6 +59,11 @@ pub enum Act {
     PrevFile,
     Newline,
     Clear,
+    Memory,
+    Promote,
+    Archive,
+    Useful,
+    Wrong,
 }
 
 pub struct Bind {
@@ -108,10 +113,12 @@ pub enum Ctx {
     Context,
     Usage,
     Help,
+    Memory,
+    MemoryFilter,
 }
 
 #[cfg(test)]
-pub const ALL: [Ctx; 11] = [
+pub const ALL: [Ctx; 13] = [
     Ctx::Home,
     Ctx::Filter,
     Ctx::NewRun,
@@ -123,6 +130,8 @@ pub const ALL: [Ctx; 11] = [
     Ctx::Context,
     Ctx::Usage,
     Ctx::Help,
+    Ctx::Memory,
+    Ctx::MemoryFilter,
 ];
 
 /// On every screen.
@@ -169,6 +178,7 @@ const HOME: &[Bind] = &[
     b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", true),
     b(&[Char('c')], Act::Context, "c", "contexto", true),
     b(&[Char('U')], Act::Usage, "U", "uso", true),
+    b(&[Char('m')], Act::Memory, "m", "memoria", true),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('D')], Act::Doctor, "D", "doctor", false),
     b(&[ESC], Act::Back, "Esc", "quitar el filtro", false),
@@ -363,6 +373,27 @@ const DETAIL_LIST: &[Bind] = &[
     b(&[Char('u')], Act::Undo, "u", "deshacer", true),
     b(&[Char('c')], Act::Context, "c", "contexto", true),
     b(&[Char('U')], Act::Usage, "U", "uso", true),
+    b(
+        &[Code(KeyCode::Tab)],
+        Act::Tab,
+        "Tab",
+        "elegir el recuerdo usado",
+        false,
+    ),
+    b(
+        &[Char('+')],
+        Act::Useful,
+        "+",
+        "el recuerdo elegido fue útil",
+        false,
+    ),
+    b(
+        &[Char('-')],
+        Act::Wrong,
+        "-",
+        "el recuerdo elegido estaba equivocado",
+        false,
+    ),
     b(&[Char('?')], Act::Help, "?", "ayuda", true),
     b(
         &[ESC, Char('q'), Ctrl('c')],
@@ -594,6 +625,64 @@ const USAGE: &[Bind] = &[
     ),
 ];
 
+const MEMORY: &[Bind] = &[
+    b(
+        &[Char('j'), Code(KeyCode::Down)],
+        Act::Down,
+        "j",
+        "bajar",
+        false,
+    ),
+    b(
+        &[Char('k'), Code(KeyCode::Up)],
+        Act::Up,
+        "k",
+        "subir",
+        false,
+    ),
+    b(
+        &[Char('g'), Code(KeyCode::Home)],
+        Act::Top,
+        "g",
+        "primero",
+        false,
+    ),
+    b(
+        &[Char('G'), Code(KeyCode::End)],
+        Act::Bottom,
+        "G",
+        "último",
+        false,
+    ),
+    b(&[ENTER], Act::Open, "Enter", "ver completo", true),
+    b(&[Char('p')], Act::Promote, "p", "aprobar", true),
+    b(&[Char('a')], Act::Archive, "a", "archivar", true),
+    b(&[Char('/')], Act::Filter, "/", "buscar", true),
+    b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
+    b(&[Char('?')], Act::Help, "?", "ayuda", true),
+    b(
+        &[ESC, Char('q'), Ctrl('c')],
+        Act::Back,
+        "Esc",
+        "volver",
+        true,
+    ),
+];
+
+const MEMORY_FILTER: &[Bind] = &[
+    b(&[ENTER], Act::Open, "Enter", "dejar la búsqueda", true),
+    b(&[ESC], Act::Back, "Esc", "borrar la búsqueda", true),
+    b(&[Code(KeyCode::Down)], Act::Down, "↓", "bajar", false),
+    b(&[Code(KeyCode::Up)], Act::Up, "↑", "subir", false),
+    b(
+        &[Ctrl('c')],
+        Act::Back,
+        "Ctrl-C",
+        "borrar la búsqueda",
+        false,
+    ),
+];
+
 const HELP: &[Bind] = &[
     b(
         &[Char('j'), Code(KeyCode::Down)],
@@ -659,6 +748,8 @@ pub fn table(ctx: Ctx) -> &'static [Bind] {
         Ctx::Context => CONTEXT,
         Ctx::Usage => USAGE,
         Ctx::Help => HELP,
+        Ctx::Memory => MEMORY,
+        Ctx::MemoryFilter => MEMORY_FILTER,
     }
 }
 
@@ -730,6 +821,10 @@ mod tests {
             ('k', Act::Up),
             (']', Act::NextFile),
             ('[', Act::PrevFile),
+            ('m', Act::Memory),
+            ('p', Act::Promote),
+            ('+', Act::Useful),
+            ('-', Act::Wrong),
         ];
         for ctx in ALL {
             for bind in table(ctx) {
@@ -740,8 +835,11 @@ mod tests {
                         // Back on 'c' and 'U' is "toggle back" in the two views that are the pair.
                         let toggle = matches!(ctx, Ctx::Context | Ctx::Usage | Ctx::Help)
                             && bind.act == Act::Back;
+                        // `a` is "aplicar" on a run and "archivar" on a memory: the same verb of
+                        // accepting a decision, on the one screen that has no runs to apply.
+                        let archive = *c == 'a' && ctx == Ctx::Memory && bind.act == Act::Archive;
                         assert!(
-                            bind.act == *act || toggle,
+                            bind.act == *act || toggle || archive,
                             "{ctx:?}: {c:?} is {:?}, elsewhere {act:?}",
                             bind.act
                         );
@@ -821,6 +919,8 @@ mod tests {
             (Ctx::Context, "Contexto"),
             (Ctx::Usage, "Uso"),
             (Ctx::Help, "Ayuda"),
+            (Ctx::Memory, "Memoria"),
+            (Ctx::MemoryFilter, "Memoria, escribiendo la búsqueda"),
         ];
         for (ctx, name) in names {
             let entries: Vec<String> = table(ctx)

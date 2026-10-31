@@ -155,6 +155,7 @@ pub(super) fn detail(id: &str, status: Status) -> Detail {
         scroll: 0,
         usage: super::tests_views::usage_with_context(),
         view_h: Cell::new(10),
+        mem_sel: 0,
     }
 }
 
@@ -1269,6 +1270,7 @@ fn hostile_file_names_diffs_and_messages_never_reach_the_screen_raw() {
                     scroll: 0,
                     usage: RunUsage::default(),
                     view_h: Cell::new(10),
+                    mem_sel: 0,
                 },
                 diff_mode,
             );
@@ -1383,6 +1385,7 @@ impl App {
             scroll: d.scroll,
             usage: d.usage.clone(),
             view_h: Cell::new(d.view_h.get()),
+            mem_sel: 0,
         });
         b
     }

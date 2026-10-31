@@ -50,6 +50,8 @@ pub(super) fn context(call: u32) -> ContextReport {
             },
         ],
         tool_outputs: 0,
+        memory: 0,
+        memory_items: 0,
     }
 }
 

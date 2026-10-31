@@ -10,7 +10,14 @@ publish = false
 name = "clio"
 path = "src/main.rs"
 
+[features]
+# Embeddings from the local Model2Vec model; without it (or without the model on disk) the
+# memory still works, by text only.
+default = ["model2vec"]
+model2vec = ["clio-memory/model2vec"]
+
 [dependencies]
+clio-memory = { path = "../clio-memory" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }

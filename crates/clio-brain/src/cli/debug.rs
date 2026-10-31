@@ -108,6 +108,8 @@ fn ctx_json(c: &ContextReport) -> Value {
         "turns": c.turns,
         "external": c.external.iter().map(|i| json!({"name": i.name, "tokens": i.tokens})).collect::<Vec<_>>(),
         "tool_outputs": c.tool_outputs,
+        "memory": c.memory,
+        "memory_items": c.memory_items,
         "total": c.total(),
     })
 }
@@ -150,6 +152,10 @@ pub fn event_json(e: &Event, at_ms: u64) -> Value {
             "request": x.request.iter().map(|m| json!({"role": m.role, "content": cut(&m.content, LOG_FIELD_MAX)})).collect::<Vec<_>>(),
             "response": cut(&x.response, LOG_FIELD_MAX),
         }),
+        Event::Memory { title, lines } => json!({
+            "kind": "memory", "title": cut(title, 200),
+            "lines": lines.iter().map(|l| cut(l, LOG_FIELD_MAX)).collect::<Vec<_>>(),
+        }),
         Event::Decision(d) => json!({
             "kind": "decision", "n": d.n, "tool": d.tool, "args": cut(&d.args, LOG_FIELD_MAX),
             "outcome": outcome_code(d.outcome), "rule": d.rule, "reason": cut(&d.reason, LOG_FIELD_MAX),
@@ -164,7 +170,7 @@ pub fn event_json(e: &Event, at_ms: u64) -> Value {
 fn stderr_line(e: &Event) -> Option<String> {
     Some(match e {
         Event::Context(c) => format!(
-            "contexto #{}: {} tok aprox. (sistema {} {}, objetivo {}, herramientas {}, conversación {} en {} turnos, externo {} en {} lecturas, salidas {})",
+            "contexto #{}: {} tok aprox. (sistema {} {}, objetivo {}, herramientas {}, conversación {} en {} turnos, externo {} en {} lecturas, salidas {}, memoria {} en {} recuerdos)",
             c.call,
             c.total(),
             c.system,
@@ -175,7 +181,9 @@ fn stderr_line(e: &Event) -> Option<String> {
             c.turns,
             c.external_tokens(),
             c.external.len(),
-            c.tool_outputs
+            c.tool_outputs,
+            c.memory,
+            c.memory_items
         ),
         Event::Usage(u) => format!(
             "llamada #{}: {} ms, entrada {} tok, salida {} tok, costo {} micro-USD, reintentos {}",
@@ -204,6 +212,7 @@ fn stderr_line(e: &Event) -> Option<String> {
             d.reason
         ),
         Event::ProtocolError { reason } => format!("error de protocolo: {reason}"),
+        Event::Memory { title, lines } => format!("memoria: {title}\n  {}", lines.join("\n  ")),
         _ => return None,
     })
 }
@@ -249,6 +258,10 @@ pub fn scrub_event(s: &Scrubber, e: &Event) -> Event {
             response: c(&x.response),
             ..x.clone()
         }),
+        Event::Memory { title, lines } => Event::Memory {
+            title: c(title),
+            lines: lines.iter().map(|l| c(l)).collect(),
+        },
         Event::Decision(d) => Event::Decision(DecisionDebug {
             tool: c(&d.tool),
             args: c(&d.args),
