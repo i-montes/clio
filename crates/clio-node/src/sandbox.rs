@@ -17,11 +17,14 @@ pub struct Sandbox {
     root: PathBuf,
     scratch: PathBuf,
     next: AtomicU64,
+    /// Snapshots copy every file instead of hard-linking it.
+    copy_snapshots: bool,
 }
 
 /// State of the folder at one moment: files are hard links (copies when the filesystem refuses).
-/// Shortcut: a process that edits a file in place (not through `Sandbox::write`, which replaces
-/// the file) also edits its snapshot; use copies if outside editors can touch the folder.
+/// A process that edits a file in place (not through `Sandbox::write`, which replaces the file)
+/// also edits a hard-linked snapshot: whoever lets programs run in the folder must call
+/// `Sandbox::set_copy_snapshots(true)` first.
 pub struct Snapshot {
     store: PathBuf,
     entries: Vec<(PathBuf, Kind)>,
@@ -74,7 +77,14 @@ impl Sandbox {
             root,
             scratch,
             next: AtomicU64::new(0),
+            copy_snapshots: false,
         })
+    }
+
+    /// Snapshots become real copies. Needed once a program can run in the folder (the jail): it
+    /// can edit a file in place, and with hard links that would change the snapshot too.
+    pub fn set_copy_snapshots(&mut self, on: bool) {
+        self.copy_snapshots = on;
     }
 
     pub fn root(&self) -> &Path {
@@ -163,7 +173,7 @@ impl Sandbox {
                     fs::create_dir_all(d)?;
                 }
                 let src = self.root.join(rel);
-                if fs::hard_link(&src, &dst).is_err() {
+                if self.copy_snapshots || fs::hard_link(&src, &dst).is_err() {
                     fs::copy(&src, &dst)?;
                 }
             }

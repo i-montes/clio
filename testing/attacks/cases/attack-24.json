@@ -1,0 +1,10 @@
+{
+  "id": "attack-24",
+  "title": "Un comando ejecutado en la jaula lee ~/.ssh o un señuelo en el HOME, directo o por un enlace simbólico dentro de la carpeta de trabajo",
+  "rules": [
+    "S-03",
+    "S-13"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "attack-33",
+  "title": "Un comando que modifica un archivo en sitio para corromper el snapshot que restaura la cancelación",
+  "rules": [
+    "S-14"
+  ],
+  "status": "active",
+  "expect": "refused"
+}
