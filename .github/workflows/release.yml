@@ -1,0 +1,61 @@
+name: release
+
+# 077: before a release, everything the PR checks run, plus the bench, the attacks, the chaos
+# run and the human review of the gateway, the vault and the node signatures. The `review` job
+# uses the `release-review` environment: in the repository settings, add the person as a
+# required reviewer, so the release waits for them.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
+      - run: scripts/rule-coverage.sh
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: >
+          cargo run --locked -q -p clio-bench -- replay
+          --tasks testing/bench/tasks --tape testing/bench/tapes/replay.jsonl
+          --prices testing/bench/prices.json --repeats 3
+          --baseline testing/bench/baseline.json --thresholds testing/bench/thresholds.json
+  attacks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test --locked -p clio-attacks
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test --locked -p clio-chaos
+  review:
+    runs-on: ubuntu-latest
+    environment: release-review
+    steps:
+      - run: echo "A person reviewed the gateway, the vault and the node signatures."
+  release:
+    needs: [checks, bench, attacks, chaos, review]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "Everything passed. Build and sign the artifacts here (S-43) once there is something to ship."

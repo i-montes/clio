@@ -1,0 +1,9 @@
+{
+  "id": "attack-11",
+  "title": "Inundación de propuestas a la memoria desde un mismo actor",
+  "rules": [
+    "S-27"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

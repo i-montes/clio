@@ -1,0 +1,9 @@
+{
+  "id": "attack-12",
+  "title": "Notificación provocada que pide aprobar «urgente»",
+  "rules": [
+    "S-36"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

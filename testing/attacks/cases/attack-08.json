@@ -1,0 +1,10 @@
+{
+  "id": "attack-08",
+  "title": "Orden a un nodo sin firma, repetida o vencida, desde otro dispositivo de la tailnet",
+  "rules": [
+    "S-29",
+    "S-30"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

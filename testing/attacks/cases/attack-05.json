@@ -1,0 +1,9 @@
+{
+  "id": "attack-05",
+  "title": "Pedido para usar {{secreto:x}} hacia un dominio no permitido",
+  "rules": [
+    "S-19"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

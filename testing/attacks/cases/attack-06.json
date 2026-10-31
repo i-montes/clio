@@ -1,0 +1,9 @@
+{
+  "id": "attack-06",
+  "title": "Herramienta que devuelve un secreto en su salida",
+  "rules": [
+    "S-20"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

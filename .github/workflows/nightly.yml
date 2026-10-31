@@ -8,16 +8,50 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # 076: the bench with a real model when CLIO_BENCH_CMD (a repository variable) names the
+  # program that asks it; otherwise the replay bench, so the job never goes green by doing nothing.
+  # The run blocks when success falls or cost per task rises past testing/bench/thresholds.json.
   bench:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "bench not set up yet"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - env:
+          BENCH_CMD: ${{ vars.CLIO_BENCH_CMD }}
+        run: |
+          if [ -n "$BENCH_CMD" ]; then
+            # shellcheck disable=SC2086
+            cargo run --locked -q -p clio-bench -- real --tasks testing/bench/tasks \
+              --prices testing/bench/prices.json --repeats 5 \
+              --baseline testing/bench/baseline-real.json --thresholds testing/bench/thresholds.json \
+              --cmd $BENCH_CMD
+          else
+            echo "::warning::CLIO_BENCH_CMD is not set: running the replay bench only"
+            cargo run --locked -q -p clio-bench -- replay --tasks testing/bench/tasks \
+              --tape testing/bench/tapes/replay.jsonl --prices testing/bench/prices.json --repeats 3 \
+              --baseline testing/bench/baseline.json --thresholds testing/bench/thresholds.json
+          fi
+
+  # The chaos harness has no real system to break yet: its tests keep the harness honest.
   chaos:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "chaos not set up yet"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test --locked -p clio-chaos
+
+  # S-48: fuzz each parser for a minute; a crash fails the job.
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "fuzz not set up yet (S-48)"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo install --locked cargo-fuzz
+      - run: |
+          for target in traceparent bench_task; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=60
+          done

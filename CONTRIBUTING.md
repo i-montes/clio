@@ -13,3 +13,7 @@ Pasarela (`crates/clio-gateway`), vault (`crates/clio-vault`), firmas de nodos (
 ## Dependencias y secretos
 
 Ninguna dependencia nueva sin pasar `cargo-deny`. Nada que parezca un secreto entra al repositorio, ni siquiera como ejemplo: usa valores inventados que el detector no reconozca.
+
+## Cada incidente agrega un caso a la batería
+
+Si algo salió mal en producción o en un reporte, el mismo PR que lo corrige agrega el caso en `testing/attacks/cases/` y una línea en la «Batería de ataques» de `docs/security.md`. Una prueba falla si las dos listas no coinciden.

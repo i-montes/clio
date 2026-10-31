@@ -1,0 +1,10 @@
+{
+  "id": "attack-07",
+  "title": "Comandos con ;, $(...) y rutas con .. o enlaces simbólicos",
+  "rules": [
+    "S-12",
+    "S-13"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

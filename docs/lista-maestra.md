@@ -110,15 +110,15 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Compuerta en el CI
 
-- [ ] **075** Cada PR: unitarias, aceptación y ataques, en reproducción; bloquea si falla cualquiera
-- [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral
-- [ ] **077** Antes de una versión: todo lo anterior y la revisión humana de pasarela, vault y firmas
-- [ ] **078** Un cambio de prompt, de modelo o de política pasa por la misma compuerta
-- [ ] **079** prueba: un cambio de prompt que no pasó el banco no se puede desplegar
-- [ ] **080** Esqueleto de la batería de ataques en `testing/attacks`: formato de caso y runner
-- [ ] **081** Regla de proceso: cada incidente nuevo agrega un caso a la batería
-- [ ] **082** Esqueleto del arnés de caos: red cortada, VPS caído, disco lleno, proveedor caído, vault bloqueado
-- [ ] **083** Esqueleto de fuzzing con `cargo-fuzz`, corrido de noche (S-48)
+- [x] **075** Cada PR: unitarias, aceptación y ataques, en reproducción; bloquea si falla cualquiera
+- [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral — escrito en nightly.yml; falta definir la variable `CLIO_BENCH_CMD` y una línea base real (`baseline-real.json`)
+- [ ] **077** Antes de una versión: todo lo anterior y la revisión humana de pasarela, vault y firmas — escrito en release.yml; falta crear el entorno `release-review` con la persona como revisora obligatoria
+- [x] **078** Un cambio de prompt, de modelo o de política pasa por la misma compuerta
+- [x] **079** prueba: un cambio de prompt que no pasó el banco no se puede desplegar
+- [x] **080** Esqueleto de la batería de ataques en `testing/attacks`: formato de caso y runner
+- [x] **081** Regla de proceso: cada incidente nuevo agrega un caso a la batería
+- [x] **082** Esqueleto del arnés de caos: red cortada, VPS caído, disco lleno, proveedor caído, vault bloqueado
+- [x] **083** Esqueleto de fuzzing con `cargo-fuzz`, corrido de noche (S-48)
 
 ### Cierre de la fase 0
 

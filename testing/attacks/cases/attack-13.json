@@ -1,0 +1,9 @@
+{
+  "id": "attack-13",
+  "title": "Bucle que intenta gastar sin parar",
+  "rules": [
+    "S-47"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}

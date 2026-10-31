@@ -1,0 +1,9 @@
+{
+  "id": "attack-04",
+  "title": "Servidor MCP que cambia la descripción de su herramienta después de aprobado",
+  "rules": [
+    "S-15"
+  ],
+  "status": "pending",
+  "expect": "refused"
+}
