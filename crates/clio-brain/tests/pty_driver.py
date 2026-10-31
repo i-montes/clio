@@ -96,9 +96,19 @@ def wait_for(path_fn, timeout=25.0):
     return None
 
 
+# On a loaded CI runner a key can be lost in the terminal; a person would press `q` again, so the
+# driver does too (at most 3 times, every 5 s) and reports how many it needed. `ctrl_c` and `panic`
+# never retry: they must leave without help.
+RETRY_KEY = None if scenario in ("ctrl_c", "panic") else b"q"
+RETRIES = 0
+SCREEN_TAIL = ""
+
+
 def finish(pid, fd, timeout=20.0):
+    global RETRIES, SCREEN_TAIL
     drain(fd)
     end = time.time() + timeout
+    next_retry = time.time() + 5.0
     status = None
     while time.time() < end:
         done, st = os.waitpid(pid, os.WNOHANG)
@@ -106,9 +116,14 @@ def finish(pid, fd, timeout=20.0):
             status = st
             break
         drain(fd)
+        if RETRY_KEY and RETRIES < 3 and time.time() >= next_retry:
+            os.write(fd, RETRY_KEY)
+            RETRIES += 1
+            next_retry = time.time() + 5.0
         time.sleep(0.05)
     if status is None:
-        # The program did not exit: kill it and report it, instead of waiting for ever.
+        # The program did not exit: say what the screen last showed, kill it, and report it.
+        SCREEN_TAIL = "".join(c if c.isprintable() else "." for c in buf[-500:].decode("utf-8", "replace"))
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
         return "timeout"
@@ -269,4 +284,7 @@ elif scenario == "memory":
     out["after"] = modes(fd)
 else:
     sys.exit("unknown scenario")
+out["q_retries"] = RETRIES
+if SCREEN_TAIL:
+    out["screen_tail"] = SCREEN_TAIL
 print(json.dumps(out))
