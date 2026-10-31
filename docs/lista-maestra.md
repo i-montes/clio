@@ -413,8 +413,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 - [ ] **317** Operación PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida
 - [ ] **318** prueba: PURGE elimina el contenido de todas las operaciones y deja la lápida (prueba 11)
-- [ ] **319** PURGE también borra el vector (S-24)
-- [ ] **320** prueba: después de un PURGE no queda el vector (S-24)
+- [ ] **319** PURGE también borra el vector (S-24); además debe sumar uno al contador `vector_epoch` del store, o la copia de vectores en memoria sigue viva hasta que cambie otra cosa (`crates/clio-memory/src/sqlite/mod.rs`, `Reader`)
+- [ ] **320** prueba: después de un PURGE no queda el vector (S-24), ni en el archivo ni en la copia en memoria
 - [ ] **321** Que la exportación respete las lápidas
 
 ### Gestor de memoria (conexión con el agente)
