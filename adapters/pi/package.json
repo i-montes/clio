@@ -2,13 +2,13 @@
   "name": "clio-pi-adapter",
   "version": "0.0.0",
   "private": true,
-  "description": "Pins the version of Pi that Clio builds on (S-42). The adapter itself is not written yet.",
+  "description": "Pins the version of Pi that Clio uses as its agent harness (S-42, ADR 0007). The extension that guards it lives in extensions/.",
   "license": "MIT OR Apache-2.0",
   "dependencies": {
-    "@mariozechner/pi-agent-core": "0.73.1",
-    "@mariozechner/pi-ai": "0.73.1"
+    "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "overrides": {
-    "basic-ftp": "6.2.4"
+    "undici": "8.12.3",
+    "minimatch": "11.0.3"
   }
 }

@@ -10,20 +10,8 @@ Decidiste que no hay servidor por ahora, así que el PC es la base (ADR 0006) y 
 - **Tailnet Lock** no está activado; es opcional y lo decides tú (095).
 - **Un VPS, si algún día quieres uno:** es opcional; el borrador está en `infra/vps/` y no bloquea nada.
 
-### 2. Adaptador de Pi · tareas 098 a 102
-Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría diaria) pero el adaptador no se escribió.
-- **Qué elegir:** si el adaptador es TypeScript dentro de `adapters/pi` o un proceso aparte que habla con el cerebro en Rust; y si se adopta Pi o se sigue con el bucle mínimo propio (`clio-brain::agent`), que ya cumple el mismo papel detrás de un trait.
-- **Dato nuevo:** la última publicación de Pi en npm es de mayo de 2026; si el proyecto se detuvo, conviene saberlo antes de depender de él.
-- **Si no decides:** se sigue con el bucle propio; no se pierde nada.
-
-### 1 bis. ¿Dejas activado Tailscale SSH?
-En este PC `tailscale debug prefs` dice `RunSSH = true`: se puede abrir una terminal por la tailnet sin `sshd` ni llaves (entra por tu identidad de Tailscale). Es cómodo si lo usas desde tus otros dispositivos; el riesgo es que quien controle esos dispositivos o tu cuenta de Tailscale tiene una terminal en este PC, donde corre el agente. Si no lo usas: `tailscale set --ssh=false`. Si lo usas, revisa las reglas `ssh` de tu ACL (mejor con `action: check`, que pide reautenticarse).
-
-### 2 bis. Usuarios separados y jaula para ejecutar comandos
-El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero en un PC con un solo usuario la separación es una convención, no una pared. Dos opciones para endurecerla: usuarios del sistema distintos para el vault y el agente (necesita `sudo`), o una jaula `bwrap` para lo que el agente ejecute (`bwrap` ya está instalado). Hoy el agente no ejecuta comandos, así que no corre riesgo; decídelo antes de darle una herramienta que ejecute código. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Solo aplica si algún día hay un servidor; en este PC todo corre como tu usuario (ver el riesgo en `docs/threat-model.md`).
-
-### 2 ter. ¿Parar la tarea tras N negaciones seguidas de la pasarela?
-Hoy el cortacircuito solo frena lo que correría solo; lo que acaba el bucle es el tope de pasos. Añadir un `Stop::Denials` cortaría antes a un modelo que insiste con herramientas prohibidas. Es más estricto: ¿lo quieres? Por defecto no.
+### 2. Pi como arnés (decidido por ti el 2026-10-31, ADR 0007)
+Pi 1.4.0 (publicada el 2026-10-21, activa) es el arnés: bucle, proveedores, sesiones y compactación; Clio es el servicio, la guardia y la interfaz alrededor. Quedan por decidir cosas menores que tomé por defecto: el modelo diario (hoy `beam-free`, gratuito; tu Aria usa `mimo-v2.6-flash`, que sí consume la cuota de tu plan Go) y si se corre el propio Pi dentro de `bwrap` más adelante.
 
 ### 3. Topes de gasto en el panel de cada proveedor · tarea 281 (S-45)
 Se configura en la web del proveedor, no en código. Hoy se usa solo el modelo gratuito, así que el riesgo es nulo; hazlo antes de usar un modelo de pago.
