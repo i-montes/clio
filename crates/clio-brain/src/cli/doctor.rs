@@ -1,28 +1,49 @@
 //! `clio doctor`: Clio's own checks, then the host script of `infra/local/check-host.sh`.
+//! `collect` gathers the checks as data; the plain command and the TUI both show them.
 
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::json;
+
 use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::mode;
+use super::tui::sanitize;
+use super::ui::{Level, Style};
 
-struct Out {
-    fail: bool,
+#[derive(Debug, Clone)]
+pub struct Check {
+    pub level: Level,
+    pub msg: String,
+    /// What to do about a WARN or a FAIL.
+    pub hint: Option<String>,
 }
 
-impl Out {
-    fn say(&mut self, level: &str, msg: String) {
-        if level == "FAIL" {
-            self.fail = true;
-        }
-        println!("{level:<5} {msg}");
+#[derive(Debug, Clone, Default)]
+pub struct Report {
+    pub checks: Vec<Check>,
+    /// The host script that ran, if it was found.
+    pub host_script: Option<String>,
+}
+
+impl Report {
+    pub fn count(&self, l: Level) -> usize {
+        self.checks.iter().filter(|c| c.level == l).count()
+    }
+
+    pub fn ok(&self) -> bool {
+        self.count(Level::Fail) == 0
+    }
+
+    fn say(&mut self, level: Level, msg: String, hint: Option<String>) {
+        self.checks.push(Check { level, msg, hint });
     }
 }
 
 /// Every file and folder under `dir`: folders must be 0700, files and sockets without access for
 /// group and others.
-fn check_tree(o: &mut Out, dir: &Path, depth: usize) {
+fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -38,8 +59,9 @@ fn check_tree(o: &mut Out, dir: &Path, depth: usize) {
         if m.is_dir() {
             if md & 0o077 != 0 {
                 o.say(
-                    "FAIL",
-                    format!("{} is mode {md:o}, it must be 700 (S-23)", p.display()),
+                    Level::Fail,
+                    format!("{} tiene modo {md:o}, debe ser 700 (S-23)", p.display()),
+                    Some(format!("chmod 700 {}", p.display())),
                 );
             }
             if depth < 8 {
@@ -47,8 +69,9 @@ fn check_tree(o: &mut Out, dir: &Path, depth: usize) {
             }
         } else if md & 0o077 != 0 {
             o.say(
-                "FAIL",
-                format!("{} is mode {md:o}, it must be 600 (S-23)", p.display()),
+                Level::Fail,
+                format!("{} tiene modo {md:o}, debe ser 600 (S-23)", p.display()),
+                Some(format!("chmod 600 {}", p.display())),
             );
         }
     }
@@ -131,84 +154,145 @@ fn find_host_check() -> Option<PathBuf> {
         .find(|c| c.is_file())
 }
 
-/// Returns true when every check passed or only warned.
-pub fn doctor(dirs: &Dirs) -> bool {
-    let mut o = Out { fail: false };
+fn host_lines(o: &mut Report, script: &Path) {
+    let out = match Command::new("bash").arg(script).output() {
+        Ok(out) => out,
+        Err(e) => {
+            o.say(
+                Level::Warn,
+                format!("no se pudo correr el chequeo del equipo: {e}"),
+                None,
+            );
+            return;
+        }
+    };
+    let before = o.checks.len();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let (lv, rest) = if let Some(r) = line.strip_prefix("PASS") {
+            (Level::Pass, r)
+        } else if let Some(r) = line.strip_prefix("WARN") {
+            (Level::Warn, r)
+        } else if let Some(r) = line.strip_prefix("FAIL") {
+            (Level::Fail, r)
+        } else {
+            continue;
+        };
+        let hint = (lv != Level::Pass)
+            .then(|| "Del chequeo del equipo (infra/local/check-host.sh); ver docs/uso-local.md.".to_owned());
+        o.say(lv, rest.trim().to_owned(), hint);
+    }
+    let host_failed = o.checks[before..].iter().any(|c| c.level == Level::Fail);
+    if !out.status.success() && !host_failed {
+        o.say(
+            Level::Fail,
+            "el chequeo del equipo reportó un fallo".into(),
+            None,
+        );
+    }
+}
+
+/// Runs every check. The host script's own lines are included as checks.
+pub fn collect(dirs: &Dirs) -> Report {
+    let mut o = Report::default();
     let mut folders = vec![dirs.config.clone(), dirs.data.clone()];
     folders.extend(dirs.runtime.clone());
     for d in &folders {
         match mode(d) {
             None => o.say(
-                "WARN",
-                format!("{} does not exist (run `clio init`)", d.display()),
+                Level::Warn,
+                format!("{} no existe", d.display()),
+                Some("Ejecuta `clio init`.".into()),
             ),
-            Some(m) if m & 0o077 != 0 => {
-                o.say(
-                    "FAIL",
-                    format!("{} is mode {m:o}, it must be 700 (S-23)", d.display()),
-                );
-            }
-            Some(_) => o.say("PASS", format!("{} is private (700)", d.display())),
+            Some(m) if m & 0o077 != 0 => o.say(
+                Level::Fail,
+                format!("{} tiene modo {m:o}, debe ser 700 (S-23)", d.display()),
+                Some(format!("chmod 700 {}", d.display())),
+            ),
+            Some(_) => o.say(
+                Level::Pass,
+                format!("{} es privada (700)", d.display()),
+                None,
+            ),
         }
         check_tree(&mut o, d, 0);
     }
     if dirs.runtime.is_none() {
         o.say(
-            "WARN",
-            "XDG_RUNTIME_DIR is not set, so the vault sockets cannot be checked".into(),
+            Level::Warn,
+            "XDG_RUNTIME_DIR no está definida, no se pueden revisar los sockets de la bóveda"
+                .into(),
+            Some("Entra por una sesión normal (login) para que exista.".into()),
         );
     }
     match Config::load(dirs) {
         Ok(c) => {
             o.say(
-                "PASS",
+                Level::Pass,
                 format!(
-                    "configuration loads ({}/{})",
+                    "la configuración carga ({}/{})",
                     c.model.provider, c.model.model
                 ),
+                None,
             );
-            match c.model.command.get(1) {
-                Some(script) if !Path::new(script).is_file() => {
-                    o.say("FAIL", format!("the model adapter {script} does not exist"));
-                }
-                _ => {}
+            if let Some(script) = c.model.command.get(1)
+                && !Path::new(script).is_file()
+            {
+                o.say(
+                    Level::Fail,
+                    format!("el adaptador del modelo {script} no existe"),
+                    Some("Corrige model.command en ~/.config/clio/config.json.".into()),
+                );
             }
         }
-        Err(e) => o.say("WARN", e),
+        Err(e) => o.say(Level::Warn, e, Some("Ejecuta `clio init`.".into())),
     }
     match key_status(dirs) {
-        KeyStatus::Env => o.say("PASS", "model key present in OPENCODE_API_KEY".into()),
-        KeyStatus::File { open_mode: None } => o.say("PASS", "model key file is 600".into()),
+        KeyStatus::Env => o.say(
+            Level::Pass,
+            "clave del modelo en OPENCODE_API_KEY".into(),
+            None,
+        ),
+        KeyStatus::File { open_mode: None } => {
+            o.say(Level::Pass, "el archivo de la clave es 600".into(), None);
+        }
         KeyStatus::File { open_mode: Some(m) } => o.say(
-            "FAIL",
+            Level::Fail,
             format!(
-                "{} is mode {m:o}, others can read the key (chmod 600)",
+                "{} tiene modo {m:o}, otros pueden leer la clave",
                 dirs.key_file().display()
             ),
+            Some(format!("chmod 600 {}", dirs.key_file().display())),
         ),
         KeyStatus::Missing => o.say(
-            "WARN",
-            "no model key (OPENCODE_API_KEY or the key file)".into(),
+            Level::Warn,
+            "no hay clave del modelo".into(),
+            Some(format!(
+                "Ponla en OPENCODE_API_KEY o en {} (chmod 600).",
+                dirs.key_file().display()
+            )),
         ),
     }
     if let Some(rt) = &dirs.runtime
         && let Ok(rd) = std::fs::read_dir(rt)
     {
-        {
-            for e in rd.filter_map(Result::ok) {
-                if e.file_type().is_ok_and(|t| t.is_socket()) {
-                    let m = mode(&e.path()).unwrap_or(0o777);
-                    if m & 0o077 != 0 {
-                        o.say(
-                            "FAIL",
-                            format!(
-                                "socket {} is mode {m:o}, it must be 600",
-                                e.path().display()
-                            ),
-                        );
-                    } else {
-                        o.say("PASS", format!("socket {} is 600", e.path().display()));
-                    }
+        for e in rd.filter_map(Result::ok) {
+            if e.file_type().is_ok_and(|t| t.is_socket()) {
+                let m = mode(&e.path()).unwrap_or(0o777);
+                if m & 0o077 != 0 {
+                    o.say(
+                        Level::Fail,
+                        format!(
+                            "el socket {} tiene modo {m:o}, debe ser 600",
+                            e.path().display()
+                        ),
+                        Some(format!("chmod 600 {}", e.path().display())),
+                    );
+                } else {
+                    o.say(
+                        Level::Pass,
+                        format!("el socket {} es 600", e.path().display()),
+                        None,
+                    );
                 }
             }
         }
@@ -216,41 +300,88 @@ pub fn doctor(dirs: &Dirs) -> bool {
     let l = public_listeners();
     if l.is_empty() {
         o.say(
-            "PASS",
-            "no clio process listens outside loopback (S-38)".into(),
+            Level::Pass,
+            "ningún proceso clio escucha fuera de loopback (S-38)".into(),
+            None,
         );
     } else {
         o.say(
-            "FAIL",
-            format!("clio listens outside loopback: {}", l.join(", ")),
+            Level::Fail,
+            format!("clio escucha fuera de loopback: {}", l.join(", ")),
+            Some("Detén ese proceso: Clio no debe escuchar en una dirección pública.".into()),
         );
     }
     match find_host_check() {
         Some(script) => {
-            println!("--- {} ---", script.display());
-            match Command::new("bash").arg(&script).output() {
-                Ok(out) => {
-                    print!("{}", String::from_utf8_lossy(&out.stdout));
-                    eprint!("{}", String::from_utf8_lossy(&out.stderr));
-                    if !out.status.success() {
-                        o.say("FAIL", "the host check reported a FAIL".into());
-                    }
-                }
-                Err(e) => o.say("WARN", format!("could not run the host check: {e}")),
-            }
+            o.host_script = Some(script.display().to_string());
+            host_lines(&mut o, &script);
         }
         None => o.say(
-            "WARN",
-            "infra/local/check-host.sh not found (set CLIO_HOST_CHECK)".into(),
+            Level::Warn,
+            "no se encontró infra/local/check-host.sh".into(),
+            Some("Define CLIO_HOST_CHECK con la ruta del script.".into()),
         ),
     }
+    o
+}
+
+fn level_code(l: Level) -> &'static str {
+    match l {
+        Level::Pass => "pass",
+        Level::Warn => "warn",
+        Level::Fail => "fail",
+    }
+}
+
+/// The plain command. Returns true when nothing failed (WARN is the person's call).
+pub fn doctor(dirs: &Dirs, json: bool) -> bool {
+    let st = Style::stdout();
+    let r = collect(dirs);
+    if json {
+        let checks: Vec<_> = r
+            .checks
+            .iter()
+            .map(|c| json!({"level": level_code(c.level), "message": c.msg, "hint": c.hint}))
+            .collect();
+        let v = json!({
+            "ok": r.ok(),
+            "pass": r.count(Level::Pass),
+            "warn": r.count(Level::Warn),
+            "fail": r.count(Level::Fail),
+            "host_script": r.host_script,
+            "checks": checks,
+        });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return r.ok();
+    }
+    for c in &r.checks {
+        println!("{}  {}", st.mark(c.level), sanitize::line(&c.msg));
+        if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
+            println!(
+                "{}{} {}",
+                " ".repeat(st.mark_width() + 2),
+                st.dim(st.arrow()),
+                st.dim(&sanitize::line(h))
+            );
+        }
+    }
+    println!();
     println!(
         "{}",
-        if o.fail {
-            "doctor: FAIL"
+        if r.ok() {
+            st.green(&format!(
+                "doctor: bien ({} ok, {} avisos; los avisos son decisión tuya)",
+                r.count(Level::Pass),
+                r.count(Level::Warn)
+            ))
         } else {
-            "doctor: ok (WARN lines are your call)"
+            st.red(&format!(
+                "doctor: hay {} fallo(s) ({} ok, {} avisos)",
+                r.count(Level::Fail),
+                r.count(Level::Pass),
+                r.count(Level::Warn)
+            ))
         }
     );
-    !o.fail
+    r.ok()
 }

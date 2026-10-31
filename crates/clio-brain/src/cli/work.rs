@@ -36,24 +36,24 @@ pub struct Scan {
 pub fn validate(ws: &Path, dirs: &Dirs) -> Res<PathBuf> {
     let ws = ws
         .canonicalize()
-        .map_err(|e| format!("workspace {}: {e}", ws.display()))?;
+        .map_err(|e| format!("carpeta {}: {e}", ws.display()))?;
     if !ws.is_dir() {
-        return Err(format!("{} is not a folder", ws.display()));
+        return Err(format!("{} no es una carpeta", ws.display()));
     }
     let home = dirs
         .home
         .canonicalize()
         .unwrap_or_else(|_| dirs.home.clone());
     if ws == Path::new("/") {
-        return Err("refusing to use / as a workspace".into());
+        return Err("rechazo usar / como carpeta de trabajo".into());
     }
     if ws == home {
-        return Err("refusing to use your whole home folder as a workspace; pick a project".into());
+        return Err("rechazo usar toda tu carpeta personal como proyecto; elige un proyecto".into());
     }
     for own in [&dirs.config, &dirs.data] {
         let own = own.canonicalize().unwrap_or_else(|_| own.clone());
         if own.starts_with(&ws) || ws.starts_with(&own) {
-            return Err("the workspace overlaps Clio's own folders".into());
+            return Err("la carpeta se cruza con las carpetas propias de Clio".into());
         }
     }
     Ok(ws)
@@ -94,7 +94,7 @@ pub fn scan(root: &Path, max_files: u64, max_bytes: u64) -> Res<Scan> {
                 s.files.push(r);
                 if s.files.len() as u64 > lim.0 || s.bytes > lim.1 {
                     return Err(format!(
-                        "the workspace is bigger than {} files / {} MB; choose a smaller folder or pass --allow-broad",
+                        "la carpeta es más grande que {} archivos / {} MB; elige una más pequeña o usa --allow-broad",
                         lim.0,
                         lim.1 / (1024 * 1024)
                     ));

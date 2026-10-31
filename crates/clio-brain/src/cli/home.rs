@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::ui::{Level, Style};
 use super::{Res, io_err, mkdir_private, mode, write_private};
 
 /// The adapter that ships with the repository; `init` installs this copy when it cannot find the
@@ -24,9 +25,9 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn from_env() -> Res<Self> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME no está definida")?);
         if !home.is_absolute() {
-            return Err("HOME must be an absolute path".into());
+            return Err("HOME debe ser una ruta absoluta".into());
         }
         let data = home.join(".local/share/clio");
         Ok(Self {
@@ -51,7 +52,7 @@ impl Dirs {
     pub fn need_runtime(&self) -> Res<&Path> {
         self.runtime
             .as_deref()
-            .ok_or_else(|| "XDG_RUNTIME_DIR is not set (log in through a normal session)".into())
+            .ok_or_else(|| "XDG_RUNTIME_DIR no está definida (entra por una sesión normal)".into())
     }
 }
 
@@ -113,7 +114,7 @@ impl Config {
     pub fn load(dirs: &Dirs) -> Res<Self> {
         let p = dirs.config_file();
         let text = std::fs::read_to_string(&p)
-            .map_err(|e| format!("{}: {e} (run `clio init` first)", p.display()))?;
+            .map_err(|e| format!("{}: {e} (ejecuta `clio init` primero)", p.display()))?;
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
     }
 
@@ -177,12 +178,14 @@ fn find_adapter(dirs: &Dirs) -> Res<PathBuf> {
 }
 
 pub fn init(dirs: &Dirs) -> Res<()> {
+    let st = Style::stdout();
+    let ok = st.mark(Level::Pass);
     let made = |d: &Path| -> Res<()> {
         let existed = d.is_dir();
         mkdir_private(d)?;
         println!(
-            "{} {} (0700)",
-            if existed { "ok     " } else { "created" },
+            "{ok}  {} {} (0700)",
+            if existed { "ya estaba   " } else { "creada      " },
             d.display()
         );
         Ok(())
@@ -194,32 +197,39 @@ pub fn init(dirs: &Dirs) -> Res<()> {
 
     let cfg = dirs.config_file();
     if cfg.exists() {
-        println!("ok      {} already exists, left as it is", cfg.display());
+        println!("{ok}  ya existe    {} (se deja como está)", cfg.display());
     } else {
         let adapter = find_adapter(dirs)?;
         let c = Config::default_with(vec!["python3".into(), adapter.display().to_string()]);
         let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
         write_private(&cfg, text.as_bytes())?;
-        println!("created {} (0600)", cfg.display());
+        println!("{ok}  creada       {} (0600)", cfg.display());
     }
+    let key = dirs.key_file();
     match key_status(dirs) {
-        KeyStatus::Env => println!("ok      model key found in OPENCODE_API_KEY (not shown)"),
+        KeyStatus::Env => println!("{ok}  clave del modelo encontrada en OPENCODE_API_KEY (no se muestra)"),
         KeyStatus::File { open_mode: None } => {
             println!(
-                "ok      model key found in {} (0600, not shown)",
-                dirs.key_file().display()
+                "{ok}  clave del modelo encontrada en {} (0600, no se muestra)",
+                key.display()
             );
         }
         KeyStatus::File { open_mode: Some(m) } => println!(
-            "WARNING {} is mode {m:o}: others can read it. Run: chmod 600 {}",
-            dirs.key_file().display(),
-            dirs.key_file().display()
+            "{}  ADVERTENCIA: {} tiene modo {m:o} y otros pueden leerla. Ejecuta: chmod 600 {}",
+            st.mark(Level::Warn),
+            key.display(),
+            key.display()
         ),
         KeyStatus::Missing => println!(
-            "NOTE    no model key. Put it in OPENCODE_API_KEY or in {} (chmod 600)",
-            dirs.key_file().display()
+            "{}  falta la clave del modelo. Ponla en OPENCODE_API_KEY o en {} (chmod 600)",
+            st.mark(Level::Warn),
+            key.display()
         ),
     }
-    println!("next: clio doctor, then clio run --workspace DIR \"instruction\"");
+    println!(
+        "\nsiguiente: {}, y luego {}",
+        st.bold("clio doctor"),
+        st.bold("clio")
+    );
     Ok(())
 }

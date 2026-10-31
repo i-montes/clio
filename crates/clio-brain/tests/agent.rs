@@ -406,3 +406,76 @@ fn empty_answers_are_protocol_errors_bounded_by_the_step_budget() {
             .starts_with("[protocol error] your reply was empty")
     }));
 }
+
+struct Recorder(Arc<std::sync::Mutex<Vec<clio_brain::agent::Event>>>);
+
+impl clio_brain::agent::Observer for Recorder {
+    fn event(&mut self, e: &clio_brain::agent::Event) {
+        self.0.lock().unwrap().push(e.clone());
+    }
+}
+
+#[test]
+fn the_observer_sees_every_step_and_the_gateway_decision() {
+    use clio_brain::agent::Event;
+    use clio_gateway::Outcome;
+    let r = setup("real-01");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut model = script(vec![
+        call("read_file", json!({"path": "dates.py"})),
+        call("read_file", json!({"path": "../outside.txt"})),
+        "not json at all".to_owned(),
+        json!({"final": "done"}).to_string(),
+    ]);
+    let mut a = agent(&r, clock(), |_| {});
+    a.observer = Box::new(Recorder(seen.clone()));
+    let out = a.run(&mut model, "mira dates.py").unwrap();
+    assert_eq!(out.ending, Ending::Final);
+    let ev = seen.lock().unwrap().clone();
+    assert!(matches!(ev[0], Event::Started { .. }));
+    assert!(ev.contains(&Event::Step { n: 1 }) && ev.contains(&Event::Step { n: 4 }));
+    assert!(
+        ev.iter().any(|e| matches!(
+            e,
+            Event::Tool { name, target, outcome: Outcome::Allow, ran: true, tainted: true, result_chars, .. }
+                if name == "read_file" && target == "dates.py" && *result_chars > 0
+        )),
+        "{ev:?}"
+    );
+    assert!(
+        ev.iter().any(|e| matches!(
+            e,
+            Event::Tool { target, outcome: Outcome::Deny, ran: false, rule, .. }
+                if target == "../outside.txt" && !rule.is_empty()
+        )),
+        "{ev:?}"
+    );
+    assert!(ev.iter().any(|e| matches!(e, Event::ProtocolError { .. })));
+    assert_eq!(ev.last(), Some(&Event::Final));
+}
+
+#[test]
+fn cancel_ends_the_run_after_the_step_in_progress() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let r = setup("real-01");
+    let flag = Arc::new(AtomicBool::new(false));
+    let f2 = flag.clone();
+    let mut n = 0;
+    // The person presses cancel while the second answer is being produced.
+    let mut model = move |_: &[Msg]| {
+        n += 1;
+        if n == 2 {
+            f2.store(true, Ordering::Relaxed);
+        }
+        call("list_dir", json!({"path": "."}))
+    };
+    let mut a = agent(&r, clock(), |c| c.budget.max_repeats = 100);
+    a.cancel = Some(flag);
+    let out = a.run(&mut model, "lista").unwrap();
+    assert_eq!(out.ending, Ending::Cancelled);
+    assert_eq!(
+        out.steps, 2,
+        "the step in progress finished, no more started"
+    );
+    assert!(out.final_message.is_none());
+}
