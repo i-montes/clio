@@ -780,6 +780,65 @@ mod tests {
         assert_eq!(lookup(Ctx::Home, &plain_d), Some(Act::Diff));
     }
 
+    fn key_name(k: &Key) -> String {
+        let code = |c: &KeyCode| match c {
+            KeyCode::Esc => "Esc".to_owned(),
+            KeyCode::Enter => "Enter".to_owned(),
+            KeyCode::Tab => "Tab".to_owned(),
+            KeyCode::BackTab => "Shift-Tab".to_owned(),
+            KeyCode::Up => "↑".to_owned(),
+            KeyCode::Down => "↓".to_owned(),
+            KeyCode::Left => "←".to_owned(),
+            KeyCode::Right => "→".to_owned(),
+            KeyCode::Home => "Inicio".to_owned(),
+            KeyCode::End => "Fin".to_owned(),
+            KeyCode::PageUp => "RePág".to_owned(),
+            KeyCode::PageDown => "AvPág".to_owned(),
+            KeyCode::F(n) => format!("F{n}"),
+            other => format!("{other:?}"),
+        };
+        match k {
+            Key::Char(c) => c.to_string(),
+            Key::Ctrl(c) => format!("Ctrl-{}", c.to_ascii_uppercase()),
+            Key::Alt(c) => format!("Alt-{}", code(c)),
+            Key::Code(c) => code(c),
+        }
+    }
+
+    /// The table for `docs/uso-local.md`: `cargo test -p clio-brain --bin clio print_keymap -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prints the key map; not a check"]
+    fn print_keymap() {
+        let names = [
+            (Ctx::Home, "Inicio"),
+            (Ctx::Filter, "Inicio, escribiendo el filtro"),
+            (Ctx::NewRun, "Nuevo trabajo"),
+            (Ctx::LiveRun, "En vivo, corriendo"),
+            (Ctx::LiveDone, "En vivo, terminado"),
+            (Ctx::DetailList, "Detalle, lista de archivos"),
+            (Ctx::DetailDiff, "Detalle, diff"),
+            (Ctx::Doctor, "Doctor"),
+            (Ctx::Context, "Contexto"),
+            (Ctx::Usage, "Uso"),
+            (Ctx::Help, "Ayuda"),
+        ];
+        for (ctx, name) in names {
+            let entries: Vec<String> = table(ctx)
+                .iter()
+                .map(|b| {
+                    let keys: Vec<String> = b
+                        .keys
+                        .iter()
+                        .map(|k| format!("`{}`", key_name(k)))
+                        .collect();
+                    format!("{} {}", keys.join(" "), b.what)
+                })
+                .collect();
+            println!("- **{name}**: {}.", entries.join(" · "));
+        }
+        println!("- **En todas**: `Ctrl-D` modo debug · `Ctrl-L` redibujar.");
+    }
+
     #[test]
     fn every_bind_is_documented_and_ends_up_in_the_hints_or_the_help() {
         for ctx in ALL {

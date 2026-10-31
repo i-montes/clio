@@ -2,7 +2,7 @@
 
 Clio runs on the user's own machine (ADR 0006); a VPS is optional (`infra/vps/`).
 
-`./check-host.sh` is read-only, needs no sudo and takes a second. It checks, for the machine that runs Clio:
+`./check-host.sh` is read-only, needs no sudo and takes a second. Its messages are in Spanish (the person reads them in `clio doctor`); `PASS`/`WARN`/`FAIL`, the `S-xx` keys and the exit code are the stable part. `clio doctor` runs it with `CLIO_DOCTOR_EMBEDDED=1`, which skips the two checks `clio` already does itself (S-38 for Clio's own listeners and S-23 for the permissions of Clio's folders), so each shows once. It checks, for the machine that runs Clio:
 
 | Check | Rule | FAIL or WARN |
 |---|---|---|

@@ -435,7 +435,21 @@ pub fn execute(
     agent.debug = Some(dbg.on.clone());
     agent.cancel = cancel;
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
-    let outcome = agent.run(&mut model, instruction)?;
+    let mut outcome = agent.run(&mut model, instruction)?;
+    // What the model said can carry a secret it was shown or made up: scrub what is saved and shown.
+    let scrub = |t: &str| p.scrubber.scrub(t);
+    outcome.final_message = outcome.final_message.as_deref().map(scrub);
+    for m in &mut outcome.transcript {
+        m.content = scrub(&m.content);
+    }
+    for l in outcome
+        .report
+        .pending
+        .iter_mut()
+        .chain(&mut outcome.report.done)
+    {
+        *l = scrub(l);
+    }
 
     work::lock_down(path)?;
     let usage = used.lock().map(|u| u.clone()).unwrap_or_default();

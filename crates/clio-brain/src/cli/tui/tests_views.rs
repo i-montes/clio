@@ -917,3 +917,147 @@ fn print_screens() {
     );
     show("inicio sin runs", &app());
 }
+
+// ------------------------------------------------------------ secrets never reach a view
+
+fn b64(s: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in s.as_bytes().chunks(3) {
+        let n = c
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            out.push(if i <= c.len() {
+                T[((n >> (18 - 6 * i)) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+struct Collect(std::sync::Arc<std::sync::Mutex<Vec<Event>>>);
+
+impl clio_brain::agent::Observer for Collect {
+    fn event(&mut self, e: &Event) {
+        self.0.lock().unwrap().push(e.clone());
+    }
+}
+
+fn app_with(events: &[Event]) -> App {
+    let mut a = with_runs();
+    a.screen = Screen::Live;
+    a.live = Live::starting(0, "mira");
+    let mut inputs = vec![Input::Bg(started())];
+    inputs.extend(events.iter().cloned().map(|e| Input::Bg(Bg::Agent(e))));
+    let (mut a, _) = feed(a, inputs);
+    a.now_ms = 5_000;
+    a.debug = true;
+    a
+}
+
+/// Every view of a run, at every size.
+fn screens_for(events: Vec<Event>) -> Vec<String> {
+    let mut texts = Vec::new();
+    for keys in [
+        vec![],
+        vec![key(KeyCode::Tab)],
+        vec![ch('c')],
+        vec![ch('U')],
+        vec![ch('?')],
+    ] {
+        let (b, _) = feed(app_with(&events), keys);
+        for (w, h) in SIZES {
+            texts.push(screen_text(&b, w, h));
+        }
+    }
+    texts
+}
+
+#[test]
+fn a_decoy_in_an_answer_a_file_name_a_tool_call_or_a_reason_reaches_no_view_no_log() {
+    use crate::cli::debug::{DebugCtl, Tee};
+    use clio_canaries::Canaries;
+    use std::sync::{Arc, Mutex};
+    let canaries = Canaries::from_seed(5);
+    let decoy = canaries.value("github").unwrap().to_owned();
+    let url: String = decoy.bytes().map(|b| format!("%{b:02X}")).collect();
+    let forms = format!("{decoy} {} {url}", b64(&decoy));
+    let raw = vec![
+        Event::Started {
+            level: TaskLevel::Simple,
+        },
+        Event::Context(ContextReport {
+            external: vec![ContextItem {
+                name: format!("claves/{decoy}.txt"),
+                tokens: 40,
+            }],
+            ..context(1)
+        }),
+        Event::Usage(call(1, 100, 10, 0, 100, 100)),
+        Event::Exchange(Exchange {
+            call: 1,
+            messages: 3,
+            request_chars: 99,
+            request: vec![Msg {
+                role: "user".into(),
+                content: format!("Result of read_file: {forms}"),
+            }],
+            response: format!("{{\"tool\":\"read_file\",\"note\":\"{forms}\"}}"),
+        }),
+        Event::Step { n: 1 },
+        Event::Decision(DecisionDebug {
+            args: format!("{{\"path\":\"{forms}\"}}"),
+            reason: format!("path {forms} is protected"),
+            ..decision("")
+        }),
+        Event::ProtocolError {
+            reason: format!("bad {forms}"),
+        },
+        Event::Tool {
+            name: "read_file".into(),
+            target: forms.clone(),
+            outcome: Outcome::Deny,
+            rule: "S-16".into(),
+            ran: false,
+            result_chars: 1,
+            tainted: true,
+        },
+        Event::Final,
+    ];
+    // Without the scrubber the decoy IS on the debug screen: the test can fail.
+    let leaked = screens_for(raw.clone())
+        .iter()
+        .any(|t| !canaries.scan("screen", t).is_empty());
+    assert!(
+        leaked,
+        "the control case must leak, or this test proves nothing"
+    );
+    // Through the Tee, with the decoy known to the scrubber (as the API key is): nothing leaks.
+    let tmp = tempfile::tempdir().unwrap();
+    let scrubber = clio_vault::Scrubber::default();
+    scrubber.add("github", &decoy);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut tee = Tee::new(
+        Box::new(Collect(seen.clone())),
+        Arc::new(Mutex::new(RunUsage::default())),
+        scrubber,
+        DebugCtl::new(true, false),
+        tmp.path().join("debug.log"),
+    );
+    for e in &raw {
+        clio_brain::agent::Observer::event(&mut tee, e);
+    }
+    let clean = seen.lock().unwrap().clone();
+    for (i, t) in screens_for(clean).iter().enumerate() {
+        canaries.assert_clean(&format!("screen {i}"), t);
+        assert_clean(t);
+    }
+    canaries.assert_clean(
+        "debug.log",
+        &std::fs::read_to_string(tmp.path().join("debug.log")).unwrap(),
+    );
+}

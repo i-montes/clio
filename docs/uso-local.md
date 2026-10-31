@@ -8,96 +8,287 @@ Clio corre en tu propia máquina (ADR 0006): sin servidor, sin puertos públicos
 
 ## La interfaz: escribe `clio`
 
-En una terminal, `clio` sin argumentos abre una interfaz de pantalla completa (TUI). Todo lo que hacen los comandos de abajo se puede hacer desde ella, con las mismas protecciones (`apply` y `undo` son el mismo código). Fuera de una terminal (una tubería, un script, CI), `clio` imprime la ayuda y sale con 0; `clio --help` también; un comando desconocido sale con 2.
+En una terminal, `clio` sin argumentos abre una interfaz de pantalla completa (TUI). Todo lo que hacen los comandos de abajo se puede hacer desde ella, con las mismas protecciones (`apply` y `undo` son el mismo código). Fuera de una terminal (una tubería, un script, CI), `clio` imprime la ayuda y sale con 0; `clio --help` también; un comando desconocido sale con 2. `clio --debug` (o `CLIO_DEBUG=1`) la abre con el modo debug encendido (más abajo).
 
-Teclas generales: `?` ayuda, `q` o `Ctrl+C` salir (desde Inicio), `Esc` volver. Las listas se mueven con flechas o `j`/`k`.
+**Cómo está pensada.** Con poco ruido: sin recuadros (solo líneas finas y espacio en blanco), una cabecera de una línea, `clio · carpeta · modelo` (a la derecha, la pantalla y, si está activo, `debug`), el texto principal en el color de tu terminal y lo secundario atenuado. El cian es solo para la selección y el foco; verde, amarillo y rojo solo para «bien», «aviso», «fallo» y el diff. Los únicos recuadros son las preguntas que esperan tu respuesta (confirmar un `apply`, un aviso). No usa el ratón: todo es con el teclado (tabla de atajos más abajo; `?` muestra los de la pantalla en que estés).
 
-**Inicio**: el estado de Clio y los runs recientes.
-
-```
- clio  Inicio  (el original nunca se toca sin tu permiso)
-╭ Estado ──────────────────────────────────────────────────────────────────────╮
-│Modelo opencode-go / beam-free    Clave presente                              │
-│Vault sin crear (opcional)    Doctor 12 ok · 3 avisos · 0 fallos              │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Runs recientes ──────────────────────────────────────────────────────────────╮
-│▶ 1031-1816-5a67 pendiente de revisar   1 arch arregla parse_date en dates.py │
-│  1030-0900-0b1c aplicado               2 arch agrega un README               │
-│  1029-1200-ffff fallido                0 arch refactoriza todo               │
-╰──────────────────────────────────────────────────────────────────────────────╯
-n nuevo   Enter abrir   d diff   a aplicar   u deshacer   r refrescar   D doctor
-? ayuda   q salir
-```
-
-`n` nuevo trabajo, `Enter` abrir el run, `d` ver su diff, `a` aplicar, `u` deshacer, `r` refrescar, `D` doctor. Estados: `aplicado` (verde), `pendiente de revisar` (amarillo: el agente terminó y hay cambios sin aplicar), `fallido` (rojo), `cancelado`, `deshecho` y `sin cambios` (atenuados), `incompleto` (el proceso murió antes de cerrar). El id corto `1031-1816-5a67` es `MMDD-HHMM-sufijo` del id completo `20261031-181646-5a67`. La clave del modelo nunca se muestra, solo si está.
-
-**Nuevo trabajo** (`n`): la carpeta (por defecto la actual) y la instrucción. La carpeta se valida mientras escribes con las reglas de `clio run` (rechaza `/`, tu carpeta personal y las que son demasiado grandes) y la pantalla te dice qué NO se copiará (secretos, `.git`, `node_modules`, enlaces simbólicos...) antes de empezar.
+**Siempre visible: el uso y el contexto.** La última línea de la pantalla es una barra de estado, siempre la misma y atenuada, en todas las pantallas donde hay un run (en el inicio, con el último):
 
 ```
-┌ Carpeta del proyecto ─ /home/ivan/proyecto
-┏ Instrucción ━━━━━━━━ arregla parse_date en dates.py▏
-╭ Qué se va a copiar ──────────────────────────────────────────────────────────╮
-│✓ se copiarán 12 archivos (3.0 MB)                                            │
-│NO se copiarán a la copia de trabajo:                                         │
-│  parecen secretos: .env                                                      │
-│  carpetas pesadas o internas: .git, node_modules                             │
-╰──────────────────────────────────────────────────────────────────────────────╯
+↑12,4k ↓3,1k tok · $0 · 8/40 pasos · 21 s/10 min   contexto ▕███░░░░░░░▏ 31 %   externo
 ```
 
-`Tab` cambia de campo, `Enter` lanza (en la carpeta, pasa a la instrucción), `Alt+Enter` o `Ctrl+J` agrega una línea a la instrucción, `Ctrl+U` borra el campo, `Esc` vuelve. Pegar texto no puede lanzar nada: el texto pegado se limpia y sus saltos de línea no pulsan Enter.
+- `↑` tokens de entrada y `↓` de salida, como los informa el modelo (si el adaptador no los informa, salen 0).
+- El costo en dólares con la precisión justa: `$0` si es gratis, `$0,0015` si es una fracción de centavo, `$0,12` desde un centavo. Por dentro todo es en micro-USD enteros, sin decimales flotantes.
+- Pasos y tiempo contra su límite (`8/40 pasos`, `21 s/10 min`; los límites son los de `~/.config/clio/config.json`).
+- Contexto: qué parte de la ventana del modelo ocupa lo que verá en su próxima llamada, **aproximado** (cuatro caracteres por token). La ventana sale del catálogo de modelos (`~/.config/clio/catalog.json` o el archivo de `CLIO_CATALOG`; si no hay ninguno se usa el que viene con Clio, que conoce el modelo por defecto); si el modelo no está, se usa 128k por defecto y la vista de contexto lo dice. La barra pasa a amarillo desde el 70 % y a rojo desde el 90 %.
+- `externo` aparece solo si la sesión leyó contenido externo (archivos, salida de pruebas): es lo que antes era el aviso largo de «contaminada». La pasarela es más estricta en ese caso.
 
-**En vivo**: el agente corre en un hilo aparte; ves cada acción que pide el modelo y la decisión de la pasarela (permitido, pedido o negado, con la regla), el tamaño del resultado, los pasos y el tiempo contra el límite, un indicador de actividad y si la sesión está contaminada (leyó archivos).
+En una terminal angosta la barra abrevia (`tok` se va, `pasos` pasa a `p`, `contexto` a `ctx`, `externo` a `ext`, la barra desaparece) pero no pierde ninguno de los cuatro datos; a 60 columnas sigue completa. El tamaño mínimo es 60x16; con menos, la pantalla lo dice en vez de dibujar mal.
 
-```
-╭  ────────────────────────────────────────────────────────────────────────────╮
-│⠋ trabajando en la copia…   20261031-181646-5a67   nivel Simple               │
-│Pasos  ██░░░░░░░░░░░░░░░░░░░░░░ 4/40                                          │
-│Tiempo ░░░░░░░░░░░░░░░░░░░░░░░░ 14s/600s                                      │
-│Sesión contaminada: leyó archivos, la pasarela es más estricta                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Línea de tiempo ─────────────────────────────────────────────────────────────╮
-│   1  list_dir   .  permitido (step-8-reversible-in-sandbox)  812 car.        │
-│   2  read_file  dates.py  permitido (step-8-reversible-in-sandbox)  812 car. │
-│   3  write_file .git/hooks/pre-commit  negado (S-16)                         │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-`Esc` o `Ctrl+C` piden cancelar: el agente termina el paso en curso (un paso puede tardar lo que tarde el modelo en contestar) y el run queda `cancelado`. Una segunda pulsación sale de Clio ya; el run queda `incompleto`. En los dos casos el original no se tocó. Al terminar, `Enter` abre el detalle.
-
-**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` en cian.
+**Inicio**: una línea de estado (clave, vault, doctor; solo un problema lleva color) y los runs recientes. `/` filtra la lista por id, estado, instrucción o carpeta mientras escribes (`Enter` deja el filtro y vuelve a los atajos, `Esc` lo borra).
 
 ```
-╭ Resumen ─────────────────────────────────────────────────────────────────────╮
-│Estado pendiente de revisar   20261031-181646-5a67                            │
-│Carpeta /home/ivan/proyecto                                                   │
-│nivel Simple · 7 pasos · 12.3s · terminó · 0 denegadas                        │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Mensaje del agente ──────────────────────────────────────────────────────────╮
-│Arreglé parse_date. No pude correr las pruebas.                               │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭ Archivos cambiados (2) ──────────────────────────────────────────────────────╮
-│▶ M dates.py                                                                  │
-│  A docs/new.md                                                               │
-╰──────────────────────────────────────────────────────────────────────────────╯
+clio · proyecto · beam-free                                              inicio
+
+ clave presente · vault sin crear (opcional)
+ doctor: 12 ok · 3 avisos · 0 fallos
+
+ ─ recientes ──────────────────────────────────────────────────────────────────
+ ▸ 1031-1816-5a67 pendiente de revisar   1 arch arregla parse_date en dates.py
+   1030-0900-0b1c aplicado               2 arch agrega un README
+   1029-1200-ffff fallido                0 arch refactoriza todo
+ Enter abrir   n nuevo   / filtrar   c contexto   U uso   q salir   ? ayuda
+ ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
 ```
 
-En el diff: `j`/`k` desplazan, `PgUp`/`PgDn` una página, `g`/`G` principio y final, `[` y `]` cambian de archivo, `Esc` vuelve a la lista. `a` aplica: primero pasa todas las comprobaciones de `apply` (si algo falla, un aviso te dice qué; no se escribe nada) y luego un diálogo repite cuántos archivos y dónde, y solo una `y` sigue (cualquier otra tecla cancela). `u` deshace un run aplicado, también con `y`. Si el original cambió desde la copia, la TUI no pisa nada: usa `clio apply <id> --force` desde la línea de comandos, sabiendo que guarda tu versión para poder deshacer.
-
-**Doctor** (`D`): las comprobaciones con `PASS`/`WARN`/`FAIL` coloreados y, bajo cada aviso o fallo, una línea con qué hacer (`r` repite, `j`/`k` desplazan).
+**Nuevo trabajo** (`n`): la carpeta (por defecto la actual) y la instrucción. La carpeta se valida mientras escribes con las reglas de `clio run` (rechaza `/`, tu carpeta personal y las que son demasiado grandes) y la pantalla te dice qué NO se copiará (secretos, `.git`, `node_modules`, enlaces simbólicos...) antes de empezar. En los campos de texto las letras son texto, aunque en otras pantallas sean atajos; `Alt-Enter` o `Ctrl-J` agregan una línea a la instrucción. Lo que pegas pasa por el limpiador: no puede traer secuencias de escape ni pulsar `Enter`.
 
 ```
-╭ Doctor: 1 ok · 1 aviso · 1 fallo ────────────────────────────────────────────╮
-│PASS  /home/ivan/.config/clio es privada (700)                                │
-│WARN  no hay clave del modelo                                                 │
-│      → Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key        │
-│FAIL  /x/y tiene modo 755, debe ser 700 (S-23)                                │
-│      → chmod 700 /x/y                                                        │
-╰──────────────────────────────────────────────────────────────────────────────╯
+clio · proyecto · beam-free                                       nuevo trabajo
+
+ Carpeta       /home/ivan/proyecto
+
+ Instrucción   arregla parse_date en dates.py▏
+
+ ✓ se copiarán 12 archivos (3,0 MB)
+ ─ NO se copiarán a la copia de trabajo ───────────────────────────────────────
+ parecen secretos: .env
+ carpetas pesadas o internas: .git, node_modules
+ siempre: .git, node_modules, target, .venv, __pycache__, .env*, *.pem, *.key,
+ id_rsa*, id_ed25519*, .ssh, .aws, credentials*
+
+ Tab cambiar campo   Enter lanzar   Alt-Enter línea nueva
 ```
 
-**Colores**: solo los 8 colores ANSI básicos más negrita, tenue y video inverso, así que la paleta de tu terminal decide los tonos (sirve en tema oscuro y claro y sin 24 bits). Con `NO_COLOR=1` o `TERM=dumb` queda sin color. Requiere una terminal de al menos 40x10.
+**En vivo**: el agente corre en un hilo aparte; ves cada acción que pide el modelo y la decisión de la pasarela (permitido, pedido o negado, con la regla y el tamaño del resultado). `Ctrl-C` (o `Esc`) cancela y termina tras el paso en curso; una segunda pulsación sale ya (el run queda incompleto, el original nunca se tocó). `j`/`k` recorren la línea de tiempo.
 
-**Seguridad de la pantalla.** Lo que viene de archivos, del modelo, de nombres de archivo, de diffs o de la instrucción puede traer secuencias de escape (cambiar el título de la ventana, borrar la pantalla, simular otra pantalla), un `\r` que sobreescribe una línea o caracteres bidireccionales (como U+202E) que invierten el texto. Antes de dibujar o imprimir cualquier texto externo, Clio elimina las secuencias de escape completas (CSI, OSC, DCS, APC...) y reemplaza los demás caracteres de control, los separadores de línea y los caracteres invisibles o bidireccionales por `�`; un tabulador pasa a cuatro espacios. Esto vale para la TUI y para lo que imprimen `run`, `runs`, `show`, `diff`, `apply` y `doctor` en una terminal. Los archivos del run guardan el texto tal cual llegó. Limitación: se reemplazan también los unidos de ancho cero (ZWJ), así que un emoji compuesto puede verse como varios. Si Clio se cae por un error, la terminal se restaura antes de mostrar el mensaje (sale de la pantalla alterna y del modo crudo); no puede hacerlo si la matan con `kill -9` o con una señal; en ese caso, escribe `reset`.
+```
+clio · proyecto · beam-free                                             en vivo
+
+ ⠋ trabajando en la copia…   1031-1816-5a67   nivel Simple
+ arregla parse_date
+
+ ─ línea de tiempo ────────────────────────────────────────────────────────────
+   1  read_file  dates.py  ✓ permitido (step-8-reversib…)  1234 car.
+   8  write_file .git/hooks/pre-commit  ✗ negado (S-16)
+ Ctrl-C cancelar   Tab tiempo / debug   c contexto   U uso   ? ayuda
+ ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
+```
+
+Con 100 columnas o más, la línea de tiempo queda a la izquierda y a la derecha van el contexto (por capas) y el uso frente a sus límites; con menos, una sola columna, y `c` y `U` abren las vistas completas:
+
+```
+clio · proyecto · beam-free                                                                                     en vivo
+
+ ⠋ trabajando en la copia…   1031-1816-5a67   nivel Simple
+ arregla parse_date
+
+ ─ línea de tiempo ───────────────────────────────────────────────────────── │ ─ contexto ─────────────────────────────
+   1  read_file  dates.py  ✓ permitido (step-8-reversib…)  1234 car.         │ contexto ▕███░░░░░░░▏ 31 %
+   8  write_file .git/hooks/pre-commit  ✗ negado (S-16)                      │ 39,7k de 128k tokens (aprox.)
+                                                                             │
+                                                                             │ sistema         1,2k    0,9 %
+                                                                             │ objetivo         120    0,0 %
+                                                                             │ herramientas     410    0,3 %
+                                                                             │ conversación    3,1k    2,4 %
+                                                                             │ externo        34,9k   27,2 %
+                                                                             │     dates.py          2k externo
+                                                                             │     big.json       32,9k externo
+                                                                             │ salidas            0    0,0 %
+                                                                             │
+                                                                             │ ─ uso ──────────────────────────────────
+                                                                             │ ↑12,4k ↓3,1k tokens · $0
+                                                                             │ pasos   8 de 40  ▕██░░░░░░░░▏ 20 %
+                                                                             │ tiempo  21 s de 10 min  ▕░░░░░░░░░░▏ 3 %
+                                                                             │ costo   $0 de $0,10  ▕░░░░░░░░░░▏ 0 %
+                                                                             │
+                                                                             │
+                                                                             │
+                                                                             │
+ Ctrl-C cancelar   Tab tiempo / debug   c contexto   U uso   ? ayuda
+ ↑12,4k ↓3,1k tok · $0 · 8/40 pasos · 21 s/10 min   contexto ▕███░░░░░░░▏ 31 %   externo
+```
+
+**Contexto** (`c`, en vivo, en el detalle y en el inicio con el último run): una vista en CAPAS de lo que hay en el contexto del modelo, cada capa con su tamaño aproximado en tokens y su porcentaje de la ventana: el prompt de sistema (con su versión, por ejemplo `clio-agent@3`), el objetivo (tu pedido, que es el objetivo del contrato), las descripciones de las herramientas, la conversación (respuestas del modelo y avisos de protocolo, en turnos), el contenido EXTERNO (cada archivo leído, con su nombre saneado, sus tokens y la marca `externo`) y las salidas de las demás herramientas. Las capas suman lo que el modelo recibe en la próxima llamada. Avisa de forma discreta al pasar del 70 % y del 90 %. En un run ya terminado muestra el contexto de su última llamada al modelo (sin su última respuesta).
+
+```
+clio · proyecto · beam-free                                            contexto
+
+ contexto ▕███████░░░░░░░░░░░░░░░░░▏ 31 %  39,7k de 128k tokens (aprox.)
+
+ prompt de sistema        clio-agent@3      1,2k    0,9 %  ▕░░░░░░░░░░░░▏
+ objetivo / contrato      tu pedido          120    0,0 %  ▕░░░░░░░░░░░░▏
+ herramientas             descripciones      410    0,3 %  ▕░░░░░░░░░░░░▏
+ conversación             7 turnos          3,1k    2,4 %  ▕░░░░░░░░░░░░▏
+ externo                  2 lecturas       34,9k   27,2 %  ▕███░░░░░░░░░▏
+     dates.py                                     2k externo
+     big.json                                  32,9k externo
+ salidas de herramientas                       0    0,0 %  ▕░░░░░░░░░░░░▏
+
+ Aprox.: cuatro caracteres por token. Las capas suman lo que ve el modelo.
+ U ver el uso   Esc volver   ? ayuda
+ ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
+```
+
+**Uso** (`U`): una tabla compacta por paso (llamada al modelo): tokens de entrada y salida, costo, tiempo del modelo y los acumulados; debajo, el total frente al límite de pasos, de tiempo y de costo del run.
+
+```
+clio · proyecto · beam-free                                                 uso
+
+ uso ↑12,4k ↓3,1k tokens · $0
+
+ paso  entrada   salida      costo    modelo  acum.tok  acum.costo
+    1      10k       2k         $0     1,2 s       12k          $0
+    2     2,4k     1,1k         $0     2,1 s     15,5k          $0
+
+ ─ frente al límite del run ───────────────────────────────────────────────────
+ pasos   8 de 40  ▕██░░░░░░░░▏ 20 %
+ tiempo  21 s de 10 min  ▕░░░░░░░░░░▏ 3 %
+ costo   $0 de $0,10  ▕░░░░░░░░░░▏ 0 %
+
+ Los tokens y el costo los informa el modelo; el contexto es aproximado.
+ c ver el contexto   Esc volver   ? ayuda
+ ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
+```
+
+**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter` o `d`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` atenuado. `a` aplica y `u` deshace (pide una `y` de confirmación; es el mismo código que `clio apply` y `clio undo`).
+
+```
+clio · proyecto · beam-free                                             detalle
+
+ pendiente de revisar · 20261031-181646-5a67
+ carpeta /home/ivan/proyecto
+ pedido  arregla parse_date
+ nivel Simple · 7 pasos · 12,3 s · terminó · 0 denegadas
+
+ ─ mensaje del agente ─────────────────────────────────────────────────────────
+ Arreglé parse_date.
+ No pude correr las pruebas.
+
+ ─ archivos cambiados (2) ─────────────────────────────────────────────────────
+ ▸ M dates.py
+   A docs/new.md
+ Enter d ver el diff   a aplicar   u deshacer   c contexto   U uso
+ ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
+```
+
+```
+clio · proyecto · beam-free                                             detalle
+
+ M dates.py  · 1/2 · línea 1/7
+ --- a/dates.py
+ +++ b/dates.py
+ @@ -1,3 +1,3 @@
+  def parse(s):
+ -    return int(s)
+ +    return None
+  x = 1
+ ] otro archivo   a aplicar   u deshacer   Esc a la lista   ? ayuda
+ ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
+```
+
+**Doctor** (`D`): cada comprobación con su marca (`✓` bien, `!` aviso, `✗` fallo) y, bajo cada aviso o fallo, una línea con qué hacer (`r` repite). Cada comprobación sale una sola vez: las de permisos y puertos que hace el propio `clio` ya no se repiten con las de `infra/local/check-host.sh`.
+
+```
+clio · proyecto · beam-free                                              doctor
+
+ doctor: 1 ok · 1 aviso · 1 fallo
+
+ ✓  /home/ivan/.config/clio es privada (700)
+ !  no hay clave del modelo
+    → Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key (chmod
+ 600).
+ ✗  /x/y tiene modo 755, debe ser 700 (S-23)
+    → chmod 700 /x/y
+
+ r repetir   Esc volver   ? ayuda
+```
+
+**Ayuda** (`?`): los atajos de la pantalla en que estés, en una sola vista breve.
+
+```
+clio · proyecto · beam-free                                               ayuda
+
+ atajos · Clio trabaja en una copia; tú decides qué vuelve al original
+
+ j         bajar             c         contexto
+ k         subir             U         uso
+ g         primero           r         refrescar
+ G         último            D         doctor
+ Enter     abrir             Esc       quitar el filtro
+ n         nuevo             ?         ayuda
+ d         diff              q         salir
+ a         aplicar           Ctrl-D    modo debug
+ u         deshacer          Ctrl-L    redibujar
+ /         filtrar
+ Esc ? cerrar la ayuda
+ ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
+```
+
+### Atajos
+
+Iguales en todas las pantallas: un atajo significa lo mismo donde exista (`c` contexto, `U` uso, `?` ayuda, `r` refrescar, `d` diff, `a` aplicar, `u` deshacer, `g`/`G` principio y final, `j`/`k` mover). Una prueba recorre la tabla de cada pantalla y falla si una tecla está repetida o significa cosas distintas. `Esc` o `q` vuelven (en el inicio `q` sale; `Esc` solo quita el filtro); `Ctrl-C` cancela el run en vivo (la segunda vez sale) y en las demás pantallas hace lo mismo que `Esc`. Páginas con `Ctrl-F`/`Ctrl-B` (o `AvPág`/`RePág`): `Ctrl-D` no sirve de «media página» porque es el modo debug. Reparto para no chocar: `U` (mayúscula) abre el uso y `u` deshace.
+
+- **Inicio**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` abrir · `n` nuevo · `d` diff · `a` aplicar · `u` deshacer · `/` filtrar · `c` contexto · `U` uso · `r` refrescar · `D` doctor · `Esc` quitar el filtro · `?` ayuda · `q` `Ctrl-C` salir.
+- **Inicio, escribiendo el filtro**: `Enter` dejar el filtro · `Esc` borrar el filtro · `↓` bajar · `↑` subir · `Ctrl-C` borrar el filtro.
+- **Nuevo trabajo**: `Tab` `Shift-Tab` cambiar campo · `Enter` lanzar · `Alt-Enter` `Ctrl-J` línea nueva · `Ctrl-U` borrar el campo · `F1` ayuda · `Esc` `Ctrl-C` volver.
+- **En vivo, corriendo**: `Esc` `Ctrl-C` cancelar · `Tab` tiempo / debug · `c` contexto · `U` uso · `j` `↓` más reciente · `k` `↑` más antiguo · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `?` ayuda.
+- **En vivo, terminado**: `Enter` ver el run · `Esc` `q` `Ctrl-C` inicio · `Tab` tiempo / debug · `c` contexto · `U` uso · `j` `↓` más reciente · `k` `↑` más antiguo · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `?` ayuda.
+- **Detalle, lista de archivos**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` `l` `→` `d` ver el diff · `a` aplicar · `u` deshacer · `c` contexto · `U` uso · `?` ayuda · `Esc` `q` `Ctrl-C` volver.
+- **Detalle, diff**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `]` otro archivo · `[` archivo anterior · `a` aplicar · `u` deshacer · `c` contexto · `U` uso · `?` ayuda · `Esc` `q` `h` `←` `Ctrl-C` a la lista.
+- **Doctor**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `r` repetir · `?` ayuda · `Esc` `q` `Ctrl-C` volver.
+- **Contexto**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `U` ver el uso · `?` ayuda · `Esc` `q` `Ctrl-C` `c` volver.
+- **Uso**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `c` ver el contexto · `?` ayuda · `Esc` `q` `Ctrl-C` `U` volver.
+- **Ayuda**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `Esc` `q` `?` `Enter` `Ctrl-C` cerrar la ayuda.
+- **En todas**: `Ctrl-D` modo debug · `Ctrl-L` redibujar.
+
+### Modo debug
+
+Se activa con `--debug` (en `clio` y en `clio run`), con `CLIO_DEBUG=1` (cualquier valor menos vacío, `0`, `false` o `no`) o con `Ctrl-D` dentro de la interfaz, que lo conmuta en cualquier momento, también con un run en marcha (lo que pasó antes de encenderlo no tiene detalle). Con debug encendido, `Tab` en la pantalla en vivo alterna entre la línea de tiempo y la vista de debug, que muestra por cada llamada al modelo:
+
+- cómo se armó el contexto (las capas y cada archivo externo), turno a turno;
+- la petición (solo los mensajes nuevos en esa llamada) y la respuesta, truncadas con el aviso de cuánto falta (`… (faltan 3500 caracteres)`); las líneas largas continúan en la siguiente en vez de cortarse;
+- cada decisión de la pasarela con su herramienta, argumentos, regla y razón completas, y cuánto tardó;
+- el tiempo del modelo, tokens, costo y los reintentos (cuando el adaptador falló y Clio volvió a llamar), y los errores de protocolo.
+
+```
+clio · proyecto · beam-free                                       debug en vivo
+
+ ⠋ trabajando en la copia…   1031-1816-5a67   nivel Simple
+ arregla parse_date
+
+ ─ debug: lo que vio y dijo el modelo (saneado) ───────────────────────────────
+ llamada 2
+   contexto 39,7k tok aprox.: sistema 1,2k (clio-agent@3) · objetivo 120 · herr
+       amientas 410 · conversación 3,1k (7 turnos) · externo 34,9k (2) · salida
+       s 0
+     externo: dates.py 2k
+     externo: big.json 32,9k
+   modelo 2,1 s · entrada 2,4k · salida 1,1k tok · $0
+   petición: 3 mensajes en total (4200 car.), nuevos en esta llamada: 1
+     [user] Result of read_file:
+       hola
+   respuesta: 21 car.
+     {"tool":"write_file"}
+   pasarela #1 write_file {"path":".git/hooks/x"}
+     negado · regla S-16 · 3 ms
+     razón: the path is protected (S-16)
+ Ctrl-C cancelar   Tab tiempo / debug   c contexto   U uso   ? ayuda
+ ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
+```
+
+Además, con debug encendido se escribe un `debug.log` en la carpeta del run (`~/.local/share/clio/runs/<id>/debug.log`): JSON por línea (`started`, `context`, `usage`, `exchange`, `step`, `decision`, `tool`, `protocol_error`, `final`), con permisos 0600, nacido 0600, y con cada texto largo cortado a 8000 caracteres con el aviso de cuánto falta. En `clio run --debug` las mismas líneas (saneadas) salen por la salida de errores con el prefijo `[debug]`, y la ruta del log se imprime al empezar. **Sin debug no se escribe nada de esto.**
+
+**Qué garantiza.** Todo lo que sale en la vista, en `debug.log` y en la salida de errores pasa primero por el limpiador de secretos (`Scrubber`), que conoce la clave del modelo (la de `OPENCODE_API_KEY` o la del archivo `opencode-api-key`) y reconoce un secreto conocido en claro, en base64 y codificado para URL; y después por el saneado de terminal (secuencias de escape, `\r`, bidireccionales). La clave de la API nunca aparece. Las pruebas lo comprueban con señuelos (`clio-canaries`) en la respuesta del modelo, en un archivo leído, en un nombre de archivo, en los argumentos y razón de la pasarela y en un error de protocolo: ni la pantalla (en cuatro tamaños), ni `debug.log`, ni la salida de errores, ni `summary.json`, `transcript.json` o `usage.json` los contienen. Limitación: el limpiador solo conoce los secretos que se le enseñaron (la clave del modelo y lo que la bóveda le entrega) y los patrones de claves de proveedores; un secreto que Clio no conozca y no tenga forma de clave no se puede ocultar.
+
+### Qué guarda cada run
+
+Además de lo de siempre, cada run guarda `usage.json` (0600): los límites con que corrió, la ventana del modelo, el uso de cada llamada (tokens, costo en micro-USD, tiempo, reintentos) y las capas del contexto antes de la última llamada, con los nombres de los archivos leídos. Es lo que alimenta la barra y las vistas `c` y `U` de un run ya terminado; un run anterior a esta función no lo tiene y la vista lo dice (los totales salen de su `summary.json`). El mensaje final, el reporte y la transcripción de un run también pasan por el limpiador de secretos antes de guardarse.
+
+**Colores y símbolos**: solo los 8 colores ANSI básicos más negrita y tenue, así que la paleta de tu terminal decide los tonos (sirve en tema oscuro y claro y sin 24 bits). Con `NO_COLOR=1` o `TERM=dumb` queda sin color; si la terminal no declara UTF-8, o es la consola de Linux, los símbolos (`·` `▸` `✓` `✗` `↑` `↓` `─` y las barras) pasan a ASCII (`-` `>` `+` `x` `^` `v` `-` `[###...]`).
+
+**Seguridad de la pantalla.** Lo que viene de archivos, del modelo, de nombres de archivo, de diffs, de la instrucción, de las respuestas y razones del modo debug o del filtro puede traer secuencias de escape (cambiar el título de la ventana, borrar la pantalla, simular otra pantalla), un `\r` que sobreescribe una línea o caracteres bidireccionales (como U+202E) que invierten el texto. Antes de dibujar o imprimir cualquier texto externo, Clio elimina las secuencias de escape completas (CSI, OSC, DCS, APC...) y reemplaza los demás caracteres de control, los separadores de línea y los caracteres invisibles o bidireccionales por `�`; un tabulador pasa a cuatro espacios. Esto vale para todas las pantallas (inicio, nuevo trabajo, en vivo, contexto, uso, debug, detalle, doctor, ayuda) y para lo que imprimen `run`, `runs`, `show`, `diff`, `apply` y `doctor` en una terminal. Los archivos del run guardan el texto tal cual llegó (salvo secretos). Limitación: se reemplazan también los unidos de ancho cero (ZWJ), así que un emoji compuesto puede verse como varios. Si Clio se cae por un error, la terminal se restaura antes de mostrar el mensaje (sale de la pantalla alterna y del modo crudo); no puede hacerlo si la matan con `kill -9` o con una señal; en ese caso, escribe `reset`. `Ctrl-L` redibuja toda la pantalla (limpia la terminal y repinta cada celda).
 
 ## Instalar y preparar
 
@@ -149,7 +340,7 @@ run:      20261031-191737-ccb5
 nivel:    Simple   pasos: 4   tiempo: 0.1s   fin: terminó
 cambios:  1 modificados, 0 creados, 0 borrados
   M app.py
-nota:     leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado
+nota:     externo: leyó archivos del proyecto; revisa el diff con cuidado
 agente:   Corregí total() en app.py: ya no suma 1 de más. No pude correr las
           pruebas; ejecútalas antes de aplicar.
 
@@ -265,7 +456,7 @@ Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en `CLIO_V
 clio doctor
 ```
 
-Revisa: la jaula (autoprueba, una línea por comprobación, ver arriba), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, en inglés). Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}`. La TUI muestra lo mismo con `D`.
+Revisa: la jaula (autoprueba, una línea por comprobación, ver arriba), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, ya en español). Clio lo corre con `CLIO_DOCTOR_EMBEDDED=1`, que le hace omitir las dos comprobaciones que `clio` ya hizo por su cuenta (permisos de las carpetas y archivos de Clio, S-23, y procesos de Clio que escuchan fuera de loopback, S-38): cada una sale una sola vez. Si corres el script solo, hace todas y termina con `equipo: sin FAIL` (o `equipo: hay FAIL, mira arriba`), con el mismo código de salida de siempre. Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}` (las mismas claves de siempre; cambia que los mensajes del script del equipo están en español y que ya no hay comprobaciones repetidas). La TUI muestra lo mismo con `D`.
 
 ## Qué NO hace Clio todavía
 

@@ -157,7 +157,16 @@ pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
             app = next;
             for c in cmds {
                 if c == Cmd::Redraw {
-                    term.clear().map_err(|e| format!("terminal: {e}"))?;
+                    // Not `Terminal::clear`: it asks the terminal where the cursor is and waits
+                    // for an answer that some terminals never give. A new `Terminal` has empty
+                    // buffers, so the next draw repaints every cell.
+                    let e = |x: std::io::Error| format!("terminal: {x}");
+                    execute!(
+                        std::io::stdout(),
+                        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                    )
+                    .map_err(e)?;
+                    term = Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(e)?;
                 } else {
                     ctx.exec(c);
                 }

@@ -498,8 +498,8 @@ fn events_of(
     a.debug = debug.map(|d| Arc::new(std::sync::atomic::AtomicBool::new(d)));
     a.scrubber = scrubber;
     a.run(model, "mira dates.py").unwrap();
-    let ev = seen.lock().unwrap().clone();
-    ev
+    let ev = seen.lock().unwrap();
+    ev.clone()
 }
 
 /// Answers a list in order and reports tokens, like a real adapter.
@@ -687,8 +687,13 @@ fn debug_events_only_flow_while_the_switch_is_on_and_are_scrubbed() {
         .collect();
     assert_eq!(ex.len(), 3);
     assert_eq!(ex[0].request.len(), 2, "first call: system + instruction");
-    assert_eq!(ex[1].request.len(), 1, "later calls: only what is new");
-    assert!(ex[1].request[0].content.contains("Result of read_file"));
+    assert_eq!(
+        ex[1].request.len(),
+        2,
+        "later calls: only what is new (the last answer and the tool result)"
+    );
+    assert_eq!(ex[1].request[0].role, "assistant");
+    assert!(ex[1].request[1].content.contains("Result of read_file"));
     let dec: Vec<_> = ev
         .iter()
         .filter_map(|e| match e {
