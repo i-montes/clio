@@ -1,6 +1,6 @@
 # Clio
 
-Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-53): [`docs/security.md`](docs/security.md). Decisions: [`docs/decisions/`](docs/decisions/).
+Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-56): [`docs/security.md`](docs/security.md); threat model: [`docs/threat-model.md`](docs/threat-model.md); reporting: [`SECURITY.md`](SECURITY.md). Decisions: [`docs/decisions/`](docs/decisions/). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Architecture
 
@@ -12,7 +12,7 @@ Requires the Rust toolchain from `rust-toolchain.toml`, plus `just`, `gitleaks`,
 
 ```sh
 just setup   # enables the secret-scanning pre-commit hook (S-43)
-just check   # fmt, clippy, rule coverage (S-04, warn-only)
+just check   # fmt, clippy, rule coverage (S-04; fails only for what is in `scripts/rule-coverage.enforced`)
 just test
 just audit   # cargo-deny and cargo-audit (S-41)
 ```

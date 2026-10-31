@@ -64,10 +64,10 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Documentos de proyecto
 
-- [ ] **041** `SECURITY.md` con canal privado de reporte (S-48)
-- [ ] **042** Modelo de amenazas publicado: qué se protege y de qué (S-48)
-- [ ] **043** Documentar la regla de que cada PR nombra las reglas S-xx que toca y sus pruebas
-- [ ] **044** Documentar la regla de que los cambios en pasarela, vault, firmas de nodos y PWA los revisa la persona, no un agente
+- [x] **041** `SECURITY.md` con canal privado de reporte (S-48)
+- [x] **042** Modelo de amenazas publicado: qué se protege y de qué (S-48)
+- [x] **043** Documentar la regla de que cada PR nombra las reglas S-xx que toca y sus pruebas
+- [x] **044** Documentar la regla de que los cambios en pasarela, vault, firmas de nodos y PWA los revisa la persona, no un agente
 
 ### Preproducción mínima
 

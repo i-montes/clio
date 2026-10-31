@@ -5,3 +5,8 @@
 /crates/*/Cargo.toml  @i-montes
 /testing/*/Cargo.toml @i-montes
 /scripts/rule-coverage.*  @i-montes
+# S-53 / project rule: gateway, vault, node signatures and the PWA are reviewed by a person.
+/crates/clio-gateway/ @i-montes
+/crates/clio-vault/   @i-montes
+/crates/clio-node/    @i-montes
+/apps/pwa/            @i-montes
