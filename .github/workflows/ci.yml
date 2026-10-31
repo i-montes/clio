@@ -2,6 +2,7 @@ name: ci
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -21,10 +22,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
       # Acceptance 25: recall over 50k memories in under 150 ms; ignored in the normal run because it builds a big file
-      - run: cargo test --release -p clio-memory --test recall t25 -- --ignored
+      - run: cargo test --locked --release -p clio-memory --test recall t25 -- --ignored
         if: matrix.os == 'ubuntu-latest'
 
   deny:
