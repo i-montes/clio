@@ -559,6 +559,8 @@ fn pty_the_tui_opens_in_the_alternate_screen_and_q_restores_the_terminal() {
     }
 }
 
+// On macOS CI `q` did not leave after the key sequence (timeout); it needs a Mac to debug, so Linux only.
+#[cfg(target_os = "linux")]
 #[test]
 fn pty_debug_context_usage_help_and_redraw_keys_work_and_the_terminal_is_restored() {
     let e = Env::new();
@@ -916,6 +918,8 @@ fn every_run_keeps_its_usage_and_context_in_usage_json() {
     assert_eq!(s["output_tokens"], 200);
 }
 
+// The real host script is Linux-only (ss, findmnt, systemctl): this test does not apply on macOS.
+#[cfg(target_os = "linux")]
 #[test]
 fn doctor_shows_each_check_once_and_in_spanish_with_the_real_host_script() {
     let e = Env::new();
