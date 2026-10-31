@@ -2,6 +2,10 @@
 setup:
     git config core.hooksPath .githooks
 
+# macOS only: download and verify the default embedding model (decision 0004).
+setup-model-macos:
+    infra/models/install-potion.macos.sh
+
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings

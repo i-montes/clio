@@ -3,15 +3,11 @@
 //! (names and attribute values) is short and checked for secrets.
 
 pub mod names;
-
-#[cfg(not(unix))]
-compile_error!("clio-trace needs Unix file permissions (S-23)");
+mod platform;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::OpenOptions;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -239,23 +235,7 @@ impl Trace {
     /// or others can read is refused.
     pub fn open(path: impl AsRef<Path>, clock: impl Clock + 'static) -> Result<Self> {
         let path = path.as_ref();
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-        {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mode = std::fs::metadata(path)
-                    .map_err(|e| Error::Io(e.to_string()))?
-                    .mode();
-                if mode & 0o077 != 0 {
-                    return Err(Error::Permissions(path.to_path_buf()));
-                }
-            }
-            Err(e) => return Err(Error::Io(e.to_string())),
-        }
+        platform::prepare_private_file(path)?;
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
