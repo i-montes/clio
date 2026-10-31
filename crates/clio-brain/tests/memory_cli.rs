@@ -372,10 +372,14 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
         "an export never overwrites"
     );
 
-    // purge does not exist yet and says so; an unknown subcommand is a usage error.
+    // purge needs an id; an unknown subcommand is a usage error.
     let p = e.try_clio(&["memory", "purge"]);
     assert_eq!(p.status.code(), Some(1));
-    assert!(text(&p.stderr).contains("PURGE"));
+    assert!(
+        text(&p.stderr).contains("falta el id"),
+        "{}",
+        text(&p.stderr)
+    );
     assert_eq!(e.try_clio(&["memory", "zzz"]).status.code(), Some(2));
 }
 
