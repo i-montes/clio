@@ -50,6 +50,20 @@ Pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe 
 - **Un `kill -9` a `clio` durante `doctor`** puede dejar un archivo señuelo inofensivo en tu HOME.
 - **`cargo test`** no se ofrece: haría falta montar parte de tu HOME.
 
+### La memoria como superficie (persistencia de inyecciones)
+
+Una inyección normal muere con el run: el contenido hostil solo vive en el contexto de esa sesión. La memoria entre runs cambia eso: si un texto de un archivo, una web o una salida de pruebas logra quedar guardado como «recuerdo», vuelve al contexto de cada run futuro, ya sin el aviso de que vino de fuera. Es una inyección que persiste, y también una forma de envenenar lo que Clio cree de ti (por ejemplo «la persona autorizó X»). Lo que la acota (`crates/clio-brain/src/memory_link.rs`):
+
+- **Un solo escritor y solo al cerrar** (S-25, S-27). El bucle del modelo no tiene herramienta de memoria (pedirla es una herramienta no declarada: S-02); lo aprendido se escribe de una vez cuando el run termina, con actores propios y cuota por hora cada uno.
+- **El origen `persona` solo lo escribe la persona** con `clio memory remember`. Lo que el modelo dice o lo que vino de un archivo entra como externo; el actor de agente ni siquiera puede declarar origen de persona (la biblioteca lo degrada).
+- **Cuarentena** (S-25): todo lo externo, y todo lo que el modelo pide recordar, espera; no sale en `recall` ni en el contexto hasta que la persona promueve. El registro del run queda activo solo si el run no tocó contenido de fuera (si leyó cualquier archivo o salida de pruebas, queda en cuarentena).
+- **Procedimientos** (S-26): los «cómo se hace» propuestos por el agente esperan aprobación de la persona aunque el run haya sido limpio.
+- **Lo recordado vuelve como datos**: en una capa propia `memoria`, envuelta como contenido no confiable, con el id de cada recuerdo, tras el limpiador de secretos y el filtro de lo que sale hacia el modelo (S-18, S-44).
+- **Texto limpio**: al guardar se sustituyen los caracteres de control, y al mostrar (TUI, CLI) se sanea otra vez, aunque otra herramienta haya escrito el archivo.
+- **Secretos**: el limpiador tacha lo que conoce (y los patrones de claves) y el detector de la biblioteca rechaza el resto antes de escribir; un rechazo se anota en una línea y no rompe el cierre del run.
+
+Lo que **no** acota: el pedido que escribes tú se guarda como parte del registro del run (activo en un run limpio); si pegas en él texto de una web hostil, ese texto queda como recuerdo activo y vuelve en runs futuros, marcado como dato pero sin cuarentena. Un recuerdo que apruebes tú es tuyo: aprobar sin leer anula la defensa (el panel muestra de dónde vino cada uno). Archivar no borra (hasta que llegue PURGE, el texto sigue en el archivo y en el registro, sin cifrar). El detector de secretos no ve lo que no parezca una clave (un dato personal sin forma de clave sí se guarda si tú lo escribes).
+
 ### Fuera de alcance
 
 Un atacante con control del dispositivo de la persona y de su passkey: ahí la firma ya no distingue a la persona del atacante. Lo limitan los topes de gasto y la revocación del cerebro en Tailscale.

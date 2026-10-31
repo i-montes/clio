@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use clio_brain::memory_link::MemoryLink;
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_memory::State;
 use crossterm::event::KeyCode;
 
@@ -98,7 +98,11 @@ fn the_memory_screen_draws_clean_and_exact_at_every_size() {
         assert!(!last.is_empty(), "{w}x{h}: status bar is empty\n{t}");
         assert_eq!(
             last,
-            screen_text(&with_runs(), w, h).lines().last().unwrap().trim(),
+            screen_text(&with_runs(), w, h)
+                .lines()
+                .last()
+                .unwrap()
+                .trim(),
             "the status bar is the same as the home's"
         );
     }
@@ -117,7 +121,10 @@ fn the_memory_screen_draws_clean_and_exact_at_every_size() {
 fn the_memory_screen_has_no_boxes() {
     let t = screen_text(&memory_app(), 120, 30);
     for c in ['┌', '┐', '└', '┘', '│'] {
-        assert!(!t.contains(c), "a box character {c:?} on the memory screen\n{t}");
+        assert!(
+            !t.contains(c),
+            "a box character {c:?} on the memory screen\n{t}"
+        );
     }
 }
 
@@ -160,7 +167,10 @@ fn promote_and_archive_always_ask_first_and_only_y_goes_ahead() {
     assert!(t.contains("Aprobar el recuerdo m12"), "{t}");
     assert_clean(&t);
     let (a, cmds) = feed(a, vec![ch('x')]);
-    assert!(cmds.is_empty() && a.confirm.is_none(), "any other key cancels");
+    assert!(
+        cmds.is_empty() && a.confirm.is_none(),
+        "any other key cancels"
+    );
     let (a, cmds) = feed(a, vec![ch('p'), ch('y')]);
     assert_eq!(cmds, vec![Cmd::MemoryPromote { id: "12".into() }]);
     // An active memory cannot be "promoted": a flash, no question.
@@ -179,7 +189,10 @@ fn promote_and_archive_always_ask_first_and_only_y_goes_ahead() {
 fn after_an_action_the_list_is_loaded_again() {
     let (_, cmds) = feed(memory_app(), vec![]);
     assert!(cmds.is_empty());
-    let (_, cmds) = update(memory_app(), Input::Bg(Bg::Done(Ok("aprobado: m12".into()))));
+    let (_, cmds) = update(
+        memory_app(),
+        Input::Bg(Bg::Done(Ok("aprobado: m12".into()))),
+    );
     assert!(cmds.contains(&Cmd::LoadMemory) && cmds.contains(&Cmd::LoadHome));
     let (a, cmds) = feed(memory_app(), vec![ch('r')]);
     assert_eq!(cmds, vec![Cmd::LoadMemory]);
@@ -190,7 +203,10 @@ fn after_an_action_the_list_is_loaded_again() {
 fn enter_shows_the_whole_memory_with_where_it_came_from() {
     let (a, _) = feed(memory_app(), vec![key(KeyCode::Enter)]);
     let t = screen_text(&a, 80, 24);
-    assert!(t.contains("m12") && t.contains("pendiente de revisión"), "{t}");
+    assert!(
+        t.contains("m12") && t.contains("pendiente de revisión"),
+        "{t}"
+    );
     assert!(t.contains("origen externo"), "{t}");
     assert_clean(&t);
 }
@@ -244,7 +260,8 @@ fn hostile_memory_text_is_cleaned_before_it_is_drawn() {
         .enumerate()
         .map(|(i, h)| mrow(100 + i64::try_from(i).unwrap(), h, State::Quarantine, h, h))
         .collect();
-    d.recent.push(mrow(7, "semántico", State::Active, "persona", HOSTILE[0]));
+    d.recent
+        .push(mrow(7, "semántico", State::Active, "persona", HOSTILE[0]));
     let mut a = memory_app();
     a = update(a, Input::Bg(Bg::Memory(Ok(Box::new(d))))).0;
     for (w, h) in SIZES {
@@ -297,9 +314,21 @@ fn run_detail_marks_a_recalled_memory_useful_or_wrong_and_nothing_else() {
     let t = screen_text(&a, 120, 30);
     assert!(t.contains("recordó [m3] m7"), "{t}");
     let (a, cmds) = feed(a, vec![ch('+')]);
-    assert_eq!(cmds, vec![Cmd::MemoryFeedback { id: 3, useful: true }]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::MemoryFeedback {
+            id: 3,
+            useful: true
+        }]
+    );
     let (a, cmds) = feed(a, vec![key(KeyCode::Tab), ch('-')]);
-    assert_eq!(cmds, vec![Cmd::MemoryFeedback { id: 7, useful: false }]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::MemoryFeedback {
+            id: 7,
+            useful: false
+        }]
+    );
     assert!(screen_text(&a, 120, 30).contains("recordó m3 [m7]"));
     for (w, h) in SIZES {
         let t = screen_text(&a, w, h);
@@ -307,7 +336,11 @@ fn run_detail_marks_a_recalled_memory_useful_or_wrong_and_nothing_else() {
         assert_clean(&t);
     }
     // A run that recalled nothing: the keys explain instead of sending.
-    let a = open_detail(with_runs(), detail(ID1, crate::cli::runs::Status::Pending), false);
+    let a = open_detail(
+        with_runs(),
+        detail(ID1, crate::cli::runs::Status::Pending),
+        false,
+    );
     let (a, cmds) = feed(a, vec![ch('+')]);
     assert!(cmds.is_empty());
     assert!(a.flash.as_deref().unwrap().contains("ningún recuerdo"));
@@ -331,7 +364,7 @@ fn loading_reads_the_real_file_read_only_and_never_creates_it() {
     assert!(none.missing);
     assert!(!d.data.exists(), "reading must not create the memory");
 
-    let link = MemoryLink::open_write(&d.data, None).unwrap();
+    let link = MemoryLink::open_write(&d.data, &EmbedModel::none()).unwrap();
     link.remember("Vivo en Tolú", Some("identidad")).unwrap();
     drop(link);
     let loaded = MemoryData::load(&d).unwrap();
@@ -352,7 +385,7 @@ fn a_36_escape_sequences_stored_in_the_file_do_not_reach_the_terminal() {
     let tmp = tempfile::tempdir().unwrap();
     let d = dirs(tmp.path());
     // Set the file up the normal way, then add hostile rows with the raw engine.
-    drop(MemoryLink::open_write(&d.data, None).unwrap());
+    drop(MemoryLink::open_write(&d.data, &EmbedModel::none()).unwrap());
     let engine = Engine::open(
         &MemoryLink::db_path(&d.data),
         OpenMode::ReadWrite,

@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, MemoryInput, Observer};
-use clio_brain::memory_link::{MemoryLink, RunFacts};
+use clio_brain::memory_link::{EmbedModel, MemoryLink, RunFacts};
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -338,7 +338,7 @@ pub struct Prepared {
     prompt_name: String,
     /// `~/.local/share/clio` and the embedding model directory (when it is on disk).
     data: PathBuf,
-    model: Option<PathBuf>,
+    model: Arc<EmbedModel>,
     /// The jail was proven: `run_tests` is offered.
     pub jail: bool,
     pub jail_note: String,
@@ -405,7 +405,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         jail_note: jail.summary(),
         program,
         data: dirs.data.clone(),
-        model: Some(MemoryLink::model_dir(&dirs.home)).filter(|m| m.is_dir()),
+        model: EmbedModel::of_home(&dirs.home),
     })
 }
 
@@ -460,7 +460,17 @@ pub fn execute(
     // Memory, at the start: the fixed blocks and what is relevant, as data. A memory that cannot
     // be opened never stops a run.
     let mut run_memory = RunMemory::default();
-    match MemoryLink::open_read(&p.data, p.model.as_deref()) {
+    // Nothing active, nothing to recall: the model is not even loaded then.
+    let anything = MemoryLink::open_read(&p.data, &EmbedModel::none())
+        .ok()
+        .flatten()
+        .is_some_and(|l| l.counts().is_ok_and(|c| c.0 > 0));
+    let recall_from = if anything {
+        MemoryLink::open_read(&p.data, &p.model)
+    } else {
+        Ok(None)
+    };
+    match recall_from {
         Ok(Some(link)) => {
             run_memory.note = link.note();
             let r = link.recall_for(instruction, &p.scrubber);
@@ -523,7 +533,7 @@ pub fn execute(
     };
     // Memory, at the close: one batch, after the loop. A failure here is a line, never an error.
     let files: Vec<String> = ch.iter().map(|c| c.rel.clone()).collect();
-    match MemoryLink::open_write(&p.data, p.model.as_deref()) {
+    match MemoryLink::open_write(&p.data, &p.model) {
         Ok(link) => {
             let facts = RunFacts {
                 run_id: id.clone(),

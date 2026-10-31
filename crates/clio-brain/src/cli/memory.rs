@@ -3,17 +3,15 @@
 //! something (`remember`, `promote`, `archive`, `feedback`) act as the person; the agent has no
 //! way to reach any of them (S-25, S-26). There is no `purge` here: it comes with PURGE.
 
-use clio_brain::memory_link::{
-    MemoryLink, Res, kind_label, origin_label, state_label,
-};
+use clio_brain::memory_link::{EmbedModel, MemoryLink, Res, kind_label, origin_label, state_label};
 use clio_memory::{MemoryId, MemoryRow, Signal, State};
 use serde_json::{Value, json};
 
+use super::Args;
 use super::apply::confirm;
 use super::home::Dirs;
 use super::tui::sanitize;
 use super::ui::{self, Style, clip};
-use super::Args;
 
 pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local/share/clio/memory.db)
 
@@ -36,12 +34,16 @@ fn id_of(s: &str) -> Res<MemoryId> {
 }
 
 fn open_read(dirs: &Dirs, model: bool) -> Res<Option<MemoryLink>> {
-    let dir = model.then(|| MemoryLink::model_dir(&dirs.home)).filter(|m| m.is_dir());
-    MemoryLink::open_read(&dirs.data, dir.as_deref())
+    let m = if model {
+        EmbedModel::of_home(&dirs.home)
+    } else {
+        EmbedModel::none()
+    };
+    MemoryLink::open_read(&dirs.data, &m)
 }
 
 fn open_write(dirs: &Dirs) -> Res<MemoryLink> {
-    MemoryLink::open_write(&dirs.data, None)
+    MemoryLink::open_write(&dirs.data, &EmbedModel::none())
 }
 
 fn row_json(link: &MemoryLink, m: &MemoryRow) -> Value {
@@ -121,7 +123,11 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 let items: Vec<Value> = rows.iter().map(|m| row_json(&link, m)).collect();
                 print_json(&json!({"abstained": abstained, "results": items}))?;
             } else {
-                print_rows(st, &rows, "nada relevante (Clio prefiere no inventar un recuerdo)");
+                print_rows(
+                    st,
+                    &rows,
+                    "nada relevante (Clio prefiere no inventar un recuerdo)",
+                );
                 if let Some(n) = link.note() {
                     println!("{}", st.dim(&n));
                 }
@@ -189,7 +195,10 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                         st.yellow("en cuarentena: no se recuerda hasta que lo apruebes (promote)")
                     );
                 }
-                for l in ui::wrap(&sanitize::multiline(&m.content), ui::width().saturating_sub(10)) {
+                for l in ui::wrap(
+                    &sanitize::multiline(&m.content),
+                    ui::width().saturating_sub(10),
+                ) {
                     println!("  {l}");
                 }
             }
@@ -198,7 +207,9 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let block = args.value("--block")?;
             let text = args.rest()?.join(" ");
             if text.trim().is_empty() {
-                return Err("falta el texto: clio memory remember \"lo que quieres que recuerde\"".into());
+                return Err(
+                    "falta el texto: clio memory remember \"lo que quieres que recuerde\"".into(),
+                );
             }
             let link = open_write(dirs)?;
             let id = link.remember(&text, block.as_deref())?;
@@ -257,9 +268,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             match rest.as_slice() {
                 [] => {
                     let mut out = std::io::stdout().lock();
-                    link.engine()
-                        .export(&mut out)
-                        .map_err(|e| e.to_string())?;
+                    link.engine().export(&mut out).map_err(|e| e.to_string())?;
                 }
                 [file] => {
                     let s = link
@@ -292,9 +301,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     "file_bytes": s.file_bytes, "embedding_model_on_disk": model,
                 }))?;
             } else {
-                println!(
-                    "activos {active} · en cuarentena {quarantine} · archivados {archived}"
-                );
+                println!("activos {active} · en cuarentena {quarantine} · archivados {archived}");
                 println!(
                     "operaciones {} · vectores {} · archivo {} bytes",
                     s.operations, s.vectors, s.file_bytes

@@ -40,6 +40,23 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
 - `tests/attacks.rs`: the attack battery against the whole agent (see
   [`docs/mediciones/fase-1-ataques.md`](../../docs/mediciones/fase-1-ataques.md)). S-16: the
   agent's gateway protects `PROTECTED_PATHS` (`extensions`, `skills`, `.pi`, `.claude`, `.git`).
+- `memory_link`: the agent's side of `clio-memory` and the ONLY writer on behalf of a run. Opens
+  `<data>/memory.db` (0600, scope `clio`, never elsewhere) with four actors, each with its own
+  quota: `persona` (the only one that writes `user` origin, promotes and archives), `agente`,
+  `sesion` and `importador`. `recall_for` builds the fixed blocks plus what is relevant, each under
+  its own token budget, and abstains when nothing is; the agent shows it to the model as data in a
+  new `memoria` context layer (`AgentLoop::memory`, `ContextReport::memory`). `close_run` writes
+  ONE batch after the loop: the run's own episodic record (active only if the run never touched
+  outside content, quarantine otherwise) and up to five `RECORDAR:` / `PROCEDIMIENTO:` lines of
+  the final message, always quarantined as external (procedures wait for a person on top of that).
+  A refusal (secret, quota, size) is a line in `CloseReport`, never an error. The embedding model
+  (`EmbedModel`, optional `model2vec` feature, on by default) loads once per process and only on
+  demand; without it everything works by text. CLI `clio memory` (`src/cli/memory.rs`: `search`,
+  `list`, `show`, `remember`, `promote`, `archive`, `feedback`, `export`, `stats`; no `purge`
+  until PURGE exists) and the Memory screen (`m`, `src/cli/tui/memory.rs`). Tests:
+  `tests/memory_agent.rs` (cycle, quarantine, procedures, quotas, abstention, secrets),
+  `tests/memory_cli.rs` (every subcommand, two real runs with a scripted adapter, pty), attacks
+  10, 11 and 35 to 37 in `tests/attacks.rs`.
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

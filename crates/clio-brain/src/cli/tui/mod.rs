@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clio_brain::agent::{Event, Observer};
-use clio_brain::memory_link::MemoryLink;
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_memory::Signal;
 use crossterm::event::{self, Event as Term, KeyEventKind};
 use crossterm::terminal::{
@@ -321,7 +321,7 @@ impl Ctx {
             ),
             Cmd::MemoryPromote { id } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, None)?;
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
                     link.promote(memory_id(&id)?)?;
                     Ok::<_, String>(format!("aprobado: m{id}; desde ahora se recuerda"))
                 },
@@ -329,7 +329,7 @@ impl Ctx {
             ),
             Cmd::MemoryArchive { id } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, None)?;
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
                     link.archive(memory_id(&id)?)?;
                     Ok::<_, String>(format!("archivado: m{id}; ya no se recuerda"))
                 },
@@ -337,8 +337,12 @@ impl Ctx {
             ),
             Cmd::MemoryFeedback { id, useful } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, None)?;
-                    let signal = if useful { Signal::Useful } else { Signal::Wrong };
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let signal = if useful {
+                        Signal::Useful
+                    } else {
+                        Signal::Wrong
+                    };
                     link.feedback(clio_memory::MemoryId(id), signal)?;
                     Ok::<_, String>(format!(
                         "anotado para m{id}: {} (nunca borra el recuerdo)",

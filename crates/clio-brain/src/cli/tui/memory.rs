@@ -3,7 +3,7 @@
 //! after a question. Every text here comes from the memory file and is sanitized before it is
 //! drawn. No boxes, like the rest.
 
-use clio_brain::memory_link::{MemoryLink, kind_label, origin_label, state_label};
+use clio_brain::memory_link::{EmbedModel, MemoryLink, kind_label, origin_label, state_label};
 use clio_memory::State;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -46,7 +46,7 @@ impl MemoryData {
     /// Reads the file read-only. An error comes back as text for the screen.
     pub fn load(dirs: &Dirs) -> Result<Self, String> {
         // Listing needs no embeddings: the model is not loaded here, only looked for.
-        let Some(link) = MemoryLink::open_read(&dirs.data, None)? else {
+        let Some(link) = MemoryLink::open_read(&dirs.data, &EmbedModel::none())? else {
             return Ok(Self {
                 missing: true,
                 ..Self::default()
@@ -192,7 +192,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                     r.kind,
                     r.origin,
                     r.actor,
-                    r.source.as_deref().map_or(String::new(), |s| format!("fuente {s}")),
+                    r.source
+                        .as_deref()
+                        .map_or(String::new(), |s| format!("fuente {s}")),
                     r.content
                 );
                 app.notice = Some(text);
@@ -289,13 +291,20 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         t.dot(),
         plural(d.pending.len(), "pendiente", "pendientes"),
         t.dot(),
-        plural(usize::try_from(d.archived).unwrap_or(0), "archivado", "archivados"),
+        plural(
+            usize::try_from(d.archived).unwrap_or(0),
+            "archivado",
+            "archivados"
+        ),
     );
     if let Some(n) = &d.note {
         state = format!("{state} {} {n}", t.dot());
     }
     lines.push(Line::from(Span::styled(
-        sanitize::line(&state).chars().take(usize::from(area.width)).collect::<String>(),
+        sanitize::line(&state)
+            .chars()
+            .take(usize::from(area.width))
+            .collect::<String>(),
         t.dim(),
     )));
     if d.missing {
@@ -341,7 +350,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             seen_pending = true;
             rows.push((
                 None,
-                section(t, &format!("pendientes de revisión ({n_pending})"), area.width),
+                section(
+                    t,
+                    &format!("pendientes de revisión ({n_pending})"),
+                    area.width,
+                ),
             ));
         }
         if !*pending && !seen_recent {

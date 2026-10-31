@@ -118,6 +118,8 @@ pub struct Planned {
     pub workspace: String,
 }
 
+// One value per frame or event, moved once: boxing `Bg` would only add an allocation per agent event.
+#[allow(clippy::large_enum_variant)]
 pub enum Input {
     Key(KeyEvent),
     Paste(String),
@@ -671,7 +673,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         let verb = match c.action {
             Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
             Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
-            Action::Promote => format!("Aprobar el recuerdo m{} (pasa a activo y se recordará)", c.id),
+            Action::Promote => format!(
+                "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
+                c.id
+            ),
             Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
         };
         let lines = vec![

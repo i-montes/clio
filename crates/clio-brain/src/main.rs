@@ -60,7 +60,16 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     }
     if !matches!(
         cmd.as_str(),
-        "init" | "run" | "diff" | "apply" | "undo" | "runs" | "show" | "vault" | "doctor" | "memory"
+        "init"
+            | "run"
+            | "diff"
+            | "apply"
+            | "undo"
+            | "runs"
+            | "show"
+            | "vault"
+            | "doctor"
+            | "memory"
     ) {
         eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
         return Ok(2);

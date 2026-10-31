@@ -380,8 +380,20 @@ const DETAIL_LIST: &[Bind] = &[
         "elegir el recuerdo usado",
         false,
     ),
-    b(&[Char('+')], Act::Useful, "+", "el recuerdo elegido fue útil", false),
-    b(&[Char('-')], Act::Wrong, "-", "el recuerdo elegido estaba equivocado", false),
+    b(
+        &[Char('+')],
+        Act::Useful,
+        "+",
+        "el recuerdo elegido fue útil",
+        false,
+    ),
+    b(
+        &[Char('-')],
+        Act::Wrong,
+        "-",
+        "el recuerdo elegido estaba equivocado",
+        false,
+    ),
     b(&[Char('?')], Act::Help, "?", "ayuda", true),
     b(
         &[ESC, Char('q'), Ctrl('c')],
@@ -662,7 +674,13 @@ const MEMORY_FILTER: &[Bind] = &[
     b(&[ESC], Act::Back, "Esc", "borrar la búsqueda", true),
     b(&[Code(KeyCode::Down)], Act::Down, "↓", "bajar", false),
     b(&[Code(KeyCode::Up)], Act::Up, "↑", "subir", false),
-    b(&[Ctrl('c')], Act::Back, "Ctrl-C", "borrar la búsqueda", false),
+    b(
+        &[Ctrl('c')],
+        Act::Back,
+        "Ctrl-C",
+        "borrar la búsqueda",
+        false,
+    ),
 ];
 
 const HELP: &[Bind] = &[

@@ -21,13 +21,12 @@
 //! The embedding model is optional: without it everything works by text and `note()` says so.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clio_memory::{
     ActorId, ActorInfo, ActorKind, ContextOpts, Engine, Error, MemoryId, MemoryRow, MemoryType,
-    OpenMode, Origin, Proposal, Quota, RecallOpts, ScopeId, SearchOpts, Signal, State,
-    SystemClock,
+    OpenMode, Origin, Proposal, Quota, RecallOpts, ScopeId, SearchOpts, Signal, State, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -227,14 +226,53 @@ fn quota(max: u32) -> Quota {
     }
 }
 
-/// Attaches the embedder when a model directory is given and loads.
-fn with_model(engine: Engine, model: Option<&Path>) -> (Engine, bool, Option<String>) {
-    match model {
-        Some(dir) => match load_embedder(dir) {
-            Ok(emb) => (engine.with_embedder(emb), true, None),
-            Err(e) => (engine, false, Some(e)),
-        },
-        None => (engine, false, None),
+/// The embedding model: loaded at most once per process (reading it takes seconds, and a run
+/// opens the memory twice), and only when something asks for it. Share it with an `Arc`.
+pub struct EmbedModel {
+    dir: Option<PathBuf>,
+    cell: OnceLock<Result<Arc<dyn clio_memory::Embedder>, String>>,
+}
+
+impl EmbedModel {
+    /// A model in `dir`, or none (`None`): memory then works by text only.
+    pub fn new(dir: Option<PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            dir,
+            cell: OnceLock::new(),
+        })
+    }
+
+    /// No model, never loads anything.
+    pub fn none() -> Arc<Self> {
+        Self::new(None)
+    }
+
+    /// The model Clio would use in `home`: the local one when it is on disk.
+    pub fn of_home(home: &Path) -> Arc<Self> {
+        Self::new(Some(MemoryLink::model_dir(home)).filter(|m| m.is_dir()))
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.dir.is_some()
+    }
+
+    fn get(&self) -> Result<Option<Arc<dyn clio_memory::Embedder>>, String> {
+        let Some(dir) = &self.dir else {
+            return Ok(None);
+        };
+        self.cell
+            .get_or_init(|| load_embedder(dir))
+            .clone()
+            .map(Some)
+    }
+}
+
+/// Attaches the embedder when there is a model and it loads.
+fn with_model(engine: Engine, model: &EmbedModel) -> (Engine, bool, Option<String>) {
+    match model.get() {
+        Ok(Some(emb)) => (engine.with_embedder(emb), true, None),
+        Ok(None) => (engine, false, None),
+        Err(e) => (engine, false, Some(e)),
     }
 }
 
@@ -250,7 +288,7 @@ impl MemoryLink {
     /// Opens (creating on first use) `<data>/memory.db` for writing, with the scope, the four
     /// actors and the fixed blocks in place. `model` is the embedding model directory, if it
     /// should be used. Waits a little for another writer (a run closing while the screen acts).
-    pub fn open_write(data: &Path, model: Option<&Path>) -> Res<Self> {
+    pub fn open_write(data: &Path, model: &EmbedModel) -> Res<Self> {
         let path = Self::db_path(data);
         if !data.is_dir() {
             private_dir(data)?;
@@ -311,7 +349,7 @@ impl MemoryLink {
 
     /// Opens for reading when the file exists and was set up; `None` otherwise. Never creates or
     /// changes anything, and does not wait for the writer.
-    pub fn open_read(data: &Path, model: Option<&Path>) -> Res<Option<Self>> {
+    pub fn open_read(data: &Path, model: &EmbedModel) -> Res<Option<Self>> {
         let path = Self::db_path(data);
         if !path.is_file() {
             return Ok(None);
@@ -501,10 +539,8 @@ impl MemoryLink {
         };
         self.propose_into(
             &mut rep,
-            self.actors.sesion,
-            MemoryType::Episodic,
+            (self.actors.sesion, MemoryType::Episodic, origin),
             episode,
-            origin,
             f,
             "run",
         );
@@ -527,10 +563,8 @@ impl MemoryLink {
             }
             self.propose_into(
                 &mut rep,
-                self.actors.agente,
-                kind,
+                (self.actors.agente, kind, Origin::External),
                 text(body, 400),
-                Origin::External,
                 f,
                 "agente",
             );
@@ -544,13 +578,13 @@ impl MemoryLink {
         rep
     }
 
+    /// One proposal of the batch; `(actor, kind, origin)` says who writes what and how far to
+    /// trust it.
     fn propose_into(
         &self,
         rep: &mut CloseReport,
-        actor: ActorId,
-        kind: MemoryType,
+        (actor, kind, origin): (ActorId, MemoryType, Origin),
         content: String,
-        origin: Origin,
         f: &RunFacts,
         who: &str,
     ) {
