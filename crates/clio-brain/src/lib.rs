@@ -3,4 +3,5 @@
 pub mod agent;
 pub mod control;
 pub mod models;
+pub mod vault_link;
 pub mod verify;

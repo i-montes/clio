@@ -17,6 +17,11 @@ The brain that runs on the VPS. This crate is the library; the binary comes late
   `clio-bench` JSON (`Request` on stdin, `Response` on stdout), retries failures and empty answers.
   The agent has no tool that runs code, so it cannot run tests: nothing outside the model verifies
   its result, and the contract waits (`Blocked`) instead of closing as done.
+- `vault_link`: the gateway side of the vault process. `VaultPolicy` is the gateway's
+  `SecretPolicy`, answered by the vault's `check`. `SecretExecutor` is its `Executor`: it
+  resolves `{{secreto:name}}` last, for the action's tool and domains only, runs the tool with the
+  real values and sends every output through the vault's filter (dropped if the vault is down).
+  `AgentLoop` still holds an in-process `Scrubber`; wiring it to the remote filter is not done.
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

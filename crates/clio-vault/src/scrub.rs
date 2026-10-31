@@ -3,6 +3,8 @@
 //! because a redaction usually means somebody tried to leak.
 
 use clio_core::{Clock, SystemClock};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -10,7 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// Shorter values would shred ordinary text; the vault refuses to store them.
 pub(crate) const MIN_VALUE_LEN: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Form {
     Plain,
     Base64,
@@ -33,8 +35,27 @@ struct Needle {
     text: String,
 }
 
+/// A variant of a secret that is not loaded yet (task 272): only its length and a digest keyed
+/// with this process's random key, so the value cannot be read back from it.
+struct Masked {
+    name: String,
+    form: Form,
+    len: usize,
+    digest: [u8; 32],
+}
+
+/// What the vault stores (sealed) for each secret so a lazy unlock never decrypts its value.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Print {
+    form: Form,
+    len: usize,
+    digest: [u8; 32],
+}
+
 struct Shared {
     clock: Arc<dyn Clock>,
+    pkey: [u8; 32],
+    masked: Mutex<Vec<Masked>>,
     needles: Mutex<Vec<Needle>>,
     log: Mutex<Vec<Redaction>>,
     count: AtomicU64,
@@ -66,6 +87,10 @@ impl Scrubber {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self(Arc::new(Shared {
             clock,
+            // shortcut: if the system has no randomness the key is zero; the masked digests are
+            // then only unkeyed SHA-256 held in memory, which still never holds a value.
+            pkey: crate::crypto::random().unwrap_or([0; 32]),
+            masked: Mutex::new(Vec::new()),
             needles: Mutex::new(Vec::new()),
             log: Mutex::new(Vec::new()),
             count: AtomicU64::new(0),
@@ -78,18 +103,11 @@ impl Scrubber {
         if value.len() < MIN_VALUE_LEN {
             return;
         }
-        let mut forms = vec![(Form::Plain, value.to_string())];
-        forms.extend(url_variants(value).map(|v| (Form::UrlEncoded, v)));
-        forms.extend(
-            base64_variants(value)
-                .into_iter()
-                .map(|v| (Form::Base64, v)),
-        );
+        lock(&self.0.masked).retain(|m| m.name != name);
         let mut needles = lock(&self.0.needles);
-        for (form, text) in forms {
-            // A variant too short would match unrelated text; a repeated one is already covered.
-            let dup = needles.iter().any(|n| n.text == text);
-            if text.len() >= MIN_VALUE_LEN && !dup {
+        for (form, text) in variants(value) {
+            // A repeated variant is already covered.
+            if !needles.iter().any(|n| n.text == text) {
                 needles.push(Needle {
                     name: name.to_string(),
                     form,
@@ -101,20 +119,82 @@ impl Scrubber {
         needles.sort_by_key(|n| std::cmp::Reverse(n.text.len()));
     }
 
-    pub fn scrub(&self, text: &str) -> String {
-        let mut out = text.to_string();
-        let mut hits = Vec::new();
-        for n in lock(&self.0.needles).iter() {
-            if out.contains(&n.text) {
-                out = out.replace(&n.text, &marker(&n.name));
-                hits.push((n.name.clone(), n.form));
+    /// Teach it a secret it has not loaded: only digests, no value (task 272).
+    pub(crate) fn add_masked(&self, name: &str, prints: &[Print]) {
+        let mut masked = lock(&self.0.masked);
+        for p in prints {
+            masked.push(Masked {
+                name: name.to_string(),
+                form: p.form,
+                len: p.len,
+                digest: self.keyed(&p.digest),
+            });
+        }
+    }
+
+    /// The secret was just loaded: from now on the scrubber knows its full value.
+    pub(crate) fn promote(&self, name: &str, value: &str) {
+        let had = {
+            let mut m = lock(&self.0.masked);
+            let n = m.len();
+            m.retain(|x| x.name != name);
+            m.len() != n
+        };
+        if had {
+            self.add(name, value);
+        }
+    }
+
+    fn keyed(&self, digest: &[u8; 32]) -> [u8; 32] {
+        Sha256::new()
+            .chain_update(self.0.pkey)
+            .chain_update(digest)
+            .finalize()
+            .into()
+    }
+
+    /// Replaces every window of `text` whose keyed digest matches a masked variant.
+    /// shortcut: one SHA-256 per byte offset and distinct length, so cost grows with output size
+    /// times the number of distinct secret lengths; upgrade with a rolling hash if outputs get big.
+    fn scrub_masked(&self, text: &str) -> (String, Vec<(String, Form)>) {
+        let masked = lock(&self.0.masked);
+        let mut lens: Vec<usize> = masked.iter().map(|m| m.len).collect();
+        lens.sort_unstable();
+        lens.dedup();
+        let mut found: Vec<(usize, usize, String, Form)> = Vec::new();
+        for len in lens {
+            for i in (0..=text.len().saturating_sub(len)).filter(|&i| text.is_char_boundary(i)) {
+                let Some(w) = text.get(i..i + len) else {
+                    continue;
+                };
+                let d = self.keyed(&Sha256::digest(w.as_bytes()).into());
+                if let Some(m) = masked.iter().find(|m| m.len == len && m.digest == d) {
+                    found.push((i, i + len, m.name.clone(), m.form));
+                }
             }
         }
-        let (out, patterns) = redact_patterns(&out);
-        hits.extend(std::iter::repeat_n(
-            ("patrón".to_string(), Form::Pattern),
-            patterns,
-        ));
+        found.sort_by_key(|f| f.0);
+        let (mut out, mut at, mut hits) = (String::new(), 0, Vec::new());
+        for (start, end, name, form) in found {
+            if start >= at {
+                out.push_str(&text[at..start]);
+                out.push_str(&marker(&name));
+                at = end;
+                hits.push((name, form));
+            }
+        }
+        out.push_str(&text[at..]);
+        (out, hits)
+    }
+
+    /// What `scrub` would redact in `text`, without redacting or logging (task 257: searching
+    /// files for vault values).
+    pub fn find(&self, text: &str) -> Vec<(String, Form)> {
+        self.apply(text).1
+    }
+
+    pub fn scrub(&self, text: &str) -> String {
+        let (out, hits) = self.apply(text);
         let at_ms = self.0.clock.now_ms();
         let mut log = lock(&self.0.log);
         for (name, form) in hits {
@@ -124,6 +204,25 @@ impl Scrubber {
         out
     }
 
+    fn apply(&self, text: &str) -> (String, Vec<(String, Form)>) {
+        let mut out = text.to_string();
+        let mut hits = Vec::new();
+        for n in lock(&self.0.needles).iter() {
+            if out.contains(&n.text) {
+                out = out.replace(&n.text, &marker(&n.name));
+                hits.push((n.name.clone(), n.form));
+            }
+        }
+        let (out, masked_hits) = self.scrub_masked(&out);
+        hits.extend(masked_hits);
+        let (out, patterns) = redact_patterns(&out);
+        hits.extend(std::iter::repeat_n(
+            ("patrón".to_string(), Form::Pattern),
+            patterns,
+        ));
+        (out, hits)
+    }
+
     pub fn redactions(&self) -> Vec<Redaction> {
         lock(&self.0.log).clone()
     }
@@ -131,6 +230,31 @@ impl Scrubber {
     pub fn redaction_count(&self) -> u64 {
         self.0.count.load(Ordering::Relaxed)
     }
+}
+
+/// Every form a value can take that the filter looks for.
+fn variants(value: &str) -> Vec<(Form, String)> {
+    let mut forms = vec![(Form::Plain, value.to_string())];
+    forms.extend(url_variants(value).map(|v| (Form::UrlEncoded, v)));
+    forms.extend(
+        base64_variants(value)
+            .into_iter()
+            .map(|v| (Form::Base64, v)),
+    );
+    // A variant too short would match unrelated text.
+    forms.retain(|(_, t)| t.len() >= MIN_VALUE_LEN);
+    forms
+}
+
+pub(crate) fn prints(value: &str) -> Vec<Print> {
+    variants(value)
+        .into_iter()
+        .map(|(form, t)| Print {
+            form,
+            len: t.len(),
+            digest: Sha256::digest(t.as_bytes()).into(),
+        })
+        .collect()
 }
 
 fn marker(name: &str) -> String {
