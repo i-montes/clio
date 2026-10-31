@@ -2,8 +2,9 @@
 """The program behind `clio-bench real|record --cmd`: reads a Request as JSON on stdin, asks an
 OpenAI-compatible chat completions API, writes a Response as JSON on stdout.
 
-The key comes only from the environment (OPENCODE_API_KEY) and is never printed. Defaults point
-at OpenCode Go; LLM_BASE_URL changes the API. Standard library only.
+The key comes from the environment (OPENCODE_API_KEY) or, when that is not set, from
+~/.config/clio/opencode-api-key (mode 0600; a file others can read is refused). It is never
+printed. Defaults point at OpenCode Go; LLM_BASE_URL changes the API. Standard library only.
 """
 import json
 import os
@@ -21,9 +22,24 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
-key = os.environ.get("OPENCODE_API_KEY")
+def read_key() -> str:
+    key = os.environ.get("OPENCODE_API_KEY")
+    if key:
+        return key
+    path = os.path.expanduser("~/.config/clio/opencode-api-key")
+    try:
+        if os.stat(path).st_mode & 0o077:
+            fail(f"{path} must not be readable by group or others (chmod 600)")
+        with open(path) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        fail("OPENCODE_API_KEY is not set and ~/.config/clio/opencode-api-key does not exist")
+    return ""
+
+
+key = read_key()
 if not key:
-    fail("OPENCODE_API_KEY is not set")
+    fail("the API key is empty")
 
 request = json.load(sys.stdin)
 body = {
