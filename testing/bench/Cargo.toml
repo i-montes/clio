@@ -7,13 +7,17 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clio-brain = { path = "../../crates/clio-brain" }
+clio-core = { path = "../../crates/clio-core" }
 clio-fake-llm = { path = "../fake-llm" }
 clio-trace = { path = "../../crates/clio-trace" }
+clio-vault = { path = "../../crates/clio-vault" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
 [dev-dependencies]
 rusqlite = { version = "0.41.1", features = ["bundled"] }
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

@@ -12,12 +12,17 @@ use clio_bench::{
 use clio_fake_llm::{Llm, Record, Replay, Response, Scripted, Tape};
 use clio_trace::{FixedClock, SystemClock, Trace};
 
-const HELP: &str = "usage: clio-bench <replay|record|real|synthetic-tape> --tasks DIR [--tape FILE] [--prices FILE] \
+const HELP: &str = "usage: clio-bench <replay|record|real|synthetic-tape|agent> --tasks DIR [--tape FILE] [--prices FILE] \
 [--repeats N] [--trace DB] [--provider P] [--model M] [--cmd PROGRAM [ARG...]] \
 [--baseline FILE --thresholds FILE] [--save-baseline FILE] \
+(agent: [--prompt FILE] [--tags A,B] [--only ID,ID] [--keep DIR]) \
 (--cmd takes the rest of the line, so it goes last)";
 
-const FLAGS: [&str; 11] = [
+const FLAGS: [&str; 15] = [
+    "prompt",
+    "tags",
+    "only",
+    "keep",
     "tasks",
     "tape",
     "prices",
@@ -68,6 +73,9 @@ fn go() -> Result<ExitCode, String> {
     let one = |name: &str| flags.get(name).and_then(|v| v.first()).cloned();
     let need = |name: &str| one(name).ok_or(format!("missing --{name}"));
     let all = load_tasks(&PathBuf::from(need("tasks")?))?;
+    if mode == "agent" {
+        return agent_mode(&flags, &all);
+    }
     // A task with a workspace needs an agent that edits files; the single-call baseline cannot run it.
     let (tasks, needs_agent): (Vec<_>, Vec<_>) =
         all.into_iter().partition(|t| t.workspace.is_none());
@@ -106,21 +114,7 @@ fn go() -> Result<ExitCode, String> {
         Trace::open(&trace_path, SystemClock)
     }
     .map_err(|e| e.to_string())?;
-    for p in serde_json::from_str::<Vec<Price>>(
-        &std::fs::read_to_string(need("prices")?).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?
-    {
-        trace
-            .set_price(
-                &p.provider,
-                &p.model,
-                0,
-                p.input_per_mtok,
-                p.output_per_mtok,
-            )
-            .map_err(|e| e.to_string())?;
-    }
+    set_prices(&trace, &need("prices")?)?;
     let repeats = one("repeats").map_or(Ok(1), |n| n.parse::<u32>().map_err(|e| e.to_string()))?;
     let agent = SingleCall {
         llm,
@@ -152,6 +146,108 @@ fn go() -> Result<ExitCode, String> {
         if !bad.is_empty() {
             return Ok(ExitCode::from(1));
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn set_prices(trace: &Trace, file: &str) -> Result<(), String> {
+    for p in serde_json::from_str::<Vec<Price>>(
+        &std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?
+    {
+        trace
+            .set_price(
+                &p.provider,
+                &p.model,
+                0,
+                p.input_per_mtok,
+                p.output_per_mtok,
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// `agent`: the real agent loop over the tasks that have a workspace. Exit 0 unless setup fails;
+/// there is no gate yet (the baseline is a measurement, not a limit).
+fn agent_mode(
+    flags: &BTreeMap<String, Vec<String>>,
+    all: &[clio_bench::Task],
+) -> Result<ExitCode, String> {
+    let one = |name: &str| flags.get(name).and_then(|v| v.first()).cloned();
+    let need = |name: &str| one(name).ok_or(format!("missing --{name}"));
+    let list = |name: &str| -> Vec<String> {
+        one(name)
+            .map(|v| v.split(',').map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let cmd = flags
+        .get("cmd")
+        .filter(|v| !v.is_empty())
+        .ok_or("missing --cmd PROGRAM")?;
+    let provider = one("provider").unwrap_or_else(|| "opencode-go".into());
+    let model = one("model").unwrap_or_else(|| "beam-free".into());
+    let prompt_path =
+        PathBuf::from(one("prompt").unwrap_or_else(|| "prompts/system/clio-agent@2.md".into()));
+    let system_prompt = std::fs::read_to_string(&prompt_path)
+        .map_err(|e| format!("{}: {e}", prompt_path.display()))?;
+    // The first line is `version: N`; the prompt name is the file name before the `@`.
+    let version = prompt_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agent")
+        .to_owned();
+    let prices: Vec<Price> =
+        serde_json::from_str(&std::fs::read_to_string(need("prices")?).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let price = prices
+        .iter()
+        .find(|p| p.provider == provider && p.model == model)
+        .ok_or_else(|| format!("no price for {provider}/{model} in the prices file"))?;
+    let keep = one("keep").map(PathBuf::from);
+    let run_root = match &keep {
+        Some(p) => {
+            std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            p.clone()
+        }
+        None => private_dir()?,
+    };
+    let trace_path = match one("trace") {
+        Some(p) => PathBuf::from(p),
+        None => private_dir()?.join("trace.db"),
+    };
+    let trace = Trace::open(&trace_path, SystemClock).map_err(|e| e.to_string())?;
+    set_prices(&trace, &need("prices")?)?;
+    let cfg = clio_bench::agent_bench::AgentBenchConfig {
+        provider,
+        model,
+        system_prompt,
+        prompt_version: version,
+        program: cmd[0].clone(),
+        args: cmd[1..].to_vec(),
+        repeats: one("repeats").map_or(Ok(1), |n| n.parse::<u32>().map_err(|e| e.to_string()))?,
+        tags: list("tags"),
+        only: list("only"),
+        run_root: run_root.clone(),
+        cleanup: keep.is_none(),
+        price_in_micro_per_mtok: price.input_per_mtok,
+        price_out_micro_per_mtok: price.output_per_mtok,
+        backoff_ms: vec![5_000, 20_000, 60_000],
+    };
+    let report = clio_bench::agent_bench::run_agent(all, &cfg, &trace)?;
+    println!("{}", report.line());
+    print!("{}", report.table());
+    if let Some(path) = one("save-baseline") {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n",
+        )
+        .map_err(|e| e.to_string())?;
+        println!("baseline saved to {path}");
+    }
+    if keep.is_none() {
+        let _ = std::fs::remove_dir_all(&run_root);
     }
     Ok(ExitCode::SUCCESS)
 }

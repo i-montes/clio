@@ -3,6 +3,8 @@
 //! Replay mode answers from a tape and never touches the network, so a run is reproducible; a
 //! real run asks a command (see `CommandLlm`).
 
+pub mod agent_bench;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;

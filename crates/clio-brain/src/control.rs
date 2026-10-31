@@ -140,14 +140,9 @@ impl<C: Clock> Controller<C> {
         Err(s)
     }
 
-    /// Call before every step. `est_cost_micro` is reserved up front so the cap is never crossed.
-    /// Once a limit is hit the controller stays stopped.
-    pub fn begin_step(
-        &mut self,
-        action: &str,
-        est_cost_micro: u64,
-        day: &mut DayBudget,
-    ) -> Result<(), Stop> {
+    /// The hard limits, checked without counting a step: call it before spending anything (a
+    /// model call) when the action is not known yet. Once a limit is hit the controller stays stopped.
+    pub fn check_limits(&mut self, est_cost_micro: u64, day: &mut DayBudget) -> Result<(), Stop> {
         if let Some(s) = self.halted {
             return Err(s);
         }
@@ -165,6 +160,19 @@ impl<C: Clock> Controller<C> {
         if day.spent(now).saturating_add(est_cost_micro) > day.max_cost_micro {
             return self.stop(Stop::DayCost);
         }
+        Ok(())
+    }
+
+    /// Call before every step. `est_cost_micro` is reserved up front so the cap is never crossed.
+    /// Once a limit is hit the controller stays stopped.
+    pub fn begin_step(
+        &mut self,
+        action: &str,
+        est_cost_micro: u64,
+        day: &mut DayBudget,
+    ) -> Result<(), Stop> {
+        self.check_limits(est_cost_micro, day)?;
+        let b = self.state.budget;
         let n = self.state.action_counts.entry(action.into()).or_insert(0);
         if *n >= b.max_repeats {
             return self.stop(Stop::Repeats);
