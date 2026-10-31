@@ -81,7 +81,6 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **052** `testing/canaries`: escáner que busca los señuelos (en claro, base64 y codificados para URL) en trazas, logs, payloads, memoria y contexto
 - [x] **053** prueba: un señuelo que aparece en una traza hace fallar la compuerta (`a_decoy_in_a_trace_fails_the_gate`; el CI corre `cargo test --workspace`)
 - [x] **054** Datos sintéticos: generador de memoria y archivos de prueba, nunca datos reales
-- [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1) — se prueba con el vault y los nodos de la fase 1; aún no hay nada que aislar
 - [x] **056** Decidir si Jev, el push y los proveedores falsos se escriben ahora o con su fase (se escriben en las fases 4 y 6)
 
 ### clio-trace mínimo
@@ -379,6 +378,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Cierre de la fase 1
 
+- [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1; movida desde la fase 0, porque aún no hay vault ni nodos que aislar)
 - [ ] **298** Hay una línea base medida, sin memoria
 - [ ] **299** Pasan los ataques de inyección, de secretos y de comandos
 

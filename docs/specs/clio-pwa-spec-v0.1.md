@@ -14,7 +14,7 @@ La superficie desde la que hablas con Clio, apruebas y revisas, en cualquier dis
 | Aprobaciones | lista y detalle con la acción exacta, el diff, el destino y el origen; aprobar con passkey (S-36) |
 | Resumen | lo que pasó mientras no mirabas, agrupado |
 | Trazas | la cascada de clio-trace, ordenable por tiempo o por costo |
-| Memoria | buscar; revisar cuarentena, conflictos y revisión pendiente; promover, revertir o purgar con passkey |
+| Memoria | buscar; revisar cuarentena y revisión pendiente; promover, revertir o purgar con passkey |
 | Políticas y trabajos | ver, proponer, renovar y revocar |
 | Nodos | estado, últimas conexiones; revocar un dispositivo |
 | Costos | por día, nivel y modelo; topes |
