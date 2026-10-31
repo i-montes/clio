@@ -191,6 +191,14 @@ version = "0.0.0"
 [[package]]
 name = "clio-node"
 version = "0.0.0"
+dependencies = [
+ "clio-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "clio-policy"
