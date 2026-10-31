@@ -7,6 +7,7 @@ pub mod apply;
 pub mod diff;
 pub mod doctor;
 pub mod home;
+pub mod jail;
 pub mod runs;
 pub mod tui;
 pub mod ui;

@@ -13,6 +13,9 @@ const ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/openai_co
 /// The default system prompt, compiled in so the binary works without the repository.
 pub const DEFAULT_PROMPT_NAME: &str = "clio-agent@2";
 const DEFAULT_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@2.md");
+/// The same prompt plus `run_tests`: used instead of the default when the jail is proven.
+pub const JAIL_PROMPT_NAME: &str = "clio-agent@3";
+const JAIL_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@3.md");
 
 pub struct Dirs {
     pub config: PathBuf,
@@ -118,17 +121,23 @@ impl Config {
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
     }
 
-    /// The system prompt text for `model.prompt`.
-    pub fn prompt_text(&self, dirs: &Dirs) -> Res<String> {
+    /// The system prompt (name for the trace, text) for `model.prompt`. The default one becomes
+    /// `clio-agent@3` when the jail is proven; a prompt the person chose is never swapped.
+    pub fn prompt_text(&self, dirs: &Dirs, jail: bool) -> Res<(String, String)> {
         if self.model.prompt == DEFAULT_PROMPT_NAME {
-            return Ok(DEFAULT_PROMPT.to_owned());
+            return Ok(if jail {
+                (JAIL_PROMPT_NAME.to_owned(), JAIL_PROMPT.to_owned())
+            } else {
+                (DEFAULT_PROMPT_NAME.to_owned(), DEFAULT_PROMPT.to_owned())
+            });
         }
         let name = &self.model.prompt;
         if name.contains('/') || name.contains("..") {
             return Err(format!("bad prompt name {name:?}"));
         }
         let p = dirs.config.join("prompts").join(format!("{name}.md"));
-        std::fs::read_to_string(&p).map_err(|e| io_err(&p, &e))
+        let text = std::fs::read_to_string(&p).map_err(|e| io_err(&p, &e))?;
+        Ok((name.clone(), text))
     }
 }
 

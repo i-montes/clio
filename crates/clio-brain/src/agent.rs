@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::control::{Budget, Controller, DayBudget, OutputFilter, Stop};
+use crate::verify::{Checklist, Criterion, ExternalSignal, Scope, Signal};
 
 /// One chat message. Same JSON as the bench's `Request` messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +267,9 @@ pub struct AgentOutcome {
     /// Turns whose answer was not a valid turn (empty, no JSON, wrong keys).
     pub protocol_errors: u32,
     pub tainted: bool,
+    /// How many times `run_tests` ran, and whether the last run came after the last change and passed.
+    pub tests_run: u32,
+    pub verified_by_tests: bool,
     pub contract_state: Option<contract::State>,
     pub report: ClosingReport,
     pub transcript: Vec<Msg>,
@@ -288,6 +292,9 @@ pub struct AgentConfig {
     /// Level 3 only: a person already approved the contract (a bench has no one to ask).
     pub person_approves_long: bool,
     pub max_result_chars: usize,
+    /// Offer `run_tests` (the jail). The caller must have proven the jail (`Jail::probe` and
+    /// `Jail::self_test`) before setting this; it also switches the sandbox to copy snapshots.
+    pub run_tests: bool,
 }
 
 impl AgentConfig {
@@ -310,6 +317,7 @@ impl AgentConfig {
             min_level: Level::Direct,
             person_approves_long: false,
             max_result_chars: 12_000,
+            run_tests: false,
         }
     }
 }
@@ -358,6 +366,14 @@ fn arg_specs(tool: &str) -> Vec<ArgSpec> {
     };
     match tool {
         "write_file" => vec![a("path", ArgKind::Path), a("content", ArgKind::Text)],
+        "run_tests" => vec![
+            a("runner", ArgKind::Text),
+            ArgSpec {
+                name: "target".into(),
+                kind: ArgKind::Path,
+                required: false,
+            },
+        ],
         _ => vec![a("path", ArgKind::Path)],
     }
 }
@@ -383,6 +399,23 @@ pub fn tool_help(registry: &Registry) -> String {
         .join("\n")
 }
 
+/// What the last `run_tests` said, kept as the external signal for the contract.
+#[derive(Debug, Default)]
+struct TestState {
+    runs: u32,
+    /// Result of the last run; `None` before the first one.
+    last: Option<TestRun>,
+    /// A file was written after the last run: its result no longer says anything.
+    wrote_since: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TestRun {
+    passed: bool,
+    exit_code: Option<i64>,
+    tail: String,
+}
+
 pub struct AgentLoop {
     clock: Arc<dyn Clock>,
     cfg: AgentConfig,
@@ -395,6 +428,7 @@ pub struct AgentLoop {
     pub observer: Box<dyn Observer>,
     /// When set to true, the loop ends with `Ending::Cancelled` before its next model call.
     pub cancel: Option<Arc<AtomicBool>>,
+    tests: TestState,
 }
 
 impl AgentLoop {
@@ -407,7 +441,10 @@ impl AgentLoop {
         scratch: &Path,
     ) -> Result<Self, String> {
         let e = |x: &dyn std::fmt::Display| x.to_string();
-        let registry = Registry::basic().map_err(|x| e(&x))?;
+        let mut registry = Registry::basic().map_err(|x| e(&x))?;
+        if cfg.run_tests {
+            clio_node::register_run_tests(&mut registry).map_err(|x| e(&x))?;
+        }
         let mut tools = Vec::new();
         let mut descriptions = Vec::new();
         for t in registry.visible() {
@@ -434,7 +471,9 @@ impl AgentLoop {
         })?;
         std::fs::create_dir_all(&cfg.run_dir).map_err(|x| e(&x))?;
         let log = EffectLog::open(&cfg.run_dir.join("effects.jsonl")).map_err(|x| e(&x))?;
-        let sandbox = Sandbox::new(workdir, scratch).map_err(|x| e(&x))?;
+        let mut sandbox = Sandbox::new(workdir, scratch).map_err(|x| e(&x))?;
+        // A program that runs in the folder can edit files in place: snapshots must be copies.
+        sandbox.set_copy_snapshots(cfg.run_tests);
         Ok(Self {
             clock,
             cfg,
@@ -450,6 +489,7 @@ impl AgentLoop {
             asker: Box::new(NobodyHome),
             observer: Box::new(NoObserver),
             cancel: None,
+            tests: TestState::default(),
         })
     }
 
@@ -464,17 +504,23 @@ impl AgentLoop {
     }
 
     /// Scrub, cut, filter and wrap a tool result as data the model must not obey.
-    fn present(&self, source: Source, raw: &str) -> String {
+    fn present(&self, source: Source, raw: &str, keep_end: bool) -> String {
         let mut text = self
             .scrubber
             .as_ref()
             .map_or_else(|| raw.to_owned(), |s| s.scrub(raw));
-        if text.chars().count() > self.cfg.max_result_chars {
-            text = text
-                .chars()
-                .take(self.cfg.max_result_chars)
-                .collect::<String>()
-                + "\n[truncated]";
+        let n = text.chars().count();
+        if n > self.cfg.max_result_chars {
+            text = if keep_end {
+                // Test output: the summary of the failures is at the end.
+                let tail: String = text.chars().skip(n - self.cfg.max_result_chars).collect();
+                format!("[truncated: the end is shown]\n{tail}")
+            } else {
+                text.chars()
+                    .take(self.cfg.max_result_chars)
+                    .collect::<String>()
+                    + "\n[truncated]"
+            };
         }
         if let Some(f) = &self.filter {
             text = f
@@ -491,6 +537,7 @@ impl AgentLoop {
     ) -> Result<AgentOutcome, String> {
         let clock = self.clock.clone();
         let id = self.cfg.task_id.clone();
+        self.tests = TestState::default();
 
         // 1. Triage, over the person's message only (S-07).
         let mut triager = Triager::rules_only(clock.clone());
@@ -652,9 +699,46 @@ impl AgentLoop {
             _ => None,
         };
         let mut pending = Vec::new();
+        // The only thing that can close the contract as done: the jail's `run_tests` passed AFTER
+        // the last change. It is a signal from outside the model (verify::ExternalSignal).
+        let mut checklist = Checklist {
+            criteria: vec![Criterion::new(
+                "goal",
+                "the project's tests pass after the last change",
+                Scope::Goal,
+            )],
+        };
+        if let (Some(last), false) = (&self.tests.last, self.tests.wrote_since) {
+            checklist.apply(
+                "goal",
+                Signal::External(ExternalSignal::TestResult {
+                    name: "run_tests".into(),
+                    passed: last.passed,
+                }),
+            );
+        }
+        let verified = matches!(ending, Ending::Final) && checklist.is_done();
         let next_step = match &ending {
+            Ending::Final if verified => {
+                done.push("run_tests passed after the last change".into());
+                pending
+                    .push("the tests passed; they may not cover everything the task asks".into());
+                "read the diff and decide whether to apply it".to_owned()
+            }
             Ending::Final => {
-                pending.push("nothing outside the model has verified the result".into());
+                pending.push(match &self.tests.last {
+                    None => "nothing outside the model has verified the result: no tests were run"
+                        .to_owned(),
+                    Some(t) if self.tests.wrote_since => format!(
+                        "files changed after the last test run ({})",
+                        if t.passed {
+                            "it had passed"
+                        } else {
+                            "it had failed"
+                        }
+                    ),
+                    Some(t) => format!("the last test run FAILED (exit code {:?})", t.exit_code),
+                });
                 "run the checks on the result".to_owned()
             }
             Ending::Stopped(s) => {
@@ -680,6 +764,17 @@ impl AgentLoop {
             if !c.state().is_closed() {
                 let _ = if stop.is_some() || !matches!(ending, Ending::Final) {
                     c.close_failed(&next, ck)
+                } else if verified {
+                    let tail = self.tests.last.as_ref().map(|t| t.tail.clone());
+                    let evidence = contract::Evidence {
+                        observed: format!(
+                            "run_tests passed after the last change. End of its output: {}",
+                            tail.unwrap_or_default()
+                        ),
+                    };
+                    c.check_criterion(0, Some(evidence))
+                        .and_then(|()| c.close_ok(&next, ck))
+                        .or_else(|_| c.block(ck))
                 } else {
                     c.block(ck) // done by the model's word only: waits for a check from outside
                 };
@@ -700,6 +795,8 @@ impl AgentLoop {
             denied,
             protocol_errors,
             tainted: session.tainted(),
+            tests_run: self.tests.runs,
+            verified_by_tests: verified,
             contract_state,
             report: ClosingReport {
                 done,
@@ -708,6 +805,44 @@ impl AgentLoop {
             },
             transcript: messages,
         })
+    }
+
+    /// The message for the model after `run_tests`, and the signal for the contract. What the
+    /// tests print is external content: scrubbed, wrapped as data, and it taints the session. The
+    /// exit code is ours (the jail's), so it goes outside the markers.
+    fn tests_message(&mut self, result: &Value, session: &mut clio_gateway::Session) -> String {
+        let passed = result["passed"].as_bool().unwrap_or(false);
+        let exit_code = result["exit_code"].as_i64();
+        let output = result["output"].as_str().unwrap_or_default();
+        let tail: String = {
+            let n = output.chars().count();
+            output.chars().skip(n.saturating_sub(400)).collect()
+        };
+        self.tests.runs += 1;
+        self.tests.wrote_since = false;
+        self.tests.last = Some(TestRun {
+            passed,
+            exit_code,
+            tail: self
+                .scrubber
+                .as_ref()
+                .map_or(tail.clone(), |s| s.scrub(&tail)),
+        });
+        session.mark_external(Source::ToolResult);
+        self.gateway.mark_tainted(session.id());
+        let how = if result["timed_out"].as_bool() == Some(true) {
+            "killed: time limit".to_owned()
+        } else {
+            format!(
+                "exit code {}",
+                exit_code.map_or("none".into(), |c| c.to_string())
+            )
+        };
+        format!(
+            "Result of run_tests: {} ({how}).\n{}",
+            if passed { "PASSED" } else { "FAILED" },
+            self.present(Source::ToolResult, output, true)
+        )
     }
 
     fn outcome_without_loop(&self, level: Level, ending: Ending) -> AgentOutcome {
@@ -723,6 +858,8 @@ impl AgentLoop {
             denied: 0,
             protocol_errors: 0,
             tainted: false,
+            tests_run: 0,
+            verified_by_tests: false,
             contract_state: None,
             report: ClosingReport {
                 done: vec![],
@@ -745,11 +882,14 @@ impl AgentLoop {
         session: &mut clio_gateway::Session,
         spent: u64,
     ) -> (String, Option<Vec<String>>) {
-        let target = args
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let text = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default();
+        let target = if name == "run_tests" {
+            format!("{} {}", text("runner"), text("target"))
+                .trim()
+                .to_owned()
+        } else {
+            text("path").to_owned()
+        };
         let (text, ran, outcome, rule) =
             self.decide_and_run(name, args, n, level, plan, session, spent);
         self.observer.event(&Event::Tool {
@@ -769,7 +909,7 @@ impl AgentLoop {
     /// and rule (a malformed call never reached the gateway: denied by `protocol`).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn decide_and_run(
-        &self,
+        &mut self,
         name: &str,
         args: Value,
         n: u32,
@@ -847,6 +987,17 @@ impl AgentLoop {
                     .get(name)
                     .and_then(|f| f.tool.effect)
                     .unwrap_or(Effect::Irreversible);
+                if name == "run_tests" {
+                    return (
+                        self.tests_message(&out.result, session),
+                        Some(vec![]),
+                        d.outcome,
+                        d.rule,
+                    );
+                }
+                if effect > Effect::Read {
+                    self.tests.wrote_since = true;
+                }
                 let (source, raw) = match (name, out.result.get("content").and_then(Value::as_str))
                 {
                     ("read_file", Some(c)) => (Source::File, c.to_owned()),
@@ -867,7 +1018,7 @@ impl AgentLoop {
                     vec![]
                 };
                 (
-                    format!("Result of {name}:\n{}", self.present(source, &raw)),
+                    format!("Result of {name}:\n{}", self.present(source, &raw, false)),
                     Some(lines),
                     d.outcome,
                     d.rule,

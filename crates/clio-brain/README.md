@@ -20,8 +20,17 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   `AgentLoop::observer` (trait `Observer`, one method `event(&Event)`, empty by default) reports
   `Started`, `Step`, `ProtocolError`, `Tool` (with the gateway's outcome and rule) and `Final`;
   `AgentLoop::cancel` (an `AtomicBool`) ends the loop with `Ending::Cancelled` before the next model call.
-  The agent has no tool that runs code, so it cannot run tests: nothing outside the model verifies
-  its result, and the contract waits (`Blocked`) instead of closing as done.
+  Without the jail the agent has no tool that runs code: nothing outside the model verifies its
+  result and the contract waits (`Blocked`). With `AgentConfig::run_tests` (set only when the jail
+  is PROVEN: `cli/jail.rs` runs `Jail::probe` and the self-test) it also has `run_tests`, governed
+  by the gateway like any tool (declared args `runner` and `target`, effect `LocalReversible`).
+  Its output is external: scrubbed, wrapped as `UNTRUSTED-DATA`, it taints the session; the exit
+  code is outside the markers. If the last `run_tests` came after the last write and passed, the
+  contract closes `ClosedOk` (through `verify::ExternalSignal::TestResult`); no tests, a failure
+  or a later write leave it `Blocked`. The CLI uses prompt `clio-agent@3` when the jail is proven
+  and `clio-agent@2` otherwise; `CLIO_JAIL=off` switches it off. `clio doctor` prints one PASS or
+  FAIL per escape attempt (`--json`: `jail`). Tests: `tests/run_tests.rs` (attack 34 is in
+  `tests/attacks.rs`); they print `SKIPPED` without user namespaces (`CLIO_REQUIRE_JAIL=1` fails).
 - `vault_link`: the gateway side of the vault process. `VaultPolicy` is the gateway's
   `SecretPolicy`, answered by the vault's `check`. `SecretExecutor` is its `Executor`: it
   resolves `{{secreto:name}}` last, for the action's tool and domains only, runs the tool with the
