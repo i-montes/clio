@@ -10,6 +10,23 @@ use clio_memory::*;
 use common::*;
 
 fn run(db: Option<&Path>, args: &[&str]) -> Output {
+    // Tests run in parallel threads. While one thread holds an engine open, another can fork a
+    // child that inherits a copy of the lock file until its `exec`; the lock then outlives the
+    // first thread's `drop(engine)` for a moment. That is the harness, not the product: wait it
+    // out. The only tests that want the lock error use the library, not this helper.
+    for _ in 0..60 {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio-memory"));
+        if let Some(db) = db {
+            cmd.arg("--db").arg(db);
+        }
+        let o = cmd.env("USER", "tester").args(args).output().unwrap();
+        let locked = o.status.code() == Some(1)
+            && String::from_utf8_lossy(&o.stderr).contains("another process owns the write lock");
+        if !locked {
+            return o;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio-memory"));
     if let Some(db) = db {
         cmd.arg("--db").arg(db);
