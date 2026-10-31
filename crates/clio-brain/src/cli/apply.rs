@@ -88,7 +88,7 @@ fn workspace(meta_ws: &str) -> Res<PathBuf> {
         .map_err(|e| format!("la carpeta original {meta_ws}: {e}"))
 }
 
-fn confirm(q: &str) -> bool {
+pub(super) fn confirm(q: &str) -> bool {
     print!("{q} [s/N] ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();

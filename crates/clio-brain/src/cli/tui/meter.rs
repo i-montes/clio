@@ -120,6 +120,20 @@ fn layers(c: &ContextReport) -> Vec<Layer> {
             tokens: c.tools,
         },
         Layer {
+            label: "memoria",
+            short: "memoria",
+            detail: format!(
+                "{} {}",
+                c.memory_items,
+                if c.memory_items == 1 {
+                    "recuerdo"
+                } else {
+                    "recuerdos"
+                }
+            ),
+            tokens: c.memory,
+        },
+        Layer {
             label: "conversación",
             short: "conversación",
             detail: format!(

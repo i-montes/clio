@@ -30,6 +30,8 @@ pub struct Detail {
     pub sel: usize,
     pub in_diff: bool,
     pub scroll: usize,
+    /// Which of the memories this run recalled `+` and `-` judge.
+    pub mem_sel: usize,
     /// What the run used and its context, from `usage.json` (empty for an older run).
     pub usage: RunUsage,
     /// Height of the diff area at the last draw, to bound scrolling.
@@ -59,6 +61,7 @@ impl Detail {
             sel: 0,
             in_diff: false,
             scroll: 0,
+            mem_sel: 0,
             usage: RunUsage::load(&run.path),
             view_h: Cell::new(10),
         })
@@ -68,6 +71,16 @@ impl Detail {
         self.sel = old.sel.min(self.rows.len().saturating_sub(1));
         self.in_diff = old.in_diff && !self.rows.is_empty();
         self.scroll = old.scroll;
+        self.mem_sel = old.mem_sel.min(self.recalled().len().saturating_sub(1));
+    }
+
+    /// The ids of the memories the run brought into its context.
+    pub fn recalled(&self) -> &[i64] {
+        self.info
+            .summary
+            .as_ref()
+            .and_then(|s| s.memory.as_ref())
+            .map_or(&[], |m| m.recalled.as_slice())
     }
 
     fn total_lines(&self) -> usize {
@@ -133,6 +146,23 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             Act::Apply => return vec![Cmd::PlanApply { id }],
             Act::Undo => ask_undo(app),
             Act::Back => return app.go_home(),
+            Act::Tab => {
+                let n = d.recalled().len();
+                if n == 0 {
+                    app.flash = Some("este run no usó ningún recuerdo".into());
+                } else {
+                    d.mem_sel = (d.mem_sel + 1) % n;
+                }
+            }
+            Act::Useful | Act::Wrong => match d.recalled().get(d.mem_sel) {
+                Some(m) => {
+                    return vec![Cmd::MemoryFeedback {
+                        id: *m,
+                        useful: act == Act::Useful,
+                    }];
+                }
+                None => app.flash = Some("este run no usó ningún recuerdo".into()),
+            },
             Act::Diff if !d.rows.is_empty() => {
                 d.in_diff = true;
                 d.scroll = 0;
@@ -173,8 +203,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
     let t = app.theme;
     let info = &d.info;
+    let mem_line = memory_line(app, d);
     let [sum_a, _, msg_a, _, files_a] = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(4 + u16::from(mem_line.is_some())),
         Constraint::Length(1),
         Constraint::Percentage(40),
         Constraint::Length(1),
@@ -214,6 +245,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             t.fail(),
         ))),
     }
+    lines.extend(mem_line);
     f.render_widget(Paragraph::new(lines), sum_a);
 
     let msg = info
@@ -322,4 +354,41 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
         head,
     );
     f.render_widget(Paragraph::new(lines), body);
+}
+
+/// `memoria  recordó m3 [m7] · guardó 1 (1 en cuarentena)`: what the memory did in this run. The
+/// memory in brackets is the one `+` and `-` judge (Tab changes it).
+fn memory_line(app: &App, d: &Detail) -> Option<Line<'static>> {
+    let t = app.theme;
+    let m = d.info.summary.as_ref()?.memory.as_ref()?;
+    let recalled = if m.recalled.is_empty() {
+        "no recordó nada".to_owned()
+    } else {
+        let ids: Vec<String> = m
+            .recalled
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                if i == d.mem_sel {
+                    format!("[m{id}]")
+                } else {
+                    format!("m{id}")
+                }
+            })
+            .collect();
+        format!("recordó {} (+ útil, - equivocado)", ids.join(" "))
+    };
+    let mut text = format!(
+        "{recalled} {} guardó {} ({} en cuarentena)",
+        t.dot(),
+        m.saved.len(),
+        m.pending
+    );
+    if !m.rejected.is_empty() {
+        text += &format!(" {} {} rechazado(s)", t.dot(), m.rejected.len());
+    }
+    Some(Line::from(vec![
+        Span::styled("memoria ", t.dim()),
+        Span::raw(clean(&text)),
+    ]))
 }

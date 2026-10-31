@@ -134,6 +134,7 @@ impl Live {
             Event::Usage(u) => self.block().usage(u),
             Event::Exchange(x) => self.block().exchange(x),
             Event::Decision(d) => self.block().decision(d),
+            Event::Memory { title, lines } => self.blocks.push(Block::memory(title, lines)),
         }
     }
 

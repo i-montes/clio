@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, Observer};
+use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, MemoryInput, Observer};
+use clio_brain::memory_link::{MemoryLink, RunFacts};
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -132,6 +133,23 @@ pub struct RunSummary {
     pub excluded_secrets: Vec<String>,
     pub final_message: Option<String>,
     pub pending: Vec<String>,
+    /// What the memory did in this run; `None` for a run from before the memory existed.
+    pub memory: Option<RunMemory>,
+}
+
+/// What the memory did in one run: what it recalled (ids, for feedback) and what it saved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunMemory {
+    pub recalled: Vec<i64>,
+    pub abstained: bool,
+    pub saved: Vec<i64>,
+    pub pending: usize,
+    pub rejected: Vec<String>,
+    /// The one discreet line for the closing panel.
+    pub line: String,
+    /// About the embedding model, when it is not in use.
+    pub note: Option<String>,
 }
 
 impl RunSummary {
@@ -318,6 +336,9 @@ pub struct Prepared {
     cfg: Config,
     prompt: String,
     prompt_name: String,
+    /// `~/.local/share/clio` and the embedding model directory (when it is on disk).
+    data: PathBuf,
+    model: Option<PathBuf>,
     /// The jail was proven: `run_tests` is offered.
     pub jail: bool,
     pub jail_note: String,
@@ -383,6 +404,8 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         jail: jail.ready(),
         jail_note: jail.summary(),
         program,
+        data: dirs.data.clone(),
+        model: Some(MemoryLink::model_dir(&dirs.home)).filter(|m| m.is_dir()),
     })
 }
 
@@ -434,6 +457,34 @@ pub fn execute(
     ));
     agent.debug = Some(dbg.on.clone());
     agent.cancel = cancel;
+    // Memory, at the start: the fixed blocks and what is relevant, as data. A memory that cannot
+    // be opened never stops a run.
+    let mut run_memory = RunMemory::default();
+    match MemoryLink::open_read(&p.data, p.model.as_deref()) {
+        Ok(Some(link)) => {
+            run_memory.note = link.note();
+            let r = link.recall_for(instruction, &p.scrubber);
+            run_memory.recalled.clone_from(&r.ids);
+            run_memory.abstained = r.abstained;
+            let mut lines = r.debug.clone();
+            lines.extend(link.note());
+            agent.observer.event(&Event::Memory {
+                title: format!("recordó {} recuerdo(s)", r.items),
+                lines,
+            });
+            if r.items > 0 {
+                agent.memory = Some(MemoryInput {
+                    text: r.text,
+                    items: r.items,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(e) => agent.observer.event(&Event::Memory {
+            title: "la memoria no se pudo abrir".into(),
+            lines: vec![p.scrubber.scrub(&e)],
+        }),
+    }
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
     let mut outcome = agent.run(&mut model, instruction)?;
     // What the model said can carry a secret it was shown or made up: scrub what is saved and shown.
@@ -470,6 +521,35 @@ pub fn execute(
             .map(|c| c.rel.clone())
             .collect()
     };
+    // Memory, at the close: one batch, after the loop. A failure here is a line, never an error.
+    let files: Vec<String> = ch.iter().map(|c| c.rel.clone()).collect();
+    match MemoryLink::open_write(&p.data, p.model.as_deref()) {
+        Ok(link) => {
+            let facts = RunFacts {
+                run_id: id.clone(),
+                instruction: instruction.to_owned(),
+                finished: matches!(outcome.ending, clio_brain::agent::Ending::Final),
+                ending: ending_label(&format!("{:?}", outcome.ending)),
+                files,
+                final_message: outcome.final_message.clone(),
+                tainted: outcome.tainted,
+            };
+            let rep = link.close_run(&facts, &p.scrubber);
+            run_memory.saved = rep.saved.iter().map(|s| s.id).collect();
+            run_memory.pending = rep.pending();
+            run_memory.rejected.clone_from(&rep.rejected);
+            run_memory.line = rep.line();
+            run_memory.note = run_memory.note.or_else(|| link.note());
+            agent.observer.event(&Event::Memory {
+                title: "al cerrar propuso guardar".into(),
+                lines: rep.debug_lines(),
+            });
+        }
+        Err(e) => {
+            run_memory.line = format!("memoria: no se guardó nada ({})", p.scrubber.scrub(&e));
+            run_memory.rejected.push(run_memory.line.clone());
+        }
+    }
     let summary = RunSummary {
         id: id.clone(),
         workspace: p.ws.display().to_string(),
@@ -491,6 +571,7 @@ pub fn execute(
         excluded_secrets: p.scan.secrets.clone(),
         final_message: outcome.final_message,
         pending: outcome.report.pending,
+        memory: Some(run_memory),
     };
     write_json(&path.join("summary.json"), &summary)?;
     Ok(summary)
@@ -523,7 +604,11 @@ impl Observer for Progress {
                 clip(self.st, &sanitize::line(reason), 60)
             ),
             Event::Final => "el modelo dice que terminó".to_owned(),
-            Event::Context(_) | Event::Usage(_) | Event::Exchange(_) | Event::Decision(_) => {
+            Event::Context(_)
+            | Event::Usage(_)
+            | Event::Exchange(_)
+            | Event::Decision(_)
+            | Event::Memory { .. } => {
                 return;
             }
             Event::Tool {
@@ -686,6 +771,19 @@ fn print_panel(st: Style, s: &RunSummary) {
             "{}{}",
             " ".repeat(10),
             st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id))
+        );
+    }
+    if let Some(m) = s.memory.as_ref().filter(|m| !m.line.is_empty()) {
+        println!(
+            "{}{}",
+            label("memoria:"),
+            st.dim(&format!(
+                "{}{}",
+                sanitize::line(&m.line),
+                m.note
+                    .as_ref()
+                    .map_or(String::new(), |n| format!(" ({})", sanitize::line(n)))
+            ))
         );
     }
     println!();

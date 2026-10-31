@@ -228,6 +228,7 @@ dependencies = [
  "clio-contract",
  "clio-core",
  "clio-gateway",
+ "clio-memory",
  "clio-node",
  "clio-triage",
  "clio-vault",

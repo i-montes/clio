@@ -154,6 +154,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Act::Help => app.open_help(),
         Act::Context => app.open_view(Screen::Context),
         Act::Usage => app.open_view(Screen::Usage),
+        Act::Memory => return super::memory::opened(app),
         Act::Open | Act::Diff | Act::Apply | Act::Undo => return on_selected(app, act),
         _ => {}
     }

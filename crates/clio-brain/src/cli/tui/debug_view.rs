@@ -46,7 +46,7 @@ impl Block {
         b.lines.push((
             Kind::Dim,
             format!(
-                "  contexto {} tok aprox.: sistema {} ({}) · objetivo {} · herramientas {} · conversación {} ({} turnos) · externo {} ({}) · salidas {}",
+                "  contexto {} tok aprox.: sistema {} ({}) · objetivo {} · herramientas {} · conversación {} ({} turnos) · externo {} ({}) · salidas {} · memoria {} ({})",
                 tokens(c.total()),
                 tokens(c.system),
                 one(&c.prompt_version),
@@ -56,7 +56,9 @@ impl Block {
                 c.turns,
                 tokens(c.external_tokens()),
                 c.external.len(),
-                tokens(c.tool_outputs)
+                tokens(c.tool_outputs),
+                tokens(c.memory),
+                c.memory_items
             ),
         ));
         for i in &c.external {
@@ -64,6 +66,17 @@ impl Block {
                 Kind::Dim,
                 format!("    externo: {} {}", one(&i.name), tokens(i.tokens)),
             ));
+        }
+        b
+    }
+
+    /// What the memory recalled or proposed: one stored line per item.
+    pub fn memory(title: &str, lines: &[String]) -> Self {
+        let mut b = Self {
+            lines: vec![(Kind::Head, format!("memoria: {}", one(title)))],
+        };
+        for l in lines {
+            b.lines.push((Kind::Dim, format!("  {}", one(l))));
         }
         b
     }
