@@ -12,6 +12,7 @@ import json
 import os
 import pty
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -22,6 +23,26 @@ scenario = sys.argv[1]
 cfg = json.loads(sys.argv[2])
 buf = b""
 ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+CHILDREN = []
+
+
+def kill_children():
+    for child in CHILDREN:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def on_alarm(*_):
+    # Never hang a test run: whatever went wrong, kill the children and say so.
+    kill_children()
+    print(json.dumps({"timeout": True}))
+    os._exit(3)
+
+
+signal.signal(signal.SIGALRM, on_alarm)
+signal.alarm(110)
 
 
 def spawn(extra_env=None):
@@ -31,6 +52,7 @@ def spawn(extra_env=None):
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         os.chdir(cfg["cwd"])
         os.execve(cfg["clio"], ["clio"], env)
+    CHILDREN.append(pid)
     return pid, fd
 
 
@@ -74,12 +96,24 @@ def wait_for(path_fn, timeout=25.0):
     return None
 
 
-def finish(pid, fd):
+def finish(pid, fd, timeout=20.0):
     drain(fd)
-    _, status = os.waitpid(pid, 0)
+    end = time.time() + timeout
+    status = None
+    while time.time() < end:
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = st
+            break
+        drain(fd)
+        time.sleep(0.05)
+    if status is None:
+        # The program did not exit: kill it and report it, instead of waiting for ever.
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return "timeout"
     drain(fd)
-    code = os.waitstatus_to_exitcode(status)
-    return code
+    return os.waitstatus_to_exitcode(status)
 
 
 def type_text(fd, s):
