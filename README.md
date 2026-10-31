@@ -17,10 +17,15 @@ just test
 just audit   # cargo-deny and cargo-audit (S-41)
 ```
 
+## Using Clio on your PC
+
+`cargo build --release -p clio-brain -p clio-vault`, then `clio init`, `clio run --workspace DIR "instruction"`, `clio diff <id>`, `clio apply <id>`. The agent works on a copy of your project and you decide what goes back. Guide (in Spanish): [`docs/uso-local.md`](docs/uso-local.md).
+
 ## Layout
 
 - `crates/clio-memory`: generic, publishable on its own; depends on no other Clio crate.
 - `crates/*`: the rest of Clio (placeholders for now).
+- `adapters/models/openai_compat.py`: the model adapter `clio` calls (OpenAI-compatible API, key from `OPENCODE_API_KEY` or `~/.config/clio/opencode-api-key`).
 - `adapters/pi`, `apps/pwa`, `infra`, `testing/*`: placeholders.
 
 Platform-specific code (Linux only for now) is isolated and marked by name, never mixed into shared code. See [`docs/decisions/0002-platform-compatibility.md`](docs/decisions/0002-platform-compatibility.md).

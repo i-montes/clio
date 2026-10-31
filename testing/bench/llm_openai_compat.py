@@ -1,83 +1,10 @@
 #!/usr/bin/env python3
-"""The program behind `clio-bench real|record --cmd`: reads a Request as JSON on stdin, asks an
-OpenAI-compatible chat completions API, writes a Response as JSON on stdout.
-
-The key comes from the environment (OPENCODE_API_KEY) or, when that is not set, from
-~/.config/clio/opencode-api-key (mode 0600; a file others can read is refused). It is never
-printed. Defaults point at OpenCode Go; LLM_BASE_URL changes the API. Standard library only.
-"""
-import json
+"""Forwarder: the model adapter lives in adapters/models/openai_compat.py (it is a product piece,
+not a bench one). Kept at this path because the bench and the nightly workflow call it."""
 import os
-import sys
-import urllib.error
-import urllib.request
-import uuid
+import runpy
 
-BASE = os.environ.get("LLM_BASE_URL", "https://opencode.ai/inference/go/openai/v1").rstrip("/")
-TIMEOUT = int(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))
-
-
-def fail(message: str) -> None:
-    print(f"llm_openai_compat: {message}", file=sys.stderr)
-    sys.exit(1)
-
-
-def read_key() -> str:
-    key = os.environ.get("OPENCODE_API_KEY")
-    if key:
-        return key
-    path = os.path.expanduser("~/.config/clio/opencode-api-key")
-    try:
-        if os.stat(path).st_mode & 0o077:
-            fail(f"{path} must not be readable by group or others (chmod 600)")
-        with open(path) as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        fail("OPENCODE_API_KEY is not set and ~/.config/clio/opencode-api-key does not exist")
-    return ""
-
-
-key = read_key()
-if not key:
-    fail("the API key is empty")
-
-request = json.load(sys.stdin)
-body = {
-    "model": request["model"],
-    "messages": request["messages"],
-    "temperature": 0,
-}
-if request.get("max_tokens"):
-    body["max_tokens"] = request["max_tokens"]
-
-http = urllib.request.Request(
-    f"{BASE}/chat/completions",
-    data=json.dumps(body).encode(),
-    headers={
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        # The API sits behind Cloudflare, which refuses Python's default User-Agent (error 1010).
-        "User-Agent": "clio-bench/0.1",
-        # OpenCode asks for a session id per conversation, to route and cache. Each call here is
-        # its own conversation, so each gets its own id.
-        "x-opencode-session": str(uuid.uuid4()),
-    },
-)
-try:
-    with urllib.request.urlopen(http, timeout=TIMEOUT) as response:
-        answer = json.load(response)
-except urllib.error.HTTPError as e:
-    fail(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
-except Exception as e:  # network down, timeout, bad JSON
-    fail(f"{type(e).__name__}: {e}")
-
-message = (answer.get("choices") or [{}])[0].get("message", {})
-usage = answer.get("usage", {})
-json.dump(
-    {
-        "content": message.get("content") or "",
-        "input_tokens": int(usage.get("prompt_tokens", 0)),
-        "output_tokens": int(usage.get("completion_tokens", 0)),
-    },
-    sys.stdout,
+runpy.run_path(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "adapters", "models", "openai_compat.py"),
+    run_name="__main__",
 )

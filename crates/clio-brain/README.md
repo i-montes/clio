@@ -1,6 +1,6 @@
 # clio-brain
 
-The brain. It runs on the user's own machine by default (a VPS is optional, ADR 0006). This crate is the library; the binary comes later.
+The brain. It runs on the user's own machine by default (a VPS is optional, ADR 0006). This crate is the library plus the `clio` binary (`src/main.rs`, `src/cli/`): `init`, `run`, `diff`, `apply`, `undo`, `runs`, `show`, `vault`, `doctor`. `run` copies the workspace to `~/.local/share/clio/runs/<id>/sandbox/` (leaving out `.git`, heavy folders and secret-looking files), runs the agent there, and never touches the original; `apply` puts changes back only after a person confirms, refusing changed originals, protected paths and symlinks, with a backup for `undo`. Usage guide (Spanish): [`docs/uso-local.md`](../../docs/uso-local.md). Tests: `tests/cli.rs` (scripted model, no network).
 
 - `control`: hard budgets per task and per day (S-47), anti-loop counter, retry budget,
   checkpoints, plan check, rule feasibility, retry evidence package, model output filter.

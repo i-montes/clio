@@ -1,0 +1,288 @@
+//! `clio apply` and `clio undo`: the only way anything leaves the sandbox. A person confirms, the
+//! paths are checked one by one, and whatever is overwritten is saved in the run first.
+//!
+//! Hard refusals (`--force` never overrides them): a path that is not plain and relative, a
+//! protected path (`.git`, `.claude`, ...), a secret-looking name, a symbolic link anywhere on the
+//! way. Conflicts (`--force` overrides them): the original changed since the copy.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+
+use clio_brain::agent::PROTECTED_PATHS;
+use serde::{Deserialize, Serialize};
+
+use super::home::Dirs;
+use super::runs::{self, Run, read_json, write_json};
+use super::work::{self, Change, Kind, is_secret_name, plain_rel};
+use super::{Res, io_err, now_ms, sha_hex};
+
+#[derive(Serialize, Deserialize)]
+struct Entry {
+    path: String,
+    /// "modified", "created" or "deleted".
+    action: String,
+    /// Hash of the original before (None if it did not exist) and of what was written.
+    before: Option<String>,
+    after: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Applied {
+    at_ms: i64,
+    entries: Vec<Entry>,
+    /// Folders `apply` created, outermost first.
+    created_dirs: Vec<String>,
+}
+
+/// Why a path may never be written, or `None` if it is fine to consider.
+fn hard_refusal(rel: &str) -> Option<String> {
+    if !plain_rel(rel) {
+        return Some("not a plain relative path".into());
+    }
+    let comps: Vec<&str> = rel.split('/').collect();
+    if PROTECTED_PATHS.contains(&comps[0]) || comps.contains(&".git") {
+        return Some("protected path".into());
+    }
+    if comps.iter().any(|c| is_secret_name(c)) {
+        return Some("looks like a secret".into());
+    }
+    None
+}
+
+/// Walks `rel` under `ws` and refuses if any existing step is a symbolic link or leaves `ws`.
+fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
+    let mut cur = ws.to_path_buf();
+    for c in rel.split('/') {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err("a symbolic link is in the way".into());
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let mut existing = cur.as_path();
+    while !existing.exists() {
+        existing = existing.parent().unwrap_or(ws);
+    }
+    match existing.canonicalize() {
+        Ok(c) if c.starts_with(ws) => Ok(()),
+        _ => Err("resolves outside the workspace".into()),
+    }
+}
+
+fn hash_of(p: &Path) -> Option<String> {
+    std::fs::read(p).ok().map(|b| sha_hex(&b))
+}
+
+fn workspace(meta_ws: &str) -> Res<PathBuf> {
+    Path::new(meta_ws)
+        .canonicalize()
+        .map_err(|e| format!("the original workspace {meta_ws}: {e}"))
+}
+
+fn confirm(q: &str) -> bool {
+    print!("{q} [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut s = String::new();
+    std::io::stdin().lock().read_line(&mut s).is_ok()
+        && matches!(s.trim().to_lowercase().as_str(), "y" | "yes" | "s" | "si")
+}
+
+fn action(k: Kind) -> &'static str {
+    match k {
+        Kind::Modified => "modified",
+        Kind::Created => "created",
+        Kind::Deleted => "deleted",
+    }
+}
+
+pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
+    let run = runs::resolve(dirs, id)?;
+    if run.path.join("applied.json").exists() {
+        return Err(format!(
+            "run {} is already applied; `clio undo {}` first",
+            run.id, run.id
+        ));
+    }
+    let (meta, manifest) = (run.meta()?, run.manifest()?);
+    let ws = workspace(&meta.workspace)?;
+    let ch = work::changes(&run.sandbox(), &manifest)?;
+    if ch.is_empty() {
+        println!("run {} has no changes; nothing to apply", run.id);
+        return Ok(());
+    }
+
+    // Preflight everything before touching anything.
+    let (mut refused, mut conflicts) = (Vec::new(), Vec::new());
+    for c in &ch {
+        if let Some(why) = hard_refusal(&c.rel) {
+            refused.push(format!("{}: {why}", c.rel));
+            continue;
+        }
+        if let Err(why) = symlink_check(&ws, &c.rel) {
+            refused.push(format!("{}: {why}", c.rel));
+            continue;
+        }
+        let now = hash_of(&ws.join(&c.rel));
+        match (c.kind, &now) {
+            (Kind::Created, Some(_)) => {
+                conflicts.push(format!("{}: it exists in the original", c.rel))
+            }
+            (Kind::Modified | Kind::Deleted, None) => {
+                conflicts.push(format!("{}: it no longer exists in the original", c.rel));
+            }
+            (Kind::Modified | Kind::Deleted, Some(h)) if manifest.get(&c.rel) != Some(h) => {
+                conflicts.push(format!(
+                    "{}: it changed in the original since the copy",
+                    c.rel
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !refused.is_empty() {
+        return Err(format!(
+            "refused, nothing was applied:\n  {}",
+            refused.join("\n  ")
+        ));
+    }
+    if !conflicts.is_empty() && !force {
+        return Err(format!(
+            "the original changed, nothing was applied (--force overwrites it, with a backup):\n  {}",
+            conflicts.join("\n  ")
+        ));
+    }
+
+    runs::print_diff(&ws, &run, &manifest, &ch)?;
+    if !yes && !confirm(&format!("Apply {} file(s) to {}?", ch.len(), ws.display())) {
+        println!("not applied");
+        return Ok(());
+    }
+    let mut done = Applied {
+        at_ms: now_ms(),
+        ..Applied::default()
+    };
+    let result = write_all(&ws, &run, &ch, &mut done);
+    // Record what was done even if it stopped halfway, so `undo` can put it back.
+    write_json(&run.path.join("applied.json"), &done)?;
+    result?;
+    println!(
+        "applied {} file(s); undo with: clio undo {}",
+        done.entries.len(),
+        run.id
+    );
+    Ok(())
+}
+
+fn write_all(ws: &Path, run: &Run, ch: &[Change], done: &mut Applied) -> Res<()> {
+    for c in ch {
+        let target = ws.join(&c.rel);
+        let before = hash_of(&target);
+        if before.is_some() {
+            let b = run.path.join("backup").join(&c.rel);
+            if let Some(p) = b.parent() {
+                super::mkdir_private(p)?;
+            }
+            let bytes = std::fs::read(&target).map_err(|e| io_err(&target, &e))?;
+            super::write_private(&b, &bytes)?;
+        }
+        let after = match c.kind {
+            Kind::Deleted => {
+                std::fs::remove_file(&target).map_err(|e| io_err(&target, &e))?;
+                None
+            }
+            Kind::Modified | Kind::Created => {
+                let bytes =
+                    std::fs::read(run.sandbox().join(&c.rel)).map_err(|e| io_err(&target, &e))?;
+                if let Some(parent) = target.parent() {
+                    make_dirs(ws, parent, done)?;
+                }
+                std::fs::write(&target, &bytes).map_err(|e| io_err(&target, &e))?;
+                Some(sha_hex(&bytes))
+            }
+        };
+        done.entries.push(Entry {
+            path: c.rel.clone(),
+            action: action(c.kind).into(),
+            before,
+            after,
+        });
+    }
+    Ok(())
+}
+
+/// Creates missing folders under `ws`, noting each one so `undo` can remove it.
+fn make_dirs(ws: &Path, dir: &Path, done: &mut Applied) -> Res<()> {
+    let mut missing = Vec::new();
+    let mut cur = dir;
+    while !cur.exists() {
+        missing.push(cur.to_path_buf());
+        cur = cur.parent().ok_or("no parent folder")?;
+    }
+    for d in missing.iter().rev() {
+        std::fs::create_dir(d).map_err(|e| io_err(d, &e))?;
+        done.created_dirs.push(
+            d.strip_prefix(ws)
+                .map_err(|e| e.to_string())?
+                .display()
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
+    let run = runs::resolve(dirs, id)?;
+    let ap = run.path.join("applied.json");
+    if !ap.exists() {
+        return Err(format!(
+            "run {} has nothing applied (or it was already undone)",
+            run.id
+        ));
+    }
+    let done: Applied = read_json(&ap)?;
+    let ws = workspace(&run.meta()?.workspace)?;
+    let mut problems = Vec::new();
+    for e in &done.entries {
+        if let Some(why) = hard_refusal(&e.path).or_else(|| symlink_check(&ws, &e.path).err()) {
+            problems.push(format!("{}: {why}", e.path));
+        } else if hash_of(&ws.join(&e.path)) != e.after && !force {
+            problems.push(format!("{}: it changed after `apply`", e.path));
+        }
+    }
+    if !problems.is_empty() {
+        return Err(format!(
+            "not undone (--force overrides changes made after apply):\n  {}",
+            problems.join("\n  ")
+        ));
+    }
+    for e in done.entries.iter().rev() {
+        let target = ws.join(&e.path);
+        match &e.before {
+            Some(_) => {
+                let bytes = std::fs::read(run.path.join("backup").join(&e.path))
+                    .map_err(|x| format!("backup of {}: {x}", e.path))?;
+                std::fs::write(&target, bytes).map_err(|x| io_err(&target, &x))?;
+            }
+            None => {
+                if target.exists() {
+                    std::fs::remove_file(&target).map_err(|x| io_err(&target, &x))?;
+                }
+            }
+        }
+    }
+    for d in done.created_dirs.iter().rev() {
+        let _ = std::fs::remove_dir(ws.join(d)); // only succeeds when empty
+    }
+    std::fs::rename(&ap, run.path.join("undone.json")).map_err(|e| io_err(&ap, &e))?;
+    let n: BTreeMap<&str, usize> = done.entries.iter().fold(BTreeMap::new(), |mut m, e| {
+        *m.entry(e.action.as_str()).or_default() += 1;
+        m
+    });
+    println!("undone: {n:?}");
+    Ok(())
+}
