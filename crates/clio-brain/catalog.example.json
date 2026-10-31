@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "provider": "opencode-go",
+      "id": "beam-free",
+      "version": "2026-10-31",
+      "context_window": 128000,
+      "input_micro_per_mtok": 0,
+      "output_micro_per_mtok": 0,
+      "tools": true,
+      "vision": false,
+      "retention": "no_training",
+      "tier": "fast",
+      "levels": ["Direct", "Simple"],
+      "bench": { "run": "example-run", "passed": true }
+    }
+  ],
+  "data_routes": {
+    "public": ["opencode-go"],
+    "personal": ["opencode-go"]
+  }
+}
