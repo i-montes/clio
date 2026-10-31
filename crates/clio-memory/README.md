@@ -30,7 +30,7 @@ engine.revert(out.op, actor)?;
 - **`embed_pending(limit)`** computes vectors for memories that have none for the current model (`Engine::with_embedder`). `propose` never calls the model; until a memory has a vector it is found by text only. Switching models re-embeds everything on the next call.
 - **`recall(scope, query, opts)`** mixes full text and vectors (reciprocal rank fusion, a small recency boost, and a small nudge from feedback) and answers "nothing relevant" (`abstained`) instead of padding the list. Each hit carries its text, vector and recency scores and its confidence. Vector search is exact and written in safe Rust: about 70 ms for a whole `recall` over 50 000 memories of 256 dimensions on a Ryzen 7 5700X.
 - **`context(scope, opts)`** builds what goes into the prompt: fixed blocks (identity, rules, preferences; only a person edits them, only active memories enter, and they follow updates) and then what `recall` finds, each under its own token budget, as one short line per fact or as JSON.
-- Optional feature `model2vec` adds `Model2VecEmbedder::from_dir`, which reads a local Model2Vec model directory. The crate never downloads models and never opens network connections. On macOS, `just setup-model-macos` installs the default model (potion-multilingual-128M, pinned and checked by sha256) in `~/.cache/clio-models/`.
+- Optional feature `model2vec` adds `Model2VecEmbedder::from_dir`, which reads a local Model2Vec model directory. The crate never downloads models and never opens network connections. `just setup-model-macos` or `just setup-model-linux` installs the default model (potion-multilingual-128M, pinned and checked by sha256) in `~/.cache/clio-models/`.
 
 ## Deciding what to store
 

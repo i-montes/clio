@@ -6,6 +6,10 @@ setup:
 setup-model-macos:
     infra/models/install-potion.macos.sh
 
+# Linux only: download and verify the default embedding model (decision 0004).
+setup-model-linux:
+    infra/models/install-potion.linux.sh
+
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings

@@ -50,7 +50,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Terreno
 
-- [ ] **030** Subir el commit local `8cd2730` (prueba de independencia de clio-memory)
+- [x] **030** Subir el commit local `8cd2730` (prueba de independencia de clio-memory)
 - [ ] **031** Arreglar el CI: todas las ejecuciones terminan en `startup_failure` (revisar facturación y permisos de Actions)
 - [ ] **032** Confirmar que el CI corre en verde en Linux y macOS tras arreglarlo
 - [ ] **033** Confirmar que `cargo-deny` y `cargo-audit` corren en el CI y que fallan con una vulnerabilidad sembrada (S-41)
