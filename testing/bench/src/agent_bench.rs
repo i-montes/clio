@@ -50,6 +50,7 @@ pub struct RunDetail {
     pub ending: String,
     pub level: String,
     pub denied: u32,
+    pub protocol_errors: u32,
     pub tainted: bool,
     pub check_passed: bool,
     /// The check's last words, trimmed; for diagnosis, never for tuning prompts.
@@ -318,6 +319,7 @@ pub fn run_agent(
                     .as_ref()
                     .map_or_else(String::new, |o| format!("{:?}", o.level)),
                 denied: outcome.as_ref().map_or(0, |o| o.denied),
+                protocol_errors: outcome.as_ref().map_or(0, |o| o.protocol_errors),
                 tainted: outcome.as_ref().is_some_and(|o| o.tainted),
                 check_passed: passed,
                 check_tail: tail,

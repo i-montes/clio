@@ -82,8 +82,9 @@ struct WireResponse {
 
 /// A real model reached through a program that reads a `Request` as JSON on stdin and writes a
 /// `Response` as JSON on stdout (the contract of `clio-bench --cmd`). No HTTP and no keys here.
-/// A failed call or an empty answer is retried after each pause in `backoff_ms` (quota and
-/// network errors pass).
+/// A failed call is retried after each pause in `backoff_ms` (quota and network errors pass).
+/// An empty answer is NOT retried: at temperature 0 it would come back empty again, so the loop
+/// answers it with a protocol error, which changes the conversation.
 /// shortcut: one process per call, and the sleeps block; fine for a bench, not for a server.
 pub struct CommandModel {
     pub program: String,
@@ -136,10 +137,6 @@ impl CommandModel {
         }
         let r: WireResponse =
             serde_json::from_slice(&out.stdout).map_err(|e| fail(format!("bad answer: {e}")))?;
-        // An empty answer is the provider hiccuping, not a move of the model: ask again.
-        if r.content.trim().is_empty() {
-            return Err(fail("empty answer".into()));
-        }
         Ok(Reply {
             text: r.content,
             input_tokens: r.input_tokens,
@@ -229,6 +226,8 @@ pub struct AgentOutcome {
     pub elapsed_ms: i64,
     /// Tool calls the gateway denied or left waiting for a person.
     pub denied: u32,
+    /// Turns whose answer was not a valid turn (empty, no JSON, wrong keys).
+    pub protocol_errors: u32,
     pub tainted: bool,
     pub contract_state: Option<contract::State>,
     pub report: ClosingReport,
@@ -517,7 +516,8 @@ impl AgentLoop {
             tool_help(&self.executor.registry)
         );
         let mut messages = vec![Msg::new("system", system), Msg::new("user", instruction)];
-        let (mut tin, mut tout, mut denied, mut n_calls) = (0u64, 0u64, 0u32, 0u32);
+        let (mut tin, mut tout, mut denied, mut n_calls, mut protocol_errors) =
+            (0u64, 0u64, 0u32, 0u32, 0u32);
         let mut done: Vec<String> = Vec::new();
         let (ending, final_message) = loop {
             // Hard stop before spending on a model call.
@@ -536,7 +536,10 @@ impl AgentLoop {
             let key = match &turn {
                 Ok(Turn::Tool { name, args }) => format!("{name}:{args}"),
                 Ok(Turn::Final(_)) => "final".to_owned(),
-                Err(_) => "invalid".to_owned(),
+                // Junk repeated verbatim is a loop; an empty answer is not an action, and the
+                // step budget bounds those.
+                Err(_) if reply.text.trim().is_empty() => format!("empty:{}", messages.len()),
+                Err(_) => format!("invalid:{}", digest_hex(&reply.text)),
             };
             if let Err(s) = ctl.begin_step(&key, cost, &mut day) {
                 break (Ending::Stopped(s), None);
@@ -546,12 +549,18 @@ impl AgentLoop {
                 let _ = c.spend(1, cost.saturating_mul(100), clock.as_ref());
             }
             match turn {
-                Err(why) => messages.push(Msg::new(
+                Err(mut why) => {
+                    protocol_errors += 1;
+                    if reply.text.trim().is_empty() {
+                        why = "your reply was empty".into();
+                    }
+                    messages.push(Msg::new(
                     "user",
                     format!(
                         "[protocol error] {why}. Reply with exactly one JSON object: {{\"tool\":\"<name>\",\"args\":{{...}}}} or {{\"final\":\"<message>\"}}."
                     ),
-                )),
+                    ));
+                }
                 Ok(Turn::Final(m)) => break (Ending::Final, Some(m)),
                 Ok(Turn::Tool { name, args }) => {
                     n_calls += 1;
@@ -621,6 +630,7 @@ impl AgentLoop {
             cost_micro: cp.cost_micro,
             elapsed_ms: cp.elapsed_ms,
             denied,
+            protocol_errors,
             tainted: session.tainted(),
             contract_state,
             report: ClosingReport {
@@ -643,6 +653,7 @@ impl AgentLoop {
             cost_micro: 0,
             elapsed_ms: 0,
             denied: 0,
+            protocol_errors: 0,
             tainted: false,
             contract_state: None,
             report: ClosingReport {

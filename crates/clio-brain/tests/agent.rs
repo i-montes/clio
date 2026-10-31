@@ -392,3 +392,17 @@ print(json.dumps({"content": "{\"final\": \"ok\"}", "input_tokens": 3, "output_t
     bad.backoff_ms = vec![1, 1];
     assert!(bad.complete(&[]).unwrap_err().contains("exit"));
 }
+
+#[test]
+fn empty_answers_are_protocol_errors_bounded_by_the_step_budget() {
+    let r = setup("real-01");
+    let mut model = script(vec![String::new()]);
+    let mut a = agent(&r, clock(), |c| c.budget.max_steps = 6);
+    let out = a.run(&mut model, "arregla parse_date").unwrap();
+    assert_eq!(out.ending, Ending::Stopped(Stop::Steps));
+    assert_eq!(out.protocol_errors, 6);
+    assert!(out.transcript.iter().any(|m| {
+        m.content
+            .starts_with("[protocol error] your reply was empty")
+    }));
+}

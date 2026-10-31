@@ -189,7 +189,7 @@ fn agent_mode(
     let provider = one("provider").unwrap_or_else(|| "opencode-go".into());
     let model = one("model").unwrap_or_else(|| "beam-free".into());
     let prompt_path =
-        PathBuf::from(one("prompt").unwrap_or_else(|| "prompts/system/clio-agent@1.md".into()));
+        PathBuf::from(one("prompt").unwrap_or_else(|| "prompts/system/clio-agent@2.md".into()));
     let system_prompt = std::fs::read_to_string(&prompt_path)
         .map_err(|e| format!("{}: {e}", prompt_path.display()))?;
     // The first line is `version: N`; the prompt name is the file name before the `@`.
