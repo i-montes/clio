@@ -9,18 +9,20 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, Observer};
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::debug::{self, DebugCtl, Tee};
 use super::diff::file_diff;
 use super::home::{Config, Dirs};
 use super::tui::sanitize;
 use super::ui::{self, Style, clip, pad};
+use super::usage::{self, RunLimits, RunUsage};
 use super::work::{self, Change, Kind, Scan};
 use super::{Res, io_err, mkdir_private, now_ms, stamp, write_private};
 
@@ -306,6 +308,12 @@ pub struct Prepared {
     pub scan: Scan,
     pub max_steps: u32,
     pub max_seconds: u64,
+    pub max_cost_micro: u64,
+    /// The model's context window in tokens, and whether the catalog knew it.
+    pub window: u64,
+    pub window_known: bool,
+    /// Knows the model's API key.
+    scrubber: clio_vault::Scrubber,
     manifest: BTreeMap<String, String>,
     cfg: Config,
     prompt: String,
@@ -356,9 +364,14 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
             created_ms: started,
         },
     )?;
+    let (window, window_known) = usage::window_for(dirs, &cfg.model.provider, &cfg.model.model);
     Ok(Prepared {
         max_steps: o.max_steps.unwrap_or(cfg.limits.max_steps),
         max_seconds: cfg.limits.max_seconds,
+        max_cost_micro: cfg.limits.max_cost_micro_usd,
+        window,
+        window_known,
+        scrubber: debug::scrubber(dirs),
         id,
         path,
         ws,
@@ -373,13 +386,15 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     })
 }
 
-/// Runs the agent in the copy and writes the files of the run. `observer` sees every step;
-/// `cancel` set to true ends the run after the step in progress (the run is kept as cancelled).
+/// Runs the agent in the copy and writes the files of the run. `observer` sees every step (its
+/// events are scrubbed first); `cancel` set to true ends the run after the step in progress (the
+/// run is kept as cancelled). `dbg` says whether to write `debug.log` (and print on stderr).
 pub fn execute(
     p: &Prepared,
     instruction: &str,
     observer: Box<dyn Observer>,
     cancel: Option<Arc<AtomicBool>>,
+    dbg: &DebugCtl,
 ) -> Res<RunSummary> {
     let (cfg, path, id) = (&p.cfg, &p.path, &p.id);
     let mut acfg = AgentConfig::new(id, &p.prompt, path);
@@ -399,13 +414,32 @@ pub fn execute(
         &path.join("sandbox"),
         &path.join("scratch"),
     )?;
-    agent.scrubber = Some(clio_vault::Scrubber::default());
-    agent.observer = observer;
+    let scrubber = p.scrubber.clone();
+    agent.scrubber = Some(scrubber.clone());
+    let used = Arc::new(Mutex::new(RunUsage::new(
+        p.window,
+        p.window_known,
+        RunLimits {
+            max_steps: p.max_steps,
+            max_seconds: p.max_seconds,
+            max_cost_micro: p.max_cost_micro,
+        },
+    )));
+    agent.observer = Box::new(Tee::new(
+        observer,
+        used.clone(),
+        scrubber,
+        dbg.clone(),
+        path.join("debug.log"),
+    ));
+    agent.debug = Some(dbg.on.clone());
     agent.cancel = cancel;
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
     let outcome = agent.run(&mut model, instruction)?;
 
     work::lock_down(path)?;
+    let usage = used.lock().map(|u| u.clone()).unwrap_or_default();
+    write_json(&path.join("usage.json"), &usage)?;
     write_json(&path.join("transcript.json"), &outcome.transcript)?;
     write_json(
         &path.join("report.json"),
@@ -475,6 +509,9 @@ impl Observer for Progress {
                 clip(self.st, &sanitize::line(reason), 60)
             ),
             Event::Final => "el modelo dice que terminó".to_owned(),
+            Event::Context(_) | Event::Usage(_) | Event::Exchange(_) | Event::Decision(_) => {
+                return;
+            }
             Event::Tool {
                 name,
                 target,
@@ -508,9 +545,15 @@ impl Observer for Progress {
     }
 }
 
-pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
+pub fn run(dirs: &Dirs, o: &RunOpts, debug: bool) -> Res<i32> {
     let st = Style::stdout();
     let p = prepare(dirs, o)?;
+    if debug {
+        eprintln!(
+            "[debug] depuración activa: el detalle va a stderr y a {}",
+            p.path.join("debug.log").display()
+        );
+    }
     println!(
         "{} {}: {} archivos copiados de {}",
         st.bold("run"),
@@ -556,7 +599,13 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
         step: 0,
         started: std::time::Instant::now(),
     };
-    let s = execute(&p, &o.instruction, Box::new(progress), None)?;
+    let s = execute(
+        &p,
+        &o.instruction,
+        Box::new(progress),
+        None,
+        &DebugCtl::new(debug, true),
+    )?;
     println!();
     print_panel(st, &s);
     Ok(exit_code(&s))
@@ -596,7 +645,7 @@ fn print_panel(st: Style, s: &RunSummary) {
         println!(
             "{}{}",
             label("nota:"),
-            st.yellow("leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado")
+            st.yellow("externo: leyó archivos del proyecto; revisa el diff con cuidado")
         );
     }
     let msg = match &s.final_message {

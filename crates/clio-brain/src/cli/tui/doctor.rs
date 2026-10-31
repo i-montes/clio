@@ -1,13 +1,14 @@
 //! The doctor screen: every check with its mark and, for each warning or failure, one line on
-//! what to do.
+//! what to do. Each check appears once (Clio's own and the host script's do not repeat).
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
-use super::app::{App, Cmd, Screen, clean, is_ctrl_c, plural};
+use super::app::{App, Cmd, clean, plural};
+use super::keys::{Act, Ctx, lookup};
 use crate::cli::doctor::Report;
 use crate::cli::ui::Level;
 
@@ -26,23 +27,20 @@ impl DoctorView {
 }
 
 pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
-    match k.code {
-        KeyCode::Esc | KeyCode::Char('q') => return app.go_home(),
-        _ if is_ctrl_c(k) => return app.go_home(),
-        KeyCode::Char('r') => {
+    let page = 8;
+    match lookup(Ctx::Doctor, k) {
+        Some(Act::Back) => return app.go_home(),
+        Some(Act::Refresh) => {
             app.doctor.loading = true;
             return vec![Cmd::RunDoctor];
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.doctor.scroll = app.doctor.scroll.saturating_add(1)
-        }
-        KeyCode::Up | KeyCode::Char('k') => app.doctor.scroll = app.doctor.scroll.saturating_sub(1),
-        KeyCode::PageDown => app.doctor.scroll = app.doctor.scroll.saturating_add(10),
-        KeyCode::PageUp => app.doctor.scroll = app.doctor.scroll.saturating_sub(10),
-        KeyCode::Char('?') => {
-            app.before_help = Screen::Doctor;
-            app.screen = Screen::Help;
-        }
+        Some(Act::Down) => app.doctor.scroll = app.doctor.scroll.saturating_add(1),
+        Some(Act::Up) => app.doctor.scroll = app.doctor.scroll.saturating_sub(1),
+        Some(Act::PageDown) => app.doctor.scroll = app.doctor.scroll.saturating_add(page),
+        Some(Act::PageUp) => app.doctor.scroll = app.doctor.scroll.saturating_sub(page),
+        Some(Act::Top) => app.doctor.scroll = 0,
+        Some(Act::Bottom) => app.doctor.scroll = u16::MAX,
+        Some(Act::Help) => app.open_help(),
         _ => {}
     }
     vec![]
@@ -51,21 +49,31 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let mut lines: Vec<Line> = Vec::new();
-    let mut title = " Doctor ".to_owned();
     match &app.doctor.report {
         None => lines.push(Line::from(Span::styled("comprobando…", t.dim()))),
         Some(r) => {
-            title = format!(
-                " Doctor: {} ok · {} · {} ",
-                r.count(Level::Pass),
-                plural(r.count(Level::Warn), "aviso", "avisos"),
-                plural(r.count(Level::Fail), "fallo", "fallos")
-            );
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "doctor: {} ok {} {} {} {}{}",
+                    r.count(Level::Pass),
+                    t.dot(),
+                    plural(r.count(Level::Warn), "aviso", "avisos"),
+                    t.dot(),
+                    plural(r.count(Level::Fail), "fallo", "fallos"),
+                    if app.doctor.loading {
+                        "   (actualizando…)"
+                    } else {
+                        ""
+                    }
+                ),
+                t.bold(),
+            )));
+            lines.push(Line::from(""));
             for c in &r.checks {
                 let (mark, style) = match c.level {
-                    Level::Pass => ("PASS", t.ok()),
-                    Level::Warn => ("WARN", t.warn()),
-                    Level::Fail => ("FAIL", t.fail()),
+                    Level::Pass => (t.check(), t.ok()),
+                    Level::Warn => (t.bang(), t.warn()),
+                    Level::Fail => (t.cross(), t.fail()),
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{mark}  "), style),
@@ -73,26 +81,19 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 ]));
                 if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
                     lines.push(Line::from(vec![
-                        Span::raw("      → "),
+                        Span::styled(format!("   {} ", t.arrow()), t.dim()),
                         Span::styled(clean(h), t.dim()),
                     ]));
                 }
             }
         }
     }
-    if app.doctor.loading && app.doctor.report.is_some() {
-        title.push_str("(actualizando…) ");
-    }
+    // Wrapped lines count as several: keep the scroll inside what exists.
+    let max = u16::try_from(lines.len().saturating_sub(usize::from(area.height))).unwrap_or(0);
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((app.doctor.scroll, 0))
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(Span::styled(title, t.bold())),
-            ),
+            .scroll((app.doctor.scroll.min(max), 0)),
         area,
     );
 }

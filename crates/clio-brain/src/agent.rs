@@ -54,6 +54,11 @@ pub struct Reply {
 /// (scripted ones, for tests).
 pub trait Model {
     fn complete(&mut self, messages: &[Msg]) -> Result<Reply, String>;
+
+    /// How many times the last `complete` had to retry (for the debug view). Default: none.
+    fn retries(&self) -> u32 {
+        0
+    }
 }
 
 impl<F: FnMut(&[Msg]) -> String> Model for F {
@@ -94,6 +99,8 @@ pub struct CommandModel {
     pub model: String,
     pub max_tokens: u32,
     pub backoff_ms: Vec<u64>,
+    /// Retries done by the last `complete`.
+    pub last_retries: u32,
 }
 
 impl CommandModel {
@@ -104,6 +111,7 @@ impl CommandModel {
             model: model.into(),
             max_tokens: 4096,
             backoff_ms: vec![5_000, 20_000, 60_000],
+            last_retries: 0,
         }
     }
 
@@ -150,14 +158,20 @@ impl CommandModel {
 impl Model for CommandModel {
     fn complete(&mut self, messages: &[Msg]) -> Result<Reply, String> {
         let mut result = self.once(messages);
+        self.last_retries = 0;
         for pause in self.backoff_ms.clone() {
             if result.is_ok() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(pause));
+            self.last_retries += 1;
             result = self.once(messages);
         }
         result
+    }
+
+    fn retries(&self) -> u32 {
+        self.last_retries
     }
 }
 
@@ -232,6 +246,149 @@ pub enum Event {
     },
     /// The model said it is done.
     Final,
+    /// What is in the model's context right now, sent before every model call.
+    Context(ContextReport),
+    /// What one model call used. Sent after every call, even when the call then fails the budget.
+    Usage(CallUsage),
+    /// Debug only (`AgentLoop::debug`): the request and the answer of one model call.
+    Exchange(Exchange),
+    /// Debug only: the full gateway decision for one tool call.
+    Decision(DecisionDebug),
+}
+
+/// Rough token count: four characters per token, rounded up (the same rule as
+/// `clio_memory::ApproxTokens`, which this crate does not depend on: it would pull in SQLite).
+pub fn approx_tokens(text: &str) -> u64 {
+    text.chars().count().div_ceil(4) as u64
+}
+
+/// One model call: tokens as the provider reported them, cost in integer micro-USD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallUsage {
+    /// Counts model calls from 1.
+    pub call: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_micro: u64,
+    /// How long the call took, retries included.
+    pub model_ms: u64,
+    /// Milliseconds since the loop started, when the call ended.
+    pub at_ms: u64,
+    pub retries: u32,
+}
+
+/// A file (or listing) the agent read: external content in the context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextItem {
+    pub name: String,
+    pub tokens: u64,
+}
+
+/// The layers of the model's context for one call. Sizes are approximate (`approx_tokens`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ContextReport {
+    pub call: u32,
+    pub prompt_version: String,
+    /// The system prompt without the tool section.
+    pub system: u64,
+    /// The person's instruction (the objective of the contract).
+    pub objective: u64,
+    /// The descriptions of the tools.
+    pub tools: u64,
+    /// Model answers and protocol notes.
+    pub conversation: u64,
+    pub turns: u32,
+    /// Everything read from files, one item per read.
+    pub external: Vec<ContextItem>,
+    /// Results of the other tools (writes, tests, refusals).
+    pub tool_outputs: u64,
+}
+
+impl ContextReport {
+    pub fn external_tokens(&self) -> u64 {
+        self.external.iter().map(|i| i.tokens).sum()
+    }
+
+    /// The sum of every layer.
+    pub fn total(&self) -> u64 {
+        self.system
+            + self.objective
+            + self.tools
+            + self.conversation
+            + self.external_tokens()
+            + self.tool_outputs
+    }
+}
+
+/// Debug: what was sent and what came back. Text is scrubbed; `request` is only what is new
+/// since the previous call (the rest was sent before).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exchange {
+    pub call: u32,
+    pub messages: usize,
+    pub request_chars: usize,
+    pub request: Vec<Msg>,
+    pub response: String,
+}
+
+/// Debug: one gateway decision with its full rule and reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionDebug {
+    pub n: u32,
+    pub tool: String,
+    pub args: String,
+    pub outcome: Outcome,
+    pub rule: String,
+    pub reason: String,
+    pub tool_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    Objective,
+    Conversation,
+    External,
+    ToolOutput,
+}
+
+/// The size of every message the model has seen, kept next to the messages so a report per call
+/// costs one pass over a short list.
+struct Ledger {
+    system: u64,
+    tools: u64,
+    items: Vec<(Layer, String, u64)>,
+}
+
+impl Ledger {
+    fn add(&mut self, layer: Layer, name: &str, text: &str) {
+        self.items
+            .push((layer, name.to_owned(), approx_tokens(text)));
+    }
+
+    fn report(&self, call: u32, prompt_version: &str) -> ContextReport {
+        let mut r = ContextReport {
+            call,
+            prompt_version: prompt_version.to_owned(),
+            system: self.system,
+            tools: self.tools,
+            ..ContextReport::default()
+        };
+        for (layer, name, tokens) in &self.items {
+            match layer {
+                Layer::Objective => r.objective += tokens,
+                Layer::Conversation => {
+                    r.conversation += tokens;
+                    r.turns += u32::from(name == "assistant");
+                }
+                Layer::External => r.external.push(ContextItem {
+                    name: name.clone(),
+                    tokens: *tokens,
+                }),
+                Layer::ToolOutput => r.tool_outputs += tokens,
+            }
+        }
+        r
+    }
 }
 
 /// Watches the loop. The default method does nothing, so an observer only handles what it wants.
@@ -428,7 +585,11 @@ pub struct AgentLoop {
     pub observer: Box<dyn Observer>,
     /// When set to true, the loop ends with `Ending::Cancelled` before its next model call.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// While true, the loop also sends the debug events (`Exchange`, `Decision`). Checked at each
+    /// call, so it can be flipped during a run. `None`: never.
+    pub debug: Option<Arc<AtomicBool>>,
     tests: TestState,
+    last_reason: String,
 }
 
 impl AgentLoop {
@@ -489,8 +650,23 @@ impl AgentLoop {
             asker: Box::new(NobodyHome),
             observer: Box::new(NoObserver),
             cancel: None,
+            debug: None,
             tests: TestState::default(),
+            last_reason: String::new(),
         })
+    }
+
+    fn debugging(&self) -> bool {
+        self.debug
+            .as_ref()
+            .is_some_and(|d| d.load(Ordering::Relaxed))
+    }
+
+    /// Text for a debug event: scrubbed.
+    fn scrub(&self, text: &str) -> String {
+        self.scrubber
+            .as_ref()
+            .map_or_else(|| text.to_owned(), |s| s.scrub(text))
     }
 
     pub fn gateway(&self) -> &Gateway {
@@ -605,12 +781,17 @@ impl AgentLoop {
         } else {
             vec![]
         };
-        let system = format!(
-            "{}\n\nTools:\n{}",
-            self.cfg.system_prompt,
-            tool_help(&self.executor.registry)
-        );
+        let help = tool_help(&self.executor.registry);
+        let system = format!("{}\n\nTools:\n{help}", self.cfg.system_prompt);
+        let mut ledger = Ledger {
+            system: approx_tokens(&self.cfg.system_prompt),
+            tools: approx_tokens(&help) + approx_tokens("\n\nTools:\n"),
+            items: Vec::new(),
+        };
+        ledger.add(Layer::Objective, "user", instruction);
         let mut messages = vec![Msg::new("system", system), Msg::new("user", instruction)];
+        let loop_start = clock.now_ms();
+        let (mut calls, mut sent_upto) = (0u32, 0usize);
         let (mut tin, mut tout, mut denied, mut n_calls, mut protocol_errors) =
             (0u64, 0u64, 0u32, 0u32, 0u32);
         let mut done: Vec<String> = Vec::new();
@@ -626,6 +807,17 @@ impl AgentLoop {
             if let Err(s) = ctl.check_limits(0, &mut day) {
                 break (Ending::Stopped(s), None);
             }
+            calls += 1;
+            self.observer.event(&Event::Context(
+                ledger.report(calls, &self.cfg.prompt_version),
+            ));
+            let debug_request: Vec<Msg> = if self.debugging() {
+                messages[sent_upto..].to_vec()
+            } else {
+                vec![]
+            };
+            sent_upto = messages.len();
+            let call_start = clock.now_ms();
             let reply = match model.complete(&messages) {
                 Ok(r) => r,
                 Err(m) => break (Ending::ModelError(m), None),
@@ -633,7 +825,31 @@ impl AgentLoop {
             tin += u64::from(reply.input_tokens);
             tout += u64::from(reply.output_tokens);
             let cost = self.cost(&reply);
+            let after = clock.now_ms();
+            self.observer.event(&Event::Usage(CallUsage {
+                call: calls,
+                input_tokens: reply.input_tokens,
+                output_tokens: reply.output_tokens,
+                cost_micro: cost,
+                model_ms: u64::try_from(after - call_start).unwrap_or(0),
+                at_ms: u64::try_from(after - loop_start).unwrap_or(0),
+                retries: model.retries(),
+            }));
+            if self.debugging() {
+                let request: Vec<Msg> = debug_request
+                    .iter()
+                    .map(|m| Msg::new(&m.role, self.scrub(&m.content)))
+                    .collect();
+                self.observer.event(&Event::Exchange(Exchange {
+                    call: calls,
+                    messages: messages.len(),
+                    request_chars: messages.iter().map(|m| m.content.chars().count()).sum(),
+                    request,
+                    response: self.scrub(&reply.text),
+                }));
+            }
             messages.push(Msg::new("assistant", reply.text.clone()));
+            ledger.add(Layer::Conversation, "assistant", &reply.text);
             let turn = parse_turn(&reply.text);
             let key = match &turn {
                 Ok(Turn::Tool { name, args }) => format!("{name}:{args}"),
@@ -662,12 +878,11 @@ impl AgentLoop {
                     self.observer.event(&Event::ProtocolError {
                         reason: why.clone(),
                     });
-                    messages.push(Msg::new(
-                    "user",
-                    format!(
+                    let note = format!(
                         "[protocol error] {why}. Reply with exactly one JSON object: {{\"tool\":\"<name>\",\"args\":{{...}}}} or {{\"final\":\"<message>\"}}."
-                    ),
-                    ));
+                    );
+                    ledger.add(Layer::Conversation, "user", &note);
+                    messages.push(Msg::new("user", note));
                 }
                 Ok(Turn::Final(m)) => {
                     self.observer.event(&Event::Final);
@@ -675,6 +890,11 @@ impl AgentLoop {
                 }
                 Ok(Turn::Tool { name, args }) => {
                     n_calls += 1;
+                    let path = args
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
                     let (text, ok) = self.call_tool(
                         &name,
                         args,
@@ -684,6 +904,17 @@ impl AgentLoop {
                         &mut session,
                         ctl.checkpoint().cost_micro,
                     );
+                    // A read is external content; everything else (writes, tests, refusals) is tool output.
+                    if ok.is_some() && matches!(name.as_str(), "read_file" | "list_dir") {
+                        let label = if name == "list_dir" {
+                            format!("{path}/")
+                        } else {
+                            path
+                        };
+                        ledger.add(Layer::External, &label, &text);
+                    } else {
+                        ledger.add(Layer::ToolOutput, &name, &text);
+                    }
                     match ok {
                         Some(effect_line) => done.extend(effect_line),
                         None => denied += 1,
@@ -890,8 +1121,23 @@ impl AgentLoop {
         } else {
             text("path").to_owned()
         };
+        let debug_args = self.debugging().then(|| self.scrub(&args.to_string()));
+        let started = self.clock.now_ms();
         let (text, ran, outcome, rule) =
             self.decide_and_run(name, args, n, level, plan, session, spent);
+        if let Some(args) = debug_args {
+            let reason = std::mem::take(&mut self.last_reason);
+            let reason = self.scrub(&reason);
+            self.observer.event(&Event::Decision(DecisionDebug {
+                n,
+                tool: self.scrub(name),
+                args,
+                outcome,
+                rule: rule.clone(),
+                reason,
+                tool_ms: u64::try_from(self.clock.now_ms() - started).unwrap_or(0),
+            }));
+        }
         self.observer.event(&Event::Tool {
             name: name.to_owned(),
             target,
@@ -919,6 +1165,7 @@ impl AgentLoop {
         spent: u64,
     ) -> (String, Option<Vec<String>>, Outcome, String) {
         let Value::Object(map) = args else {
+            self.last_reason = "\"args\" must be a JSON object".into();
             return (
                 "[protocol error] \"args\" must be a JSON object".into(),
                 None,
@@ -952,6 +1199,7 @@ impl AgentLoop {
             plan: plan.to_vec(),
         };
         let d = self.gateway.decide_or_deny(&req);
+        self.last_reason.clone_from(&d.reason);
         let allowed = match d.outcome {
             Outcome::Allow => true,
             Outcome::Ask => self.asker.approve(&d, name, &map),

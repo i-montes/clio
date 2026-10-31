@@ -4,16 +4,18 @@
 
 use std::cell::Cell;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
-use super::app::{Action, App, Cmd, Confirm, Screen, clean};
+use super::app::{Action, App, Cmd, Confirm, Screen, clean, section};
+use super::keys::{Act, lookup};
 use super::sanitize;
 use crate::cli::home::Dirs;
 use crate::cli::runs::{self, RunInfo, Status, ending_label};
+use crate::cli::usage::{self, RunUsage};
 use crate::cli::work;
 
 pub struct Row {
@@ -28,6 +30,8 @@ pub struct Detail {
     pub sel: usize,
     pub in_diff: bool,
     pub scroll: usize,
+    /// What the run used and its context, from `usage.json` (empty for an older run).
+    pub usage: RunUsage,
     /// Height of the diff area at the last draw, to bound scrolling.
     pub view_h: Cell<u16>,
 }
@@ -55,6 +59,7 @@ impl Detail {
             sel: 0,
             in_diff: false,
             scroll: 0,
+            usage: RunUsage::load(&run.path),
             view_h: Cell::new(10),
         })
     }
@@ -78,120 +83,138 @@ impl Detail {
 }
 
 pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
+    let ctx = app.ctx();
+    let Some(act) = lookup(ctx, k) else {
+        return vec![];
+    };
+    match act {
+        Act::Help => {
+            app.open_help();
+            return vec![];
+        }
+        Act::Context => {
+            app.open_view(Screen::Context);
+            return vec![];
+        }
+        Act::Usage => {
+            app.open_view(Screen::Usage);
+            return vec![];
+        }
+        _ => {}
+    }
     let Some(d) = app.detail.as_mut() else {
         return app.go_home();
     };
     let id = d.info.id.clone();
     let page = usize::from(d.view_h.get().max(2) - 1);
-    match (k.code, d.in_diff) {
-        (KeyCode::Char('a'), _) => return vec![Cmd::PlanApply { id }],
-        (KeyCode::Char('u'), _) => {
-            if d.info.status == Status::Applied {
-                app.confirm = Some(Confirm {
-                    action: Action::Undo,
-                    id,
-                    files: d.info.files(),
-                    workspace: d.info.workspace.clone(),
-                });
-            } else {
-                app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
+    if d.in_diff {
+        match act {
+            Act::Apply => return vec![Cmd::PlanApply { id }],
+            Act::Undo => ask_undo(app),
+            Act::Back => d.in_diff = false,
+            Act::Down => d.scroll = (d.scroll + 1).min(d.max_scroll()),
+            Act::Up => d.scroll = d.scroll.saturating_sub(1),
+            Act::PageDown => d.scroll = (d.scroll + page).min(d.max_scroll()),
+            Act::PageUp => d.scroll = d.scroll.saturating_sub(page),
+            Act::Top => d.scroll = 0,
+            Act::Bottom => d.scroll = d.max_scroll(),
+            Act::NextFile if d.sel + 1 < d.rows.len() => {
+                d.sel += 1;
+                d.scroll = 0;
             }
+            Act::PrevFile if d.sel > 0 => {
+                d.sel -= 1;
+                d.scroll = 0;
+            }
+            _ => {}
         }
-        (KeyCode::Char('?'), _) => {
-            app.before_help = Screen::Detail;
-            app.screen = Screen::Help;
+    } else {
+        match act {
+            Act::Apply => return vec![Cmd::PlanApply { id }],
+            Act::Undo => ask_undo(app),
+            Act::Back => return app.go_home(),
+            Act::Diff if !d.rows.is_empty() => {
+                d.in_diff = true;
+                d.scroll = 0;
+            }
+            Act::Down => d.sel = (d.sel + 1).min(d.rows.len().saturating_sub(1)),
+            Act::Up => d.sel = d.sel.saturating_sub(1),
+            Act::Top => d.sel = 0,
+            Act::Bottom => d.sel = d.rows.len().saturating_sub(1),
+            _ => {}
         }
-        (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::Char('h'), true) => {
-            d.in_diff = false;
-        }
-        (KeyCode::Esc | KeyCode::Char('q'), false) => return app.go_home(),
-        (KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'), false) if !d.rows.is_empty() => {
-            d.in_diff = true;
-            d.scroll = 0;
-        }
-        (KeyCode::Down | KeyCode::Char('j'), false) => {
-            d.sel = (d.sel + 1).min(d.rows.len().saturating_sub(1));
-        }
-        (KeyCode::Up | KeyCode::Char('k'), false) => d.sel = d.sel.saturating_sub(1),
-        (KeyCode::Down | KeyCode::Char('j'), true) => d.scroll = (d.scroll + 1).min(d.max_scroll()),
-        (KeyCode::Up | KeyCode::Char('k'), true) => d.scroll = d.scroll.saturating_sub(1),
-        (KeyCode::PageDown | KeyCode::Char(' '), true) => {
-            d.scroll = (d.scroll + page).min(d.max_scroll());
-        }
-        (KeyCode::PageUp | KeyCode::Char('b'), true) => d.scroll = d.scroll.saturating_sub(page),
-        (KeyCode::Home | KeyCode::Char('g'), true) => d.scroll = 0,
-        (KeyCode::End | KeyCode::Char('G'), true) => d.scroll = d.max_scroll(),
-        (KeyCode::Char(']'), true) if d.sel + 1 < d.rows.len() => {
-            d.sel += 1;
-            d.scroll = 0;
-        }
-        (KeyCode::Char('['), true) if d.sel > 0 => {
-            d.sel -= 1;
-            d.scroll = 0;
-        }
-        _ => {}
     }
     vec![]
 }
 
-fn block<'a>(app: &App, title: String) -> Block<'a> {
-    Block::new()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(format!(" {title} "), app.theme.bold()))
+fn ask_undo(app: &mut App) {
+    let Some(d) = &app.detail else {
+        return;
+    };
+    if d.info.status == Status::Applied {
+        app.confirm = Some(Confirm {
+            action: Action::Undo,
+            id: d.info.id.clone(),
+            files: d.info.files(),
+            workspace: d.info.workspace.clone(),
+        });
+    } else {
+        app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
+    }
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let Some(d) = &app.detail else {
         return;
     };
-    let t = app.theme;
     if d.in_diff {
         draw_diff(f, area, app, d);
         return;
     }
+    let t = app.theme;
     let info = &d.info;
-    let [sum_a, msg_a, files_a] = Layout::vertical([
-        Constraint::Length(6),
+    let [sum_a, _, msg_a, _, files_a] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Length(1),
         Constraint::Percentage(40),
-        Constraint::Min(4),
+        Constraint::Length(1),
+        Constraint::Min(3),
     ])
     .areas(area);
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Estado ", t.dim()),
             Span::styled(info.status.label(), t.status(info.status)),
-            Span::raw("   "),
-            Span::styled(clean(&info.id), t.dim()),
+            Span::styled(format!(" {} {}", t.dot(), clean(&info.id)), t.dim()),
         ]),
         Line::from(vec![
-            Span::styled("Carpeta ", t.dim()),
+            Span::styled("carpeta ", t.dim()),
             Span::raw(clean(&info.workspace)),
         ]),
         Line::from(vec![
-            Span::styled("Pedido ", t.dim()),
+            Span::styled("pedido  ", t.dim()),
             Span::raw(clean(&info.instruction)),
         ]),
     ];
     match &info.summary {
-        Some(s) => lines.push(Line::from(format!(
-            "nivel {} · {} pasos · {:.1}s · {} · {} denegadas",
-            s.level,
-            s.steps,
-            s.elapsed_ms as f64 / 1000.0,
-            ending_label(&s.ending),
-            s.denied
+        Some(s) => lines.push(Line::from(Span::styled(
+            format!(
+                "nivel {} {dot} {} pasos {dot} {} {dot} {} {dot} {} denegadas",
+                s.level,
+                s.steps,
+                usage::ms_label(u64::try_from(s.elapsed_ms).unwrap_or(0)),
+                ending_label(&s.ending),
+                s.denied,
+                dot = t.dot()
+            ),
+            t.dim(),
         ))),
         None => lines.push(Line::from(Span::styled(
             "sin resumen: el run no llegó a terminar",
             t.fail(),
         ))),
     }
-    f.render_widget(
-        Paragraph::new(lines).block(block(app, "Resumen".into())),
-        sum_a,
-    );
+    f.render_widget(Paragraph::new(lines), sum_a);
 
     let msg = info
         .summary
@@ -202,56 +225,50 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_else(|| format!("(sin mensaje final) {}", s.pending.join("; ")))
         })
         .unwrap_or_default();
-    let mut msg_lines: Vec<Line> = sanitize::multiline(&msg)
-        .lines()
-        .map(|l| Line::from(l.to_owned()))
-        .collect();
-    if info.summary.as_ref().is_some_and(|s| s.tainted) {
-        msg_lines.push(Line::from(""));
-        msg_lines.push(Line::from(Span::styled(
-            "Ojo: el agente leyó archivos que pudieron traer instrucciones ocultas; revisa el diff.",
-            t.warn(),
-        )));
-    }
-    f.render_widget(
-        Paragraph::new(msg_lines)
-            .wrap(Wrap { trim: false })
-            .block(block(app, "Mensaje del agente".into())),
-        msg_a,
+    let mut msg_lines = vec![section(t, "mensaje del agente", area.width)];
+    msg_lines.extend(
+        sanitize::multiline(&msg)
+            .lines()
+            .map(|l| Line::from(l.to_owned())),
     );
+    f.render_widget(Paragraph::new(msg_lines).wrap(Wrap { trim: false }), msg_a);
 
-    let items: Vec<Line> = if d.rows.is_empty() {
-        vec![Line::from(Span::styled("  sin cambios", t.dim()))]
+    let mut items: Vec<Line> = Vec::new();
+    if d.rows.is_empty() {
+        items.push(Line::from(Span::styled("sin cambios", t.dim())));
     } else {
-        d.rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let sel = i == d.sel;
-                let kind_style = match r.kind {
-                    'A' => t.add(),
-                    'D' => t.del(),
-                    _ => t.warn(),
-                };
-                let base = if sel { t.selected() } else { t.plain() };
-                Line::from(vec![
-                    Span::styled(if sel { "▶ " } else { "  " }, base),
-                    Span::styled(
-                        format!("{} ", r.kind),
-                        if sel { t.selected() } else { kind_style },
-                    ),
-                    Span::styled(clean(&r.rel), base),
-                ])
-            })
-            .collect()
-    };
-    let rows_h = usize::from(files_a.height.saturating_sub(2));
-    let skip = (d.sel + 1).saturating_sub(rows_h);
-    f.render_widget(
-        Paragraph::new(items.into_iter().skip(skip).collect::<Vec<_>>())
-            .block(block(app, format!("Archivos cambiados ({})", d.rows.len()))),
-        files_a,
-    );
+        // The heading takes one line; the selected row stays in view.
+        let rows_h = usize::from(files_a.height).saturating_sub(1).max(1);
+        let skip = (d.sel + 1).saturating_sub(rows_h);
+        for (i, r) in d.rows.iter().enumerate().skip(skip) {
+            let sel = i == d.sel;
+            let kind_style = match r.kind {
+                'A' => t.add(),
+                'D' => t.del(),
+                _ => t.warn(),
+            };
+            let base = if sel { t.selected() } else { t.plain() };
+            items.push(Line::from(vec![
+                Span::styled(
+                    if sel {
+                        format!("{} ", t.sel())
+                    } else {
+                        "  ".into()
+                    },
+                    base,
+                ),
+                Span::styled(format!("{} ", r.kind), if sel { base } else { kind_style }),
+                Span::styled(clean(&r.rel), base),
+            ]));
+        }
+    }
+    let mut all = vec![section(
+        t,
+        &format!("archivos cambiados ({})", d.rows.len()),
+        area.width,
+    )];
+    all.extend(items);
+    f.render_widget(Paragraph::new(all), files_a);
 }
 
 fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
@@ -259,7 +276,8 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
     let Some(row) = d.rows.get(d.sel) else {
         return;
     };
-    let h = area.height.saturating_sub(2);
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let h = body.height;
     d.view_h.set(h);
     let scroll = d.scroll.min(d.max_scroll());
     let text = sanitize::multiline(&row.diff);
@@ -285,14 +303,23 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
         })
         .collect();
     let total = d.total_lines();
-    let title = format!(
-        "{} {} · {}/{} · línea {}/{}",
-        row.kind,
-        clean(&row.rel),
-        d.sel + 1,
-        d.rows.len(),
-        (scroll + 1).min(total.max(1)),
-        total
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} {}", row.kind, clean(&row.rel)), t.bold()),
+            Span::styled(
+                format!(
+                    "  {} {}/{} {} línea {}/{}",
+                    t.dot(),
+                    d.sel + 1,
+                    d.rows.len(),
+                    t.dot(),
+                    (scroll + 1).min(total.max(1)),
+                    total
+                ),
+                t.dim(),
+            ),
+        ])),
+        head,
     );
-    f.render_widget(Paragraph::new(lines).block(block(app, title)), area);
+    f.render_widget(Paragraph::new(lines), body);
 }

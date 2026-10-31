@@ -6,13 +6,13 @@ mod cli;
 use std::io::IsTerminal;
 
 use cli::home::Dirs;
-use cli::{Args, Res, apply, doctor, home, runs, tui, vault};
+use cli::{Args, Res, apply, debug, doctor, home, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
-  clio                                        abre la interfaz (en una terminal)
+  clio [--debug]                              abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug
   clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
-  clio run [--workspace DIR] [--max-steps N] [--allow-broad] \"instrucción\"
+  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] \"instrucción\"
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
@@ -20,7 +20,7 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
   clio doctor [--json]                        revisa permisos, clave, sockets y el equipo
 
-Sin color: NO_COLOR=1 o TERM=dumb. Más: docs/uso-local.md";
+Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
 
 fn id_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;
@@ -34,11 +34,23 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     let mut it = argv.into_iter();
     let Some(cmd) = it.next() else {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::run(Dirs::from_env()?);
+            return tui::run(Dirs::from_env()?, debug::env_enabled());
         }
         println!("{USAGE}");
         return Ok(0);
     };
+    // `clio --debug` alone opens the TUI with debug on.
+    if cmd == "--debug" {
+        let rest: Vec<String> = it.collect();
+        if !rest.is_empty() {
+            return Err("--debug va solo (abre la interfaz) o después de un comando: clio run --debug \"...\"".into());
+        }
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            return tui::run(Dirs::from_env()?, true);
+        }
+        println!("{USAGE}");
+        return Ok(0);
+    }
     let mut args = Args::new(it.collect());
     if matches!(cmd.as_str(), "-h" | "--help" | "help") {
         println!("{USAGE}");
@@ -67,6 +79,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 .map(|n| n.parse::<u32>().map_err(|e| format!("--max-steps: {e}")))
                 .transpose()?;
             let allow_broad = args.flag("--allow-broad");
+            let dbg = args.flag("--debug") || debug::env_enabled();
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(
@@ -81,6 +94,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                     allow_broad,
                     instruction,
                 },
+                dbg,
             );
         }
         "diff" => runs::diff(&dirs, &id_arg(args)?)?,

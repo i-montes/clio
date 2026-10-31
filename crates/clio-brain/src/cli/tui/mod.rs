@@ -1,21 +1,28 @@
 //! `clio` with no arguments in a terminal: the TUI.
 //!
 //! `app` holds the state and the pure `update`; the screens (`home`, `new_run`, `live`, `detail`,
-//! `doctor`) hold their state, keys and drawing; `sanitize` cleans every outside text before it is
-//! drawn; `theme` has the colors. This file is the only one that touches the terminal and starts
+//! `doctor`, and the views of `meter`) hold their state, keys and drawing; `keys` is the one key
+//! map; `status` is the status bar; `sanitize` cleans every outside text before it is drawn;
+//! `theme` has the colors and symbols. This file is the only one that touches the terminal and starts
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod debug_view;
 pub mod detail;
 pub mod doctor;
 pub mod home;
+pub mod keys;
 pub mod live;
+pub mod meter;
 pub mod new_run;
 pub mod sanitize;
+pub mod status;
 pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_views;
 
 use std::io::{IsTerminal, Stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -39,8 +46,10 @@ use self::detail::Detail;
 use self::home::{Header, KeyState};
 use self::new_run::Preview;
 use super::apply;
+use super::debug::DebugCtl;
 use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::runs::{self, RunOpts};
+use super::usage::{self, RunLimits, RunUsage};
 use super::{Res, work};
 
 static IN_TUI: AtomicBool = AtomicBool::new(false);
@@ -103,7 +112,7 @@ impl Drop for Guard {
 }
 
 /// Opens the TUI and returns the exit code.
-pub fn run(dirs: Dirs) -> Res<i32> {
+pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
     install_panic_hook();
     let (_guard, mut term) = Guard::enter()?;
     let (tx, rx) = channel::<Input>();
@@ -111,11 +120,13 @@ pub fn run(dirs: Dirs) -> Res<i32> {
         dirs: Arc::new(dirs),
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+        debug: DebugCtl::new(debug, false),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
+    app.debug = debug;
     for c in App::start_cmds() {
         ctx.exec(c);
     }
@@ -145,7 +156,11 @@ pub fn run(dirs: Dirs) -> Res<i32> {
             let (next, cmds) = update(app, i);
             app = next;
             for c in cmds {
-                ctx.exec(c);
+                if c == Cmd::Redraw {
+                    term.clear().map_err(|e| format!("terminal: {e}"))?;
+                } else {
+                    ctx.exec(c);
+                }
             }
         }
     }
@@ -156,6 +171,8 @@ struct Ctx {
     dirs: Arc<Dirs>,
     tx: Sender<Input>,
     cancel: Mutex<Arc<AtomicBool>>,
+    /// The debug switch the agent reads at every call; `Ctrl-D` flips it.
+    debug: DebugCtl,
 }
 
 /// Sends what the agent does to the screen.
@@ -177,10 +194,14 @@ fn expand(dir: &str, home: &std::path::Path) -> PathBuf {
 }
 
 fn header(dirs: &Dirs) -> Header {
-    let (provider, model, config_error) = match Config::load(dirs) {
-        Ok(c) => (c.model.provider, c.model.model, None),
-        Err(e) => (String::new(), String::new(), Some(e)),
+    let (provider, model, config_error, limits) = match Config::load(dirs) {
+        Ok(c) => {
+            let l = RunLimits::of(&c);
+            (c.model.provider, c.model.model, None, l)
+        }
+        Err(e) => (String::new(), String::new(), Some(e), RunLimits::default()),
     };
+    let (window, window_known) = usage::window_for(dirs, &provider, &model);
     let key = match key_status(dirs) {
         KeyStatus::Env | KeyStatus::File { open_mode: None } => KeyState::Present,
         KeyStatus::File { open_mode: Some(_) } => KeyState::OpenPermissions,
@@ -198,11 +219,13 @@ fn header(dirs: &Dirs) -> Header {
         "sin crear (opcional)"
     };
     Header {
-        provider,
         model,
         key,
         vault: vault.into(),
         config_error,
+        limits,
+        window,
+        window_known,
     }
 }
 
@@ -245,7 +268,13 @@ impl Ctx {
     fn exec(&self, cmd: Cmd) {
         match cmd {
             Cmd::LoadHome => self.spawn(
-                |d, _| (header(d), runs::list_info(d, Some(100)).unwrap_or_default()),
+                |d, _| {
+                    let list = runs::list_info(d, Some(100)).unwrap_or_default();
+                    let last = list
+                        .first()
+                        .map_or_else(RunUsage::default, |r| RunUsage::load(&d.runs.join(&r.id)));
+                    (header(d), list, last)
+                },
                 |r| match r {
                     Ok(v) => Bg::Home(Box::new(v)),
                     Err(e) => Bg::Done(Err(e)),
@@ -265,6 +294,8 @@ impl Ctx {
                     result: r.and_then(|x| x),
                 },
             ),
+            Cmd::Redraw => {}
+            Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
                 if let Ok(flag) = self.cancel.lock() {
                     flag.store(true, Ordering::Relaxed);
@@ -275,6 +306,7 @@ impl Ctx {
                 if let Ok(mut slot) = self.cancel.lock() {
                     *slot = flag.clone();
                 }
+                let dbg = self.debug.clone();
                 self.spawn(
                     move |d, tx| {
                         let opts = RunOpts {
@@ -287,10 +319,24 @@ impl Ctx {
                         let _ = tx.send(Input::Bg(Bg::Started {
                             id: p.id.clone(),
                             files: p.scan.files.len(),
-                            max_steps: p.max_steps,
-                            max_seconds: p.max_seconds,
+                            workspace: p.ws.display().to_string(),
+                            usage: RunUsage::new(
+                                p.window,
+                                p.window_known,
+                                RunLimits {
+                                    max_steps: p.max_steps,
+                                    max_seconds: p.max_seconds,
+                                    max_cost_micro: p.max_cost_micro,
+                                },
+                            ),
                         }));
-                        runs::execute(&p, &instruction, Box::new(Forward(tx.clone())), Some(flag))
+                        runs::execute(
+                            &p,
+                            &instruction,
+                            Box::new(Forward(tx.clone())),
+                            Some(flag),
+                            &dbg,
+                        )
                     },
                     |r| Bg::Finished(r.and_then(|x| x).map(Box::new)),
                 );
