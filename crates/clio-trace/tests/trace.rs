@@ -282,3 +282,59 @@ fn a_span_is_stored_under_the_gen_ai_operation_name() {
     assert_eq!(kind, names::OPERATION_MODEL);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn every_model_call_can_carry_its_prompt_version_and_the_gate_can_count_the_ones_that_do_not() {
+    let (t, _, path) = setup("prompt-version");
+    let id = t.new_trace_id();
+    let root = t.start_span(&id, None, Kind::Agent, "task").expect("root");
+    let versioned = |version: &str| {
+        BTreeMap::from([(
+            names::ATTR_PROMPT_VERSION.to_string(),
+            Attr::Text(version.to_string()),
+        )])
+    };
+    for version in ["triage@3", "answer@7", "triage@3"] {
+        let call = t.child(&root, Kind::Model, "call").expect("call");
+        t.end_span(&call, Status::Ok, Some(usage(10, 5)), &versioned(version))
+            .expect("end");
+    }
+    assert_eq!(t.model_spans_without_prompt_version(&id).expect("count"), 0);
+    assert_eq!(
+        t.prompt_versions(&id).expect("versions"),
+        ["answer@7", "triage@3"]
+    );
+
+    let bare = t.child(&root, Kind::Model, "call").expect("call");
+    t.end_span(&bare, Status::Ok, Some(usage(10, 5)), &no_attrs())
+        .expect("end");
+    assert_eq!(t.model_spans_without_prompt_version(&id).expect("count"), 1);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn every_contract_state_change_is_in_the_trace_in_order() {
+    let (t, clock, path) = setup("contract-state");
+    let id = t.new_trace_id();
+    let root = t.start_span(&id, None, Kind::Agent, "task").expect("root");
+    for (from, to) in [
+        ("borrador", "aprobado"),
+        ("aprobado", "en curso"),
+        ("en curso", "cerrado con éxito"),
+    ] {
+        clock.advance(10);
+        t.contract_state(&root, "c-1", from, to).expect("state");
+    }
+    t.contract_state(&root, "c-2", "borrador", "cancelado")
+        .expect("other contract");
+    assert_eq!(
+        t.contract_history("c-1").expect("history"),
+        [
+            ("borrador".to_string(), "aprobado".to_string()),
+            ("aprobado".to_string(), "en curso".to_string()),
+            ("en curso".to_string(), "cerrado con éxito".to_string()),
+        ]
+    );
+    assert_eq!(t.contract_history("c-2").expect("history").len(), 1);
+    let _ = std::fs::remove_file(path);
+}

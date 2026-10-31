@@ -76,11 +76,11 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **047** `testing/fake-llm`: avisar y fallar si una petición nueva no tiene grabación
 - [x] **048** `testing/fake-llm`: pasar las grabaciones por el detector de secretos antes de guardarlas
 - [x] **049** prueba: dos corridas en modo reproducción dan exactamente el mismo resultado
-- [ ] **050** Reloj inyectable en `clio-core` para todo lo que dependa del tiempo (clio-memory conserva el suyo; sin dependencia entre ambos)
+- [x] **050** Reloj inyectable en `clio-core` para todo lo que dependa del tiempo (clio-memory conserva el suyo; sin dependencia entre ambos)
 - [x] **051** `testing/canaries`: generar secretos falsos únicos por corrida
 - [x] **052** `testing/canaries`: escáner que busca los señuelos (en claro, base64 y codificados para URL) en trazas, logs, payloads, memoria y contexto
-- [ ] **053** prueba: un señuelo que aparece en una traza hace fallar la compuerta
-- [ ] **054** Datos sintéticos: generador de memoria y archivos de prueba, nunca datos reales
+- [x] **053** prueba: un señuelo que aparece en una traza hace fallar la compuerta (`a_decoy_in_a_trace_fails_the_gate`; el CI corre `cargo test --workspace`)
+- [x] **054** Datos sintéticos: generador de memoria y archivos de prueba, nunca datos reales
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1)
 - [ ] **056** Decidir si Jev, el push y los proveedores falsos se escriben ahora o con su fase (se escriben en las fases 4 y 6)
 
@@ -94,8 +94,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **062** Archivo aparte (`clio-trace.db`) con permisos 0600, separado de la memoria
 - [x] **063** Contenido de prompts apagado por defecto (S-46)
 - [x] **064** prueba: con el contenido apagado, ningún tramo trae texto (S-46)
-- [ ] **065** Guardar la versión de cada prompt usada en cada traza
-- [ ] **066** Registrar cada cambio de estado de un contrato en la traza
+- [x] **065** Guardar la versión de cada prompt usada en cada traza
+- [x] **066** Registrar cada cambio de estado de un contrato en la traza
 
 ### Banco de evaluación
 

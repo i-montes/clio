@@ -384,6 +384,58 @@ impl Trace {
         )?)
     }
 
+    /// Distinct prompt versions that the model calls of a trace carried, sorted (D15).
+    pub fn prompt_versions(&self, trace_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT json_extract(attrs, '$.\"clio.prompt.version\"') AS v FROM spans
+             WHERE trace_id = ?1 AND kind = ?2 AND v IS NOT NULL ORDER BY v",
+        )?;
+        let rows = stmt.query_map(params![trace_id, names::OPERATION_MODEL], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Model calls of a trace that carry no prompt version. The gate wants zero.
+    pub fn model_spans_without_prompt_version(&self, trace_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM spans WHERE trace_id = ?1 AND kind = ?2
+             AND json_extract(attrs, '$.\"clio.prompt.version\"') IS NULL",
+            params![trace_id, names::OPERATION_MODEL],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Records a change of state of a contract as an instant child span of `parent`.
+    pub fn contract_state(
+        &self,
+        parent: &Span,
+        contract: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        let span = self.child(parent, Kind::Agent, names::NAME_CONTRACT_STATE)?;
+        let attrs = BTreeMap::from([
+            (
+                names::ATTR_CONTRACT.to_string(),
+                Attr::Text(contract.into()),
+            ),
+            (names::ATTR_FROM.to_string(), Attr::Text(from.into())),
+            (names::ATTR_TO.to_string(), Attr::Text(to.into())),
+        ]);
+        self.end_span(&span, Status::Ok, None, &attrs)
+    }
+
+    /// The `(from, to)` changes of one contract, oldest first.
+    pub fn contract_history(&self, contract: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(attrs, '$.from'), json_extract(attrs, '$.to') FROM spans
+             WHERE name = ?1 AND json_extract(attrs, '$.contract') = ?2 ORDER BY start_ms, rowid",
+        )?;
+        let rows = stmt.query_map(params![names::NAME_CONTRACT_STATE, contract], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     fn cost(&self, u: Usage<'_>, at_ms: i64) -> Result<i64> {
         let (input_price, output_price): (i64, i64) = self
             .conn
