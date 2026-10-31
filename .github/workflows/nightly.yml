@@ -12,27 +12,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 076: the bench with a real model when CLIO_BENCH_CMD (a repository variable) names the
-  # program that asks it; otherwise the replay bench, so the job never goes green by doing nothing.
-  # The run blocks when success falls or cost per task rises past testing/bench/thresholds.json.
+  # 076: the bench with a real model when the OPENCODE_API_KEY secret exists; otherwise the replay
+  # bench, so the job never goes green by doing nothing. It blocks when success falls or the cost
+  # per task rises past testing/bench/thresholds.json, against baseline-real.json.
+  # The tasks are trivial questions with no private data: they go to an outside provider (S-44).
   bench:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - env:
-          BENCH_CMD: ${{ vars.CLIO_BENCH_CMD }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
-          if [ -n "$BENCH_CMD" ]; then
-            # shellcheck disable=SC2086
-            cargo run --locked -q -p clio-bench -- real --tasks testing/bench/tasks \
-              --prices testing/bench/prices.json --repeats 5 \
+          flags="--tasks testing/bench/tasks --prices testing/bench/prices.json --provider opencode-go --model beam-free"
+          if [ -n "$OPENCODE_API_KEY" ]; then
+            cargo run --locked -q -p clio-bench -- real $flags --repeats 3 \
               --baseline testing/bench/baseline-real.json --thresholds testing/bench/thresholds.json \
-              --cmd $BENCH_CMD
+              --cmd python3 testing/bench/llm_openai_compat.py
           else
-            echo "::warning::CLIO_BENCH_CMD is not set: running the replay bench only"
-            cargo run --locked -q -p clio-bench -- replay --tasks testing/bench/tasks \
-              --tape testing/bench/tapes/replay.jsonl --prices testing/bench/prices.json --repeats 3 \
+            echo "::warning::OPENCODE_API_KEY is not set: running the replay bench only"
+            cargo run --locked -q -p clio-bench -- replay $flags --repeats 3 \
+              --tape testing/bench/tapes/beam-free.jsonl \
               --baseline testing/bench/baseline.json --thresholds testing/bench/thresholds.json
           fi
 

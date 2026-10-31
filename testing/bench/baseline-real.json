@@ -1,0 +1,148 @@
+{
+  "runs": 60,
+  "successes": 60,
+  "cost_micro_usd": 0,
+  "duration_ms": 85458,
+  "tasks": [
+    {
+      "task": "trivial-01",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2473
+    },
+    {
+      "task": "trivial-02",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2530
+    },
+    {
+      "task": "trivial-03",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2701
+    },
+    {
+      "task": "trivial-04",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 10338
+    },
+    {
+      "task": "trivial-05",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2553
+    },
+    {
+      "task": "trivial-06",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2939
+    },
+    {
+      "task": "trivial-07",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 3318
+    },
+    {
+      "task": "trivial-08",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 5869
+    },
+    {
+      "task": "trivial-09",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 3499
+    },
+    {
+      "task": "trivial-10",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 5488
+    },
+    {
+      "task": "trivial-11",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2847
+    },
+    {
+      "task": "trivial-12",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 6541
+    },
+    {
+      "task": "trivial-13",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 3761
+    },
+    {
+      "task": "trivial-14",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 3702
+    },
+    {
+      "task": "trivial-15",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2908
+    },
+    {
+      "task": "trivial-16",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 3064
+    },
+    {
+      "task": "trivial-17",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 2454
+    },
+    {
+      "task": "trivial-18",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 5346
+    },
+    {
+      "task": "trivial-19",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 7318
+    },
+    {
+      "task": "trivial-20",
+      "runs": 3,
+      "successes": 3,
+      "cost_micro_usd": 0,
+      "duration_ms": 5809
+    }
+  ]
+}

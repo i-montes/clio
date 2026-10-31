@@ -4,5 +4,11 @@
     "model": "replay-1",
     "input_per_mtok": 3000000,
     "output_per_mtok": 15000000
+  },
+  {
+    "provider": "opencode-go",
+    "model": "beam-free",
+    "input_per_mtok": 0,
+    "output_per_mtok": 0
   }
 ]

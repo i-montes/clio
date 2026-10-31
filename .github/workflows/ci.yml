@@ -80,7 +80,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: >
           cargo run --locked -q -p clio-bench -- replay
-          --tasks testing/bench/tasks --tape testing/bench/tapes/replay.jsonl
+          --tasks testing/bench/tasks --tape testing/bench/tapes/beam-free.jsonl
+          --provider opencode-go --model beam-free
           --prices testing/bench/prices.json --repeats 3
           --baseline testing/bench/baseline.json --thresholds testing/bench/thresholds.json
 
