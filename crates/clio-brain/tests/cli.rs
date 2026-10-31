@@ -11,8 +11,9 @@ use serde_json::{Value, json};
 
 const CLIO: &str = env!("CARGO_BIN_EXE_clio");
 
-const ADAPTER: &str = r#"import json, os, sys
+const ADAPTER: &str = r#"import json, os, sys, time
 sys.stdin.read()
+time.sleep(float(os.environ.get("ADAPTER_SLEEP", "0")))
 d = os.path.dirname(os.path.abspath(__file__))
 n = int(open(d + "/n").read()) if os.path.exists(d + "/n") else 0
 r = json.load(open(d + "/responses.json"))
@@ -128,6 +129,42 @@ impl Env {
     fn read(&self, rel: &str) -> String {
         std::fs::read_to_string(self.proj().join(rel)).unwrap()
     }
+
+    /// Runs `clio` inside a real pseudo-terminal (see `pty_driver.py`) and returns its verdict.
+    fn pty(&self, scenario: &str, adapter_sleep: &str) -> Value {
+        let cfg = json!({
+            "clio": CLIO,
+            "cwd": self.path("proj"),
+            "runs": self.home().join(".local/share/clio/runs").display().to_string(),
+            "app_py": self.proj().join("app.py").display().to_string(),
+            "old": OLD_APP,
+            "new": NEW_APP,
+            "env": {
+                "HOME": self.home().display().to_string(),
+                "XDG_RUNTIME_DIR": self.path("run"),
+                "CLIO_HOST_CHECK": self.path("script/host-check.sh"),
+                "TERM": "xterm-256color",
+                "LANG": "C.UTF-8",
+                "PATH": std::env::var("PATH").unwrap_or_default(),
+                "ADAPTER_SLEEP": adapter_sleep,
+            },
+        });
+        let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pty_driver.py");
+        let o = Command::new("python3")
+            .arg("-I")
+            .arg(driver)
+            .arg(scenario)
+            .arg(cfg.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{scenario}: {}{}",
+            text(&o.stdout),
+            text(&o.stderr)
+        );
+        serde_json::from_str(text(&o.stdout).trim()).unwrap()
+    }
 }
 
 fn text(b: &[u8]) -> String {
@@ -154,11 +191,11 @@ fn full_cycle_run_diff_apply_undo() {
     assert_eq!(e.read("app.py"), OLD_APP);
     assert!(!e.proj().join("docs").exists());
     assert!(
-        out_run.contains("NOT copied") && out_run.contains(".env"),
+        out_run.contains("NO se copió") && out_run.contains(".env"),
         "{out_run}"
     );
     assert!(
-        out_run.contains("1 modified, 1 created, 0 deleted"),
+        out_run.contains("1 modificados, 1 creados, 0 borrados"),
         "{out_run}"
     );
     assert!(out_run.contains("clio diff") && out_run.contains("clio apply"));
@@ -200,7 +237,7 @@ fn full_cycle_run_diff_apply_undo() {
     assert!(diff.contains("+++ b/docs/new.md"));
 
     let applied = e.clio(&["apply", "--yes", &id]);
-    assert!(applied.contains("applied 2 file(s)"), "{applied}");
+    assert!(applied.contains("2 archivo(s) aplicados"), "{applied}");
     assert_eq!(e.read("app.py"), NEW_APP);
     assert_eq!(e.read("docs/new.md"), "hello\n");
     assert_eq!(e.read("notes.txt"), "keep me\n");
@@ -239,7 +276,7 @@ fn apply_declines_without_confirmation() {
     use std::io::Write;
     child.stdin.take().unwrap().write_all(b"n\n").unwrap();
     let o = child.wait_with_output().unwrap();
-    assert!(text(&o.stdout).contains("not applied"));
+    assert!(text(&o.stdout).contains("no se aplicó"));
     assert_eq!(e.read("app.py"), OLD_APP);
 }
 
@@ -255,7 +292,7 @@ fn apply_refuses_when_the_original_changed() {
     let o = e.try_clio(&["apply", "--yes", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("changed in the original"),
+        text(&o.stderr).contains("cambió en el original"),
         "{}",
         text(&o.stderr)
     );
@@ -282,7 +319,7 @@ fn apply_refuses_a_symlink_that_escapes() {
     let o = e.try_clio(&["apply", "--yes", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("symbolic link"),
+        text(&o.stderr).contains("enlace simbólico"),
         "{}",
         text(&o.stderr)
     );
@@ -307,7 +344,7 @@ fn apply_refuses_protected_and_secret_paths_even_with_force() {
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("protected path"),
+        text(&o.stderr).contains("ruta protegida"),
         "{}",
         text(&o.stderr)
     );
@@ -315,7 +352,7 @@ fn apply_refuses_protected_and_secret_paths_even_with_force() {
     std::fs::write(sandbox.join(".env.production"), "A=1\n").unwrap();
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     assert!(
-        text(&o.stderr).contains("looks like a secret"),
+        text(&o.stderr).contains("parece un secreto"),
         "{}",
         text(&o.stderr)
     );
@@ -348,7 +385,7 @@ fn init_is_idempotent_and_private() {
     )
     .unwrap();
     let out = e.clio(&["init"]);
-    assert!(out.contains("left as it is"), "{out}");
+    assert!(out.contains("se deja como está"), "{out}");
     assert_eq!(
         std::fs::read_to_string(&cfg).unwrap(),
         before,
@@ -378,14 +415,14 @@ fn init_checks_the_key_without_printing_it() {
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let out = e.clio(&["init"]);
     assert!(
-        out.contains("WARNING") && out.contains("chmod 600"),
+        out.contains("ADVERTENCIA") && out.contains("chmod 600"),
         "{out}"
     );
     assert!(!out.contains(&secret));
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
     let out = e.clio(&["init"]);
     assert!(
-        out.contains("model key found") && !out.contains(&secret),
+        out.contains("clave del modelo encontrada") && !out.contains(&secret),
         "{out}"
     );
 }
@@ -417,7 +454,7 @@ fn run_refuses_broad_or_huge_workspaces() {
     for ws in ["/", &e.home().display().to_string()] {
         let o = e.try_clio(&["run", "--workspace", ws, "hazlo"]);
         assert!(!o.status.success(), "{ws}");
-        assert!(text(&o.stderr).contains("refusing"), "{}", text(&o.stderr));
+        assert!(text(&o.stderr).contains("rechazo"), "{}", text(&o.stderr));
     }
     // Lower the limit to 2 files: the project (3 files) is too big until --allow-broad.
     let cfg_path = e.home().join(".config/clio/config.json");
@@ -442,4 +479,181 @@ fn run_refuses_broad_or_huge_workspaces() {
         .status
         .success()
     );
+}
+
+#[test]
+fn no_arguments_without_a_terminal_prints_help_and_exits_0() {
+    let e = Env::new();
+    for args in [&[][..], &["--help"], &["help"]] {
+        let o = e.try_clio(args);
+        assert_eq!(o.status.code(), Some(0), "{args:?}");
+        assert!(text(&o.stdout).contains("clio run"), "{args:?}");
+    }
+    let o = e.try_clio(&["frobnicate"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(text(&o.stderr).contains("comando desconocido"));
+}
+
+#[test]
+fn run_prints_a_line_per_step_and_a_plain_panel_without_escape_codes() {
+    let e = Env::new();
+    e.script_fix();
+    let o = e.clio(&[
+        "run",
+        "--workspace",
+        &e.path("proj"),
+        "arregla total en app.py",
+    ]);
+    assert!(!o.contains('\u{1b}'), "a pipe gets no color codes: {o:?}");
+    assert!(o.contains("[1/40] read_file app.py"), "{o}");
+    assert!(o.contains("permitido"), "{o}");
+    assert!(o.contains("[4/40] el modelo dice que terminó"), "{o}");
+    assert!(
+        o.contains("agente:") && o.contains("El original NO se tocó"),
+        "{o}"
+    );
+    assert!(
+        o.contains("  M app.py") && o.contains("  A docs/new.md"),
+        "{o}"
+    );
+}
+
+#[test]
+fn runs_show_and_doctor_speak_json() {
+    let e = Env::new();
+    let id = e.run_fix();
+    let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
+    assert_eq!(runs[0]["id"], id.as_str());
+    assert_eq!(runs[0]["status"], "pending_review");
+    assert_eq!(runs[0]["files"], 2);
+    let show: Value = serde_json::from_str(&e.clio(&["show", "--json", &id[..12]])).unwrap();
+    assert_eq!(show["summary"]["modified"], json!(["app.py"]));
+    assert_eq!(show["summary"]["ending"], "Final");
+    assert!(show["folder"].as_str().unwrap().ends_with(&id));
+    let doc: Value = serde_json::from_str(&e.clio(&["doctor", "--json"])).unwrap();
+    assert_eq!(doc["ok"], true);
+    assert!(doc["checks"].as_array().unwrap().len() > 3);
+    // The table is aligned and has a header.
+    let table = e.clio(&["runs"]);
+    assert!(
+        table.starts_with("RUN") && table.contains("pendiente de revisar"),
+        "{table}"
+    );
+    e.clio(&["apply", "--yes", &id]);
+    let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
+    assert_eq!(runs[0]["status"], "applied");
+}
+
+#[test]
+fn pty_the_tui_opens_in_the_alternate_screen_and_q_restores_the_terminal() {
+    let e = Env::new();
+    for scenario in ["quit", "ctrl_c"] {
+        let v = e.pty(scenario, "0");
+        assert_eq!(v["alt_on"], true, "{scenario}: {v}");
+        assert_eq!(v["title_drawn"], true, "{scenario}: {v}");
+        assert_eq!(v["code"], 0, "{scenario}: {v}");
+        assert_eq!(v["alt_off_after_on"], true, "{scenario}: {v}");
+        assert_eq!(v["during"]["canonical"], false, "raw mode while open: {v}");
+        assert_eq!(v["after"]["canonical"], true, "cooked mode back: {v}");
+        assert_eq!(v["after"]["echo"], true, "echo back: {v}");
+    }
+}
+
+#[test]
+fn pty_a_panic_still_gives_the_terminal_back() {
+    let e = Env::new();
+    let v = e.pty("panic", "0");
+    assert_eq!(v["alt_on"], true, "{v}");
+    assert_eq!(v["code"], 101, "{v}");
+    assert_eq!(v["alt_off_after_on"], true, "{v}");
+    assert_eq!(
+        v["message_after_restore"], true,
+        "the panic message prints on the normal screen: {v}"
+    );
+    assert_eq!(v["after"]["canonical"], true, "{v}");
+    assert_eq!(v["after"]["echo"], true, "{v}");
+}
+
+#[test]
+fn pty_with_stdout_piped_it_prints_help_and_exits_0() {
+    let e = Env::new();
+    let v = e.pty("help_when_piped", "0");
+    assert_eq!(v["code"], 0, "{v}");
+    assert!(v["stdout"].as_str().unwrap().contains("clio run"), "{v}");
+    assert_eq!(v["escapes"], false, "{v}");
+}
+
+#[test]
+fn pty_a_job_runs_from_the_tui_and_apply_and_undo_ask_first() {
+    let e = Env::new();
+    e.script_fix();
+    let v = e.pty("live", "0");
+    assert_eq!(v["summary"], true, "{v}");
+    assert_eq!(
+        v["asked_before_apply"], true,
+        "the dialog asks, nothing written yet: {v}"
+    );
+    assert_eq!(v["applied"], true, "{v}");
+    assert_eq!(v["asked_before_undo"], true, "{v}");
+    assert_eq!(v["undone"], true, "{v}");
+    assert_eq!(v["code"], 0, "{v}");
+    assert_eq!(v["after"]["canonical"], true, "{v}");
+    assert_eq!(e.read("app.py"), OLD_APP);
+    assert!(
+        !e.proj().join("docs").exists(),
+        "undo removed the folder apply created"
+    );
+}
+
+#[test]
+fn pty_cancelling_a_live_run_leaves_it_cancelled_and_the_original_untouched() {
+    let e = Env::new();
+    e.script_fix();
+    let v = e.pty("cancel", "2");
+    assert_eq!(v["started"], true, "{v}");
+    assert_eq!(v["ending"], "Cancelled", "{v}");
+    assert_eq!(v["code"], 0, "{v}");
+    assert_eq!(e.read("app.py"), OLD_APP);
+    let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
+    assert_eq!(runs[0]["status"], "cancelled");
+    assert!(e.clio(&["runs"]).contains("cancelado"));
+}
+
+/// Prints the plain outputs (for the docs): `cargo test -p clio-brain --test cli print_plain -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints outputs; not a check"]
+fn print_plain_outputs() {
+    let e = Env::new();
+    e.script(&[
+        json!({"tool": "read_file", "args": {"path": "app.py"}}),
+        json!({"tool": "write_file", "args": {"path": "app.py", "content": NEW_APP}}),
+        json!({"tool": "write_file", "args": {"path": ".git/x", "content": "no"}}),
+        json!({"final": "Corregí total() en app.py: ya no suma 1 de más. No pude correr las pruebas; ejecútalas antes de aplicar."}),
+    ]);
+    println!("--- init\n{}", e.clio(&["init"]));
+    let o = e.try_clio(&[
+        "run",
+        "--workspace",
+        &e.path("proj"),
+        "arregla total en app.py",
+    ]);
+    println!("--- run\n{}", text(&o.stdout));
+    println!("--- runs\n{}", e.clio(&["runs"]));
+    println!("--- doctor\n{}", text(&e.try_clio(&["doctor"]).stdout));
+}
+
+#[test]
+fn hostile_text_is_cleaned_before_it_reaches_a_terminal_view() {
+    let e = Env::new();
+    e.script(&[json!({"final": "listo\u{1b}]0;pwned\u{7} \u{1b}[2J"})]);
+    let id = {
+        let out = e.clio(&["run", "--workspace", &e.path("proj"), "haz algo\u{1b}[31m"]);
+        out.lines()
+            .find_map(|l| l.strip_prefix("run:").map(|s| s.trim().to_owned()))
+            .unwrap()
+    };
+    // The text is stored as it came (the record is the truth) but printing removes the escapes.
+    for out in [e.clio(&["runs"]), e.clio(&["show", &id])] {
+        assert!(!out.contains('\u{1b}') && !out.contains('\u{7}'), "{out:?}");
+    }
 }

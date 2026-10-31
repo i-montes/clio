@@ -8,6 +8,8 @@ pub mod diff;
 pub mod doctor;
 pub mod home;
 pub mod runs;
+pub mod tui;
+pub mod ui;
 pub mod vault;
 pub mod work;
 

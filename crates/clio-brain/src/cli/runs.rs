@@ -3,19 +3,25 @@
 //! `sandbox/` (the copy the agent worked on), `manifest.json` (hash of each copied file),
 //! `meta.json`, `contract.json`, `effects.jsonl`, `transcript.json`, `report.json`,
 //! `summary.json`, and later `backup/` and `applied.json`.
+//!
+//! The work is split so the plain commands and the TUI share it: `prepare` (validate, scan, copy),
+//! `execute` (the agent, then the files of the run), and readers (`RunInfo`, `list_info`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Ending};
+use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, Observer};
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::diff::file_diff;
 use super::home::{Config, Dirs};
-use super::work::{self, Change, Kind};
+use super::tui::sanitize;
+use super::ui::{self, Style, clip, pad};
+use super::work::{self, Change, Kind, Scan};
 use super::{Res, io_err, mkdir_private, now_ms, stamp, write_private};
 
 pub struct Run {
@@ -69,10 +75,10 @@ pub fn resolve(dirs: &Dirs, id: &str) -> Res<Run> {
             path: dirs.runs.join(n),
         }),
         _ if hits.len() > 1 => Err(format!(
-            "{id:?} matches {} runs; give more of the id",
+            "{id:?} coincide con {} runs; da más del id",
             hits.len()
         )),
-        _ => Err(format!("no run {id:?} (see `clio runs`)")),
+        _ => Err(format!("no hay un run {id:?} (mira `clio runs`)")),
     }
 }
 
@@ -91,7 +97,7 @@ fn run_ids(dirs: &Dirs) -> Res<Vec<String>> {
     Ok(v)
 }
 
-fn letter(k: Kind) -> char {
+pub fn letter(k: Kind) -> char {
     match k {
         Kind::Modified => 'M',
         Kind::Created => 'A',
@@ -99,13 +105,190 @@ fn letter(k: Kind) -> char {
     }
 }
 
-fn trim(s: &str, n: usize) -> String {
-    let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.chars().count() > n {
-        format!("{}...", one.chars().take(n).collect::<String>())
-    } else {
-        one
+/// Everything about a run that ends up in `summary.json`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunSummary {
+    pub id: String,
+    pub workspace: String,
+    pub instruction: String,
+    /// The `Debug` form of `Ending`: `Final`, `Stopped(Steps)`, `Cancelled`, ...
+    pub ending: String,
+    pub level: String,
+    pub steps: u32,
+    pub elapsed_ms: i64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_micro: u64,
+    pub denied: u32,
+    pub protocol_errors: u32,
+    pub tainted: bool,
+    pub contract_state: Option<String>,
+    pub modified: Vec<String>,
+    pub created: Vec<String>,
+    pub deleted: Vec<String>,
+    pub excluded_secrets: Vec<String>,
+    pub final_message: Option<String>,
+    pub pending: Vec<String>,
+}
+
+impl RunSummary {
+    pub fn files(&self) -> usize {
+        self.modified.len() + self.created.len() + self.deleted.len()
     }
+
+    /// Changed files as (letter, path), in the order M, A, D.
+    pub fn changed(&self) -> Vec<(char, &str)> {
+        let mut out = Vec::new();
+        out.extend(self.modified.iter().map(|p| ('M', p.as_str())));
+        out.extend(self.created.iter().map(|p| ('A', p.as_str())));
+        out.extend(self.deleted.iter().map(|p| ('D', p.as_str())));
+        out
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.ending == "Final"
+    }
+}
+
+/// Spanish words for an `Ending` in its `Debug` form.
+pub fn ending_label(ending: &str) -> String {
+    match ending {
+        "Final" => "terminó".into(),
+        "Cancelled" => "cancelado".into(),
+        "NeedsApproval" => "necesita tu aprobación".into(),
+        e if e.starts_with("Stopped(") => match e {
+            "Stopped(Steps)" => "detenido: límite de pasos".into(),
+            "Stopped(Time)" => "detenido: límite de tiempo".into(),
+            "Stopped(Cost)" | "Stopped(DayCost)" => "detenido: límite de costo".into(),
+            "Stopped(Repeats)" => "detenido: repetía la misma acción".into(),
+            "Stopped(Retries)" => "detenido: demasiados reintentos".into(),
+            other => format!("detenido ({other})"),
+        },
+        e if e.starts_with("ModelError") => "falló el modelo".into(),
+        other => other.to_lowercase(),
+    }
+}
+
+/// What a person sees about a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Applied,
+    Undone,
+    Pending,
+    NoChanges,
+    Failed,
+    Cancelled,
+    Incomplete,
+}
+
+impl Status {
+    /// Stable word for scripts (`--json`).
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Undone => "undone",
+            Self::Pending => "pending_review",
+            Self::NoChanges => "no_changes",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Applied => "aplicado",
+            Self::Undone => "deshecho",
+            Self::Pending => "pendiente de revisar",
+            Self::NoChanges => "sin cambios",
+            Self::Failed => "fallido",
+            Self::Cancelled => "cancelado",
+            Self::Incomplete => "incompleto",
+        }
+    }
+
+    fn paint(self, st: Style, s: &str) -> String {
+        match self {
+            Self::Applied => st.green(s),
+            Self::Pending => st.yellow(s),
+            Self::Failed | Self::Incomplete => st.red(s),
+            Self::Undone | Self::NoChanges | Self::Cancelled => st.dim(s),
+        }
+    }
+}
+
+/// A run as the list and the screens show it. Tolerant: a half-written run still loads.
+#[derive(Debug, Clone)]
+pub struct RunInfo {
+    pub id: String,
+    pub status: Status,
+    pub instruction: String,
+    pub workspace: String,
+    pub created_ms: Option<i64>,
+    pub summary: Option<RunSummary>,
+}
+
+impl RunInfo {
+    pub fn files(&self) -> usize {
+        self.summary.as_ref().map_or(0, RunSummary::files)
+    }
+
+    pub fn load(run: &Run) -> Self {
+        let summary: Option<RunSummary> = read_json(&run.path.join("summary.json")).ok();
+        let meta = run.meta().ok();
+        let status = if run.path.join("applied.json").exists() {
+            Status::Applied
+        } else if run.path.join("undone.json").exists() {
+            Status::Undone
+        } else {
+            match &summary {
+                None => Status::Incomplete,
+                Some(s) if s.ending == "Cancelled" => Status::Cancelled,
+                Some(s) if !s.succeeded() => Status::Failed,
+                Some(s) if s.files() == 0 => Status::NoChanges,
+                Some(_) => Status::Pending,
+            }
+        };
+        Self {
+            id: run.id.clone(),
+            status,
+            instruction: meta
+                .as_ref()
+                .map(|m| m.instruction.clone())
+                .unwrap_or_default(),
+            workspace: meta
+                .as_ref()
+                .map(|m| m.workspace.clone())
+                .unwrap_or_default(),
+            created_ms: meta.map(|m| m.created_ms),
+            summary,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "status": self.status.code(),
+            "ending": self.summary.as_ref().map(|s| s.ending.clone()),
+            "files": self.files(),
+            "instruction": self.instruction,
+            "workspace": self.workspace,
+            "created_ms": self.created_ms,
+        })
+    }
+}
+
+/// The newest `limit` runs (all when `None`).
+pub fn list_info(dirs: &Dirs, limit: Option<usize>) -> Res<Vec<RunInfo>> {
+    Ok(run_ids(dirs)?
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|id| {
+            let path = dirs.runs.join(&id);
+            RunInfo::load(&Run { id, path })
+        })
+        .collect())
 }
 
 pub struct RunOpts {
@@ -115,7 +298,22 @@ pub struct RunOpts {
     pub instruction: String,
 }
 
-pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
+/// A run that is validated and copied, ready for the agent.
+pub struct Prepared {
+    pub id: String,
+    pub path: PathBuf,
+    pub ws: PathBuf,
+    pub scan: Scan,
+    pub max_steps: u32,
+    pub max_seconds: u64,
+    manifest: BTreeMap<String, String>,
+    cfg: Config,
+    prompt: String,
+    program: String,
+}
+
+/// Validates the workspace, scans it and makes the copy. Nothing of the original is touched.
+pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     let cfg = Config::load(dirs)?;
     let ws = work::validate(&o.workspace, dirs)?;
     let (mf, mb) = if o.allow_broad {
@@ -129,9 +327,8 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
         .model
         .command
         .first()
-        .ok_or("config: model.command is empty")?
+        .ok_or("config: model.command está vacío (revisa ~/.config/clio/config.json)")?
         .clone();
-
     let started = now_ms();
     let id = format!(
         "{}-{:04x}",
@@ -140,7 +337,7 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
     );
     let path = dirs.runs.join(&id);
     if path.exists() {
-        return Err(format!("run {id} already exists; try again"));
+        return Err(format!("el run {id} ya existe; inténtalo de nuevo"));
     }
     mkdir_private(&path)?;
     let manifest = work::copy_tree(&ws, &scan.files, &path.join("sandbox"))?;
@@ -154,30 +351,32 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
             created_ms: started,
         },
     )?;
-    println!(
-        "run {id}: copied {} files from {}",
-        scan.files.len(),
-        ws.display()
-    );
-    if !scan.secrets.is_empty() {
-        println!(
-            "NOT copied, they look like secrets: {}",
-            scan.secrets.join(", ")
-        );
-    }
-    if !scan.skipped_dirs.is_empty() {
-        println!(
-            "not copied (heavy or internal folders): {}",
-            scan.skipped_dirs.join(", ")
-        );
-    }
-    if !scan.symlinks.is_empty() {
-        println!("not copied (symbolic links): {}", scan.symlinks.join(", "));
-    }
+    Ok(Prepared {
+        max_steps: o.max_steps.unwrap_or(cfg.limits.max_steps),
+        max_seconds: cfg.limits.max_seconds,
+        id,
+        path,
+        ws,
+        scan,
+        manifest,
+        cfg,
+        prompt,
+        program,
+    })
+}
 
-    let mut acfg = AgentConfig::new(&id, &prompt, &path);
+/// Runs the agent in the copy and writes the files of the run. `observer` sees every step;
+/// `cancel` set to true ends the run after the step in progress (the run is kept as cancelled).
+pub fn execute(
+    p: &Prepared,
+    instruction: &str,
+    observer: Box<dyn Observer>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Res<RunSummary> {
+    let (cfg, path, id) = (&p.cfg, &p.path, &p.id);
+    let mut acfg = AgentConfig::new(id, &p.prompt, path);
     acfg.prompt_version.clone_from(&cfg.model.prompt);
-    acfg.budget.max_steps = o.max_steps.unwrap_or(cfg.limits.max_steps);
+    acfg.budget.max_steps = p.max_steps;
     acfg.budget.max_ms =
         i64::try_from(cfg.limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
     acfg.budget.max_cost_micro = cfg.limits.max_cost_micro_usd;
@@ -192,11 +391,12 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
         &path.join("scratch"),
     )?;
     agent.scrubber = Some(clio_vault::Scrubber::default());
-    let mut model = CommandModel::new(&program, &cfg.model.command[1..], &cfg.model.model);
-    println!("working in the copy (this can take a few minutes)...");
-    let outcome = agent.run(&mut model, &o.instruction)?;
+    agent.observer = observer;
+    agent.cancel = cancel;
+    let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
+    let outcome = agent.run(&mut model, instruction)?;
 
-    work::lock_down(&path)?;
+    work::lock_down(path)?;
     write_json(&path.join("transcript.json"), &outcome.transcript)?;
     write_json(
         &path.join("report.json"),
@@ -206,153 +406,403 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
             "next_step": outcome.report.next_step,
         }),
     )?;
-    let ch = work::changes(&path.join("sandbox"), &manifest)?;
-    let names = |k: Kind| -> Vec<&str> {
+    let ch = work::changes(&path.join("sandbox"), &p.manifest)?;
+    let names = |k: Kind| -> Vec<String> {
         ch.iter()
             .filter(|c| c.kind == k)
-            .map(|c| c.rel.as_str())
+            .map(|c| c.rel.clone())
             .collect()
     };
-    let ending = format!("{:?}", outcome.ending);
-    let summary = json!({
-        "id": id,
-        "workspace": ws.display().to_string(),
-        "instruction": o.instruction,
-        "ending": ending,
-        "level": format!("{:?}", outcome.level),
-        "steps": outcome.steps,
-        "elapsed_ms": outcome.elapsed_ms,
-        "input_tokens": outcome.input_tokens,
-        "output_tokens": outcome.output_tokens,
-        "cost_micro": outcome.cost_micro,
-        "denied": outcome.denied,
-        "protocol_errors": outcome.protocol_errors,
-        "tainted": outcome.tainted,
-        "contract_state": outcome.contract_state.map(|s| format!("{s:?}")),
-        "modified": names(Kind::Modified),
-        "created": names(Kind::Created),
-        "deleted": names(Kind::Deleted),
-        "excluded_secrets": scan.secrets,
-        "final_message": outcome.final_message,
-    });
+    let summary = RunSummary {
+        id: id.clone(),
+        workspace: p.ws.display().to_string(),
+        instruction: instruction.to_owned(),
+        ending: format!("{:?}", outcome.ending),
+        level: format!("{:?}", outcome.level),
+        steps: outcome.steps,
+        elapsed_ms: outcome.elapsed_ms,
+        input_tokens: outcome.input_tokens,
+        output_tokens: outcome.output_tokens,
+        cost_micro: outcome.cost_micro,
+        denied: outcome.denied,
+        protocol_errors: outcome.protocol_errors,
+        tainted: outcome.tainted,
+        contract_state: outcome.contract_state.map(|s| format!("{s:?}")),
+        modified: names(Kind::Modified),
+        created: names(Kind::Created),
+        deleted: names(Kind::Deleted),
+        excluded_secrets: p.scan.secrets.clone(),
+        final_message: outcome.final_message,
+        pending: outcome.report.pending,
+    };
     write_json(&path.join("summary.json"), &summary)?;
-
-    println!();
-    println!("run:      {id}");
-    println!(
-        "level:    {:?}   steps: {}   time: {:.1}s   ending: {ending}",
-        outcome.level,
-        outcome.steps,
-        outcome.elapsed_ms as f64 / 1000.0
-    );
-    println!(
-        "changes:  {} modified, {} created, {} deleted",
-        names(Kind::Modified).len(),
-        names(Kind::Created).len(),
-        names(Kind::Deleted).len()
-    );
-    for c in &ch {
-        println!("  {} {}", letter(c.kind), c.rel);
-    }
-    match &outcome.final_message {
-        Some(m) => println!("agent:    {}", trim(m, 600)),
-        None => println!(
-            "agent:    (no final message) {}",
-            outcome.report.pending.join("; ")
-        ),
-    }
-    println!("The original was NOT touched. Review:  clio diff {id}   then  clio apply {id}");
-    Ok(i32::from(outcome.ending != Ending::Final))
+    Ok(summary)
 }
 
-/// Shows the changes of `ch` against what is in the original now.
+fn exit_code(s: &RunSummary) -> i32 {
+    i32::from(!s.succeeded())
+}
+
+/// One line per step for the plain `clio run`.
+struct Progress {
+    st: Style,
+    max_steps: u32,
+    step: u32,
+    started: std::time::Instant,
+}
+
+impl Observer for Progress {
+    fn event(&mut self, e: &Event) {
+        use clio_gateway::Outcome;
+        let secs = self.started.elapsed().as_secs();
+        let line = match e {
+            Event::Step { n } => {
+                self.step = *n;
+                return;
+            }
+            Event::Started { level } => format!("nivel de la tarea: {level:?}"),
+            Event::ProtocolError { reason } => format!(
+                "el modelo contestó algo que no es una acción ({})",
+                clip(self.st, &sanitize::line(reason), 60)
+            ),
+            Event::Final => "el modelo dice que terminó".to_owned(),
+            Event::Tool {
+                name,
+                target,
+                outcome,
+                rule,
+                ran,
+                result_chars,
+                ..
+            } => {
+                let mark = match (outcome, ran) {
+                    (Outcome::Deny, _) => self.st.red("negado"),
+                    (_, false) => self.st.yellow("pedido, sin ejecutar"),
+                    (Outcome::Ask, true) => self.st.yellow("pedido y aprobado"),
+                    _ => self.st.green("permitido"),
+                };
+                let size = if *ran {
+                    format!("  {result_chars} car.")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{} {}  {mark} ({}){size}",
+                    sanitize::line(name),
+                    clip(self.st, &sanitize::line(target), 40),
+                    sanitize::line(rule),
+                )
+            }
+        };
+        let time = self.st.dim(&format!("{secs:>3}s"));
+        println!("  {time}  [{}/{}] {line}", self.step, self.max_steps);
+    }
+}
+
+pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
+    let st = Style::stdout();
+    let p = prepare(dirs, o)?;
+    println!(
+        "{} {}: {} archivos copiados de {}",
+        st.bold("run"),
+        st.cyan(&p.id),
+        p.scan.files.len(),
+        sanitize::line(&p.ws.display().to_string())
+    );
+    let list = |v: &[String]| {
+        v.iter()
+            .map(|s| sanitize::line(s))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !p.scan.secrets.is_empty() {
+        println!(
+            "  {} NO se copió, parece un secreto: {}",
+            st.mark(ui::Level::Warn),
+            list(&p.scan.secrets)
+        );
+    }
+    if !p.scan.skipped_dirs.is_empty() {
+        println!(
+            "  {} no se copió (carpetas pesadas o internas): {}",
+            st.dim(st.bullet()),
+            list(&p.scan.skipped_dirs)
+        );
+    }
+    if !p.scan.symlinks.is_empty() {
+        println!(
+            "  {} no se copió (enlaces simbólicos): {}",
+            st.dim(st.bullet()),
+            list(&p.scan.symlinks)
+        );
+    }
+    println!(
+        "trabajando en la copia (puede tardar unos minutos; hasta {} pasos o {} s)...",
+        p.max_steps, p.max_seconds
+    );
+    let progress = Progress {
+        st,
+        max_steps: p.max_steps,
+        step: 0,
+        started: std::time::Instant::now(),
+    };
+    let s = execute(&p, &o.instruction, Box::new(progress), None)?;
+    println!();
+    print_panel(st, &s);
+    Ok(exit_code(&s))
+}
+
+/// The closing panel of a run.
+fn print_panel(st: Style, s: &RunSummary) {
+    let w = ui::width();
+    let label = |l: &str| st.bold(&pad(l, 10));
+    println!("{}{}", label("run:"), st.cyan(&s.id));
+    println!(
+        "{}{}   pasos: {}   tiempo: {:.1}s   fin: {}",
+        label("nivel:"),
+        s.level,
+        s.steps,
+        s.elapsed_ms as f64 / 1000.0,
+        {
+            let e = ending_label(&s.ending);
+            if s.succeeded() {
+                st.green(&e)
+            } else {
+                st.red(&e)
+            }
+        }
+    );
+    println!(
+        "{}{} modificados, {} creados, {} borrados",
+        label("cambios:"),
+        s.modified.len(),
+        s.created.len(),
+        s.deleted.len()
+    );
+    for (c, p) in s.changed() {
+        println!("  {c} {}", sanitize::line(p));
+    }
+    if s.tainted {
+        println!(
+            "{}{}",
+            label("nota:"),
+            st.yellow("leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado")
+        );
+    }
+    let msg = match &s.final_message {
+        Some(m) => sanitize::multiline(m),
+        None => format!(
+            "(sin mensaje final) {}",
+            sanitize::line(&s.pending.join("; "))
+        ),
+    };
+    let lines = ui::wrap(&msg, w.saturating_sub(10));
+    let shown = lines.len().min(14);
+    for (i, l) in lines.iter().take(shown).enumerate() {
+        println!(
+            "{}{l}",
+            if i == 0 {
+                label("agente:")
+            } else {
+                " ".repeat(10)
+            }
+        );
+    }
+    if lines.len() > shown {
+        println!(
+            "{}{}",
+            " ".repeat(10),
+            st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id))
+        );
+    }
+    println!();
+    if s.files() > 0 {
+        println!(
+            "El original NO se tocó. Revisa:  {}   y luego  {}",
+            st.bold(&format!("clio diff {}", s.id)),
+            st.bold(&format!("clio apply {}", s.id))
+        );
+    } else {
+        println!("El original NO se tocó. No hay cambios que aplicar.");
+    }
+}
+
+/// The diff of one change against what is in the original now, with a note when the original
+/// changed after the copy.
+pub fn diff_text(ws: &Path, run: &Run, manifest: &BTreeMap<String, String>, c: &Change) -> String {
+    let orig = std::fs::read(ws.join(&c.rel)).ok();
+    let new = std::fs::read(run.sandbox().join(&c.rel)).ok();
+    let mut out = String::new();
+    if let (Some(o), Some(h)) = (&orig, manifest.get(&c.rel))
+        && super::sha_hex(o) != *h
+    {
+        out += &format!(
+            "# OJO: {} cambió en el original después de la copia\n",
+            c.rel
+        );
+    }
+    out + &file_diff(&c.rel, orig.as_deref(), new.as_deref())
+}
+
+/// Prints the changes of `ch`. On a terminal the text is sanitized and colored.
 pub fn print_diff(
+    st: Style,
     ws: &Path,
     run: &Run,
     manifest: &BTreeMap<String, String>,
     ch: &[Change],
-) -> Res<()> {
+) {
     for c in ch {
-        let orig = std::fs::read(ws.join(&c.rel)).ok();
-        let new = std::fs::read(run.sandbox().join(&c.rel)).ok();
-        if let (Some(o), Some(h)) = (&orig, manifest.get(&c.rel))
-            && super::sha_hex(o) != *h
-        {
-            println!("# NOTE: {} changed in the original after the copy", c.rel);
+        let text = diff_text(ws, run, manifest, c);
+        let text = if st.tty {
+            sanitize::multiline(&text)
+        } else {
+            text
+        };
+        for l in text.lines() {
+            let painted = if l.starts_with("+++") || l.starts_with("---") {
+                st.bold(l)
+            } else if l.starts_with('+') {
+                st.green(l)
+            } else if l.starts_with('-') {
+                st.red(l)
+            } else if l.starts_with("@@") {
+                st.cyan(l)
+            } else {
+                l.to_owned()
+            };
+            println!("{painted}");
         }
-        print!("{}", file_diff(&c.rel, orig.as_deref(), new.as_deref()));
     }
-    Ok(())
 }
 
 pub fn diff(dirs: &Dirs, id: &str) -> Res<()> {
+    let st = Style::stdout();
     let run = resolve(dirs, id)?;
     let (meta, manifest) = (run.meta()?, run.manifest()?);
     let ch = work::changes(&run.sandbox(), &manifest)?;
     if ch.is_empty() {
-        println!("no changes in run {}", run.id);
+        println!("el run {} no tiene cambios", run.id);
         return Ok(());
     }
-    print_diff(Path::new(&meta.workspace), &run, &manifest, &ch)
+    print_diff(st, Path::new(&meta.workspace), &run, &manifest, &ch);
+    Ok(())
 }
 
-fn status(run: &Run) -> String {
-    let p = &run.path;
-    if p.join("applied.json").exists() {
-        return "applied".into();
+pub fn list(dirs: &Dirs, all: bool, json: bool) -> Res<()> {
+    let st = Style::stdout();
+    let rows = list_info(dirs, (!all).then_some(20))?;
+    if json {
+        let v: Vec<Value> = rows.iter().map(RunInfo::json).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+        );
+        return Ok(());
     }
-    if p.join("undone.json").exists() {
-        return "undone".into();
+    if rows.is_empty() {
+        println!("todavía no hay runs. Empieza con: clio run \"qué hacer\"");
+        return Ok(());
     }
-    match read_json::<Value>(&p.join("summary.json")) {
-        Ok(s) => s["ending"].as_str().unwrap_or("?").to_lowercase(),
-        Err(_) => "incomplete".into(),
-    }
-}
-
-pub fn list(dirs: &Dirs, all: bool) -> Res<()> {
-    let ids = run_ids(dirs)?;
-    if ids.is_empty() {
-        println!("no runs yet");
-    }
-    for id in ids.iter().take(if all { usize::MAX } else { 20 }) {
-        let run = Run {
-            id: id.clone(),
-            path: dirs.runs.join(id),
-        };
-        let sum: Value = read_json(&run.path.join("summary.json")).unwrap_or(Value::Null);
-        let n = ["modified", "created", "deleted"]
-            .iter()
-            .map(|k| sum[*k].as_array().map_or(0, Vec::len))
-            .sum::<usize>();
-        let instr = run
-            .meta()
-            .map(|m| trim(&m.instruction, 50))
-            .unwrap_or_default();
-        println!("{id}  {:<10} {n} files  {instr}", status(&run));
+    let sw = 20;
+    let iw = ui::width()
+        .saturating_sub(20 + 2 + sw + 2 + 8 + 2)
+        .clamp(20, 70);
+    println!(
+        "{}",
+        st.bold(&format!(
+            "{}  {}  {}  {}",
+            pad("RUN", 20),
+            pad("ESTADO", sw),
+            "ARCHIVOS",
+            "INSTRUCCIÓN"
+        ))
+    );
+    for r in &rows {
+        println!(
+            "{}  {}  {:>8}  {}",
+            pad(&r.id, 20),
+            r.status.paint(st, &pad(r.status.label(), sw)),
+            r.files(),
+            clip(st, &sanitize::line(&r.instruction), iw)
+        );
     }
     Ok(())
 }
 
-pub fn show(dirs: &Dirs, id: &str) -> Res<()> {
+pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
+    let st = Style::stdout();
     let run = resolve(dirs, id)?;
-    println!("run {}  status: {}", run.id, status(&run));
-    let meta = run.meta()?;
-    println!("workspace:   {}", meta.workspace);
-    println!("instruction: {}", meta.instruction);
-    match read_json::<Value>(&run.path.join("summary.json")) {
-        Ok(s) => println!(
-            "summary:\n{}",
-            serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?
-        ),
-        Err(_) => println!("(no summary: the run did not finish)"),
-    }
-    if let Ok(r) = read_json::<Value>(&run.path.join("report.json")) {
+    let info = RunInfo::load(&run);
+    let report: Option<Value> = read_json(&run.path.join("report.json")).ok();
+    if json {
+        let mut v = info.json();
+        v["summary"] = info.summary.as_ref().map_or(Value::Null, |s| {
+            serde_json::to_value(s).unwrap_or(Value::Null)
+        });
+        v["report"] = report.unwrap_or(Value::Null);
+        v["folder"] = json!(run.path.display().to_string());
         println!(
-            "closing report:\n{}",
-            serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
         );
+        return Ok(());
     }
-    println!("folder: {}", run.path.display());
+    let w = ui::width();
+    let label = |l: &str| st.bold(&pad(l, 17));
+    println!("{}{}", label("run:"), st.cyan(&run.id));
+    println!(
+        "{}{}",
+        label("estado:"),
+        info.status.paint(st, info.status.label())
+    );
+    println!("{}{}", label("carpeta:"), sanitize::line(&info.workspace));
+    println!(
+        "{}{}",
+        label("instrucción:"),
+        sanitize::line(&info.instruction)
+    );
+    match &info.summary {
+        Some(s) => {
+            println!(
+                "{}{}   pasos: {}   tiempo: {:.1}s   fin: {}",
+                label("nivel:"),
+                s.level,
+                s.steps,
+                s.elapsed_ms as f64 / 1000.0,
+                ending_label(&s.ending)
+            );
+            println!(
+                "{}{} denegadas, {} errores de protocolo, {} tokens de entrada, {} de salida",
+                label("modelo:"),
+                s.denied,
+                s.protocol_errors,
+                s.input_tokens,
+                s.output_tokens
+            );
+            println!("{}", label("cambios:"));
+            for (c, p) in s.changed() {
+                println!("  {c} {}", sanitize::line(p));
+            }
+            if let Some(m) = &s.final_message {
+                println!("{}", label("agente:"));
+                for l in ui::wrap(&sanitize::multiline(m), w.saturating_sub(2)) {
+                    println!("  {l}");
+                }
+            }
+            if !s.pending.is_empty() {
+                println!(
+                    "{}{}",
+                    label("pendiente:"),
+                    sanitize::line(&s.pending.join("; "))
+                );
+            }
+        }
+        None => println!("(sin resumen: el run no llegó a terminar)"),
+    }
+    if let Some(n) = report.as_ref().and_then(|r| r["next_step"].as_str()) {
+        println!("{}{}", label("siguiente:"), sanitize::line(n));
+    }
+    println!("{}{}", label("carpeta del run:"), run.path.display());
     Ok(())
 }

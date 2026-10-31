@@ -4,6 +4,8 @@
 //! Hard refusals (`--force` never overrides them): a path that is not plain and relative, a
 //! protected path (`.git`, `.claude`, ...), a secret-looking name, a symbolic link anywhere on the
 //! way. Conflicts (`--force` overrides them): the original changed since the copy.
+//!
+//! The TUI calls the same functions (`plan`, `commit`, `undo_run`): the checks live only here.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -14,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use super::home::Dirs;
 use super::runs::{self, Run, read_json, write_json};
+use super::tui::sanitize;
+use super::ui::Style;
 use super::work::{self, Change, Kind, is_secret_name, plain_rel};
 use super::{Res, io_err, now_ms, sha_hex};
 
@@ -38,14 +42,14 @@ struct Applied {
 /// Why a path may never be written, or `None` if it is fine to consider.
 fn hard_refusal(rel: &str) -> Option<String> {
     if !plain_rel(rel) {
-        return Some("not a plain relative path".into());
+        return Some("no es una ruta relativa simple".into());
     }
     let comps: Vec<&str> = rel.split('/').collect();
     if PROTECTED_PATHS.contains(&comps[0]) || comps.contains(&".git") {
-        return Some("protected path".into());
+        return Some("ruta protegida".into());
     }
     if comps.iter().any(|c| is_secret_name(c)) {
-        return Some("looks like a secret".into());
+        return Some("parece un secreto".into());
     }
     None
 }
@@ -57,7 +61,7 @@ fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                return Err("a symbolic link is in the way".into());
+                return Err("hay un enlace simbólico en el camino".into());
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
@@ -70,7 +74,7 @@ fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
     }
     match existing.canonicalize() {
         Ok(c) if c.starts_with(ws) => Ok(()),
-        _ => Err("resolves outside the workspace".into()),
+        _ => Err("sale de la carpeta del proyecto".into()),
     }
 }
 
@@ -81,15 +85,18 @@ fn hash_of(p: &Path) -> Option<String> {
 fn workspace(meta_ws: &str) -> Res<PathBuf> {
     Path::new(meta_ws)
         .canonicalize()
-        .map_err(|e| format!("the original workspace {meta_ws}: {e}"))
+        .map_err(|e| format!("la carpeta original {meta_ws}: {e}"))
 }
 
 fn confirm(q: &str) -> bool {
-    print!("{q} [y/N] ");
+    print!("{q} [s/N] ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();
     std::io::stdin().lock().read_line(&mut s).is_ok()
-        && matches!(s.trim().to_lowercase().as_str(), "y" | "yes" | "s" | "si")
+        && matches!(
+            s.trim().to_lowercase().as_str(),
+            "y" | "yes" | "s" | "si" | "sí"
+        )
 }
 
 fn action(k: Kind) -> &'static str {
@@ -100,11 +107,23 @@ fn action(k: Kind) -> &'static str {
     }
 }
 
-pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
+/// A run whose every path passed the checks: ready to be written.
+pub struct Plan {
+    pub run: Run,
+    pub ws: PathBuf,
+    pub manifest: BTreeMap<String, String>,
+    pub changes: Vec<Change>,
+}
+
+/// The message `plan` gives when there is nothing to apply.
+pub const NO_CHANGES: &str = "no tiene cambios; no hay nada que aplicar";
+
+/// All the checks of `apply`, before anything is written. An error means nothing was touched.
+pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
     let run = runs::resolve(dirs, id)?;
     if run.path.join("applied.json").exists() {
         return Err(format!(
-            "run {} is already applied; `clio undo {}` first",
+            "el run {} ya está aplicado; primero `clio undo {}`",
             run.id, run.id
         ));
     }
@@ -112,68 +131,91 @@ pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
     let ws = workspace(&meta.workspace)?;
     let ch = work::changes(&run.sandbox(), &manifest)?;
     if ch.is_empty() {
-        println!("run {} has no changes; nothing to apply", run.id);
-        return Ok(());
+        return Err(format!("el run {} {NO_CHANGES}", run.id));
     }
 
     // Preflight everything before touching anything.
     let (mut refused, mut conflicts) = (Vec::new(), Vec::new());
     for c in &ch {
+        let rel = sanitize::line(&c.rel);
         if let Some(why) = hard_refusal(&c.rel) {
-            refused.push(format!("{}: {why}", c.rel));
+            refused.push(format!("{rel}: {why}"));
             continue;
         }
         if let Err(why) = symlink_check(&ws, &c.rel) {
-            refused.push(format!("{}: {why}", c.rel));
+            refused.push(format!("{rel}: {why}"));
             continue;
         }
         let now = hash_of(&ws.join(&c.rel));
         match (c.kind, &now) {
-            (Kind::Created, Some(_)) => {
-                conflicts.push(format!("{}: it exists in the original", c.rel))
-            }
+            (Kind::Created, Some(_)) => conflicts.push(format!("{rel}: ya existe en el original")),
             (Kind::Modified | Kind::Deleted, None) => {
-                conflicts.push(format!("{}: it no longer exists in the original", c.rel));
+                conflicts.push(format!("{rel}: ya no existe en el original"));
             }
             (Kind::Modified | Kind::Deleted, Some(h)) if manifest.get(&c.rel) != Some(h) => {
-                conflicts.push(format!(
-                    "{}: it changed in the original since the copy",
-                    c.rel
-                ));
+                conflicts.push(format!("{rel}: cambió en el original desde la copia"));
             }
             _ => {}
         }
     }
     if !refused.is_empty() {
         return Err(format!(
-            "refused, nothing was applied:\n  {}",
+            "rechazado, no se aplicó nada:\n  {}",
             refused.join("\n  ")
         ));
     }
     if !conflicts.is_empty() && !force {
         return Err(format!(
-            "the original changed, nothing was applied (--force overwrites it, with a backup):\n  {}",
+            "el original cambió, no se aplicó nada (--force lo pisa, con respaldo):\n  {}",
             conflicts.join("\n  ")
         ));
     }
+    Ok(Plan {
+        run,
+        ws,
+        manifest,
+        changes: ch,
+    })
+}
 
-    runs::print_diff(&ws, &run, &manifest, &ch)?;
-    if !yes && !confirm(&format!("Apply {} file(s) to {}?", ch.len(), ws.display())) {
-        println!("not applied");
-        return Ok(());
-    }
+/// Writes a checked plan into the original, saving what it overwrites. Returns how many files.
+pub fn commit(p: &Plan) -> Res<usize> {
     let mut done = Applied {
         at_ms: now_ms(),
         ..Applied::default()
     };
-    let result = write_all(&ws, &run, &ch, &mut done);
+    let result = write_all(&p.ws, &p.run, &p.changes, &mut done);
     // Record what was done even if it stopped halfway, so `undo` can put it back.
-    write_json(&run.path.join("applied.json"), &done)?;
+    write_json(&p.run.path.join("applied.json"), &done)?;
     result?;
+    Ok(done.entries.len())
+}
+
+pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
+    let st = Style::stdout();
+    let p = match plan(dirs, id, force) {
+        Err(e) if e.ends_with(NO_CHANGES) => {
+            println!("{e}");
+            return Ok(());
+        }
+        r => r?,
+    };
+    runs::print_diff(st, &p.ws, &p.run, &p.manifest, &p.changes);
+    if !yes
+        && !confirm(&format!(
+            "¿Aplicar {} archivo(s) en {}?",
+            p.changes.len(),
+            sanitize::line(&p.ws.display().to_string())
+        ))
+    {
+        println!("no se aplicó");
+        return Ok(());
+    }
+    let n = commit(&p)?;
     println!(
-        "applied {} file(s); undo with: clio undo {}",
-        done.entries.len(),
-        run.id
+        "{} {n} archivo(s) aplicados; para deshacer: clio undo {}",
+        st.green(if st.unicode { "✓" } else { "ok:" }),
+        p.run.id
     );
     Ok(())
 }
@@ -235,12 +277,13 @@ fn make_dirs(ws: &Path, dir: &Path, done: &mut Applied) -> Res<()> {
     Ok(())
 }
 
-pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
+/// Puts the originals back; returns how many files per action (`modified`, `created`, `deleted`).
+pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usize>> {
     let run = runs::resolve(dirs, id)?;
     let ap = run.path.join("applied.json");
     if !ap.exists() {
         return Err(format!(
-            "run {} has nothing applied (or it was already undone)",
+            "el run {} no tiene nada aplicado (o ya se deshizo)",
             run.id
         ));
     }
@@ -248,15 +291,16 @@ pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
     let ws = workspace(&run.meta()?.workspace)?;
     let mut problems = Vec::new();
     for e in &done.entries {
+        let rel = sanitize::line(&e.path);
         if let Some(why) = hard_refusal(&e.path).or_else(|| symlink_check(&ws, &e.path).err()) {
-            problems.push(format!("{}: {why}", e.path));
+            problems.push(format!("{rel}: {why}"));
         } else if hash_of(&ws.join(&e.path)) != e.after && !force {
-            problems.push(format!("{}: it changed after `apply`", e.path));
+            problems.push(format!("{rel}: cambió después de `apply`"));
         }
     }
     if !problems.is_empty() {
         return Err(format!(
-            "not undone (--force overrides changes made after apply):\n  {}",
+            "no se deshizo (--force pisa lo que cambió después de apply):\n  {}",
             problems.join("\n  ")
         ));
     }
@@ -265,7 +309,7 @@ pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
         match &e.before {
             Some(_) => {
                 let bytes = std::fs::read(run.path.join("backup").join(&e.path))
-                    .map_err(|x| format!("backup of {}: {x}", e.path))?;
+                    .map_err(|x| format!("respaldo de {}: {x}", sanitize::line(&e.path)))?;
                 std::fs::write(&target, bytes).map_err(|x| io_err(&target, &x))?;
             }
             None => {
@@ -279,10 +323,29 @@ pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
         let _ = std::fs::remove_dir(ws.join(d)); // only succeeds when empty
     }
     std::fs::rename(&ap, run.path.join("undone.json")).map_err(|e| io_err(&ap, &e))?;
-    let n: BTreeMap<&str, usize> = done.entries.iter().fold(BTreeMap::new(), |mut m, e| {
-        *m.entry(e.action.as_str()).or_default() += 1;
+    Ok(done.entries.iter().fold(BTreeMap::new(), |mut m, e| {
+        *m.entry(e.action.clone()).or_default() += 1;
         m
-    });
-    println!("undone: {n:?}");
+    }))
+}
+
+pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
+    let st = Style::stdout();
+    let n = undo_run(dirs, id, force)?;
+    let total: usize = n.values().sum();
+    let word = |k: &str, w: &str| n.get(k).map(|c| format!("{c} {w}"));
+    let parts: Vec<String> = [
+        word("modified", "restaurados"),
+        word("created", "eliminados"),
+        word("deleted", "recuperados"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    println!(
+        "{} deshecho: {total} archivo(s) ({})",
+        st.green(if st.unicode { "✓" } else { "ok:" }),
+        parts.join(", ")
+    );
     Ok(())
 }

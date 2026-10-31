@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clio_contract as contract;
 use clio_core::{Clock, Effect, Level};
@@ -204,7 +205,43 @@ pub enum Ending {
     ModelError(String),
     /// Level 3 needs a person to approve the contract and nobody did.
     NeedsApproval,
+    /// The person asked to stop (`AgentLoop::cancel`); it ended after the step in progress.
+    Cancelled,
 }
+
+/// What the loop reports to whoever watches it (a screen, a progress line). Text fields come
+/// from the model and from files: whoever shows them must sanitize them first.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Triage decided the level of the task.
+    Started { level: Level },
+    /// A model turn was accepted by the controller; `n` counts steps from 1.
+    Step { n: u32 },
+    /// The model answered something that is not a valid turn.
+    ProtocolError { reason: String },
+    /// The model asked for a tool and the gateway decided. `ran` is false when it was not run.
+    Tool {
+        name: String,
+        target: String,
+        outcome: Outcome,
+        rule: String,
+        ran: bool,
+        result_chars: usize,
+        tainted: bool,
+    },
+    /// The model said it is done.
+    Final,
+}
+
+/// Watches the loop. The default method does nothing, so an observer only handles what it wants.
+pub trait Observer {
+    fn event(&mut self, _event: &Event) {}
+}
+
+/// Nobody is watching.
+pub struct NoObserver;
+
+impl Observer for NoObserver {}
 
 /// The closing report: done, pending, next step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +392,9 @@ pub struct AgentLoop {
     pub scrubber: Option<Scrubber>,
     pub filter: Option<Box<dyn OutputFilter>>,
     pub asker: Box<dyn Asker>,
+    pub observer: Box<dyn Observer>,
+    /// When set to true, the loop ends with `Ending::Cancelled` before its next model call.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl AgentLoop {
@@ -408,6 +448,8 @@ impl AgentLoop {
             scrubber: None,
             filter: None,
             asker: Box::new(NobodyHome),
+            observer: Box::new(NoObserver),
+            cancel: None,
         })
     }
 
@@ -507,6 +549,7 @@ impl AgentLoop {
         }
 
         // 3. The loop.
+        self.observer.event(&Event::Started { level });
         let mut ctl = Controller::new(clock.clone(), &id, level, self.cfg.budget);
         let mut day = DayBudget::new(self.cfg.day_max_cost_micro);
         let mut session = clio_gateway::Session::new(format!("{id}-session"));
@@ -525,6 +568,13 @@ impl AgentLoop {
             (0u64, 0u64, 0u32, 0u32, 0u32);
         let mut done: Vec<String> = Vec::new();
         let (ending, final_message) = loop {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
+                break (Ending::Cancelled, None);
+            }
             // Hard stop before spending on a model call.
             if let Err(s) = ctl.check_limits(0, &mut day) {
                 break (Ending::Stopped(s), None);
@@ -549,6 +599,9 @@ impl AgentLoop {
             if let Err(s) = ctl.begin_step(&key, cost, &mut day) {
                 break (Ending::Stopped(s), None);
             }
+            self.observer.event(&Event::Step {
+                n: ctl.checkpoint().steps,
+            });
             if let Some(c) = contract.as_mut() {
                 // The contract mirrors the budget; if it closes itself the controller stops us next turn.
                 let _ = c.spend(1, cost.saturating_mul(100), clock.as_ref());
@@ -559,6 +612,9 @@ impl AgentLoop {
                     if reply.text.trim().is_empty() {
                         why = "your reply was empty".into();
                     }
+                    self.observer.event(&Event::ProtocolError {
+                        reason: why.clone(),
+                    });
                     messages.push(Msg::new(
                     "user",
                     format!(
@@ -566,7 +622,10 @@ impl AgentLoop {
                     ),
                     ));
                 }
-                Ok(Turn::Final(m)) => break (Ending::Final, Some(m)),
+                Ok(Turn::Final(m)) => {
+                    self.observer.event(&Event::Final);
+                    break (Ending::Final, Some(m));
+                }
                 Ok(Turn::Tool { name, args }) => {
                     n_calls += 1;
                     let (text, ok) = self.call_tool(
@@ -609,6 +668,10 @@ impl AgentLoop {
             Ending::NeedsApproval => {
                 pending.push("the contract was not approved".into());
                 "ask the person to approve the contract".into()
+            }
+            Ending::Cancelled => {
+                pending.push("the person cancelled the task".into());
+                "look at what was done, or start again".into()
             }
         };
         let contract_state = contract.map(|mut c| {
@@ -670,11 +733,10 @@ impl AgentLoop {
         }
     }
 
-    /// One tool call: gateway first, executor only on an allow. Returns the message for the model
-    /// and `Some(done lines)` when the call ran, `None` when it did not.
+    /// One tool call, reported to the observer. See `decide_and_run`.
     #[allow(clippy::too_many_arguments)]
     fn call_tool(
-        &self,
+        &mut self,
         name: &str,
         args: Value,
         n: u32,
@@ -683,10 +745,45 @@ impl AgentLoop {
         session: &mut clio_gateway::Session,
         spent: u64,
     ) -> (String, Option<Vec<String>>) {
+        let target = args
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let (text, ran, outcome, rule) =
+            self.decide_and_run(name, args, n, level, plan, session, spent);
+        self.observer.event(&Event::Tool {
+            name: name.to_owned(),
+            target,
+            outcome,
+            rule,
+            ran: ran.is_some(),
+            result_chars: text.chars().count(),
+            tainted: session.tainted(),
+        });
+        (text, ran)
+    }
+
+    /// One tool call: gateway first, executor only on an allow. Returns the message for the model,
+    /// `Some(done lines)` when the call ran (`None` when it did not), and the gateway's outcome
+    /// and rule (a malformed call never reached the gateway: denied by `protocol`).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn decide_and_run(
+        &self,
+        name: &str,
+        args: Value,
+        n: u32,
+        level: Level,
+        plan: &[String],
+        session: &mut clio_gateway::Session,
+        spent: u64,
+    ) -> (String, Option<Vec<String>>, Outcome, String) {
         let Value::Object(map) = args else {
             return (
                 "[protocol error] \"args\" must be a JSON object".into(),
                 None,
+                Outcome::Deny,
+                "protocol".into(),
             );
         };
         let req = ActionRequest {
@@ -732,6 +829,8 @@ impl AgentLoop {
             return (
                 format!("[gateway] {name} was not run (rule {}): {why}", d.rule),
                 None,
+                d.outcome,
+                d.rule,
             );
         }
         let action = NodeAction {
@@ -770,9 +869,16 @@ impl AgentLoop {
                 (
                     format!("Result of {name}:\n{}", self.present(source, &raw)),
                     Some(lines),
+                    d.outcome,
+                    d.rule,
                 )
             }
-            Err(e) => (format!("[error] {name} failed: {e}"), Some(vec![])),
+            Err(e) => (
+                format!("[error] {name} failed: {e}"),
+                Some(vec![]),
+                d.outcome,
+                d.rule,
+            ),
         }
     }
 }
