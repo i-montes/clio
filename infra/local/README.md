@@ -9,7 +9,7 @@ Clio runs on the user's own machine (ADR 0006); a VPS is optional (`infra/vps/`)
 | No Clio process listens outside loopback and `tailscale0` | S-38 | FAIL |
 | `~/.config/clio`, `~/.local/share/clio` and `$XDG_RUNTIME_DIR/clio` are 700, their files 600 | S-23 | FAIL |
 | The disk holding `$HOME` is encrypted | S-40 | WARN |
-| A firewall is active; no SSH server runs | S-38 | WARN |
+| A firewall is active; OpenSSH is off; whether **Tailscale SSH** (its own server, no `sshd`, invisible to `ss`) is on | S-38 | WARN |
 | Tailscale runs and this node's key expires; Tailnet Lock | S-31 | WARN |
 | `bwrap` exists; the user is in the `docker` group; a backup tool exists | S-03, S-39, S-40 | WARN |
 

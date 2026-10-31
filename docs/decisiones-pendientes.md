@@ -16,6 +16,9 @@ Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría 
 - **Dato nuevo:** la última publicación de Pi en npm es de mayo de 2026; si el proyecto se detuvo, conviene saberlo antes de depender de él.
 - **Si no decides:** se sigue con el bucle propio; no se pierde nada.
 
+### 1 bis. ¿Dejas activado Tailscale SSH?
+En este PC `tailscale debug prefs` dice `RunSSH = true`: se puede abrir una terminal por la tailnet sin `sshd` ni llaves (entra por tu identidad de Tailscale). Es cómodo si lo usas desde tus otros dispositivos; el riesgo es que quien controle esos dispositivos o tu cuenta de Tailscale tiene una terminal en este PC, donde corre el agente. Si no lo usas: `tailscale set --ssh=false`. Si lo usas, revisa las reglas `ssh` de tu ACL (mejor con `action: check`, que pide reautenticarse).
+
 ### 2 bis. Usuarios separados y jaula para ejecutar comandos
 El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero en un PC con un solo usuario la separación es una convención, no una pared. Dos opciones para endurecerla: usuarios del sistema distintos para el vault y el agente (necesita `sudo`), o una jaula `bwrap` para lo que el agente ejecute (`bwrap` ya está instalado). Hoy el agente no ejecuta comandos, así que no corre riesgo; decídelo antes de darle una herramienta que ejecute código. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Solo aplica si algún día hay un servidor; en este PC todo corre como tu usuario (ver el riesgo en `docs/threat-model.md`).
 

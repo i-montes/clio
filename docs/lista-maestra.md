@@ -136,7 +136,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 - [ ] **085** Infraestructura como código en `infra/` para reconstruir el entorno desde cero: en este PC (`infra/local/`, hecho el comprobador; falta el instalador y las unidades de usuario) y, opcional, en un VPS (`infra/vps/`, borrador sin probar)
 - [x] **086** Sin puertos públicos: solo Tailscale (S-38). Verificado en este PC el 2026-10-31: solo loopback, DNS de Docker y la interfaz `tailscale0`; lo vigila `infra/local/check-host.sh`
-- [x] **087** SSH desactivado o solo por Tailscale (S-38). Verificado: `sshd` inactivo en este PC
+- [x] **087** SSH desactivado o solo por Tailscale (S-38). Verificado: `sshd` inactivo y el único SSH es el de Tailscale (`RunSSH`), alcanzable solo por la tailnet; el comprobador lo avisa porque da una terminal a quien controle tu tailnet
 - [x] **088** prueba: nada de Clio escucha fuera de loopback ni de `tailscale0` (S-38): `infra/local/check-host.sh`. El escaneo desde fuera de la tailnet solo aplica a un VPS (`infra/vps/check-open-ports.sh`)
 - [ ] **089** Procesos separados por usuario: agente, vault, memoria, trace (S-39)
 - [ ] **090** Contenedores sin root (S-39)

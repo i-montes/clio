@@ -39,8 +39,12 @@ else say WARN "could not confirm that the disk holding \$HOME is encrypted (S-40
 fw=""; for u in ufw nftables firewalld; do systemctl is-active --quiet "$u" 2>/dev/null && fw="$u"; done
 if [ -n "$fw" ]; then say PASS "firewall active ($fw)"; else say WARN "no firewall service is active (ufw, nftables, firewalld)"; fi
 if systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null; then
-  say WARN "an SSH server is running; S-38 wants it off or reachable only through Tailscale"
-else say PASS "no SSH server is running (S-38)"; fi
+  say WARN "OpenSSH (sshd) is running; S-38 wants it off or reachable only through Tailscale"
+else say PASS "OpenSSH (sshd) is not running (S-38)"; fi
+# Tailscale has its own SSH server inside tailscaled: it needs no sshd and never shows up as a listener.
+if command -v tailscale >/dev/null 2>&1 && tailscale debug prefs 2>/dev/null | grep -Eq '"RunSSH": *true'; then
+  say WARN "Tailscale SSH is ON: anyone who controls a device on your tailnet or your Tailscale login can open a shell here, if your ACL ssh rules allow it. Reachable only through the tailnet (S-38 ok). Turn it off with: tailscale set --ssh=false"
+fi
 
 # --- Tailscale (S-31) -----------------------------------------------------------------------
 if command -v tailscale >/dev/null 2>&1; then

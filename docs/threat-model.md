@@ -32,7 +32,7 @@ Clio junta datos privados (memoria, archivos), contenido no confiable (web, Noti
 Sin servidor aparte, el agente corre como tu usuario. Eso trae un riesgo que un VPS no tenía: tus archivos personales (`~/.ssh`, el perfil del navegador, otros proyectos) están al alcance de cualquier cosa que el agente pueda ejecutar. Lo que lo limita hoy:
 - el sandbox de `clio-node` (carpeta de trabajo, rutas canonizadas, enlaces simbólicos hacia fuera rechazados) y la pasarela, que niega por defecto y no deja ejecutar comandos libres;
 - el vault y la pasarela son procesos aparte con sockets 0600, y ningún proceso de Clio escucha fuera de loopback ni de `tailscale0` (`infra/local/check-host.sh` lo vigila);
-- el disco cifrado, el cortafuegos activo y SSH apagado.
+- el disco cifrado y el cortafuegos activo. OpenSSH está apagado, pero **Tailscale SSH está activado**: se puede entrar por la tailnet, así que quien controle un dispositivo de tu tailnet o tu cuenta de Tailscale puede abrir una terminal aquí si tu ACL lo permite. Si no lo usas, apágalo (`tailscale set --ssh=false`).
 
 Lo que aún falta y conviene saber: una **jaula a nivel de sistema** para ejecutar comandos (`bwrap` está instalado, no se usa todavía) y que pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe quedar fuera del alcance del agente. Mientras no haya jaula, el agente no ejecuta comandos: solo lee y escribe dentro del sandbox.
 
