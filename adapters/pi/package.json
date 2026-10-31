@@ -1,0 +1,14 @@
+{
+  "name": "clio-pi-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins the version of Pi that Clio builds on (S-42). The adapter itself is not written yet.",
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1"
+  },
+  "overrides": {
+    "basic-ftp": "6.2.4"
+  }
+}

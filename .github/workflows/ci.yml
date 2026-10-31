@@ -94,3 +94,18 @@ jobs:
       - run: python3 testing/bench/verify_real_tasks.py
       # S-09: versioned system prompts, with a manifest and nothing in them that would matter if it leaked.
       - run: python3 scripts/check-prompts.py --self-test && python3 scripts/check-prompts.py
+
+  # S-42: Pi is installed only from the lockfile and without install scripts; if package.json and
+  # the lockfile disagree, or the lockfile would change, this fails and the change gets reviewed.
+  pi-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: npm ci --ignore-scripts
+        working-directory: adapters/pi
+      - run: |
+          npm install --package-lock-only --ignore-scripts
+          git diff --exit-code -- package-lock.json
+        working-directory: adapters/pi
+      - run: npm audit --audit-level=high
+        working-directory: adapters/pi

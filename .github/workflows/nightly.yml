@@ -55,3 +55,11 @@ jobs:
           for target in traceparent bench_task; do
             cargo +nightly fuzz run "$target" -- -max_total_time=60
           done
+
+  # A new advisory can appear any day: audit the pinned Pi dependencies every night (S-42).
+  pi-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: npm ci --ignore-scripts && npm audit --audit-level=high
+        working-directory: adapters/pi

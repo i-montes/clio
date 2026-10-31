@@ -1,3 +1,4 @@
 /target
 /fuzz/target
 /.claude/worktrees/
+/adapters/pi/node_modules/

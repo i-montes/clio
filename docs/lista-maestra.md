@@ -147,13 +147,13 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Adaptador de Pi (D16)
 
-- [ ] **097** Fijar la versión de Pi, con lockfile e instalación sin scripts (S-42)
+- [x] **097** Fijar la versión de Pi, con lockfile e instalación sin scripts (S-42)
 - [ ] **098** Adaptador propio entre Pi y Clio, para poder cambiar Pi sin rehacer nada
 - [ ] **099** Que Pi corra sin sesiones propias: las guarda Clio
 - [ ] **100** Desactivar la carga y la escritura de extensiones, skills y servidores MCP por parte del agente (S-16)
 - [ ] **101** prueba: un intento de escribir en la carpeta de extensiones se bloquea (S-16)
 - [ ] **102** Revisar cada actualización de Pi antes de adoptarla (S-42)
-- [ ] **103** prueba: el CI falla si el lockfile de npm cambia sin revisión (S-42)
+- [x] **103** prueba: el CI falla si el lockfile de npm cambia sin revisión (S-42)
 - [x] **104** Prompts de sistema versionados en el repositorio: `prompts/system/<nombre>@<versión>.md`, con `MANIFEST.json` de sha256 y revisión del dueño (`CODEOWNERS`); una versión publicada no se edita
 - [x] **105** Escáner sobre los prompts versionados (S-09): `scripts/check-prompts.py`, en el CI (`gate-invariants`)
 - [x] **106** Verificar que el prompt de sistema no tiene nada cuya filtración importe (S-09): el escáner busca llaves, correos, rutas de máquina, IP y cadenas aleatorias; la revisión humana cubre lo que un patrón no ve
