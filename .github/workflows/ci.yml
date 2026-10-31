@@ -92,3 +92,5 @@ jobs:
       - run: scripts/check-gate.sh
       # The checks of the real bench tasks must fail on bad answers and pass on the good one.
       - run: python3 testing/bench/verify_real_tasks.py
+      # S-09: versioned system prompts, with a manifest and nothing in them that would matter if it leaked.
+      - run: python3 scripts/check-prompts.py --self-test && python3 scripts/check-prompts.py
