@@ -111,7 +111,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 - [x] **075** Cada PR: unitarias, aceptación y ataques, en reproducción; bloquea si falla cualquiera
 - [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral — escrito en nightly.yml; falta definir la variable `CLIO_BENCH_CMD` y una línea base real (`baseline-real.json`)
-- [ ] **077** Antes de una versión: todo lo anterior y la revisión humana de pasarela, vault y firmas — escrito en release.yml; falta crear el entorno `release-review` con la persona como revisora obligatoria
+- [ ] **077** Antes de una versión: todo lo anterior y la revisión humana de pasarela, vault y firmas — hecho el mecanismo: el job `review` de release.yml **falla a propósito** hasta que se pueda exigir un revisor (GitHub solo lo ofrece en repos públicos o con plan de pago; tampoco hay protección de rama ni avisos privados en privado)
 - [x] **078** Un cambio de prompt, de modelo o de política pasa por la misma compuerta
 - [x] **079** prueba: un cambio de prompt que no pasó el banco no se puede desplegar
 - [x] **080** Esqueleto de la batería de ataques en `testing/attacks`: formato de caso y runner

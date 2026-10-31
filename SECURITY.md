@@ -4,6 +4,8 @@
 
 No abras un issue público. Usa los avisos privados de seguridad de GitHub: pestaña **Security** del repositorio, **Report a vulnerability**. Solo los mantenedores ven el aviso.
 
+> Este canal existe cuando el repositorio es público. Mientras sea privado, GitHub no ofrece los avisos privados y nadie de fuera puede ver el repositorio. Antes de hacerlo público, activa **Settings → Code security → Private vulnerability reporting**.
+
 Incluye qué regla de [`docs/security.md`](docs/security.md) (S-xx) crees que se rompe, los pasos para reproducirlo y qué daño permite. Un secreto real nunca va en el reporte: usa uno inventado.
 
 ## Qué esperar
