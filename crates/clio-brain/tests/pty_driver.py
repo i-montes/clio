@@ -37,7 +37,7 @@ def kill_children():
 def on_alarm(*_):
     # Never hang a test run: whatever went wrong, kill the children and say so.
     kill_children()
-    print(json.dumps({"timeout": True}))
+    print(json.dumps({"timeout": True}), flush=True)
     os._exit(3)
 
 
