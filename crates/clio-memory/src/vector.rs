@@ -37,6 +37,26 @@ pub(crate) fn dot(blob: &[u8], q: &[f32]) -> f32 {
     acc.iter().sum::<f32>() + tail
 }
 
+/// Same as `dot` for vectors already decoded to `f32`. It sums in the same order, so both give
+/// bit-identical scores and the cached search ranks exactly like the scan.
+pub(crate) fn dot_f32(a: &[f32], q: &[f32]) -> f32 {
+    let mut acc = [0f32; 8];
+    let mut ca = a.chunks_exact(8);
+    let mut cq = q.chunks_exact(8);
+    for (x, y) in ca.by_ref().zip(cq.by_ref()) {
+        for lane in 0..8 {
+            acc[lane] += x[lane] * y[lane];
+        }
+    }
+    let tail: f32 = ca
+        .remainder()
+        .iter()
+        .zip(cq.remainder())
+        .map(|(x, y)| x * y)
+        .sum();
+    acc.iter().sum::<f32>() + tail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +71,11 @@ mod tests {
             let (a, b) = (wave(n, 0.0), wave(n, 1.3));
             let naive: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
             assert!((dot(&to_blob(&a), &b) - naive).abs() < 1e-3, "n={n}");
+            assert_eq!(
+                dot_f32(&a, &b).to_bits(),
+                dot(&to_blob(&a), &b).to_bits(),
+                "n={n}"
+            );
         }
     }
 }

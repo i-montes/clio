@@ -1045,3 +1045,137 @@ fn failed_jobs_are_pruned_on_their_own_schedule() {
     assert_eq!(s.jobs(Some(JobState::Failed), 10).unwrap().len(), 1);
     assert_eq!(s.prune_jobs(500, 500).unwrap(), 1);
 }
+
+// ---- the copy of the vectors in memory ----
+
+/// Repeatable pseudo-random vector in [-1, 1).
+fn noise(seed: u64, dim: usize) -> Vec<f32> {
+    let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    (0..dim)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % 2000) as f32 / 1000.0 - 1.0
+        })
+        .collect()
+}
+
+fn cached_epoch(s: &SqliteStore) -> (usize, i64) {
+    s.vectors.with(|r| (r.caches.len(), r.version)).unwrap()
+}
+
+#[test]
+fn the_copy_in_memory_ranks_exactly_like_the_scan() {
+    let (_d, _p, s, a, actor) = setup();
+    let b = s.create_scope("other", "es").unwrap();
+    let states = [
+        State::Active,
+        State::Archived,
+        State::Quarantine,
+        State::Replaced,
+    ];
+    let mut all = Vec::new();
+    for id in 1..=200i64 {
+        let scope = if id % 5 == 0 { b } else { a };
+        let mut m = row(id, scope, actor, "x", 10 + id);
+        m.known_since = 10 + id;
+        if id % 4 == 3 {
+            m.valid_to = Some(150);
+        }
+        put_with_state(&s, scope, actor, m, states[(id % 4) as usize]);
+        all.push((MemoryId(id), noise(id as u64, 16)));
+    }
+    s.put_vectors("m", 16, &all).unwrap();
+    let q = noise(999, 16);
+    let default = SearchOpts::default();
+    let variants = [
+        SearchOpts {
+            include_quarantine: true,
+            ..default
+        },
+        SearchOpts {
+            as_of: Some(100),
+            ..default
+        },
+        SearchOpts {
+            as_of: Some(100),
+            known_at: Some(60),
+            ..default
+        },
+        default,
+    ];
+    for opts in &variants {
+        for k in [1, 5, 50, 1000] {
+            let cached = s.nearest(a, "m", &q, opts, k).unwrap();
+            let scan = s.nearest_scan(a, "m", &q, opts, k).unwrap();
+            assert_eq!(cached, scan, "k={k} opts={opts:?}");
+        }
+    }
+}
+
+#[test]
+fn a_new_or_replaced_vector_is_seen_by_the_next_search() {
+    let (_d, _p, s, scope, actor) = setup();
+    for id in 1..=3 {
+        put(&s, scope, actor, &row(id, scope, actor, "x", 10));
+    }
+    s.put_vectors("m", 8, &[(MemoryId(1), unit(0, 8))]).unwrap();
+    let q = unit(0, 8);
+    let opts = SearchOpts::default();
+    assert_eq!(near(&s, scope, "m", &q, &opts), [1]);
+    s.put_vectors("m", 8, &[(MemoryId(2), unit(0, 8))]).unwrap();
+    assert_eq!(near(&s, scope, "m", &q, &opts), [1, 2], "a new vector");
+    s.put_vectors("m", 8, &[(MemoryId(1), unit(1, 8))]).unwrap();
+    assert_eq!(near(&s, scope, "m", &q, &opts), [2, 1], "a replaced vector");
+}
+
+#[test]
+fn a_store_that_only_reads_sees_what_another_store_writes() {
+    let (_d, path, s, scope, actor) = setup();
+    for id in 1..=2 {
+        put(&s, scope, actor, &row(id, scope, actor, "x", 10));
+    }
+    s.put_vectors("m", 8, &[(MemoryId(1), unit(0, 8))]).unwrap();
+    let ro = SqliteStore::open(&path, OpenMode::ReadOnly).unwrap();
+    let q = unit(0, 8);
+    let opts = SearchOpts::default();
+    assert_eq!(near(&ro, scope, "m", &q, &opts), [1]);
+    s.put_vectors("m", 8, &[(MemoryId(2), unit(0, 8))]).unwrap();
+    assert_eq!(near(&ro, scope, "m", &q, &opts), [1, 2]);
+}
+
+#[test]
+fn a_write_that_leaves_the_vectors_alone_keeps_the_copy() {
+    let (_d, _p, s, scope, actor) = setup();
+    put(&s, scope, actor, &row(1, scope, actor, "x", 10));
+    s.put_vectors("m", 8, &[(MemoryId(1), unit(0, 8))]).unwrap();
+    let q = unit(0, 8);
+    let _ = near(&s, scope, "m", &q, &SearchOpts::default());
+    let before = cached_epoch(&s);
+    assert_eq!(before.0, 1);
+    // A recall writes usage on every call; that must not throw the copy away.
+    s.create_scope("another", "es").unwrap();
+    let _ = near(&s, scope, "m", &q, &SearchOpts::default());
+    assert_eq!(cached_epoch(&s), before);
+}
+
+#[test]
+fn too_many_vectors_fall_back_to_the_scan_and_keep_nothing_in_memory() {
+    let (_d, _p, s, scope, actor) = setup();
+    for id in 1..=3 {
+        put(&s, scope, actor, &row(id, scope, actor, "x", 10));
+    }
+    let all: Vec<_> = (1..=3)
+        .map(|id| (MemoryId(id), noise(id as u64, 8)))
+        .collect();
+    s.put_vectors("m", 8, &all).unwrap();
+    s.vectors.with(|r| r.max_bytes = 8).unwrap();
+    let q = noise(7, 8);
+    let opts = SearchOpts::default();
+    assert_eq!(
+        s.nearest(scope, "m", &q, &opts, 10).unwrap(),
+        s.nearest_scan(scope, "m", &q, &opts, 10).unwrap()
+    );
+    assert_eq!(cached_epoch(&s).0, 0);
+}

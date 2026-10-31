@@ -19,6 +19,7 @@ mod embed;
 mod engine;
 mod error;
 mod format;
+mod idle;
 mod model;
 #[cfg(feature = "model2vec")]
 mod model2vec;

@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rusqlite::types::Type;
@@ -12,6 +13,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
+use crate::idle::{DEFAULT_IDLE, IdleCache};
 use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Change, Check, DecisionRecord, ExportSummary,
     Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow, MemoryType, NewOperation, OpId,
@@ -24,7 +26,7 @@ use crate::stem::fts_query;
 use crate::store::{NewDecision, NewJob, Store};
 use crate::telemetry::acceptable;
 use crate::transfer::{EXPORT_FORMAT, EXPORT_FORMAT_VERSION, ExportRecord, check_header};
-use crate::vector::{VectorIndex, dot, to_blob};
+use crate::vector::{VectorIndex, dot, dot_f32, to_blob};
 
 mod fold;
 mod schema;
@@ -568,9 +570,156 @@ impl Candidate {
     }
 }
 
+/// Above this many bytes of vectors a search scans the file instead of keeping a copy in memory
+/// (about 250 000 memories of 256 dimensions).
+const MAX_VECTOR_CACHE_BYTES: usize = 256 << 20;
+
+/// All the vectors of one model, decoded and contiguous: the position of a memory in `pos` is
+/// where its vector starts in `data`. Visibility is never cached; it comes from the file on
+/// every search.
+struct VecCache {
+    dim: usize,
+    pos: HashMap<i64, usize>,
+    data: Vec<f32>,
+}
+
+impl VecCache {
+    fn load(conn: &Connection, model: &str, dim: usize) -> Result<Self> {
+        let mut stmt =
+            conn.prepare("SELECT memory, vec FROM vectors WHERE model = ?1 AND dim = ?2")?;
+        let mut rows = stmt.query(params![model, i64::try_from(dim).unwrap_or(i64::MAX)])?;
+        let mut cache = Self {
+            dim,
+            pos: HashMap::new(),
+            data: Vec::new(),
+        };
+        while let Some(r) = rows.next()? {
+            let blob = r.get_ref(1)?.as_blob().map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(1, Type::Blob, Box::new(e))
+            })?;
+            if blob.len() != dim * 4 {
+                continue;
+            }
+            cache.pos.insert(r.get(0)?, cache.pos.len());
+            cache.data.extend(
+                blob.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+            );
+        }
+        Ok(cache)
+    }
+
+    fn vector(&self, id: i64) -> Option<&[f32]> {
+        let at = *self.pos.get(&id)? * self.dim;
+        self.data.get(at..at + self.dim)
+    }
+}
+
+/// One long-lived read-only connection and the vector copies that go with it. A copy is valid
+/// while its stamp does not change. A read-write store is the only writer of `vectors` (it holds
+/// the writer lock), so its stamp is its own count of vector commits: a recall writes usage on
+/// every call, and that must not throw the copy away. A read-only store has no such count and
+/// uses `PRAGMA data_version`, which changes whenever another connection commits anything.
+struct Reader {
+    conn: Connection,
+    version: i64,
+    caches: HashMap<(String, usize), Arc<VecCache>>,
+    max_bytes: usize,
+}
+
+impl Reader {
+    fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        mmap(&conn)?;
+        Ok(Self {
+            conn,
+            version: -1,
+            caches: HashMap::new(),
+            max_bytes: MAX_VECTOR_CACHE_BYTES,
+        })
+    }
+
+    /// The copy of the vectors for `key` (fresh) and the ids visible under `opts`, or `None` when
+    /// the vectors are too many to keep in memory.
+    fn prepare(
+        &mut self,
+        key: &(String, usize),
+        scope: ScopeId,
+        opts: &SearchOpts,
+        epoch: Option<u64>,
+    ) -> Result<Option<(Arc<VecCache>, Vec<i64>)>> {
+        let version: i64 = match epoch {
+            Some(e) => i64::try_from(e).unwrap_or(i64::MAX),
+            None => self
+                .conn
+                .pragma_query_value(None, "data_version", |r| r.get(0))?,
+        };
+        if version != self.version {
+            self.caches.clear();
+            self.version = version;
+        }
+        if !self.caches.contains_key(key) {
+            let dim = i64::try_from(key.1).unwrap_or(i64::MAX);
+            let count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM vectors WHERE model = ?1 AND dim = ?2",
+                params![key.0, dim],
+                |r| r.get(0),
+            )?;
+            if usize::try_from(count)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(key.1 * 4)
+                > self.max_bytes
+            {
+                return Ok(None);
+            }
+            let loaded = VecCache::load(&self.conn, &key.0, key.1)?;
+            self.caches.insert(key.clone(), Arc::new(loaded));
+        }
+        let Some(cache) = self.caches.get(key).cloned() else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT m.id FROM memories m WHERE m.scope = :scope AND {}",
+            visibility(opts)
+        ))?;
+        let ids = stmt
+            .query_map(
+                named_params! {
+                    ":scope": scope.0,
+                    ":as_of": opts.as_of,
+                    ":known_at": opts.known_at,
+                    ":kind": opts.kind.map(|k| enc(&k)),
+                },
+                |r| r.get::<_, i64>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some((cache, ids)))
+    }
+}
+
+/// The reader leaves memory after five idle minutes, copies of the vectors included.
+fn vector_reader(path: &Path) -> Result<IdleCache<Reader>> {
+    let owned = path.to_path_buf();
+    Ok(IdleCache::new(
+        Reader::open(path)?,
+        Some(DEFAULT_IDLE),
+        move || Reader::open(&owned),
+    ))
+}
+
+/// Lets SQLite read the file through the OS page cache instead of copying every page.
+fn mmap(conn: &Connection) -> Result<()> {
+    let _: i64 = conn.query_row("PRAGMA mmap_size = 268435456", [], |r| r.get(0))?;
+    Ok(())
+}
+
 pub struct SqliteStore {
     path: PathBuf,
     write: Option<Mutex<Connection>>,
+    vectors: IdleCache<Reader>,
+    /// Commits that changed `vectors`; see `Reader`.
+    vector_epoch: AtomicU64,
     _lock: Option<WriterLock>,
 }
 
@@ -593,6 +742,8 @@ impl SqliteStore {
             return Ok(Self {
                 path: path.to_path_buf(),
                 write: None,
+                vectors: vector_reader(path)?,
+                vector_epoch: AtomicU64::new(0),
                 _lock: None,
             });
         }
@@ -606,6 +757,8 @@ impl SqliteStore {
         Ok(Self {
             path: path.to_path_buf(),
             write: Some(Mutex::new(conn)),
+            vectors: vector_reader(path)?,
+            vector_epoch: AtomicU64::new(0),
             _lock: Some(lock),
         })
     }
@@ -619,6 +772,7 @@ impl SqliteStore {
     fn reader(&self) -> Result<Connection> {
         let conn = Connection::open_with_flags(&self.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        mmap(&conn)?;
         Ok(conn)
     }
 
@@ -649,6 +803,48 @@ impl VectorIndex for SqliteStore {
         if k == 0 {
             return Ok(Vec::new());
         }
+        let key = (model.to_string(), query.len());
+        let epoch = self
+            .write
+            .is_some()
+            .then(|| self.vector_epoch.load(Ordering::SeqCst));
+        let Some((cache, ids)) = self
+            .vectors
+            .with(|r| r.prepare(&key, scope, opts, epoch))??
+        else {
+            return self.nearest_scan(scope, model, query, opts, k);
+        };
+        // Bounded min-heap, as in the scan: the same candidates rank the same way.
+        let mut best: BinaryHeap<Reverse<Candidate>> = BinaryHeap::new();
+        for id in ids {
+            let Some(v) = cache.vector(id) else { continue };
+            let candidate = Candidate::new(MemoryId(id), dot_f32(v, query));
+            if best.len() < k {
+                best.push(Reverse(candidate));
+            } else if best.peek().is_some_and(|worst| candidate > worst.0) {
+                best.pop();
+                best.push(Reverse(candidate));
+            }
+        }
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse(c)| (c.id, c.score()))
+            .collect())
+    }
+}
+
+impl SqliteStore {
+    /// The search without a copy in memory: reads every vector from the file. It is what a search
+    /// does when there are too many vectors to keep, and what the tests compare the copy against.
+    fn nearest_scan(
+        &self,
+        scope: ScopeId,
+        model: &str,
+        query: &[f32],
+        opts: &SearchOpts,
+        k: usize,
+    ) -> Result<Vec<(MemoryId, f32)>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(&nearest_sql(opts))?;
         let dim = i64::try_from(query.len()).unwrap_or(i64::MAX);
@@ -1663,6 +1859,8 @@ impl Store for SqliteStore {
             }
         }
         tx.commit()?;
+        // After the commit: a search that sees the new count also sees the new vectors.
+        self.vector_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1677,6 +1875,7 @@ impl Store for SqliteStore {
             )?;
         }
         tx.commit()?;
+        self.vector_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
