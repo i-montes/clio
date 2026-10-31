@@ -64,9 +64,15 @@ done
 for spec in docs/specs/*-spec-v*.md; do
   [ -e "$spec" ] || continue
   name=$(basename "$spec" | sed -E 's/-spec-v.*//')
+  # A few specs describe behaviour that lives in another crate.
+  crate=$name
+  case $name in
+    clio-models) crate=clio-brain ;;
+    clio-day-zero) crate=clio-node ;;
+  esac
   want=$(awk '/^#+ .*Pruebas de aceptación/{on=1; next} /^#/{on=0} on && /^[0-9]+\./{sub(/\..*/, ""); print}' "$spec" | sort -u)
-  have=$({ grep -rhoE 'fn t[0-9]+(_t[0-9]+)*_' "crates/$name" 2>/dev/null | grep -oE 't[0-9]+' | tr -d t
-           grep -rhoE "spec-$name #[0-9]+" "crates/$name" 2>/dev/null | grep -oE '[0-9]+$'
+  have=$({ grep -rhoE 'fn t[0-9]+(_t[0-9]+)*_' "crates/$crate" 2>/dev/null | grep -oE 't[0-9]+' | tr -d t
+           grep -rhoE "spec-$name #[0-9]+" "crates/$crate" 2>/dev/null | grep -oE '[0-9]+$'
          } | sed -E 's/^0+//' | sort -u || true)
   gap=$(comm -23 <(echo "$want") <(echo "$have") | sort -n)
   n=$(echo "$want" | grep -c . || true)
