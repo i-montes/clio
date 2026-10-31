@@ -46,7 +46,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ---
 
-## Fase 0 · Cimientos (todavía no hay agente)
+## Fase 0 · Cimientos (cerrada el 2026-10-31; todavía no hay agente)
 
 ### Terreno
 
@@ -98,19 +98,16 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Banco de evaluación
 
-- [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por señal externa, no por el modelo — pendiente de ti; ver `testing/bench/tasks/real/README.md`
 - [x] **068** Escribir los 20 pedidos triviales que acompañan al banco
 - [x] **069** Formato de una tarea del banco: entrada, criterio, comprobación, tope de pasos, costo y tiempo
 - [x] **070** Runner del banco que repite cada tarea varias veces
 - [x] **071** Runner del banco que devuelve éxito, costo y tiempo, en modo reproducción y en modo real
 - [x] **072** Guardar cada corrida del banco en clio-trace
 - [x] **073** Guardar una línea base como referencia fija
-- [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones (decidir) — hay valores provisionales en `testing/bench/thresholds.json`; faltan corridas reales
 
 ### Compuerta en el CI
 
 - [x] **075** Cada PR: unitarias, aceptación y ataques, en reproducción; bloquea si falla cualquiera
-- [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral — escrito en nightly.yml; falta definir la variable `CLIO_BENCH_CMD` y una línea base real (`baseline-real.json`)
 - [x] **077** Antes de una versión: todo lo anterior y la revisión humana de pasarela, vault y firmas — el repo es público; el job `review` espera la aprobación del dueño en el entorno `release-review` (probado: queda en `waiting` y el release no corre)
 - [x] **078** Un cambio de prompt, de modelo o de política pasa por la misma compuerta
 - [x] **079** prueba: un cambio de prompt que no pasó el banco no se puede desplegar
@@ -126,6 +123,12 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 ---
 
 ## Fase 1 · Corte mínimo: un nodo (el VPS), sin memoria, a propósito
+
+### Medir con un modelo real (movidas desde la fase 0)
+
+- [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por una señal externa (una prueba que pasa, un valor exacto, un archivo producido), no por el modelo; sin datos privados, porque se mandan a un proveedor (S-44). Formato en `testing/bench/tasks/real/README.md`. Necesita el agente para poder ejecutarse.
+- [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral. Está escrito en `nightly.yml`; falta una clave de API como secreto de GitHub, la variable `CLIO_BENCH_CMD` con un script que llame al modelo, precios reales en `testing/bench/prices.json` y una línea base real (`baseline-real.json`). Poner un tope de gasto en el panel del proveedor (S-45).
+- [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones reales (decidir); hoy hay valores provisionales en `testing/bench/thresholds.json`. Va después de 067 y 076.
 
 ### VPS e infraestructura (S-38 a S-40)
 
