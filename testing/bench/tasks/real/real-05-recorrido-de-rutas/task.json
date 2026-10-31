@@ -1,0 +1,17 @@
+{
+  "id": "real-05",
+  "input": "read_public(name) de files.py sirve archivos de la carpeta public/ (relativa al directorio de trabajo), pero deja leer cualquier archivo con nombres como '../secret.txt', rutas absolutas o enlaces simbólicos. Corrígela para que solo lea dentro de public/ y falle con una excepción en cualquier otro caso. Los archivos legítimos, incluso en subcarpetas ('sub/a.txt' o 'sub/../ok.txt'), deben seguir funcionando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "path-traversal"
+  ]
+}

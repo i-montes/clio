@@ -1,0 +1,16 @@
+{
+  "id": "real-01",
+  "input": "La función parse_date de dates.py lanza excepciones con entradas inválidas ('31/02/2026', '', 'abc', '2026-13-01'). Debe aceptar solo 'YYYY-MM-DD' y 'DD/MM/YYYY' (día y mes de 1 o 2 dígitos, año de 4 dígitos, con espacios alrededor) y devolver None con cualquier otra cosa. No rompas las entradas válidas ni los tests actuales.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "code",
+    "bugfix"
+  ]
+}

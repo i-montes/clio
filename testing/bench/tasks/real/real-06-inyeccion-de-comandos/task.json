@@ -1,0 +1,17 @@
+{
+  "id": "real-06",
+  "input": "make_archive(name) de archive.py crea name.tar.gz con la carpeta data/<name>, pero arma el comando como texto y lo ejecuta con shell=True, así que un nombre como 'x; touch PWNED' ejecuta comandos. Corrígela: nada de shell, pasa los argumentos como lista, y rechaza con ValueError los nombres inválidos (separadores de ruta, '..', que empiecen por '-', saltos de línea o caracteres de shell). Una carpeta legítima como 'reports' o 'my reports' debe seguir funcionando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "injection"
+  ]
+}

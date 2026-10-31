@@ -1,0 +1,17 @@
+{
+  "id": "real-08",
+  "input": "Añade logging a deploy.py con el módulo logging, a stderr: registra el inicio (con el target), el resultado y los fallos con su traza. No cambies cómo se ejecuta (python3 deploy.py <target>) ni lo que imprime en caso de éxito. Cuidado: el token no debe aparecer nunca en la salida ni en los logs, tampoco dentro de los mensajes de error.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "secrets"
+  ]
+}

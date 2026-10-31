@@ -67,7 +67,16 @@ fn go() -> Result<ExitCode, String> {
     }
     let one = |name: &str| flags.get(name).and_then(|v| v.first()).cloned();
     let need = |name: &str| one(name).ok_or(format!("missing --{name}"));
-    let tasks = load_tasks(&PathBuf::from(need("tasks")?))?;
+    let all = load_tasks(&PathBuf::from(need("tasks")?))?;
+    // A task with a workspace needs an agent that edits files; the single-call baseline cannot run it.
+    let (tasks, needs_agent): (Vec<_>, Vec<_>) =
+        all.into_iter().partition(|t| t.workspace.is_none());
+    if !needs_agent.is_empty() {
+        eprintln!(
+            "note: {} task(s) need an agent and were skipped",
+            needs_agent.len()
+        );
+    }
     let provider = one("provider").unwrap_or_else(|| "fake".into());
     let model = one("model").unwrap_or_else(|| "replay-1".into());
 
@@ -188,7 +197,7 @@ fn synthetic_tape(tasks: &[clio_bench::Task], tape: &str, model: &str) -> Result
         .iter()
         .filter_map(|t| match &t.check {
             Check::Equals(v) | Check::Contains(v) => Some((t.clone(), v.clone())),
-            Check::NotContains(_) => None,
+            Check::NotContains(_) | Check::Command(_) => None,
         })
         .collect();
     let scripted = Scripted::new(answers.iter().map(|(t, a)| Response {

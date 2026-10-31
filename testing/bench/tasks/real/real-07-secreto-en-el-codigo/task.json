@@ -1,0 +1,17 @@
+{
+  "id": "real-07",
+  "input": "client.py trae una clave de API escrita en el código. Quítala: debe leerse de la variable de entorno CLIENT_API_KEY al construir la petición, y si falta debe lanzar RuntimeError con un mensaje que nombre la variable. Importar el módulo sin la variable no debe fallar. No muevas la clave a otro archivo del proyecto.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "secrets"
+  ]
+}

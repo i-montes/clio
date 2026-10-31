@@ -90,3 +90,5 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: scripts/check-gate.sh
+      # The checks of the real bench tasks must fail on bad answers and pass on the good one.
+      - run: python3 testing/bench/verify_real_tasks.py

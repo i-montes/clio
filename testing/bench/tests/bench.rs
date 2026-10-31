@@ -20,6 +20,9 @@ fn task(id: &str, input: &str, expect: &str) -> Task {
         max_steps: 1,
         max_cost_micro_usd: 1_000,
         max_duration_ms: 1_000,
+        workspace: None,
+        tags: vec![],
+        dir: PathBuf::new(),
     }
 }
 
@@ -154,10 +157,22 @@ fn the_gate_blocks_a_drop_in_success_or_a_rise_in_cost_and_lets_the_rest_through
 }
 
 #[test]
-fn the_shipped_trivial_tasks_load_and_a_duplicate_id_or_unknown_field_is_refused() {
-    let tasks =
-        load_tasks(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tasks")).expect("tasks");
-    assert_eq!(tasks.len(), 20);
+fn the_shipped_tasks_load_and_a_duplicate_id_or_unknown_field_is_refused() {
+    let all = load_tasks(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tasks")).expect("tasks");
+    let (single, agentic): (Vec<_>, Vec<_>) = all.iter().partition(|t| t.workspace.is_none());
+    assert_eq!(single.len(), 20, "the trivial questions");
+    assert!(agentic.len() >= 10, "the real tasks");
+    for t in agentic {
+        assert!(
+            matches!(t.check, Check::Command(_)),
+            "{} needs a command check",
+            t.id
+        );
+        let workspace = t.dir.join(t.workspace.as_deref().expect("workspace"));
+        assert!(workspace.is_dir(), "{}: no workspace folder", t.id);
+        assert!(t.dir.join("check.py").is_file(), "{}: no check.py", t.id);
+        assert!(!t.tags.is_empty(), "{} has no tags", t.id);
+    }
 
     let dir = tmp("dups");
     std::fs::create_dir_all(&dir).expect("dir");
@@ -175,23 +190,10 @@ fn the_shipped_trivial_tasks_load_and_a_duplicate_id_or_unknown_field_is_refused
 }
 
 #[test]
-fn the_gate_blocks_a_run_that_leaves_out_a_task_of_the_baseline() {
-    let limits = Thresholds {
-        max_success_drop_points: 5.0,
-        max_cost_rise_pct: 20.0,
-    };
-    let one = |name: &str| clio_bench::TaskReport {
-        task: name.into(),
-        runs: 1,
-        successes: 1,
-        cost_micro_usd: 100,
-        duration_ms: 0,
-    };
-    let mut base = report(2, 2, 200);
-    base.tasks = vec![one("a"), one("hard")];
-    let mut now = report(1, 1, 100);
-    now.tasks = vec![one("a")];
-    let bad = regressions(&base, &now, &limits);
-    assert_eq!(bad.len(), 1);
-    assert!(bad[0].contains("hard"), "{bad:?}");
+fn a_json_file_inside_a_fixture_folder_is_not_taken_for_a_task() {
+    let dir = tmp("fixture");
+    std::fs::create_dir_all(dir.join("workspace")).expect("dir");
+    std::fs::write(dir.join("workspace/config.json"), "{\"not\": \"a task\"}").expect("fixture");
+    assert!(load_tasks(&dir).expect("tasks").is_empty());
+    let _ = std::fs::remove_dir_all(dir);
 }

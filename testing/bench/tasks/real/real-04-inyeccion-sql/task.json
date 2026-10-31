@@ -1,0 +1,17 @@
+{
+  "id": "real-04",
+  "input": "users.py arma sus consultas SQL concatenando texto, y es vulnerable a inyección SQL. Corrige find_user y update_email para que usen consultas parametrizadas. Deben seguir funcionando con nombres legítimos, incluidos los que llevan apóstrofo (O'Brien).",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "injection"
+  ]
+}

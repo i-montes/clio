@@ -12,15 +12,17 @@ use clio_fake_llm::{Error as LlmError, Llm, Message, Request, Response};
 use clio_trace::{Attr, Kind, Status, Trace, Usage, names};
 use serde::{Deserialize, Serialize};
 
-/// What decides that a task succeeded. Text checks only for now.
-/// shortcut: no check that runs a command or a test suite; add one when the first real
-/// task needs it.
+/// What decides that a task succeeded. `Equals`, `Contains` and `NotContains` read the answer.
+/// `Command` runs a program on the files the agent left behind (see `Task::workspace`); it is
+/// not decided by `passes`, and the runner that has an agent will execute it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Check {
     Equals(String),
     Contains(String),
     NotContains(String),
+    /// A command line split on spaces (no shell); `{task_dir}` is the folder of the task file.
+    Command(String),
 }
 
 impl Check {
@@ -29,6 +31,8 @@ impl Check {
             Self::Equals(v) => output.trim() == v,
             Self::Contains(v) => output.contains(v.as_str()),
             Self::NotContains(v) => !output.contains(v.as_str()),
+            // Needs the workspace the agent worked in, not just its answer.
+            Self::Command(_) => false,
         }
     }
 }
@@ -43,9 +47,19 @@ pub struct Task {
     pub max_steps: u32,
     pub max_cost_micro_usd: i64,
     pub max_duration_ms: i64,
+    /// A folder (relative to the task file) holding the files the agent starts with. A task with a
+    /// workspace needs an agent that can edit files; `SingleCall` cannot run it.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The folder of the task file; filled in by `load_tasks`.
+    #[serde(skip)]
+    pub dir: std::path::PathBuf,
 }
 
-/// Every `*.json` file under `dir` (and its subdirectories), ordered by id.
+/// Every `*.json` file under `dir` (and its subdirectories, except the fixture folders
+/// `workspace`, `solution` and `bad_solutions`), ordered by id.
 pub fn load_tasks(dir: &Path) -> Result<Vec<Task>, String> {
     let mut files = Vec::new();
     collect(dir, &mut files)?;
@@ -54,8 +68,9 @@ pub fn load_tasks(dir: &Path) -> Result<Vec<Task>, String> {
     for file in files {
         let text =
             std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        let task: Task =
+        let mut task: Task =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
+        task.dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
         if !seen.insert(task.id.clone()) {
             return Err(format!("{}: duplicate task id {}", file.display(), task.id));
         }
@@ -69,6 +84,13 @@ fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> 
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if path.is_dir() {
+            // Fixture folders hold the files of a task, which may well be `.json`.
+            if matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some("workspace" | "solution" | "bad_solutions")
+            ) {
+                continue;
+            }
             collect(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "json") {
             out.push(path);
