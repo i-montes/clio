@@ -2,6 +2,7 @@
 # disappear; everything else only warns. Add a line when a rule or a whole spec gets its tests.
 S-01
 S-02
+S-03
 S-04
 S-05
 S-06
@@ -28,10 +29,11 @@ S-27
 S-44
 S-46
 S-47
+S-54
 S-56
-spec-clio-memory
-spec-clio-triage
 spec-clio-contract
 spec-clio-gateway
+spec-clio-memory
 spec-clio-models
+spec-clio-triage
 spec-clio-vault

@@ -394,7 +394,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 ### Cerrar lo que quedó abierto de clio-memory v1
 
 - [ ] **300** Confirmar que el nombre `clio-memory` está libre en crates.io y en GitHub
-- [ ] **301** Documentar `remember` en el spec (§8) y en el README
+- [x] **301** Documentar `remember` en el spec (§8) y en el README
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
 - [ ] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones)
 - [ ] **304** Decidir API remota: HTTP + JSON o gRPC
@@ -402,7 +402,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 - [ ] **306** Verificar si model2vec-rs puede cargar a menor precisión y bajar la RAM
 - [ ] **307** Investigar los ~550 MB que quedan retenidos tras soltar el modelo y reportarlo a model2vec-rs
 - [ ] **308** Fuzzing del tokenizador y de los importadores de clio-memory (S-48)
-- [ ] **309** prueba: aislamiento de ámbitos, cuota por actor y detector de secretos en cada versión (S-27)
+- [x] **309** prueba: aislamiento de ámbitos, cuota por actor y detector de secretos en cada versión (S-27)
 
 ### Daemon y MCP
 
@@ -416,11 +416,11 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### PURGE y borrado real
 
-- [ ] **317** Operación PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida
-- [ ] **318** prueba: PURGE elimina el contenido de todas las operaciones y deja la lápida (prueba 11)
-- [ ] **319** PURGE también borra el vector (S-24); además debe sumar uno al contador `vector_epoch` del store, o la copia de vectores en memoria sigue viva hasta que cambie otra cosa (`crates/clio-memory/src/sqlite/mod.rs`, `Reader`)
-- [ ] **320** prueba: después de un PURGE no queda el vector (S-24), ni en el archivo ni en la copia en memoria
-- [ ] **321** Que la exportación respete las lápidas
+- [x] **317** Operación PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida
+- [x] **318** prueba: PURGE elimina el contenido de todas las operaciones y deja la lápida (prueba 11)
+- [x] **319** PURGE también borra el vector (S-24); además debe sumar uno al contador `vector_epoch` del store, o la copia de vectores en memoria sigue viva hasta que cambie otra cosa (`crates/clio-memory/src/sqlite/mod.rs`, `Reader`)
+- [x] **320** prueba: después de un PURGE no queda el vector (S-24), ni en el archivo ni en la copia en memoria
+- [x] **321** Que la exportación respete las lápidas
 
 ### Gestor de memoria (conexión con el agente)
 
