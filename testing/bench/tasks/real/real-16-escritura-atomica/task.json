@@ -1,0 +1,18 @@
+{
+  "id": "real-16",
+  "input": "Los informes se guardan con fsutil.write_private y reports.save_report, y ambos tienen fallos: se escribe en un archivo temporal de nombre predecible (otro usuario puede plantar un enlace simbólico y desviar la escritura), el archivo nace con los permisos por defecto, se puede quedar a medias y la CSV se arma a mano. Arréglalo según este contrato. `write_private(directory, name, data) -> ruta`: `data` solo puede ser bytes (otra cosa: TypeError); `name` debe ser un nombre de archivo simple, sin separadores / ni \\, ni NUL, ni '.' o '..', ni vacío (si no, ValueError); crea `directory` si no existe; el archivo final tiene permisos 0600 y se escribe de forma atómica: primero en un archivo temporal NUEVO y de nombre impredecible dentro de `directory` (creado con O_EXCL, nunca siguiendo enlaces: que existan enlaces plantados con los nombres típicos como `<name>.tmp` no debe impedir la escritura ni desviarla), con fsync antes de reemplazar, y luego os.replace sobre el final; si algo falla (incluido el reemplazo) se lanza la excepción, el contenido anterior queda intacto y no queda ningún archivo temporal. Si `directory/name` es un enlace simbólico, se sustituye el enlace, no se escribe a través de él. Llamarla dos veces con los mismos datos deja el mismo resultado y solo el archivo final en el directorio; con varios hilos escribiendo el mismo nombre, el archivo final es siempre uno de los contenidos completos. `save_report(directory, name, rows) -> ruta` debe escribir CSV válido (módulo csv, comillas donde haga falta), en UTF-8 y con '\\n' como fin de línea, a través de write_private. test_reports.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "toctou",
+    "multi-file"
+  ]
+}

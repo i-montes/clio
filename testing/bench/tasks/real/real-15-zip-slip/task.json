@@ -1,0 +1,18 @@
+{
+  "id": "real-15",
+  "input": "El instalador de plugins (unpack.py y plugins.py) descomprime archivos .zip que sube cualquiera y es vulnerable a «zip slip». Corrígelo según este contrato. `extract_zip(archive, dest, max_bytes=10_000_000)` debe lanzar `UnsafeArchive` (ya existe) ANTES de escribir nada, y sin dejar ni siquiera `dest` creado, si algún miembro: tiene una ruta absoluta (`/x`, `\\x` o con unidad `C:`), contiene un componente `..` (tratando `/` y `\\` como separadores; aunque el resultado siguiera dentro: `a/../b` se rechaza, pero nombres como `a..b` o `..oculto` son legítimos), es un enlace simbólico (atributos Unix del zip), o resuelve (realpath) fuera de `dest`, por ejemplo a través de un enlace simbólico que ya exista dentro de `dest`; o si la suma de los tamaños descomprimidos declarados supera `max_bytes`. Basta con que UN miembro sea malo para que no se extraiga NINGUNO. Los archivos legítimos (subcarpetas, entradas de directorio, nombres con acentos, archivos vacíos, `dest` ya existente) se extraen con su contenido. `plugins.install_plugin(archive, plugins_dir)` instala en `plugins_dir/<nombre del zip sin la extensión>` y devuelve esa ruta: el nombre debe coincidir con `[A-Za-z0-9][A-Za-z0-9_.-]*` (si no, ValueError, sin tocar nada); reinstalar sustituye por completo la versión anterior (un archivo que ya no está en la versión nueva desaparece); si la instalación falla, la versión anterior queda intacta y no se queda ningún directorio temporal en `plugins_dir`. test_unpack.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "path-traversal",
+    "multi-file"
+  ]
+}

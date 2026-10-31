@@ -1,0 +1,17 @@
+{
+  "id": "real-13",
+  "input": "tokens.verify() valida tokens de sesión con formato JWT (HS256) y tiene fallos de seguridad. Arréglala según este contrato. `verify(token, secret, now=None) -> dict` (secret en bytes; now por defecto time.time()). Todo token inválido lanza `InvalidToken`, y NUNCA otra excepción (ni ValueError, ni KeyError, ni errores de base64 o de JSON, ni con entradas que no son texto). Reglas: exactamente 3 segmentos y cada uno solo con caracteres A-Z a-z 0-9 - _ (sin '=' ni otros: la decodificación de Python ignora basura y eso no vale); la cabecera es un objeto JSON cuyo `alg` es exactamente la cadena \"HS256\" (se rechaza none en cualquier grafía, otros algoritmos, ausente o de otro tipo, y se rechaza aunque venga firmado); la firma es HMAC-SHA256 de `cabecera.cuerpo` y se compara en tiempo constante con hmac.compare_digest; el cuerpo es un objeto JSON; `exp` es obligatorio, numérico (un bool no vale) y el token solo es válido si now < exp; si hay `nbf` (numérico), solo es válido si now >= nbf. Devuelve el cuerpo como dict. No cambies `sign()` ni las firmas públicas; test_tokens.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "crypto"
+  ]
+}

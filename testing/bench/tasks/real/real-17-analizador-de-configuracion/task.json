@@ -1,0 +1,17 @@
+{
+  "id": "real-17",
+  "input": "parser.parse() de confmini es una versión de juguete: parte las líneas con splitlines, quita los comentarios con split('#') aunque estén dentro de comillas, falla con ValueError si el valor lleva '=', parte las listas por comas sin entender anidamiento ni comillas, no sabe secciones anidadas como [a.b], no valida nada y no da errores con número de línea. Reescríbela para que cumpla EXACTAMENTE SPEC.md (léelo entero: fija las reglas de líneas, valores, escapes, listas, secciones y errores, incluido que solo `\\n` separa líneas y que todo error es ParseError con .line y nunca otra excepción). Mantén `ParseError(line, message)` y la función `parse(text)`; no cambies writer.py (ya funciona: parse(dumps(d)) debe devolver d para cualquier d válido). Los tests de test_parser.py deben seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "code",
+    "parser",
+    "multi-step"
+  ]
+}

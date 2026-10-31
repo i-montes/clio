@@ -1,0 +1,17 @@
+{
+  "id": "real-11",
+  "input": "Las páginas de perfil (pages.py y render.py) construyen HTML pegando cadenas y son vulnerables a XSS. Corrígelas: todo texto que viene del usuario (name, bio, tags, title, query) debe quedar escapado tanto en el texto como dentro de atributos (también comillas dobles y simples); y el enlace `website` solo puede llevar a un esquema http, https o mailto, o ser una URL relativa (sin esquema): con cualquier otro esquema (javascript:, data:, vbscript:, incluso escrito con mayúsculas, espacios, tabuladores o saltos de línea intercalados) el href debe ser '#'. Un enlace legítimo con '&' en la query debe conservarse (escapado como &amp; en el HTML). `render_profile_page` no debe volver a escapar el HTML de las tarjetas que ya produjo `render_card`. Mantén las firmas y que los tests de test_render.py sigan pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "xss"
+  ]
+}

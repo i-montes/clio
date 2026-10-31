@@ -1,0 +1,17 @@
+{
+  "id": "real-22",
+  "input": "schedule.next_run() calcula cuándo toca la siguiente ejecución diaria de una tarea, y hoy ignora la zona horaria, por lo que test_schedule.py falla. Impleméntala de verdad según SPEC.md (léelo entero: fija qué pasa con los cambios de hora de verano, con las horas repetidas y con las que no existen, y los errores). Los tests visibles no cubren todo: la comprobación final usa muchas otras fechas y zonas, incluidos los días del cambio de hora, así que no sirve ajustar el código a los valores de esos tests. Mantén las firmas next_run(after, hour, minute, tz_name) y runs(after, hour, minute, tz_name, count); test_schedule.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "code",
+    "timezone",
+    "integrity"
+  ]
+}
