@@ -17,6 +17,9 @@ The brain that runs on the VPS. This crate is the library; the binary comes late
   `clio-bench` JSON (`Request` on stdin, `Response` on stdout), retries failures and empty answers.
   The agent has no tool that runs code, so it cannot run tests: nothing outside the model verifies
   its result, and the contract waits (`Blocked`) instead of closing as done.
+- `tests/attacks.rs`: the attack battery against the whole agent (see
+  [`docs/mediciones/fase-1-ataques.md`](../../docs/mediciones/fase-1-ataques.md)). S-16: the
+  agent's gateway protects `PROTECTED_PATHS` (`extensions`, `skills`, `.pi`, `.claude`, `.git`).
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

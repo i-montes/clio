@@ -18,6 +18,7 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 
 [dev-dependencies]
+clio-attacks = { path = "../../testing/attacks" }
 clio-canaries = { path = "../../testing/canaries" }
 tempfile = "3.27.0"
 

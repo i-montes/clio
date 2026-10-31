@@ -4,6 +4,6 @@
   "rules": [
     "S-07"
   ],
-  "status": "pending",
+  "status": "active",
   "expect": "refused"
 }
