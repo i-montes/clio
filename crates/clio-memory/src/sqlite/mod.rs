@@ -16,9 +16,9 @@ use crate::error::{Error, Result};
 use crate::idle::{DEFAULT_IDLE, IdleCache};
 use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Change, Check, DecisionRecord, ExportSummary,
-    Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow, MemoryType, NewOperation, OpId,
+    Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow, MemoryType, NewOperation, OpId, OpKind,
     OpenMode, Operation, QueueStats, Quota, ScopeId, ScopeInfo, ScopeStats, SearchOpts, Signal,
-    State, Stats,
+    State, Stats, Tombstone,
 };
 use crate::platform::{self, WriterLock};
 use crate::secrets::find_secret;
@@ -332,7 +332,32 @@ fn row_has_secret(m: &MemoryRow) -> bool {
     .any(|t| find_secret(t))
 }
 
-fn restore_record(tx: &Connection, record: &ExportRecord) -> Result<()> {
+/// Fails when an earlier operation in the file being restored still carries what a PURGE of
+/// `memory` is meant to have erased.
+fn check_purged_clean(tx: &Connection, memory: MemoryId) -> Result<()> {
+    let mut stmt = tx.prepare("SELECT changes FROM operations")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let changes: Vec<Change> = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        let leaks = changes.iter().filter(|c| c.memory == memory).any(|c| {
+            let dirty = |m: &MemoryRow| !m.content.is_empty() || !m.content_hash.is_empty();
+            dirty(&c.after) || c.before.as_ref().is_some_and(dirty)
+        });
+        if leaks {
+            return Err(Error::BadImport(format!(
+                "memory {} was purged but this file still carries its content",
+                memory.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn restore_record(
+    tx: &Connection,
+    record: &ExportRecord,
+    purged: &mut std::collections::HashSet<i64>,
+) -> Result<()> {
     let bad = |m: &str| Err(Error::BadImport(m.into()));
     match record {
         ExportRecord::Header { .. } => {}
@@ -372,6 +397,23 @@ fn restore_record(tx: &Connection, record: &ExportRecord) -> Result<()> {
             )?;
         }
         ExportRecord::Operation(op) => {
+            let touched = op
+                .memory
+                .into_iter()
+                .chain(op.changes.iter().map(|c| c.memory));
+            if let Some(m) = touched.into_iter().find(|m| purged.contains(&m.0)) {
+                return Err(Error::BadImport(format!(
+                    "memory {} was purged; an operation after the purge touches it",
+                    m.0
+                )));
+            }
+            if op.kind == OpKind::Purge {
+                let Some(m) = op.memory.filter(|_| op.changes.is_empty()) else {
+                    return bad("a purge must name one memory and carry no changes");
+                };
+                check_purged_clean(tx, m)?;
+                purged.insert(m.0);
+            }
             // S-18: nothing that looks like a secret comes back through a restore
             let tainted = find_secret(&op.reason)
                 || op.changes.iter().any(|c| {
@@ -440,6 +482,9 @@ fn restore_record(tx: &Connection, record: &ExportRecord) -> Result<()> {
             position,
             memory,
         } => {
+            if purged.contains(&memory.0) {
+                return bad("a block holds a memory that was purged");
+            }
             tx.execute(
                 "INSERT INTO block_memories(block, position, memory) VALUES (?1, ?2, ?3)",
                 params![block.0, position, memory.0],
@@ -450,6 +495,9 @@ fn restore_record(tx: &Connection, record: &ExportRecord) -> Result<()> {
             uses,
             last_used,
         } => {
+            if purged.contains(&memory.0) {
+                return bad("usage of a memory that was purged");
+            }
             tx.execute(
                 "INSERT INTO usage(memory, uses, last_used) VALUES (?1, ?2, ?3)",
                 params![memory.0, uses, last_used],
@@ -463,6 +511,9 @@ fn restore_record(tx: &Connection, record: &ExportRecord) -> Result<()> {
             at,
             spent,
         } => {
+            if purged.contains(&memory.0) {
+                return bad("feedback on a memory that was purged");
+            }
             tx.execute(
                 "INSERT INTO feedback(id, memory, actor, signal, at, spent) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, memory.0, actor.0, enc(signal), at, spent],
@@ -753,6 +804,8 @@ impl SqliteStore {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        // freed pages are zeroed, so a PURGE does not leave the text behind in them
+        conn.pragma_update(None, "secure_delete", true)?;
         schema::init(&mut conn)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -909,6 +962,9 @@ fn append_in(
     for change in &op.changes {
         fold::apply_change(tx, &change.after)?;
     }
+    if let (OpKind::Purge, Some(m)) = (op.kind, op.memory) {
+        fold::forget(tx, m)?;
+    }
     for d in decisions {
         tx.execute(
                 "INSERT INTO decisions(scope, op, provider, mode, status, choice, confidence, reason, acted, at)
@@ -931,6 +987,44 @@ fn append_in(
         insert_job(tx, job)?;
     }
     Ok(id)
+}
+
+/// Empties what identifies a memory's content in a snapshot; ids, state, validity and the
+/// `replaced_by` / `supersedes` links stay, so the chain around it is not broken.
+fn scrub(row: &mut MemoryRow) {
+    row.content.clear();
+    row.content_hash.clear();
+    row.topic_key = None;
+    row.session = None;
+    row.episode = None;
+    row.source = None;
+}
+
+/// Rewrites every past operation that touched `memory` so its snapshots carry no content.
+fn redact_operations(tx: &Connection, memory: MemoryId) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT o.id, o.changes FROM operation_memories m JOIN operations o ON o.id = m.op
+         WHERE m.memory = ?1",
+    )?;
+    let found = stmt
+        .query_map([memory.0], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (id, text) in found {
+        let mut changes: Vec<Change> = serde_json::from_str(&text)?;
+        for c in changes.iter_mut().filter(|c| c.memory == memory) {
+            scrub(&mut c.after);
+            if let Some(b) = c.before.as_mut() {
+                scrub(b);
+            }
+        }
+        tx.execute(
+            "UPDATE operations SET changes = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&changes)?, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn spend_wrong_in(conn: &Connection, memory: MemoryId) -> Result<()> {
@@ -1381,6 +1475,70 @@ impl Store for SqliteStore {
         published
     }
 
+    fn purge(&self, op: NewOperation) -> Result<(OpId, bool)> {
+        let memory = op.memory.ok_or(Error::NotFound)?;
+        let mut conn = self.writer()?;
+        let id = {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+                [memory.0],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(Error::NotFound);
+            }
+            redact_operations(&tx, memory)?;
+            tx.execute(
+                "UPDATE decisions SET reason = NULL
+                 WHERE op IN (SELECT op FROM operation_memories WHERE memory = ?1)",
+                [memory.0],
+            )?;
+            for table in ["vectors", "usage", "feedback", "block_memories"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE memory = ?1"),
+                    [memory.0],
+                )?;
+            }
+            let id = append_in(&tx, op, &[], &[])?;
+            // the text index keeps deleted entries in old segments until they are merged
+            tx.execute(
+                "INSERT INTO memories_fts(memories_fts) VALUES('optimize')",
+                [],
+            )?;
+            tx.commit()?;
+            id
+        };
+        // the copy of the vectors in memory must not outlive the rows it was read from
+        self.vector_epoch.fetch_add(1, Ordering::SeqCst);
+        // freed pages and old versions of rows still hold bytes: rewrite the file, then empty the log
+        conn.execute_batch("VACUUM")?;
+        let busy: i64 = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+        Ok((id, busy == 0))
+    }
+
+    fn tombstone(&self, id: MemoryId) -> Result<Option<Tombstone>> {
+        Ok(self
+            .reader()?
+            .query_row(
+                "SELECT o.id, o.scope, o.actor, o.at, o.reason
+                 FROM operation_memories m JOIN operations o ON o.id = m.op
+                 WHERE m.memory = ?1 AND o.kind = 'Purge'",
+                [id.0],
+                |r| {
+                    Ok(Tombstone {
+                        memory: id,
+                        op: OpId(r.get(0)?),
+                        scope: ScopeId(r.get(1)?),
+                        actor: ActorId(r.get(2)?),
+                        at: r.get(3)?,
+                        reason: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     fn vacuum(&self) -> Result<()> {
         self.writer()?.execute_batch("VACUUM")?;
         Ok(())
@@ -1391,7 +1549,9 @@ impl Store for SqliteStore {
         let tx = conn.transaction()?;
         for (id, at) in uses {
             tx.execute(
-                "INSERT INTO usage(memory, uses, last_used) VALUES (?1, 1, ?2)
+                // a Touch job queued before a PURGE must not bring the memory's id back
+                "INSERT INTO usage(memory, uses, last_used)
+                 SELECT ?1, 1, ?2 WHERE EXISTS(SELECT 1 FROM memories WHERE id = ?1)
                  ON CONFLICT(memory) DO UPDATE SET uses = uses + 1, last_used = MAX(last_used, ?2)",
                 params![id.0, at],
             )?;
@@ -1582,6 +1742,7 @@ impl Store for SqliteStore {
 
         let mut summary = ExportSummary::default();
         let mut seen_header = false;
+        let mut purged = std::collections::HashSet::new();
         while let Some((line, record)) = next()? {
             let at_line = |e: Error| match e {
                 Error::BadImport(m) => Error::BadImport(format!("line {line}: {m}")),
@@ -1607,7 +1768,7 @@ impl Store for SqliteStore {
                         "the first line must be the header".into(),
                     )));
                 }
-                _ => restore_record(&tx, &record).map_err(at_line)?,
+                _ => restore_record(&tx, &record, &mut purged).map_err(at_line)?,
             }
             record.tally(&mut summary);
         }

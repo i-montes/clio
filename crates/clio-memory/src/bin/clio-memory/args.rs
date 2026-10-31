@@ -28,6 +28,10 @@ change (open the file read-write; fail if another program holds its write lock):
   promote ID                  accept a quarantined memory
   archive ID                  take a memory out of circulation (nothing is deleted)
   revert OP                   undo one operation (see `history`)
+  purge ID [--reason TEXT] [--yes]
+                              erase a memory's content for good, from every operation too, and
+                              leave a tombstone; asks first in a terminal (--yes skips it, for
+                              tests); a person only, and nothing can undo it
   feedback ID useful|wrong    say whether a memory helped; three `wrong` send it to review
   retry-job ID                put a failed job back in the queue
   run-jobs [--heavy]          run queued jobs now (--heavy also runs backup and vacuum)
@@ -97,6 +101,11 @@ pub enum Command {
     },
     Revert {
         op: OpId,
+    },
+    Purge {
+        id: MemoryId,
+        reason: String,
+        yes: bool,
     },
     Feedback {
         id: MemoryId,
@@ -398,6 +407,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, UsageErro
         "revert" => Command::Revert {
             op: parse_op(&rest.one("OP")?)?,
         },
+        "purge" => {
+            let yes = rest.switch("--yes");
+            let reason = rest
+                .flag("--reason")?
+                .unwrap_or_else(|| "purged by a person".into());
+            Command::Purge {
+                id: parse_id(&rest.one("ID")?)?,
+                reason,
+                yes,
+            }
+        }
         "feedback" => {
             let (id, signal) = rest.two("ID useful|wrong")?;
             Command::Feedback {

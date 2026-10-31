@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 
 use super::{OP_COLS, enc, op_from};
 use crate::error::Result;
-use crate::model::{Change, MemoryId, MemoryRow, OpId, ScopeId};
+use crate::model::{Change, MemoryId, MemoryRow, OpId, OpKind, ScopeId};
 use crate::stem::stem_text;
 
 fn language(conn: &Connection, scope: ScopeId) -> Result<String> {
@@ -50,6 +50,13 @@ pub fn apply_change(conn: &Connection, after: &MemoryRow) -> Result<()> {
     Ok(())
 }
 
+/// A PURGE removes the memory from the projection and the index; it has no changes to fold.
+pub fn forget(conn: &Connection, memory: MemoryId) -> Result<()> {
+    conn.execute("DELETE FROM memories WHERE id = ?1", [memory.0])?;
+    conn.execute("DELETE FROM memories_fts WHERE rowid = ?1", [memory.0])?;
+    Ok(())
+}
+
 /// Records which memories an operation touched, so `history` is an index lookup.
 pub fn link(
     conn: &Connection,
@@ -73,8 +80,12 @@ pub fn preview(conn: &Connection) -> Result<HashMap<MemoryId, MemoryRow>> {
     let mut stmt = conn.prepare(&format!("SELECT {OP_COLS} FROM operations ORDER BY id"))?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        for change in op_from(row)?.changes {
+        let op = op_from(row)?;
+        for change in op.changes {
             out.insert(change.memory, change.after);
+        }
+        if let (OpKind::Purge, Some(m)) = (op.kind, op.memory) {
+            out.remove(&m);
         }
     }
     Ok(out)
@@ -101,6 +112,9 @@ pub fn rebuild_in(tx: &Connection) -> Result<()> {
             link(tx, op.id, op.memory, &op.changes)?;
             for change in &op.changes {
                 apply_change(tx, &change.after)?;
+            }
+            if let (OpKind::Purge, Some(m)) = (op.kind, op.memory) {
+                forget(tx, m)?;
             }
         }
     }
