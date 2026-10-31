@@ -126,6 +126,12 @@ dependencies = [
 [[package]]
 name = "clio-brain"
 version = "0.0.0"
+dependencies = [
+ "clio-canaries",
+ "clio-core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "clio-canaries"
