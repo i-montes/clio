@@ -202,6 +202,7 @@ dependencies = [
 name = "clio-brain"
 version = "0.0.0"
 dependencies = [
+ "clio-attacks",
  "clio-canaries",
  "clio-contract",
  "clio-core",

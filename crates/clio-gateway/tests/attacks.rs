@@ -145,7 +145,13 @@ impl Target for Gw {
 #[test]
 fn the_active_attack_cases_are_refused_by_the_gateway() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/cases");
-    let cases = load_cases(&dir).unwrap();
+    // The cases about the whole agent (06, 09, 19 and up) are run by clio-brain/tests/attacks.rs.
+    let ours = ["01", "02", "04", "05", "07", "13", "14", "17"];
+    let cases: Vec<_> = load_cases(&dir)
+        .unwrap()
+        .into_iter()
+        .filter(|c| ours.iter().any(|n| c.id == format!("attack-{n}")))
+        .collect();
     assert!(cases.iter().any(|c| c.status == Status::Active));
     let report = run(&cases, &Gw { env: Env::new() });
     assert!(report.ok(), "{}", report.line());

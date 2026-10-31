@@ -307,6 +307,11 @@ fn digest_hex(s: &str) -> String {
         .collect()
 }
 
+/// S-16: folders under the workspace root that load code or settings by themselves (Pi
+/// extensions, skills, hooks). The agent may read them, never write them.
+/// shortcut: root level only and case-sensitive names; widen when the node has other loaders.
+pub const PROTECTED_PATHS: [&str; 5] = ["extensions", "skills", ".pi", ".claude", ".git"];
+
 /// The declared arguments of the basic tools (the registry holds code, not schemas).
 fn arg_specs(tool: &str) -> Vec<ArgSpec> {
     let a = |name: &str, kind| ArgSpec {
@@ -381,7 +386,7 @@ impl AgentLoop {
             sandbox_root: workdir.to_path_buf(),
             allowed_binaries: vec![],
             trusted_domains: vec![],
-            protected_paths: vec![],
+            protected_paths: PROTECTED_PATHS.iter().map(|p| (*p).to_owned()).collect(),
             day_zero_complete: false,
             breaker_threshold: 3,
             tools,

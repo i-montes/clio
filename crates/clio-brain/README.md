@@ -22,6 +22,10 @@ The brain that runs on the VPS. This crate is the library; the binary comes late
   resolves `{{secreto:name}}` last, for the action's tool and domains only, runs the tool with the
   real values and sends every output through the vault's filter (dropped if the vault is down).
   `AgentLoop` still holds an in-process `Scrubber`; wiring it to the remote filter is not done.
+
+- `tests/attacks.rs`: the attack battery against the whole agent (see
+  [`docs/mediciones/fase-1-ataques.md`](../../docs/mediciones/fase-1-ataques.md)). S-16: the
+  agent's gateway protects `PROTECTED_PATHS` (`extensions`, `skills`, `.pi`, `.claude`, `.git`).
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 
