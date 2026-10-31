@@ -424,19 +424,19 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### Gestor de memoria (conexión con el agente)
 
-- [ ] **322** Gestor de memoria como único escritor desde el agente
-- [ ] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento
-- [ ] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25)
-- [ ] **325** Distinguir un hecho de la persona de contenido externo
-- [ ] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26)
-- [ ] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26)
-- [ ] **328** ataque: una inyección que intenta guardar un procedimiento en la memoria
-- [ ] **329** Actores: agente, sesión, persona, importador, cada uno con su cuota
-- [ ] **330** ataque: una inundación de propuestas a la memoria desde un mismo actor
+- [x] **322** Gestor de memoria como único escritor desde el agente
+- [ ] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento — hecho el lote al cerrar; no hay memoria de trabajo inmediata porque el bucle no escribe nada
+- [x] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25)
+- [x] **325** Distinguir un hecho de la persona de contenido externo
+- [x] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26)
+- [x] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26)
+- [x] **328** ataque: una inyección que intenta guardar un procedimiento en la memoria
+- [x] **329** Actores: agente, sesión, persona, importador, cada uno con su cuota
+- [x] **330** ataque: una inundación de propuestas a la memoria desde un mismo actor
 - [ ] **331** Que el triaje y el enrutador lean la memoria
 - [ ] **332** Que las respuestas de la persona a una pregunta de ruteo queden como preferencia procedimental
-- [ ] **333** Conectar `context()` al arranque de cada sesión con presupuestos separados para bloques fijos y recall
-- [ ] **334** Conectar la retroalimentación útil/equivocado a las respuestas del agente
+- [x] **333** Conectar `context()` al arranque de cada sesión con presupuestos separados para bloques fijos y recall
+- [x] **334** Conectar la retroalimentación útil/equivocado a las respuestas del agente
 - [ ] **335** Conectar la memoria a Pi por MCP o por el adaptador
 
 ### Evaluación de la memoria

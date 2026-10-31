@@ -599,3 +599,58 @@ fn text_from_the_memory_file_never_reaches_the_terminal_raw() {
     }
     assert!(e.clio(&["memory", "show", "2"]).contains("evil"));
 }
+
+// S-24, S-25: `clio memory purge` asks first, deletes the content for good (the file and the
+// vector), leaves only a tombstone, and `show` says so instead of printing anything.
+#[test]
+fn memory_purge_asks_first_deletes_for_good_and_leaves_only_a_tombstone() {
+    let e = Env::new(true);
+    let secret_text = format!("la clave del almacén es {}", "gamma-ultra-7731");
+    e.clio(&["memory", "remember", &secret_text]);
+    assert!(
+        e.clio(&["memory", "show", "1"])
+            .contains("gamma-ultra-7731")
+    );
+
+    // Without an answer, or with "n", nothing is deleted.
+    assert!(
+        e.clio_with_stdin(&["memory", "purge", "1"], "n\n")
+            .contains("no se cambió nada")
+    );
+    assert!(
+        e.clio(&["memory", "show", "1"])
+            .contains("gamma-ultra-7731")
+    );
+
+    let out = e.clio_with_stdin(&["memory", "purge", "1", "--reason", "ya no vale"], "s\n");
+    assert!(out.contains("purgado: m1"), "{out}");
+
+    // The tombstone is all that is left.
+    let shown = e.clio(&["memory", "show", "1"]);
+    assert!(shown.contains("fue purgado"), "{shown}");
+    assert!(shown.contains("ya no vale"), "{shown}");
+    assert!(!shown.contains("gamma-ultra-7731"), "{shown}");
+    assert!(
+        !e.clio(&["memory", "search", "almacén"])
+            .contains("gamma-ultra-7731")
+    );
+
+    // Not in the file nor in its write-ahead log, nor in an export.
+    let db = std::fs::read(e.db()).unwrap();
+    let wal = std::fs::read(format!("{}-wal", e.db().display())).unwrap_or_default();
+    for (name, bytes) in [("db", db), ("wal", wal)] {
+        assert!(
+            !bytes
+                .windows("gamma-ultra-7731".len())
+                .any(|w| w == b"gamma-ultra-7731"),
+            "the purged text is still in the {name}"
+        );
+    }
+    assert!(!e.clio(&["memory", "export"]).contains("gamma-ultra-7731"));
+    // A second purge of the same memory is an error, not a silent success.
+    assert!(
+        !e.try_clio(&["memory", "purge", "1", "--yes"])
+            .status
+            .success()
+    );
+}

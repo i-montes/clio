@@ -1,7 +1,7 @@
 //! `clio memory ...`: look at what Clio remembers and decide what it keeps. Everything printed
 //! comes from the memory file and is cleaned of escape sequences first. The commands that change
 //! something (`remember`, `promote`, `archive`, `feedback`) act as the person; the agent has no
-//! way to reach any of them (S-25, S-26). There is no `purge` here: it comes with PURGE.
+//! way to reach any of them (S-25, S-26). `purge` deletes for good, so it asks first and only the person can run it.
 
 use clio_brain::memory_link::{EmbedModel, MemoryLink, Res, kind_label, origin_label, state_label};
 use clio_memory::{MemoryId, MemoryRow, Signal, State};
@@ -22,6 +22,9 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
                                               un hecho tuyo (origen: persona), activo al instante
   clio memory promote <id> [--yes]            aprueba un recuerdo pendiente (solo tú; pregunta antes)
   clio memory archive <id> [--yes]            lo archiva: ya no se recuerda (pregunta antes)
+  clio memory purge <id> [--reason \"motivo\"] [--yes]
+                                              borra el contenido PARA SIEMPRE (texto, vector, historial);
+                                              deja una lápida sin contenido. No se puede deshacer
   clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
   clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
   clio memory stats [--json]                  conteos y tamaño";
@@ -171,7 +174,22 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 println!("{NONE_YET}");
                 return Ok(0);
             };
-            let m = link.get(id_of(id)?)?;
+            let mid = id_of(id)?;
+            if let Ok(Some(t)) = link.tombstone(mid) {
+                if json {
+                    print_json(
+                        &json!({"id": format!("m{}", mid.0), "state": "purged", "purged_at": t.at, "reason": sanitize::line(&t.reason)}),
+                    )?;
+                } else {
+                    println!("m{} fue purgado: el contenido ya no existe", mid.0);
+                    println!(
+                        "{}",
+                        st.dim(&format!("motivo: {}", sanitize::line(&t.reason)))
+                    );
+                }
+                return Ok(0);
+            }
+            let m = link.get(mid)?;
             if json {
                 print_json(&row_json(&link, &m))?;
             } else {
@@ -317,10 +335,34 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             }
         }
         "purge" => {
-            return Err(
-                "`clio memory purge` todavía no existe: llegará aparte, con PURGE. Mientras tanto `archive` oculta un recuerdo sin borrarlo."
-                    .into(),
+            let yes = args.flag("--yes");
+            let reason = args
+                .value("--reason")?
+                .unwrap_or_else(|| "pedido por la persona".into());
+            let rest = args.rest()?;
+            let [id] = rest.as_slice() else {
+                return Err("falta el id: clio memory purge <id> [--reason \"motivo\"]".into());
+            };
+            let id = id_of(id)?;
+            let link = open_write(dirs)?;
+            let m = link.get(id)?;
+            println!("{}", row_line(st, &m, ui::width()));
+            println!(
+                "{}",
+                st.dim("Borra el contenido en todas partes (texto, índice, historial y vector) y no se puede deshacer.\nLos respaldos y exportaciones que ya hiciste conservan el texto. El motivo queda en claro: no pongas ahí lo borrado.")
             );
+            if !yes && !confirm(&format!("¿Purgar m{} para siempre?", id.0)) {
+                println!("no se cambió nada");
+                return Ok(0);
+            }
+            let out = link.purge(id, &reason)?;
+            println!("purgado: m{} (operación {})", id.0, out.op.0);
+            if !out.wal_truncated {
+                println!(
+                    "{}",
+                    st.dim("aviso: un lector impidió vaciar el registro de escritura; copias viejas pueden quedar en el archivo -wal hasta el próximo checkpoint")
+                );
+            }
         }
         other => {
             eprintln!("clio memory: subcomando desconocido {other:?}\n\n{USAGE}");

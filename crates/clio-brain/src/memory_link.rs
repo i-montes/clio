@@ -670,6 +670,20 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// Deletes the content of a memory for good (PURGE, S-24). Only the person; the agent has no way to
+    /// reach this. The reason is kept in the tombstone in the clear: it must not hold the deleted text.
+    pub fn purge(&self, id: MemoryId, reason: &str) -> Res<clio_memory::PurgeOutcome> {
+        self.need_write()?;
+        self.engine
+            .purge(id, self.actors.persona, reason)
+            .map_err(|e| explain(&e))
+    }
+
+    /// What is left of a purged memory: who, when and why, never the content.
+    pub fn tombstone(&self, id: MemoryId) -> Res<Option<clio_memory::Tombstone>> {
+        self.engine.tombstone(id).map_err(|e| explain(&e))
+    }
+
     pub fn archive(&self, id: MemoryId) -> Res<()> {
         self.need_write()?;
         self.engine
