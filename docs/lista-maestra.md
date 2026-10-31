@@ -208,27 +208,27 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Capa de control (presupuesto, anti-bucle y comprobaciones)
 
-- [ ] **149** Presupuesto de pasos, tiempo y costo por tarea, aplicado en código con corte duro (S-47)
-- [ ] **150** Presupuesto por día aplicado en código (S-47)
-- [ ] **151** prueba: un bucle sembrado se detiene al tocar el tope (S-47)
-- [ ] **152** ataque: un bucle que intenta gastar sin parar
-- [ ] **153** Anti-bucle: contador de pasos repetidos (D5)
-- [ ] **154** Los niveles 0 y 1 saltan contrato y planificador, pero no el presupuesto ni el anti-bucle
-- [ ] **155** Comprobar que la acción coincide con el plan antes de ejecutar (D7)
-- [ ] **156** Validador de factibilidad de reglas sobre cada acción (D7)
-- [ ] **157** Presupuesto de reintentos para la capa de control
-- [ ] **158** Puntos de control para reanudar una tarea
-- [ ] **159** Reintentos con contexto fresco más paquete de evidencia (conecta con la fase 3)
-- [ ] **160** Filtro de salidas del modelo antes de usarlas
-- [ ] **161** Decidir si el anti-bucle cuenta también pasos «sin avance» (hoy solo repeticiones)
+- [x] **149** Presupuesto de pasos, tiempo y costo por tarea, aplicado en código con corte duro (S-47)
+- [x] **150** Presupuesto por día aplicado en código (S-47)
+- [x] **151** prueba: un bucle sembrado se detiene al tocar el tope (S-47)
+- [x] **152** ataque: un bucle que intenta gastar sin parar
+- [x] **153** Anti-bucle: contador de pasos repetidos (D5)
+- [x] **154** Los niveles 0 y 1 saltan contrato y planificador, pero no el presupuesto ni el anti-bucle
+- [x] **155** Comprobar que la acción coincide con el plan antes de ejecutar (D7)
+- [x] **156** Validador de factibilidad de reglas sobre cada acción (D7)
+- [x] **157** Presupuesto de reintentos para la capa de control
+- [x] **158** Puntos de control para reanudar una tarea
+- [x] **159** Reintentos con contexto fresco más paquete de evidencia (conecta con la fase 3)
+- [x] **160** Filtro de salidas del modelo antes de usarlas
+- [x] **161** Decidir si el anti-bucle cuenta también pasos «sin avance» (hoy solo repeticiones)
 
 ### Verificación (D2, D3, D13)
 
-- [ ] **162** Verificar cada criterio con señales externas: pruebas, resultados de herramientas e invariantes en código
-- [ ] **163** Verificar también contra el objetivo final, no solo paso a paso (D3)
-- [ ] **164** El verificador es otro proceso, con otras señales y otro contexto (D13)
-- [ ] **165** Nunca usar la autocrítica del modelo ni un debate entre modelos como verificación (D2)
-- [ ] **166** El resultado de un subagente entra como observación, no como verdad (D12)
+- [x] **162** Verificar cada criterio con señales externas: pruebas, resultados de herramientas e invariantes en código
+- [x] **163** Verificar también contra el objetivo final, no solo paso a paso (D3)
+- [x] **164** El verificador es otro proceso, con otras señales y otro contexto (D13)
+- [x] **165** Nunca usar la autocrítica del modelo ni un debate entre modelos como verificación (D2)
+- [x] **166** El resultado de un subagente entra como observación, no como verdad (D12)
 
 ### Pasarela (spec: pasarela)
 
@@ -290,19 +290,19 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Sandbox y reversibilidad
 
-- [ ] **222** Sandbox desechable para lectura y escritura
-- [ ] **223** Snapshot por tarea para poder volver
-- [ ] **224** «Para» o cancelar deja el sandbox como estaba, en segundos
-- [ ] **225** Solo herramientas de lectura y escritura dentro del sandbox en esta fase
-- [ ] **226** Registro de efectos idempotente por acción
+- [x] **222** Sandbox desechable para lectura y escritura
+- [x] **223** Snapshot por tarea para poder volver
+- [x] **224** «Para» o cancelar deja el sandbox como estaba, en segundos
+- [x] **225** Solo herramientas de lectura y escritura dentro del sandbox en esta fase
+- [x] **226** Registro de efectos idempotente por acción
 - [ ] **227** Cortacircuito en la pasarela
-- [ ] **228** Arrendamiento de recursos (repo, ruta) para serializar tareas sobre el mismo recurso
+- [x] **228** Arrendamiento de recursos (repo, ruta) para serializar tareas sobre el mismo recurso
 
 ### Herramientas
 
-- [ ] **229** Juego básico de herramientas con su declaración de efecto
-- [ ] **230** Pocas herramientas visibles, el resto por recuperación (D8)
-- [ ] **231** El LLM puede pedir una herramienta no recomendada y la pasarela sigue revisando todo
+- [x] **229** Juego básico de herramientas con su declaración de efecto
+- [x] **230** Pocas herramientas visibles, el resto por recuperación (D8)
+- [x] **231** El LLM puede pedir una herramienta no recomendada y la pasarela sigue revisando todo
 - [ ] **232** medir D8: acierto de selección con 10, 30 y 60 herramientas, con tu modelo (todas visibles, recomendadas, recuperación vectorial)
 
 ### Vault (spec: vault)
@@ -350,17 +350,17 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Modelos y proveedores, versión mínima (spec: modelos)
 
-- [ ] **273** Catálogo de modelos: proveedor, id exacto con versión, ventana, precio, capacidades, retención de datos y niveles
-- [ ] **274** Un modelo sin versión fijada no se acepta (prueba)
-- [ ] **275** Nunca un alias que cambia solo
-- [ ] **276** Modelo por nivel: rápido y barato para 0 y 1, fuerte para 2 y 3
-- [ ] **277** Todo lo que sale hacia un LLM pasa antes por la limpieza (S-44)
-- [ ] **278** prueba: payloads salientes sin valores del vault (S-44)
-- [ ] **279** Tabla de qué datos van a qué proveedor (S-44)
-- [ ] **280** Usar opciones sin retención donde existan (S-44)
+- [x] **273** Catálogo de modelos: proveedor, id exacto con versión, ventana, precio, capacidades, retención de datos y niveles
+- [x] **274** Un modelo sin versión fijada no se acepta (prueba)
+- [x] **275** Nunca un alias que cambia solo
+- [x] **276** Modelo por nivel: rápido y barato para 0 y 1, fuerte para 2 y 3
+- [x] **277** Todo lo que sale hacia un LLM pasa antes por la limpieza (S-44)
+- [x] **278** prueba: payloads salientes sin valores del vault (S-44)
+- [x] **279** Tabla de qué datos van a qué proveedor (S-44)
+- [x] **280** Usar opciones sin retención donde existan (S-44)
 - [ ] **281** Topes de gasto en el panel de cada proveedor, además de los de Clio (S-45)
-- [ ] **282** Límite de llamadas con espera por proveedor
-- [ ] **283** Registrar el costo y los tokens por proveedor y modelo
+- [x] **282** Límite de llamadas con espera por proveedor
+- [x] **283** Registrar el costo y los tokens por proveedor y modelo
 
 ### Mediciones de la fase
 
