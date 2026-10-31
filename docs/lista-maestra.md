@@ -127,7 +127,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 ### Medir con un modelo real (movidas desde la fase 0)
 
 - [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por una señal externa (una prueba que pasa, un valor exacto, un archivo producido), no por el modelo; sin datos privados, porque se mandan a un proveedor (S-44). Formato en `testing/bench/tasks/real/README.md`. Necesita el agente para poder ejecutarse.
-- [ ] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral. Hecho: script `testing/bench/llm_openai_compat.py` (OpenCode Go, modelo gratuito `beam-free`), precios, cinta real, `baseline-real.json` (60/60) y `nightly.yml` que usa el modelo real si existe el secreto `OPENCODE_API_KEY`. Falta guardar ese secreto en GitHub y ver una noche completa. Poner un tope de gasto en el panel del proveedor (S-45).
+- [x] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral. Probado en GitHub el 2026-10-31: el nightly corre el modelo real (`beam-free`, 60/60, 73 s) con el secreto `OPENCODE_API_KEY`. Pendiente aparte: un tope de gasto en el panel del proveedor (S-45) si algún día se usa un modelo de pago.
 - [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones reales (decidir); hoy hay valores provisionales en `testing/bench/thresholds.json`. Va después de 067 y 076.
 
 ### VPS e infraestructura (S-38 a S-40)
