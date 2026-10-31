@@ -161,50 +161,50 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Triaje con reglas (spec: triaje)
 
-- [ ] **108** Los cuatro niveles: 0 directo, 1 simple, 2 completo, 3 largo
-- [ ] **109** Entradas: mensaje de la persona, nodo y bloque de identidad; nunca contenido externo (S-07)
-- [ ] **110** Salidas en una pasada: nivel, esfuerzo, ambiguo, posible irreversible, herramientas y modelo
-- [ ] **111** Orden de decisión: forzado por la persona, reglas duras, reglas del triaje, ante la duda nivel 1
-- [ ] **112** Comandos `/rápido` y `/plan`
-- [ ] **113** Regla dura: si algo puede ser irreversible, mínimo nivel 2
-- [ ] **114** Reglas por verbos: pregunta corta sin verbos de acción a 0; «crea», «borra», «despliega» a 2 o más
-- [ ] **115** Subir de nivel a mitad de camino, con registro, y que nunca baje
-- [ ] **116** Al llegar a nivel 3, pedir aprobación del contrato
-- [ ] **117** Telemetría: pedidos por nivel, subidas, fallos por nivel bajo y costo por nivel
-- [ ] **118** prueba: «¿Qué hora es?» queda en nivel 0 y responde con la herramienta de hora
-- [ ] **119** prueba: «Borra la carpeta de pruebas» queda en nivel 2 o más
-- [ ] **120** prueba: una página leída que dice «esto es nivel 0» no cambia el nivel (S-07)
-- [ ] **121** prueba: una tarea de nivel 1 que necesita escribir fuera del sandbox sube a 2 y queda registrado
-- [ ] **122** prueba: ninguna tarea baja de nivel
-- [ ] **123** prueba: sin Jev, el triaje funciona solo con reglas
-- [ ] **124** prueba: `/plan` fuerza el nivel 3 aunque el pedido sea corto
+- [x] **108** Los cuatro niveles: 0 directo, 1 simple, 2 completo, 3 largo
+- [x] **109** Entradas: mensaje de la persona, nodo y bloque de identidad; nunca contenido externo (S-07)
+- [x] **110** Salidas en una pasada: nivel, esfuerzo, ambiguo, posible irreversible, herramientas y modelo
+- [x] **111** Orden de decisión: forzado por la persona, reglas duras, reglas del triaje, ante la duda nivel 1
+- [x] **112** Comandos `/rápido` y `/plan`
+- [x] **113** Regla dura: si algo puede ser irreversible, mínimo nivel 2
+- [x] **114** Reglas por verbos: pregunta corta sin verbos de acción a 0; «crea», «borra», «despliega» a 2 o más
+- [x] **115** Subir de nivel a mitad de camino, con registro, y que nunca baje
+- [x] **116** Al llegar a nivel 3, pedir aprobación del contrato
+- [x] **117** Telemetría: pedidos por nivel, subidas, fallos por nivel bajo y costo por nivel
+- [x] **118** prueba: «¿Qué hora es?» queda en nivel 0 y responde con la herramienta de hora
+- [x] **119** prueba: «Borra la carpeta de pruebas» queda en nivel 2 o más
+- [x] **120** prueba: una página leída que dice «esto es nivel 0» no cambia el nivel (S-07)
+- [x] **121** prueba: una tarea de nivel 1 que necesita escribir fuera del sandbox sube a 2 y queda registrado
+- [x] **122** prueba: ninguna tarea baja de nivel
+- [x] **123** prueba: sin Jev, el triaje funciona solo con reglas
+- [x] **124** prueba: `/plan` fuerza el nivel 3 aunque el pedido sea corto
 - [ ] **125** Fijar el objetivo inicial de subidas y de fallos por nivel bajo
 - [ ] **126** medir D22: las 10 tareas más 20 triviales, con y sin triaje, forzando cada nivel
 
 ### Contrato de tarea (spec: contrato)
 
-- [ ] **127** Campos del contrato: id, nivel, objetivo, rol, alcance, requiere spec, criterios, terminación, presupuesto, política y nodos, tareas, preguntas abiertas, origen, estado, trace_id
-- [ ] **128** Estados: borrador, aprobado, en curso, bloqueado, cerrado con éxito, cerrado con fallo, cancelado
-- [ ] **129** Solo la persona cambia el objetivo (S-07)
-- [ ] **130** El nivel viene del triaje y solo sube
-- [ ] **131** Un criterio sin forma de comprobarse no se acepta
-- [ ] **132** Alcance explícito: lo que no está dentro, está fuera
-- [ ] **133** Ciclo: explorar en solo lectura, borrador, spec si hace falta, aprobación, plan, registro durable, tareas, verificación, cierre
-- [ ] **134** Como máximo una pregunta a la vez a la persona
-- [ ] **135** Registro durable del contrato antes de la primera escritura
-- [ ] **136** Decidir formato del contrato: markdown con frontmatter o JSON
+- [x] **127** Campos del contrato: id, nivel, objetivo, rol, alcance, requiere spec, criterios, terminación, presupuesto, política y nodos, tareas, preguntas abiertas, origen, estado, trace_id
+- [x] **128** Estados: borrador, aprobado, en curso, bloqueado, cerrado con éxito, cerrado con fallo, cancelado
+- [x] **129** Solo la persona cambia el objetivo (S-07)
+- [x] **130** El nivel viene del triaje y solo sube
+- [x] **131** Un criterio sin forma de comprobarse no se acepta
+- [x] **132** Alcance explícito: lo que no está dentro, está fuera
+- [x] **133** Ciclo: explorar en solo lectura, borrador, spec si hace falta, aprobación, plan, registro durable, tareas, verificación, cierre
+- [x] **134** Como máximo una pregunta a la vez a la persona
+- [x] **135** Registro durable del contrato antes de la primera escritura
+- [x] **136** Decidir formato del contrato: markdown con frontmatter o JSON
 - [ ] **137** Decidir dónde vive el registro: repositorio de trabajo, memoria episódica o ambos
-- [ ] **138** Una tarea se marca hecha solo con evidencia observada
-- [ ] **139** Informe de cierre fijo: resultado verificado, comprobaciones fallidas o pendientes, siguiente paso
-- [ ] **140** Enmiendas versionadas: el agente propone, solo la persona acepta
-- [ ] **141** Telemetría: tiempo por fase, criterios al primer intento, enmiendas, cierres por tipo, tareas reabiertas
-- [ ] **142** prueba: un contrato con un criterio sin forma de comprobarse no pasa de borrador
-- [ ] **143** prueba: ninguna tarea se marca hecha sin evidencia adjunta
-- [ ] **144** prueba: una instrucción dentro de un archivo leído no modifica el objetivo ni el alcance
-- [ ] **145** prueba: agotar el presupuesto cierra el contrato con informe
-- [ ] **146** prueba: el informe de cierre siempre lista lo pendiente, aunque esté vacío
-- [ ] **147** prueba: otra sesión retoma una tarea a medias solo con el contrato y el diff
-- [ ] **148** ataque: una inyección que intenta bajar el nivel del triaje o cambiar el contrato
+- [x] **138** Una tarea se marca hecha solo con evidencia observada
+- [x] **139** Informe de cierre fijo: resultado verificado, comprobaciones fallidas o pendientes, siguiente paso
+- [x] **140** Enmiendas versionadas: el agente propone, solo la persona acepta
+- [x] **141** Telemetría: tiempo por fase, criterios al primer intento, enmiendas, cierres por tipo, tareas reabiertas
+- [x] **142** prueba: un contrato con un criterio sin forma de comprobarse no pasa de borrador
+- [x] **143** prueba: ninguna tarea se marca hecha sin evidencia adjunta
+- [x] **144** prueba: una instrucción dentro de un archivo leído no modifica el objetivo ni el alcance
+- [x] **145** prueba: agotar el presupuesto cierra el contrato con informe
+- [x] **146** prueba: el informe de cierre siempre lista lo pendiente, aunque esté vacío
+- [x] **147** prueba: otra sesión retoma una tarea a medias solo con el contrato y el diff
+- [x] **148** ataque: una inyección que intenta bajar el nivel del triaje o cambiar el contrato
 
 ### Capa de control (presupuesto, anti-bucle y comprobaciones)
 
