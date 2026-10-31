@@ -90,8 +90,18 @@ fn with_runs() -> App {
     });
     a.home.doctor = Some((12, 3, 0));
     a.home.runs = vec![
-        info(ID1, Status::Pending, "arregla parse_date en dates.py", &["dates.py"]),
-        info(ID2, Status::Applied, "agrega un README", &["README.md", "docs/a.md"]),
+        info(
+            ID1,
+            Status::Pending,
+            "arregla parse_date en dates.py",
+            &["dates.py"],
+        ),
+        info(
+            ID2,
+            Status::Applied,
+            "agrega un README",
+            &["README.md", "docs/a.md"],
+        ),
         info(ID3, Status::Failed, "refactoriza todo", &[]),
     ];
     a
@@ -109,10 +119,19 @@ const DIFF: &str = "--- a/dates.py\n+++ b/dates.py\n@@ -1,3 +1,3 @@\n def parse(
 
 fn detail(id: &str, status: Status) -> Detail {
     Detail {
-        info: info(id, status, "arregla parse_date", &["dates.py", "docs/new.md"]),
+        info: info(
+            id,
+            status,
+            "arregla parse_date",
+            &["dates.py", "docs/new.md"],
+        ),
         rows: vec![
             row('M', "dates.py", DIFF),
-            row('A', "docs/new.md", "--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1,1 @@\n+hola\n"),
+            row(
+                'A',
+                "docs/new.md",
+                "--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1,1 @@\n+hola\n",
+            ),
         ],
         sel: 0,
         in_diff: false,
@@ -151,7 +170,10 @@ fn assert_clean(screen: &str) {
     for c in screen.chars() {
         let bad = (c.is_control() && c != '\n')
             || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{FEFF}');
-        assert!(!bad, "a control or bidi character reached the screen: {c:?}\n{screen}");
+        assert!(
+            !bad,
+            "a control or bidi character reached the screen: {c:?}\n{screen}"
+        );
     }
 }
 
@@ -172,9 +194,21 @@ fn home_navigation_clamps_and_opens_the_selected_run() {
     assert_eq!(a.home.sel, 2);
     assert!(cmds.is_empty());
     let (a, cmds) = feed(a, vec![key(KeyCode::Home), key(KeyCode::Enter)]);
-    assert_eq!(cmds, vec![Cmd::LoadDetail { id: ID1.into(), diff: false }]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::LoadDetail {
+            id: ID1.into(),
+            diff: false
+        }]
+    );
     let (_, cmds) = feed(a, vec![ch('d')]);
-    assert_eq!(cmds, vec![Cmd::LoadDetail { id: ID1.into(), diff: true }]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::LoadDetail {
+            id: ID1.into(),
+            diff: true
+        }]
+    );
 }
 
 #[test]
@@ -183,7 +217,10 @@ fn home_keys_new_refresh_doctor_help_quit() {
     assert_eq!(a.screen, Screen::NewRun);
     assert_eq!(
         cmds,
-        vec![Cmd::Check { dir: "/home/ivan/proyecto".into(), seq: 1 }]
+        vec![Cmd::Check {
+            dir: "/home/ivan/proyecto".into(),
+            seq: 1
+        }]
     );
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
     assert_eq!((a.screen, cmds), (Screen::Home, vec![Cmd::LoadHome]));
@@ -217,7 +254,10 @@ fn apply_needs_a_plan_then_a_y() {
     let c = a.confirm.clone().unwrap();
     assert_eq!((c.action, c.files), (Action::Apply, 2));
     let text = screen_text(&a, 80, 24);
-    assert!(text.contains("Aplicar 2 archivo(s) en") && text.contains("/home/ivan/proyecto"), "{text}");
+    assert!(
+        text.contains("Aplicar 2 archivo(s) en") && text.contains("/home/ivan/proyecto"),
+        "{text}"
+    );
     // Anything but y cancels and nothing is applied.
     let (b, cmds) = feed(a.clone_for_test(), vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty() && b.confirm.is_none());
@@ -229,11 +269,16 @@ fn apply_needs_a_plan_then_a_y() {
 fn a_refused_plan_shows_the_reasons_and_applies_nothing() {
     let (a, cmds) = feed(
         with_runs(),
-        vec![Input::Bg(Bg::Planned(Err("rechazado, no se aplicó nada:\n  .git/hooks/x: ruta protegida".into())))],
+        vec![Input::Bg(Bg::Planned(Err(
+            "rechazado, no se aplicó nada:\n  .git/hooks/x: ruta protegida".into(),
+        )))],
     );
     assert!(cmds.is_empty() && a.confirm.is_none());
     let text = screen_text(&a, 80, 24);
-    assert!(text.contains("ruta protegida") && text.contains("Aviso"), "{text}");
+    assert!(
+        text.contains("ruta protegida") && text.contains("Aviso"),
+        "{text}"
+    );
     let (a, cmds) = feed(a, vec![ch('y')]);
     assert!(cmds.is_empty(), "the key only closes the notice");
     assert!(a.notice.is_none());
@@ -242,7 +287,10 @@ fn a_refused_plan_shows_the_reasons_and_applies_nothing() {
 #[test]
 fn undo_only_for_applied_runs_and_it_asks() {
     let (a, cmds) = feed(with_runs(), vec![ch('u')]);
-    assert!(cmds.is_empty() && a.confirm.is_none() && a.notice.is_some(), "run 1 is not applied");
+    assert!(
+        cmds.is_empty() && a.confirm.is_none() && a.notice.is_some(),
+        "run 1 is not applied"
+    );
     let (a, cmds) = feed(a, vec![ch('x'), ch('j'), ch('u')]);
     assert!(cmds.is_empty());
     assert_eq!(a.confirm.as_ref().unwrap().action, Action::Undo);
@@ -258,23 +306,46 @@ fn new_run_validates_before_launching() {
     assert!(cmds.is_empty() && a.screen == Screen::NewRun);
     let (a, _) = feed(a, "arregla algo ".chars().map(ch).collect());
     // The check answers for the current sequence (1); an old answer is ignored.
-    let ok = Preview { workspace: "/home/ivan/proyecto".into(), files: 3, bytes: 10, ..Preview::default() };
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Checked { seq: 99, result: Ok(ok.clone()) })]);
+    let ok = Preview {
+        workspace: "/home/ivan/proyecto".into(),
+        files: 3,
+        bytes: 10,
+        ..Preview::default()
+    };
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Checked {
+            seq: 99,
+            result: Ok(ok.clone()),
+        })],
+    );
     assert!(a.new_run.check.is_none(), "stale answer ignored");
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty(), "still no valid folder");
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Checked { seq: 1, result: Ok(ok) })]);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Checked {
+            seq: 1,
+            result: Ok(ok),
+        })],
+    );
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
-        vec![Cmd::Start { dir: "/home/ivan/proyecto".into(), instruction: "arregla algo".into() }]
+        vec![Cmd::Start {
+            dir: "/home/ivan/proyecto".into(),
+            instruction: "arregla algo".into()
+        }]
     );
     assert_eq!(a.screen, Screen::Live);
 }
 
 #[test]
 fn new_run_rejects_an_invalid_folder_and_edits_the_fields() {
-    let (a, _) = feed(with_runs(), vec![ch('n'), key(KeyCode::Tab), ctrl('u'), ch('/')]);
+    let (a, _) = feed(
+        with_runs(),
+        vec![ch('n'), key(KeyCode::Tab), ctrl('u'), ch('/')],
+    );
     assert_eq!(a.new_run.dir, "/");
     let seq = a.check_seq;
     let (a, cmds) = feed(
@@ -308,12 +379,20 @@ fn pasted_text_is_cleaned_and_cannot_press_enter() {
     let (a, _) = feed(app(), vec![ch('n')]);
     let (a, cmds) = feed(
         a,
-        vec![Input::Paste("haz esto\u{1b}]0;pwned\u{7}\u{1b}[2J\nluego\rEVIL".into())],
+        vec![Input::Paste(
+            "haz esto\u{1b}]0;pwned\u{7}\u{1b}[2J\nluego\rEVIL".into(),
+        )],
     );
-    assert!(cmds.is_empty(), "a paste into the instruction launches nothing");
+    assert!(
+        cmds.is_empty(),
+        "a paste into the instruction launches nothing"
+    );
     assert_eq!(a.screen, Screen::NewRun);
     assert_eq!(a.new_run.instruction, "haz esto\nluego\u{FFFD}EVIL");
-    let (a, cmds) = feed(a, vec![key(KeyCode::Tab), Input::Paste("/tmp\nx\u{1b}[31m".into())]);
+    let (a, cmds) = feed(
+        a,
+        vec![key(KeyCode::Tab), Input::Paste("/tmp\nx\u{1b}[31m".into())],
+    );
     assert_eq!(a.new_run.dir, "/home/ivan/proyecto/tmpx");
     assert!(matches!(cmds[0], Cmd::Check { .. }));
 }
@@ -329,8 +408,15 @@ fn live_run_shows_events_and_cancel_asks_twice() {
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(matches!(cmds[0], Cmd::Start { .. }));
     let events = vec![
-        Bg::Started { id: ID1.into(), files: 3, max_steps: 40, max_seconds: 600 },
-        Bg::Agent(Event::Started { level: TaskLevel::Simple }),
+        Bg::Started {
+            id: ID1.into(),
+            files: 3,
+            max_steps: 40,
+            max_seconds: 600,
+        },
+        Bg::Agent(Event::Started {
+            level: TaskLevel::Simple,
+        }),
         Bg::Agent(Event::Step { n: 1 }),
         Bg::Agent(Event::Tool {
             name: "read_file".into(),
@@ -358,9 +444,15 @@ fn live_run_shows_events_and_cancel_asks_twice() {
         let t = screen_text(&a, w, h);
         assert_clean(&t);
         if w >= 80 {
-            assert!(t.contains("read_file") && t.contains("permitido") && t.contains("negado"), "{t}");
+            assert!(
+                t.contains("read_file") && t.contains("permitido") && t.contains("negado"),
+                "{t}"
+            );
             assert!(t.contains("S-16") && t.contains("1234 car."), "{t}");
-            assert!(t.contains("2/40") && t.contains("5s/600s") && t.contains("contaminada"), "{t}");
+            assert!(
+                t.contains("2/40") && t.contains("5s/600s") && t.contains("contaminada"),
+                "{t}"
+            );
         }
     }
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
@@ -377,15 +469,35 @@ fn a_finished_live_run_offers_the_detail() {
     let mut a = app();
     a.screen = Screen::Live;
     a.live.id = Some(ID1.into());
-    let (a, cmds) = feed(a, vec![Input::Bg(Bg::Finished(Ok(Box::new(summary(ID1, "Final", &["a.py"])))))]);
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::Finished(Ok(Box::new(summary(
+            ID1,
+            "Final",
+            &["a.py"],
+        )))))],
+    );
     assert_eq!(cmds, vec![Cmd::LoadHome]);
     assert!(screen_text(&a, 80, 24).contains("terminó"));
     let (_, cmds) = feed(a, vec![key(KeyCode::Enter)]);
-    assert_eq!(cmds, vec![Cmd::LoadDetail { id: ID1.into(), diff: false }]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::LoadDetail {
+            id: ID1.into(),
+            diff: false
+        }]
+    );
     // A cancelled run says so.
     let mut a = app();
     a.screen = Screen::Live;
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Finished(Ok(Box::new(summary(ID1, "Cancelled", &[])))))]);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Finished(Ok(Box::new(summary(
+            ID1,
+            "Cancelled",
+            &[],
+        )))))],
+    );
     assert!(screen_text(&a, 80, 24).contains("cancelado"));
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
     assert_eq!((a.screen, cmds), (Screen::Home, vec![Cmd::LoadHome]));
@@ -400,7 +512,11 @@ fn detail_selects_files_scrolls_the_diff_and_goes_back() {
     let (a, _) = feed(a, vec![ch('k'), key(KeyCode::Enter)]);
     assert!(a.detail.as_ref().unwrap().in_diff);
     let (a, _) = feed(a, vec![ch('j'), ch('j')]);
-    assert_eq!(a.detail.as_ref().unwrap().scroll, 0, "a short diff cannot scroll past its end");
+    assert_eq!(
+        a.detail.as_ref().unwrap().scroll,
+        0,
+        "a short diff cannot scroll past its end"
+    );
     let (a, _) = feed(a, vec![ch(']')]);
     assert_eq!(a.detail.as_ref().unwrap().sel, 1);
     let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
@@ -433,7 +549,10 @@ fn detail_apply_and_undo_ask_first() {
     let (_, cmds) = feed(a.clone_for_test(), vec![ch('a')]);
     assert_eq!(cmds, vec![Cmd::PlanApply { id: ID1.into() }]);
     let (b, cmds) = feed(a, vec![ch('u')]);
-    assert!(cmds.is_empty() && b.notice.is_some(), "not applied yet, nothing to undo");
+    assert!(
+        cmds.is_empty() && b.notice.is_some(),
+        "not applied yet, nothing to undo"
+    );
     let a = open_detail(with_runs(), detail(ID2, Status::Applied), false);
     let (a, cmds) = feed(a, vec![ch('u')]);
     assert!(cmds.is_empty());
@@ -447,10 +566,19 @@ fn detail_apply_and_undo_ask_first() {
 #[test]
 fn after_applying_the_lists_reload() {
     let a = open_detail(with_runs(), detail(ID1, Status::Pending), false);
-    let (a, cmds) = feed(a, vec![Input::Bg(Bg::Done(Ok("2 archivo(s) aplicados".into())))]);
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::Done(Ok("2 archivo(s) aplicados".into())))],
+    );
     assert_eq!(
         cmds,
-        vec![Cmd::LoadHome, Cmd::LoadDetail { id: ID1.into(), diff: false }]
+        vec![
+            Cmd::LoadHome,
+            Cmd::LoadDetail {
+                id: ID1.into(),
+                diff: false
+            }
+        ]
     );
     assert_eq!(a.flash.as_deref(), Some("2 archivo(s) aplicados"));
 }
@@ -469,11 +597,18 @@ fn doctor_screen_scrolls_and_repeats() {
 fn report() -> Report {
     Report {
         checks: vec![
-            Check { level: Level::Pass, msg: "/home/ivan/.config/clio es privada (700)".into(), hint: None },
+            Check {
+                level: Level::Pass,
+                msg: "/home/ivan/.config/clio es privada (700)".into(),
+                hint: None,
+            },
             Check {
                 level: Level::Warn,
                 msg: "no hay clave del modelo".into(),
-                hint: Some("Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key (chmod 600).".into()),
+                hint: Some(
+                    "Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key (chmod 600)."
+                        .into(),
+                ),
             },
             Check {
                 level: Level::Fail,
@@ -493,16 +628,28 @@ fn home_draws_status_and_runs_without_overflow() {
         assert_eq!(t.lines().count(), usize::from(h));
         assert!(t.lines().all(|l| l.chars().count() == usize::from(w)));
         if w >= 80 {
-            assert!(t.contains("opencode-go / beam-free") && t.contains("presente"), "{t}");
+            assert!(
+                t.contains("opencode-go / beam-free") && t.contains("presente"),
+                "{t}"
+            );
             assert!(t.contains("12 ok · 3 avisos · 0 fallos"), "{t}");
-            assert!(t.contains("1031-1816-5a67") && t.contains("pendiente de revisar"), "{t}");
+            assert!(
+                t.contains("1031-1816-5a67") && t.contains("pendiente de revisar"),
+                "{t}"
+            );
             assert!(t.contains("aplicado") && t.contains("fallido"), "{t}");
             assert!(t.contains("arregla parse_date en dates.py"), "{t}");
-            assert!(t.contains("n nuevo") && t.contains("D doctor") && t.contains("q salir"), "{t}");
+            assert!(
+                t.contains("n nuevo") && t.contains("D doctor") && t.contains("q salir"),
+                "{t}"
+            );
         }
     }
     let t = screen_text(&app(), 80, 24);
-    assert!(t.contains("Todavía no hay runs") && t.contains("cargando"), "{t}");
+    assert!(
+        t.contains("Todavía no hay runs") && t.contains("cargando"),
+        "{t}"
+    );
 }
 
 #[test]
@@ -510,7 +657,8 @@ fn home_header_reports_a_missing_key_and_a_broken_config() {
     let mut a = with_runs();
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
     assert!(screen_text(&a, 80, 24).contains("falta"));
-    a.home.header.as_mut().unwrap().config_error = Some("config.json: no existe (ejecuta `clio init` primero)".into());
+    a.home.header.as_mut().unwrap().config_error =
+        Some("config.json: no existe (ejecuta `clio init` primero)".into());
     assert!(screen_text(&a, 100, 24).contains("ejecuta `clio init` primero"));
 }
 
@@ -530,10 +678,19 @@ fn new_run_draws_the_checks_and_the_exclusions() {
         let t = screen_text(&a, w, h);
         assert_clean(&t);
         if w >= 80 {
-            assert!(t.contains("Carpeta del proyecto") && t.contains("/home/ivan/proyecto"), "{t}");
-            assert!(t.contains("arregla algo") && t.contains("se copiarán 12 archivos (3.0 MB)"), "{t}");
+            assert!(
+                t.contains("Carpeta del proyecto") && t.contains("/home/ivan/proyecto"),
+                "{t}"
+            );
+            assert!(
+                t.contains("arregla algo") && t.contains("se copiarán 12 archivos (3.0 MB)"),
+                "{t}"
+            );
             assert!(t.contains("parecen secretos: .env, id_rsa"), "{t}");
-            assert!(t.contains(".git, node_modules") && t.contains("enlaces simbólicos: link"), "{t}");
+            assert!(
+                t.contains(".git, node_modules") && t.contains("enlaces simbólicos: link"),
+                "{t}"
+            );
         }
     }
     a.new_run.check = Some(Err("rechazo usar tu carpeta personal".into()));
@@ -547,9 +704,20 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
         let t = screen_text(&a, w, h);
         assert_clean(&t);
         if w >= 80 {
-            assert!(t.contains("pendiente de revisar") && t.contains("arregla parse_date"), "{t}");
-            assert!(t.contains("Arreglé parse_date.") && t.contains("No pude correr las pruebas."), "{t}");
-            assert!(t.contains("Archivos cambiados (2)") && t.contains("M dates.py") && t.contains("A docs/new.md"), "{t}");
+            assert!(
+                t.contains("pendiente de revisar") && t.contains("arregla parse_date"),
+                "{t}"
+            );
+            assert!(
+                t.contains("Arreglé parse_date.") && t.contains("No pude correr las pruebas."),
+                "{t}"
+            );
+            assert!(
+                t.contains("Archivos cambiados (2)")
+                    && t.contains("M dates.py")
+                    && t.contains("A docs/new.md"),
+                "{t}"
+            );
         }
     }
     let a = open_detail(with_runs(), detail(ID1, Status::Pending), true);
@@ -557,7 +725,12 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
         assert_clean(&screen_text(&a, w, h));
     }
     let t = screen_text(&a, 80, 24);
-    assert!(t.contains("-    return int(s)") && t.contains("+    return None") && t.contains("@@ -1,3 +1,3 @@"), "{t}");
+    assert!(
+        t.contains("-    return int(s)")
+            && t.contains("+    return None")
+            && t.contains("@@ -1,3 +1,3 @@"),
+        "{t}"
+    );
     // Colors: + green, - red, @@ cyan.
     let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
     term.draw(|f| draw(f, &a)).unwrap();
@@ -565,7 +738,11 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
     let mut seen = std::collections::BTreeMap::new();
     for y in 0..24 {
         let line: String = (0..80).map(|x| buf[(x, y)].symbol()).collect();
-        for (tag, color) in [("+    return None", ratatui::style::Color::Green), ("-    return int(s)", ratatui::style::Color::Red), ("@@ -1,3", ratatui::style::Color::Cyan)] {
+        for (tag, color) in [
+            ("+    return None", ratatui::style::Color::Green),
+            ("-    return int(s)", ratatui::style::Color::Red),
+            ("@@ -1,3", ratatui::style::Color::Cyan),
+        ] {
             if let Some(x) = line.find(tag) {
                 let col = line[..x].chars().count() as u16;
                 seen.insert(tag, buf[(col, y)].fg == color);
@@ -586,8 +763,14 @@ fn doctor_draws_marks_and_one_hint_per_warning() {
         let t = screen_text(&a, w, h);
         assert_clean(&t);
         if w >= 80 {
-            assert!(t.contains("PASS") && t.contains("WARN") && t.contains("FAIL"), "{t}");
-            assert!(t.contains("→ Ponla en OPENCODE_API_KEY") && t.contains("→ chmod 700 /x/y"), "{t}");
+            assert!(
+                t.contains("PASS") && t.contains("WARN") && t.contains("FAIL"),
+                "{t}"
+            );
+            assert!(
+                t.contains("→ Ponla en OPENCODE_API_KEY") && t.contains("→ chmod 700 /x/y"),
+                "{t}"
+            );
             assert!(t.contains("Doctor: 1 ok · 1 aviso · 1 fallo"), "{t}");
         }
     }
@@ -597,12 +780,21 @@ fn doctor_draws_marks_and_one_hint_per_warning() {
 fn help_and_tiny_terminals() {
     let mut a = with_runs();
     a.screen = Screen::Help;
-    let t = screen_text(&a, 80, 30);
-    assert!(t.contains("Clio trabaja en una COPIA") && t.contains("Esc / Ctrl+C"), "{t}");
+    let t = screen_text(&a, 80, 24);
+    assert!(
+        t.contains("Clio trabaja en una COPIA") && t.contains("termina tras el paso en curso"),
+        "the whole help fits in 80x24\n{t}"
+    );
     let t = screen_text(&a, 30, 8);
     assert!(t.contains("Terminal muy pequeña"), "{t}");
     // No size may panic, whatever the screen.
-    for s in [Screen::Home, Screen::NewRun, Screen::Live, Screen::Doctor, Screen::Help] {
+    for s in [
+        Screen::Home,
+        Screen::NewRun,
+        Screen::Live,
+        Screen::Doctor,
+        Screen::Help,
+    ] {
         a.screen = s;
         for (w, h) in [(1, 1), (10, 3), (40, 10), (60, 12), (120, 8)] {
             screen_text(&a, w, h);
@@ -617,14 +809,35 @@ fn help_and_tiny_terminals() {
 #[test]
 fn without_color_the_theme_uses_no_colors() {
     let t = Theme { color: false };
-    for s in [t.ok(), t.warn(), t.fail(), t.add(), t.del(), t.hunk(), t.accent(), t.key()] {
+    for s in [
+        t.ok(),
+        t.warn(),
+        t.fail(),
+        t.add(),
+        t.del(),
+        t.hunk(),
+        t.accent(),
+        t.key(),
+    ] {
         assert!(s.fg.is_none(), "{s:?}");
     }
     let c = Theme { color: true };
     assert_eq!(c.ok().fg, Some(ratatui::style::Color::Green));
     // Only the basic palette: nothing indexed or RGB, so the terminal's theme decides.
-    for s in [c.ok(), c.warn(), c.fail(), c.add(), c.del(), c.hunk(), c.accent(), c.key()] {
-        assert!(!matches!(s.fg, Some(ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(_))));
+    for s in [
+        c.ok(),
+        c.warn(),
+        c.fail(),
+        c.add(),
+        c.del(),
+        c.hunk(),
+        c.accent(),
+        c.key(),
+    ] {
+        assert!(!matches!(
+            s.fg,
+            Some(ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(_))
+        ));
     }
 }
 
@@ -666,11 +879,29 @@ fn hostile_file_names_diffs_and_messages_never_reach_the_screen_raw() {
         for sel in 0..d.rows.len() {
             d.sel = sel;
             d.in_diff = diff_mode;
-            let mut a = open_detail(with_runs(), Detail { info: d.info.clone(), rows: d.rows.iter().map(|r| row(r.kind, &r.rel, &r.diff)).collect(), sel, in_diff: diff_mode, scroll: 0, view_h: Cell::new(10) }, diff_mode);
+            let mut a = open_detail(
+                with_runs(),
+                Detail {
+                    info: d.info.clone(),
+                    rows: d
+                        .rows
+                        .iter()
+                        .map(|r| row(r.kind, &r.rel, &r.diff))
+                        .collect(),
+                    sel,
+                    in_diff: diff_mode,
+                    scroll: 0,
+                    view_h: Cell::new(10),
+                },
+                diff_mode,
+            );
             for (w, h) in sizes() {
                 let t = screen_text(&a, w, h);
                 assert_clean(&t);
-                assert!(!t.contains("pwned-title"), "the OSC payload must be gone\n{t}");
+                assert!(
+                    !t.contains("pwned-title"),
+                    "the OSC payload must be gone\n{t}"
+                );
                 assert!(!t.contains("http://evil.example"), "{t}");
             }
             a.screen = Screen::Detail;
@@ -680,8 +911,14 @@ fn hostile_file_names_diffs_and_messages_never_reach_the_screen_raw() {
     let a = open_detail(with_runs(), hostile_detail(), false);
     let t = screen_text(&a, 120, 40);
     assert!(t.contains("evilname.txt"), "{t}");
-    assert!(t.contains("ok\u{FFFD}OVERWRITTEN.txt"), "\\r became a visible mark\n{t}");
-    assert!(t.contains("report\u{FFFD}txt.exe"), "U+202E became a visible mark\n{t}");
+    assert!(
+        t.contains("ok\u{FFFD}OVERWRITTEN.txt"),
+        "\\r became a visible mark\n{t}"
+    );
+    assert!(
+        t.contains("report\u{FFFD}txt.exe"),
+        "U+202E became a visible mark\n{t}"
+    );
     assert!(t.contains("Listo.All files verified\u{FFFD}FAKE-OK"), "{t}");
 }
 
@@ -706,7 +943,9 @@ fn hostile_instruction_and_live_timeline_are_cleaned() {
             tainted: true,
         });
     }
-    a.live.on_event(&Event::ProtocolError { reason: "no\u{1b}]0;pwned-title\u{7} json\u{202E}".into() });
+    a.live.on_event(&Event::ProtocolError {
+        reason: "no\u{1b}]0;pwned-title\u{7} json\u{202E}".into(),
+    });
     for (w, h) in sizes() {
         let t = screen_text(&a, w, h);
         assert_clean(&t);
@@ -726,10 +965,107 @@ fn hostile_doctor_and_notice_text_is_cleaned() {
         }],
         host_script: None,
     });
-    a.notice = Some("rechazado:\n  \u{1b}[2J.git/x\u{1b}]0;pwned-title\u{7}: ruta protegida\rFAKE".into());
+    a.notice =
+        Some("rechazado:\n  \u{1b}[2J.git/x\u{1b}]0;pwned-title\u{7}: ruta protegida\rFAKE".into());
     let t = screen_text(&a, 100, 24);
     assert_clean(&t);
-    assert!(!t.contains("pwned-title") && t.contains("ruta protegida"), "{t}");
+    assert!(
+        !t.contains("pwned-title") && t.contains("ruta protegida"),
+        "{t}"
+    );
+}
+
+/// Prints every screen as text (for the docs): `cargo test -p clio-brain --bin clio print_screens -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the screens; not a check"]
+fn print_screens() {
+    let show = |name: &str, a: &App| println!("===== {name} =====\n{}", screen_text(a, 80, 24));
+    show("home", &with_runs());
+    let (mut a, _) = feed(with_runs(), vec![ch('n')]);
+    a.new_run.instruction = "arregla parse_date en dates.py".into();
+    a.new_run.check = Some(Ok(Preview {
+        workspace: "/home/ivan/proyecto".into(),
+        files: 12,
+        bytes: 3 * 1024 * 1024,
+        secrets: vec![".env".into()],
+        skipped: vec![".git".into(), "node_modules".into()],
+        symlinks: vec![],
+    }));
+    show("new_run", &a);
+    let mut l = app();
+    l.screen = Screen::Live;
+    l.live.begin(ID1.into(), 12, 40, 600);
+    l.live.on_event(&Event::Started {
+        level: TaskLevel::Simple,
+    });
+    for (n, (tool, target, out, rule, ran)) in [
+        (
+            "list_dir",
+            ".",
+            Outcome::Allow,
+            "step-8-reversible-in-sandbox",
+            true,
+        ),
+        (
+            "read_file",
+            "dates.py",
+            Outcome::Allow,
+            "step-8-reversible-in-sandbox",
+            true,
+        ),
+        (
+            "write_file",
+            ".git/hooks/pre-commit",
+            Outcome::Deny,
+            "S-16",
+            false,
+        ),
+        (
+            "write_file",
+            "dates.py",
+            Outcome::Allow,
+            "step-8-reversible-in-sandbox",
+            true,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        l.live.on_event(&Event::Step { n: n as u32 + 1 });
+        l.live.on_event(&Event::Tool {
+            name: tool.into(),
+            target: target.into(),
+            outcome: out,
+            rule: rule.into(),
+            ran,
+            result_chars: 812,
+            tainted: n > 0,
+        });
+    }
+    l.now_ms = 14_000;
+    show("live", &l);
+    let a = open_detail(with_runs(), detail(ID1, Status::Pending), false);
+    show("detail", &a);
+    let a = open_detail(with_runs(), detail(ID1, Status::Pending), true);
+    show("detail_diff", &a);
+    let (a, _) = feed(
+        open_detail(with_runs(), detail(ID1, Status::Pending), false),
+        vec![
+            ch('a'),
+            Input::Bg(Bg::Planned(Ok(Planned {
+                id: ID1.into(),
+                files: 2,
+                workspace: "/home/ivan/proyecto".into(),
+            }))),
+        ],
+    );
+    show("confirm", &a);
+    let mut a = with_runs();
+    a.screen = Screen::Doctor;
+    a.doctor.set(report());
+    show("doctor", &a);
+    a.screen = Screen::Help;
+    show("help", &a);
 }
 
 // ------------------------------------------------------------ terminal restoration
@@ -752,7 +1088,11 @@ impl App {
         b.confirm = self.confirm.clone();
         b.detail = self.detail.as_ref().map(|d| Detail {
             info: d.info.clone(),
-            rows: d.rows.iter().map(|r| row(r.kind, &r.rel, &r.diff)).collect(),
+            rows: d
+                .rows
+                .iter()
+                .map(|r| row(r.kind, &r.rel, &r.diff))
+                .collect(),
             sel: d.sel,
             in_diff: d.in_diff,
             scroll: d.scroll,

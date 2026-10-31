@@ -331,8 +331,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     if area.width < MIN_W || area.height < MIN_H {
         f.render_widget(
-            Paragraph::new(format!("Terminal muy pequeña: se necesita al menos {MIN_W}x{MIN_H}."))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(format!(
+                "Terminal muy pequeña: se necesita al menos {MIN_W}x{MIN_H}."
+            ))
+            .wrap(Wrap { trim: true }),
             area,
         );
         return;
@@ -387,6 +389,14 @@ pub fn draw(f: &mut Frame, app: &App) {
                 vec![("Esc / Ctrl+C", "cancelar (termina el paso en curso)")]
             }
         }
+        Screen::Detail if app.detail.as_ref().is_some_and(|d| d.in_diff) => vec![
+            ("j/k", "desplazar"),
+            ("PgUp/PgDn", "página"),
+            ("[ ]", "otro archivo"),
+            ("a", "aplicar"),
+            ("u", "deshacer"),
+            ("Esc", "volver"),
+        ],
         Screen::Detail => vec![
             ("j/k", "mover"),
             ("Enter", "ver diff"),
@@ -436,7 +446,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             .map(|l| Line::from(l.to_owned()))
             .collect();
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("(cualquier tecla cierra)", t.dim())));
+        lines.push(Line::from(Span::styled(
+            "(cualquier tecla cierra)",
+            t.dim(),
+        )));
         dialog(f, area, t, " Aviso ", lines, t.fail());
     }
 }
@@ -450,7 +463,7 @@ fn dialog(
     border: ratatui::style::Style,
 ) {
     let w = area.width.saturating_sub(6).clamp(30, 76);
-    let h = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 4).min(area.height);
+    let h = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 3).min(area.height);
     let r = centered(area, w, h.max(5));
     f.render_widget(Clear, r);
     f.render_widget(
@@ -474,27 +487,32 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
     };
     let head = |s: &str| Line::from(Span::styled(s.to_owned(), t.accent()));
     let lines = vec![
-        head("Clio trabaja en una COPIA de tu proyecto"),
-        Line::from("  Tú revisas el diff y decides qué vuelve al original; todo se puede deshacer."),
-        Line::from(""),
+        head("Clio trabaja en una COPIA; tú decides qué vuelve al original (todo se deshace)"),
         head("Inicio"),
-        row("j / k, flechas", "elegir un run"),
-        row("n", "nuevo trabajo"),
-        row("Enter", "abrir el run (resumen, mensaje del agente y archivos)"),
-        row("d / a / u", "ver el diff / aplicar / deshacer el run elegido"),
-        row("r / D", "refrescar la lista / abrir el doctor"),
-        row("q / Ctrl+C", "salir"),
+        row("j k, flechas", "elegir un run        (g/G: primero/último)"),
+        row("n", "nuevo trabajo      Enter: abrir el run"),
+        row("d  a  u", "ver el diff / aplicar / deshacer el run elegido"),
+        row("r  D", "refrescar la lista / abrir el doctor"),
+        row("q  Ctrl+C", "salir"),
         Line::from(""),
-        head("Detalle"),
-        row("j / k", "elegir archivo (o desplazar el diff)"),
-        row("Enter / Esc", "abrir el diff / volver"),
-        row("PgUp PgDn", "desplazar el diff de a una página"),
-        row("a / u", "aplicar (pide y) / deshacer (pide y)"),
+        head("Detalle del run"),
+        row(
+            "j k",
+            "elegir archivo (o desplazar el diff)   PgUp PgDn: página",
+        ),
+        row(
+            "Enter  Esc",
+            "abrir el diff / volver      [ ]: otro archivo",
+        ),
+        row("a  u", "aplicar / deshacer: pide una y de confirmación"),
         Line::from(""),
         head("Nuevo trabajo y en vivo"),
         row("Tab", "cambiar entre carpeta e instrucción"),
-        row("Enter", "lanzar (Alt+Enter o Ctrl+J: línea nueva)"),
-        row("Esc / Ctrl+C", "cancelar en vivo: termina tras el paso en curso"),
+        row("Enter", "lanzar      Alt+Enter o Ctrl+J: línea nueva"),
+        row(
+            "Esc  Ctrl+C",
+            "en vivo: cancelar, termina tras el paso en curso",
+        ),
     ];
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(

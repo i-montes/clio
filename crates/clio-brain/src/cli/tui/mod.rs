@@ -43,10 +43,14 @@ use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::runs::{self, RunOpts};
 use super::{Res, work};
 
+static IN_TUI: AtomicBool = AtomicBool::new(false);
+
 /// Gives the terminal back: normal screen, cooked mode, visible cursor. Safe to call twice.
 pub fn restore_terminal() {
     let mut out = std::io::stdout();
-    if !out.is_terminal() {
+    // Once is enough: leaving the alternate screen again would jump the cursor back to where it
+    // was saved and could overwrite the panic message that was just printed.
+    if !out.is_terminal() || !IN_TUI.swap(false, Ordering::SeqCst) {
         return;
     }
     let _ = execute!(
@@ -78,9 +82,15 @@ impl Guard {
     fn enter() -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         let e = |x: std::io::Error| format!("terminal: {x}");
         enable_raw_mode().map_err(e)?;
+        IN_TUI.store(true, Ordering::SeqCst);
         let guard = Self;
         let mut out = std::io::stdout();
-        execute!(out, EnterAlternateScreen, crossterm::event::EnableBracketedPaste).map_err(e)?;
+        execute!(
+            out,
+            EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        )
+        .map_err(e)?;
         let term = Terminal::new(CrosstermBackend::new(out)).map_err(e)?;
         Ok((guard, term))
     }
@@ -116,7 +126,8 @@ pub fn run(dirs: Dirs) -> Res<i32> {
     }
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
     while !app.quit {
-        term.draw(|f| draw(f, &app)).map_err(|e| format!("terminal: {e}"))?;
+        term.draw(|f| draw(f, &app))
+            .map_err(|e| format!("terminal: {e}"))?;
         let mut inputs: Vec<Input> = Vec::new();
         if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
@@ -220,8 +231,9 @@ impl Ctx {
         let spawned = std::thread::Builder::new()
             .name("clio-worker".into())
             .spawn(move || {
-                let r = catch_unwind(AssertUnwindSafe(|| f(&dirs, &tx)))
-                    .map_err(|_| "error interno en un hilo de trabajo (es un fallo de Clio)".to_owned());
+                let r = catch_unwind(AssertUnwindSafe(|| f(&dirs, &tx))).map_err(|_| {
+                    "error interno en un hilo de trabajo (es un fallo de Clio)".to_owned()
+                });
                 let _ = tx.send(Input::Bg(done(r)));
             });
         if let Err(e) = spawned {
@@ -312,7 +324,10 @@ impl Ctx {
             Cmd::Undo { id } => self.spawn(
                 move |d, _| {
                     let n = apply::undo_run(d, &id, false)?;
-                    Ok::<_, String>(format!("deshecho: {} archivo(s) vuelven a como estaban", n.values().sum::<usize>()))
+                    Ok::<_, String>(format!(
+                        "deshecho: {} archivo(s) vuelven a como estaban",
+                        n.values().sum::<usize>()
+                    ))
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
             ),

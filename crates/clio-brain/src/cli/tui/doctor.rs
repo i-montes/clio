@@ -33,7 +33,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             app.doctor.loading = true;
             return vec![Cmd::RunDoctor];
         }
-        KeyCode::Down | KeyCode::Char('j') => app.doctor.scroll = app.doctor.scroll.saturating_add(1),
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.doctor.scroll = app.doctor.scroll.saturating_add(1)
+        }
         KeyCode::Up | KeyCode::Char('k') => app.doctor.scroll = app.doctor.scroll.saturating_sub(1),
         KeyCode::PageDown => app.doctor.scroll = app.doctor.scroll.saturating_add(10),
         KeyCode::PageUp => app.doctor.scroll = app.doctor.scroll.saturating_sub(10),

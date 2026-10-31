@@ -6,6 +6,99 @@ Clio corre en tu propia máquina (ADR 0006): sin servidor, sin puertos públicos
 
 **El agente nunca toca tu proyecto.** `clio run` hace una COPIA del proyecto y el agente trabaja solo en esa copia. Al terminar, tú ves el diff y decides con `clio apply` qué vuelve al original. Si no te gusta, no pasa nada: el original sigue igual. Si aplicas y te arrepientes, `clio undo` lo deja como estaba.
 
+## La interfaz: escribe `clio`
+
+En una terminal, `clio` sin argumentos abre una interfaz de pantalla completa (TUI). Todo lo que hacen los comandos de abajo se puede hacer desde ella, con las mismas protecciones (`apply` y `undo` son el mismo código). Fuera de una terminal (una tubería, un script, CI), `clio` imprime la ayuda y sale con 0; `clio --help` también; un comando desconocido sale con 2.
+
+Teclas generales: `?` ayuda, `q` o `Ctrl+C` salir (desde Inicio), `Esc` volver. Las listas se mueven con flechas o `j`/`k`.
+
+**Inicio**: el estado de Clio y los runs recientes.
+
+```
+ clio  Inicio  (el original nunca se toca sin tu permiso)
+╭ Estado ──────────────────────────────────────────────────────────────────────╮
+│Modelo opencode-go / beam-free    Clave presente                              │
+│Vault sin crear (opcional)    Doctor 12 ok · 3 avisos · 0 fallos              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Runs recientes ──────────────────────────────────────────────────────────────╮
+│▶ 1031-1816-5a67 pendiente de revisar   1 arch arregla parse_date en dates.py │
+│  1030-0900-0b1c aplicado               2 arch agrega un README               │
+│  1029-1200-ffff fallido                0 arch refactoriza todo               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+n nuevo   Enter abrir   d diff   a aplicar   u deshacer   r refrescar   D doctor
+? ayuda   q salir
+```
+
+`n` nuevo trabajo, `Enter` abrir el run, `d` ver su diff, `a` aplicar, `u` deshacer, `r` refrescar, `D` doctor. Estados: `aplicado` (verde), `pendiente de revisar` (amarillo: el agente terminó y hay cambios sin aplicar), `fallido` (rojo), `cancelado`, `deshecho` y `sin cambios` (atenuados), `incompleto` (el proceso murió antes de cerrar). El id corto `1031-1816-5a67` es `MMDD-HHMM-sufijo` del id completo `20261031-181646-5a67`. La clave del modelo nunca se muestra, solo si está.
+
+**Nuevo trabajo** (`n`): la carpeta (por defecto la actual) y la instrucción. La carpeta se valida mientras escribes con las reglas de `clio run` (rechaza `/`, tu carpeta personal y las que son demasiado grandes) y la pantalla te dice qué NO se copiará (secretos, `.git`, `node_modules`, enlaces simbólicos...) antes de empezar.
+
+```
+┌ Carpeta del proyecto ─ /home/ivan/proyecto
+┏ Instrucción ━━━━━━━━ arregla parse_date en dates.py▏
+╭ Qué se va a copiar ──────────────────────────────────────────────────────────╮
+│✓ se copiarán 12 archivos (3.0 MB)                                            │
+│NO se copiarán a la copia de trabajo:                                         │
+│  parecen secretos: .env                                                      │
+│  carpetas pesadas o internas: .git, node_modules                             │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+`Tab` cambia de campo, `Enter` lanza (en la carpeta, pasa a la instrucción), `Alt+Enter` o `Ctrl+J` agrega una línea a la instrucción, `Ctrl+U` borra el campo, `Esc` vuelve. Pegar texto no puede lanzar nada: el texto pegado se limpia y sus saltos de línea no pulsan Enter.
+
+**En vivo**: el agente corre en un hilo aparte; ves cada acción que pide el modelo y la decisión de la pasarela (permitido, pedido o negado, con la regla), el tamaño del resultado, los pasos y el tiempo contra el límite, un indicador de actividad y si la sesión está contaminada (leyó archivos).
+
+```
+╭  ────────────────────────────────────────────────────────────────────────────╮
+│⠋ trabajando en la copia…   20261031-181646-5a67   nivel Simple               │
+│Pasos  ██░░░░░░░░░░░░░░░░░░░░░░ 4/40                                          │
+│Tiempo ░░░░░░░░░░░░░░░░░░░░░░░░ 14s/600s                                      │
+│Sesión contaminada: leyó archivos, la pasarela es más estricta                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Línea de tiempo ─────────────────────────────────────────────────────────────╮
+│   1  list_dir   .  permitido (step-8-reversible-in-sandbox)  812 car.        │
+│   2  read_file  dates.py  permitido (step-8-reversible-in-sandbox)  812 car. │
+│   3  write_file .git/hooks/pre-commit  negado (S-16)                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+`Esc` o `Ctrl+C` piden cancelar: el agente termina el paso en curso (un paso puede tardar lo que tarde el modelo en contestar) y el run queda `cancelado`. Una segunda pulsación sale de Clio ya; el run queda `incompleto`. En los dos casos el original no se tocó. Al terminar, `Enter` abre el detalle.
+
+**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` en cian.
+
+```
+╭ Resumen ─────────────────────────────────────────────────────────────────────╮
+│Estado pendiente de revisar   20261031-181646-5a67                            │
+│Carpeta /home/ivan/proyecto                                                   │
+│nivel Simple · 7 pasos · 12.3s · terminó · 0 denegadas                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Mensaje del agente ──────────────────────────────────────────────────────────╮
+│Arreglé parse_date. No pude correr las pruebas.                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Archivos cambiados (2) ──────────────────────────────────────────────────────╮
+│▶ M dates.py                                                                  │
+│  A docs/new.md                                                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+En el diff: `j`/`k` desplazan, `PgUp`/`PgDn` una página, `g`/`G` principio y final, `[` y `]` cambian de archivo, `Esc` vuelve a la lista. `a` aplica: primero pasa todas las comprobaciones de `apply` (si algo falla, un aviso te dice qué; no se escribe nada) y luego un diálogo repite cuántos archivos y dónde, y solo una `y` sigue (cualquier otra tecla cancela). `u` deshace un run aplicado, también con `y`. Si el original cambió desde la copia, la TUI no pisa nada: usa `clio apply <id> --force` desde la línea de comandos, sabiendo que guarda tu versión para poder deshacer.
+
+**Doctor** (`D`): las comprobaciones con `PASS`/`WARN`/`FAIL` coloreados y, bajo cada aviso o fallo, una línea con qué hacer (`r` repite, `j`/`k` desplazan).
+
+```
+╭ Doctor: 1 ok · 1 aviso · 1 fallo ────────────────────────────────────────────╮
+│PASS  /home/ivan/.config/clio es privada (700)                                │
+│WARN  no hay clave del modelo                                                 │
+│      → Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key        │
+│FAIL  /x/y tiene modo 755, debe ser 700 (S-23)                                │
+│      → chmod 700 /x/y                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+**Colores**: solo los 8 colores ANSI básicos más negrita, tenue y video inverso, así que la paleta de tu terminal decide los tonos (sirve en tema oscuro y claro y sin 24 bits). Con `NO_COLOR=1` o `TERM=dumb` queda sin color. Requiere una terminal de al menos 40x10.
+
+**Seguridad de la pantalla.** Lo que viene de archivos, del modelo, de nombres de archivo, de diffs o de la instrucción puede traer secuencias de escape (cambiar el título de la ventana, borrar la pantalla, simular otra pantalla), un `\r` que sobreescribe una línea o caracteres bidireccionales (como U+202E) que invierten el texto. Antes de dibujar o imprimir cualquier texto externo, Clio elimina las secuencias de escape completas (CSI, OSC, DCS, APC...) y reemplaza los demás caracteres de control, los separadores de línea y los caracteres invisibles o bidireccionales por `�`; un tabulador pasa a cuatro espacios. Esto vale para la TUI y para lo que imprimen `run`, `runs`, `show`, `diff`, `apply` y `doctor` en una terminal. Los archivos del run guardan el texto tal cual llegó. Limitación: se reemplazan también los unidos de ancho cero (ZWJ), así que un emoji compuesto puede verse como varios. Si Clio se cae por un error, la terminal se restaura antes de mostrar el mensaje (sale de la pantalla alterna y del modo crudo); no puede hacerlo si la matan con `kill -9` o con una señal; en ese caso, escribe `reset`.
+
 ## Instalar y preparar
 
 ```sh
@@ -17,14 +110,17 @@ clio init
 Ejemplo de salida:
 
 ```
-ok      /home/tu/.config/clio (0700)
-created /home/tu/.local/share/clio (0700)
-created /home/tu/.local/share/clio/runs (0700)
-created /run/user/1000/clio (0700)
-created /home/tu/.config/clio/config.json (0600)
-ok      model key found in /home/tu/.config/clio/opencode-api-key (0600, not shown)
-next: clio doctor, then clio run --workspace DIR "instruction"
+PASS  ya estaba    /home/tu/.config/clio (0700)
+PASS  creada       /home/tu/.local/share/clio (0700)
+PASS  creada       /home/tu/.local/share/clio/runs (0700)
+PASS  creada       /run/user/1000/clio (0700)
+PASS  creada       /home/tu/.config/clio/config.json (0600)
+PASS  clave del modelo encontrada en /home/tu/.config/clio/opencode-api-key (0600, no se muestra)
+
+siguiente: clio doctor, y luego clio
 ```
+
+(En una terminal con Unicode, `PASS`/`WARN`/`FAIL` se ven como `✓`/`⚠`/`✗` y en colores; sin terminal el texto es plano y estable.)
 
 `init` es idempotente: no pisa lo que ya existe (si cambias `config.json`, queda como lo dejaste). Deja las carpetas en 0700, nunca imprime la clave y avisa si el archivo de la clave tiene permisos abiertos.
 
@@ -39,32 +135,58 @@ clio run --workspace ~/proyectos/mi-app "arregla parse_date en dates.py para que
 ```
 
 ```
-run 20261031-181646-5a67: copied 2 files from /home/tu/proyectos/mi-app
-NOT copied, they look like secrets: .env
-not copied (heavy or internal folders): .git, node_modules
-working in the copy (this can take a few minutes)...
+run 20261031-191737-ccb5: 2 archivos copiados de /home/tu/proyectos/mi-app
+  WARN NO se copió, parece un secreto: .env
+  - no se copió (carpetas pesadas o internas): .git
+trabajando en la copia (puede tardar unos minutos; hasta 40 pasos o 600 s)...
+    0s  [0/40] nivel de la tarea: Simple
+    0s  [1/40] read_file app.py  permitido (step-8-reversible-in-sandbox)  193 car.
+    0s  [2/40] write_file app.py  permitido (step-8-reversible-in-sandbox)  179 car.
+    0s  [3/40] write_file .git/x  negado (S-16)
+    0s  [4/40] el modelo dice que terminó
 
-run:      20261031-181646-5a67
-level:    Simple   steps: 11   time: 21.8s   ending: Final
-changes:  1 modified, 0 created, 0 deleted
-  M dates.py
-agent:    Modificado dates.py: ...
-The original was NOT touched. Review:  clio diff 20261031-181646-5a67   then  clio apply 20261031-181646-5a67
+run:      20261031-191737-ccb5
+nivel:    Simple   pasos: 4   tiempo: 0.1s   fin: terminó
+cambios:  1 modificados, 0 creados, 0 borrados
+  M app.py
+nota:     leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado
+agente:   Corregí total() en app.py: ya no suma 1 de más. No pude correr las
+          pruebas; ejecútalas antes de aplicar.
+
+El original NO se tocó. Revisa:  clio diff 20261031-191737-ccb5   y luego  clio apply 20261031-191737-ccb5
 ```
 
-(El ejemplo de salida del `run` es de una ejecución real con `beam-free`; las líneas de «NOT copied» aparecen solo cuando hay algo que excluir.)
+(Esta salida es la de `clio run` sin terminal, con un modelo de mentira que sigue un guion; con un modelo real los pasos y el texto cambian. Las líneas de «NO se copió» aparecen solo cuando hay algo que excluir. Hay una línea por paso en vez de minutos de silencio; en una terminal con color la decisión sale en verde, amarillo o rojo. `clio run` sale con 0 si el agente terminó y con 1 si no.)
 
 Opciones de `run`: `--workspace DIR` (por defecto la carpeta actual), `--max-steps N`, `--allow-broad` (quita los topes de tamaño; no quita el rechazo de `/` ni de tu carpeta personal).
 
 ```sh
 clio diff 20261031-1816          # basta un prefijo único del id
-clio apply 20261031-1816         # muestra el diff y pregunta [y/N]
+clio apply 20261031-1816         # muestra el diff y pregunta [s/N]
 clio undo 20261031-1816          # restaura desde el respaldo
 clio runs                        # los 20 más recientes (--all para todos)
-clio show 20261031-1816          # informe y resumen
+clio show 20261031-1816          # resumen, mensaje del agente y siguiente paso
 ```
 
-`diff` muestra un diff unificado de texto (para binarios, solo «binary file: changed»). `runs` lista, por ejemplo: `20261031-181646-5a67  applied    1 files  La función parse_date...`. Los estados son: `final` (el agente dijo que terminó), `stopped(...)`/`modelerror(...)` (se cortó), `applied`, `undone` e `incomplete` (el proceso murió antes de cerrar).
+`diff` muestra un diff unificado de texto (para binarios, solo «binary file: changed»), en color en una terminal. `runs` es una tabla alineada:
+
+```
+RUN                   ESTADO                ARCHIVOS  INSTRUCCIÓN
+20261031-191737-ccb5  pendiente de revisar         1  arregla total en app.py
+```
+
+Los estados son: `pendiente de revisar` (terminó y hay cambios), `sin cambios`, `fallido` (se cortó por un límite, falló el modelo o se detuvo), `cancelado`, `aplicado`, `deshecho` e `incompleto` (el proceso murió antes de cerrar).
+
+## En scripts: `--json`, `NO_COLOR`
+
+`clio runs`, `clio show <id>` y `clio doctor` aceptan `--json` y escriben JSON en la salida estándar. El campo `status` de un run es una palabra estable: `pending_review`, `no_changes`, `failed`, `cancelled`, `applied`, `undone` o `incomplete`; `ending` es el final del agente (`Final`, `Stopped(Steps)`, `Cancelled`, ...).
+
+```sh
+clio runs --json | jq -r '.[] | select(.status=="pending_review") | .id'
+clio doctor --json | jq '{ok, warn, fail}'
+```
+
+Color y símbolos solo salen cuando la salida es una terminal. `NO_COLOR=1` o `TERM=dumb` los quitan; si la terminal no declara UTF-8 (`LANG`/`LC_ALL`) o es la consola de Linux, se usan palabras ASCII (`PASS`, `WARN`, `FAIL`) en vez de `✓ ⚠ ✗`. Sin terminal (una tubería, un archivo) el texto es plano y estable. Los errores van a la salida de errores, cortos y con lo que se puede hacer, y el código de salida es 1 (2 para un comando desconocido).
 
 ## Qué hace cada paso de seguridad
 
@@ -108,7 +230,7 @@ Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en `CLIO_V
 clio doctor
 ```
 
-Revisa: permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida. Sale con 1 si hay algún FAIL; los WARN son decisión tuya.
+Revisa: permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, en inglés). Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, checks: [{level, message, hint}]}`. La TUI muestra lo mismo con `D`.
 
 ## Qué NO hace Clio todavía
 

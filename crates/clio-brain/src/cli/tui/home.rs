@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph};
 
-use super::app::{App, Action, Cmd, Confirm, Screen, clean, is_ctrl_c, plural};
+use super::app::{Action, App, Cmd, Confirm, Screen, clean, is_ctrl_c, plural};
 use crate::cli::runs::{RunInfo, Status};
 use crate::cli::ui::Level;
 
@@ -142,7 +142,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 lines.push(Line::from(vec![
                     Span::styled("Modelo ", t.dim()),
-                    Span::styled(format!("{} / {}", clean(&h.provider), clean(&h.model)), t.bold()),
+                    Span::styled(
+                        format!("{} / {}", clean(&h.provider), clean(&h.model)),
+                        t.bold(),
+                    ),
                     Span::raw("    "),
                     Span::styled("Clave ", t.dim()),
                     match h.key {
@@ -157,7 +160,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let doctor = match app.home.doctor {
                 None => Span::styled("comprobando…", t.dim()),
                 Some((ok, warn, fail)) => Span::styled(
-                    format!("{ok} ok · {} · {}", plural(warn, "aviso", "avisos"), plural(fail, "fallo", "fallos")),
+                    format!(
+                        "{ok} ok · {} · {}",
+                        plural(warn, "aviso", "avisos"),
+                        plural(fail, "fallo", "fallos")
+                    ),
                     if fail > 0 {
                         t.fail()
                     } else if warn > 0 {
@@ -215,7 +222,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, r)| {
             let selected = i == app.home.sel;
-            let st = if selected { t.selected() } else { t.status(r.status) };
+            let st = if selected {
+                t.selected()
+            } else {
+                t.status(r.status)
+            };
             let base = if selected { t.selected() } else { t.plain() };
             let instr: String = clean(&r.instruction).chars().take(instr_w).collect();
             ListItem::new(Line::from(vec![
@@ -233,5 +244,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
 /// For the doctor summary on the header.
 pub fn counts(r: &crate::cli::doctor::Report) -> (usize, usize, usize) {
-    (r.count(Level::Pass), r.count(Level::Warn), r.count(Level::Fail))
+    (
+        r.count(Level::Pass),
+        r.count(Level::Warn),
+        r.count(Level::Fail),
+    )
 }

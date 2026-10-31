@@ -44,7 +44,12 @@ impl Style {
     }
 
     /// The decision as a pure function, so it can be tested without touching the environment.
-    pub fn decide(tty: bool, no_color: Option<&str>, term: Option<&str>, locale: Option<&str>) -> Self {
+    pub fn decide(
+        tty: bool,
+        no_color: Option<&str>,
+        term: Option<&str>,
+        locale: Option<&str>,
+    ) -> Self {
         let dumb = term.is_none_or(|t| t == "dumb");
         let utf8 = locale.is_some_and(|l| {
             let l = l.to_ascii_lowercase();
@@ -119,7 +124,11 @@ pub fn clip(st: Style, s: &str, n: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if one.chars().count() > n {
         let keep = n.saturating_sub(st.ellipsis().chars().count());
-        format!("{}{}", one.chars().take(keep).collect::<String>(), st.ellipsis())
+        format!(
+            "{}{}",
+            one.chars().take(keep).collect::<String>(),
+            st.ellipsis()
+        )
     } else {
         one
     }
@@ -194,8 +203,14 @@ mod tests {
         let t = |nc, term, loc| Style::decide(true, nc, term, loc);
         assert!(!t(Some("1"), Some("xterm"), Some("C.UTF-8")).color);
         assert!(t(Some("1"), Some("xterm"), Some("C.UTF-8")).unicode);
-        assert!(t(Some(""), Some("xterm"), Some("C.UTF-8")).color, "empty NO_COLOR is unset");
-        for s in [t(None, Some("dumb"), Some("C.UTF-8")), t(None, None, Some("C.UTF-8"))] {
+        assert!(
+            t(Some(""), Some("xterm"), Some("C.UTF-8")).color,
+            "empty NO_COLOR is unset"
+        );
+        for s in [
+            t(None, Some("dumb"), Some("C.UTF-8")),
+            t(None, None, Some("C.UTF-8")),
+        ] {
             assert!(!s.color && !s.unicode, "{s:?}");
         }
         let latin = t(None, Some("xterm"), Some("es_CO.ISO-8859-1"));
@@ -207,7 +222,10 @@ mod tests {
     fn wrap_breaks_at_spaces_and_cuts_long_words() {
         assert_eq!(wrap("aaa bbb ccc", 8), vec!["aaa bbb", "ccc"]);
         assert_eq!(wrap("x\n\ny", 8), vec!["x", "", "y"]);
-        assert_eq!(wrap(&"z".repeat(20), 8), vec!["zzzzzzzz", "zzzzzzzz", "zzzz"]);
+        assert_eq!(
+            wrap(&"z".repeat(20), 8),
+            vec!["zzzzzzzz", "zzzzzzzz", "zzzz"]
+        );
     }
 
     #[test]

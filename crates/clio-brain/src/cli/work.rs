@@ -48,7 +48,9 @@ pub fn validate(ws: &Path, dirs: &Dirs) -> Res<PathBuf> {
         return Err("rechazo usar / como carpeta de trabajo".into());
     }
     if ws == home {
-        return Err("rechazo usar toda tu carpeta personal como proyecto; elige un proyecto".into());
+        return Err(
+            "rechazo usar toda tu carpeta personal como proyecto; elige un proyecto".into(),
+        );
     }
     for own in [&dirs.config, &dirs.data] {
         let own = own.canonicalize().unwrap_or_else(|_| own.clone());

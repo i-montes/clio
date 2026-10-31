@@ -171,7 +171,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let field = |title: &str, focused: bool| {
         Block::new()
             .borders(Borders::ALL)
-            .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
+            .border_type(if focused {
+                BorderType::Thick
+            } else {
+                BorderType::Rounded
+            })
             .border_style(if focused { t.accent() } else { t.plain() })
             .title(Span::styled(format!(" {title} "), t.bold()))
     };
@@ -189,7 +193,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .map(|l| Line::from(l.to_owned()))
         .collect();
     if n.instruction.is_empty() && n.focus != Field::Instruction {
-        lines = vec![Line::from(Span::styled("(escribe qué quieres que haga Clio)", t.dim()))];
+        lines = vec![Line::from(Span::styled(
+            "(escribe qué quieres que haga Clio)",
+            t.dim(),
+        ))];
     }
     if let Some(last) = lines.last_mut() {
         last.spans.push(cursor(n.focus == Field::Instruction));
@@ -211,7 +218,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         Some(Ok(p)) => {
             info.push(Line::from(vec![
                 Span::styled("✓ ", t.ok()),
-                Span::raw(format!("se copiarán {} archivos ({})", p.files, mb(p.bytes))),
+                Span::raw(format!(
+                    "se copiarán {} archivos ({})",
+                    p.files,
+                    mb(p.bytes)
+                )),
             ]));
             info.push(Line::from(Span::styled(
                 "NO se copiarán a la copia de trabajo:",
@@ -220,7 +231,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             let group = |label: &str, v: &[String], info: &mut Vec<Line>| {
                 if !v.is_empty() {
                     let shown: Vec<String> = v.iter().take(8).map(|s| clean(s)).collect();
-                    let more = if v.len() > 8 { format!(" … y {} más", v.len() - 8) } else { String::new() };
+                    let more = if v.len() > 8 {
+                        format!(" … y {} más", v.len() - 8)
+                    } else {
+                        String::new()
+                    };
                     info.push(Line::from(vec![
                         Span::styled(format!("  {label}: "), t.warn()),
                         Span::raw(format!("{}{more}", shown.join(", "))),

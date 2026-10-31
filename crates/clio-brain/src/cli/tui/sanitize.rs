@@ -153,7 +153,10 @@ mod tests {
     #[test]
     fn carriage_return_and_other_controls_become_a_visible_mark() {
         assert_eq!(line("safe\rEVIL"), "safe\u{FFFD}EVIL");
-        assert_eq!(line("a\u{0}b\u{7}c\u{7f}d\u{8}e"), "a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e");
+        assert_eq!(
+            line("a\u{0}b\u{7}c\u{7f}d\u{8}e"),
+            "a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e"
+        );
         assert_eq!(line("a\u{2028}b"), "a\u{FFFD}b");
     }
 
@@ -163,7 +166,10 @@ mod tests {
         let name = "report\u{202E}txt.exe";
         let got = line(name);
         assert_eq!(got, "report\u{FFFD}txt.exe");
-        for c in ['\u{202A}', '\u{202D}', '\u{2066}', '\u{2069}', '\u{200E}', '\u{200B}', '\u{FEFF}', '\u{061C}'] {
+        for c in [
+            '\u{202A}', '\u{202D}', '\u{2066}', '\u{2069}', '\u{200E}', '\u{200B}', '\u{FEFF}',
+            '\u{061C}',
+        ] {
             assert_eq!(line(&format!("a{c}b")), "a\u{FFFD}b", "{c:?}");
         }
     }

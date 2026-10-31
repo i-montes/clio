@@ -253,8 +253,14 @@ impl RunInfo {
         Self {
             id: run.id.clone(),
             status,
-            instruction: meta.as_ref().map(|m| m.instruction.clone()).unwrap_or_default(),
-            workspace: meta.as_ref().map(|m| m.workspace.clone()).unwrap_or_default(),
+            instruction: meta
+                .as_ref()
+                .map(|m| m.instruction.clone())
+                .unwrap_or_default(),
+            workspace: meta
+                .as_ref()
+                .map(|m| m.workspace.clone())
+                .unwrap_or_default(),
             created_ms: meta.map(|m| m.created_ms),
             summary,
         }
@@ -456,11 +462,10 @@ impl Observer for Progress {
             }
             Event::Started { level } => format!("nivel de la tarea: {level:?}"),
             Event::ProtocolError { reason } => format!(
-                "paso {}: el modelo contestó algo que no es una acción ({})",
-                self.step,
+                "el modelo contestó algo que no es una acción ({})",
                 clip(self.st, &sanitize::line(reason), 60)
             ),
-            Event::Final => format!("paso {}: el modelo dice que terminó", self.step),
+            Event::Final => "el modelo dice que terminó".to_owned(),
             Event::Tool {
                 name,
                 target,
@@ -476,9 +481,13 @@ impl Observer for Progress {
                     (Outcome::Ask, true) => self.st.yellow("pedido y aprobado"),
                     _ => self.st.green("permitido"),
                 };
+                let size = if *ran {
+                    format!("  {result_chars} car.")
+                } else {
+                    String::new()
+                };
                 format!(
-                    "paso {}: {} {}  {mark} ({})  {result_chars} car.",
-                    self.step,
+                    "{} {}  {mark} ({}){size}",
                     sanitize::line(name),
                     clip(self.st, &sanitize::line(target), 40),
                     sanitize::line(rule),
@@ -500,7 +509,12 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
         p.scan.files.len(),
         sanitize::line(&p.ws.display().to_string())
     );
-    let list = |v: &[String]| v.iter().map(|s| sanitize::line(s)).collect::<Vec<_>>().join(", ");
+    let list = |v: &[String]| {
+        v.iter()
+            .map(|s| sanitize::line(s))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     if !p.scan.secrets.is_empty() {
         println!(
             "  {} NO se copió, parece un secreto: {}",
@@ -551,7 +565,11 @@ fn print_panel(st: Style, s: &RunSummary) {
         s.elapsed_ms as f64 / 1000.0,
         {
             let e = ending_label(&s.ending);
-            if s.succeeded() { st.green(&e) } else { st.red(&e) }
+            if s.succeeded() {
+                st.green(&e)
+            } else {
+                st.red(&e)
+            }
         }
     );
     println!(
@@ -567,21 +585,35 @@ fn print_panel(st: Style, s: &RunSummary) {
     if s.tainted {
         println!(
             "{}{}",
-            label("ojo:"),
-            st.yellow("el agente leyó archivos con posibles instrucciones ocultas; revisa el diff con cuidado")
+            label("nota:"),
+            st.yellow("leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado")
         );
     }
     let msg = match &s.final_message {
         Some(m) => sanitize::multiline(m),
-        None => format!("(sin mensaje final) {}", sanitize::line(&s.pending.join("; "))),
+        None => format!(
+            "(sin mensaje final) {}",
+            sanitize::line(&s.pending.join("; "))
+        ),
     };
     let lines = ui::wrap(&msg, w.saturating_sub(10));
     let shown = lines.len().min(14);
     for (i, l) in lines.iter().take(shown).enumerate() {
-        println!("{}{l}", if i == 0 { label("agente:") } else { " ".repeat(10) });
+        println!(
+            "{}{l}",
+            if i == 0 {
+                label("agente:")
+            } else {
+                " ".repeat(10)
+            }
+        );
     }
     if lines.len() > shown {
-        println!("{}{}", " ".repeat(10), st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id)));
+        println!(
+            "{}{}",
+            " ".repeat(10),
+            st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id))
+        );
     }
     println!();
     if s.files() > 0 {
@@ -597,19 +629,17 @@ fn print_panel(st: Style, s: &RunSummary) {
 
 /// The diff of one change against what is in the original now, with a note when the original
 /// changed after the copy.
-pub fn diff_text(
-    ws: &Path,
-    run: &Run,
-    manifest: &BTreeMap<String, String>,
-    c: &Change,
-) -> String {
+pub fn diff_text(ws: &Path, run: &Run, manifest: &BTreeMap<String, String>, c: &Change) -> String {
     let orig = std::fs::read(ws.join(&c.rel)).ok();
     let new = std::fs::read(run.sandbox().join(&c.rel)).ok();
     let mut out = String::new();
     if let (Some(o), Some(h)) = (&orig, manifest.get(&c.rel))
         && super::sha_hex(o) != *h
     {
-        out += &format!("# OJO: {} cambió en el original después de la copia\n", c.rel);
+        out += &format!(
+            "# OJO: {} cambió en el original después de la copia\n",
+            c.rel
+        );
     }
     out + &file_diff(&c.rel, orig.as_deref(), new.as_deref())
 }
@@ -624,7 +654,11 @@ pub fn print_diff(
 ) {
     for c in ch {
         let text = diff_text(ws, run, manifest, c);
-        let text = if st.tty { sanitize::multiline(&text) } else { text };
+        let text = if st.tty {
+            sanitize::multiline(&text)
+        } else {
+            text
+        };
         for l in text.lines() {
             let painted = if l.starts_with("+++") || l.starts_with("---") {
                 st.bold(l)
@@ -660,7 +694,10 @@ pub fn list(dirs: &Dirs, all: bool, json: bool) -> Res<()> {
     let rows = list_info(dirs, (!all).then_some(20))?;
     if json {
         let v: Vec<Value> = rows.iter().map(RunInfo::json).collect();
-        println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
     if rows.is_empty() {
@@ -668,10 +705,18 @@ pub fn list(dirs: &Dirs, all: bool, json: bool) -> Res<()> {
         return Ok(());
     }
     let sw = 20;
-    let iw = ui::width().saturating_sub(20 + 2 + sw + 2 + 8 + 2).clamp(20, 70);
+    let iw = ui::width()
+        .saturating_sub(20 + 2 + sw + 2 + 8 + 2)
+        .clamp(20, 70);
     println!(
         "{}",
-        st.bold(&format!("{}  {}  {}  {}", pad("RUN", 20), pad("ESTADO", sw), "ARCHIVOS", "INSTRUCCIÓN"))
+        st.bold(&format!(
+            "{}  {}  {}  {}",
+            pad("RUN", 20),
+            pad("ESTADO", sw),
+            "ARCHIVOS",
+            "INSTRUCCIÓN"
+        ))
     );
     for r in &rows {
         println!(
@@ -692,21 +737,31 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
     let report: Option<Value> = read_json(&run.path.join("report.json")).ok();
     if json {
         let mut v = info.json();
-        v["summary"] = info
-            .summary
-            .as_ref()
-            .map_or(Value::Null, |s| serde_json::to_value(s).unwrap_or(Value::Null));
+        v["summary"] = info.summary.as_ref().map_or(Value::Null, |s| {
+            serde_json::to_value(s).unwrap_or(Value::Null)
+        });
         v["report"] = report.unwrap_or(Value::Null);
         v["folder"] = json!(run.path.display().to_string());
-        println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
     let w = ui::width();
     let label = |l: &str| st.bold(&pad(l, 17));
     println!("{}{}", label("run:"), st.cyan(&run.id));
-    println!("{}{}", label("estado:"), info.status.paint(st, info.status.label()));
+    println!(
+        "{}{}",
+        label("estado:"),
+        info.status.paint(st, info.status.label())
+    );
     println!("{}{}", label("carpeta:"), sanitize::line(&info.workspace));
-    println!("{}{}", label("instrucción:"), sanitize::line(&info.instruction));
+    println!(
+        "{}{}",
+        label("instrucción:"),
+        sanitize::line(&info.instruction)
+    );
     match &info.summary {
         Some(s) => {
             println!(
@@ -736,15 +791,16 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
                 }
             }
             if !s.pending.is_empty() {
-                println!("{}{}", label("pendiente:"), sanitize::line(&s.pending.join("; ")));
+                println!(
+                    "{}{}",
+                    label("pendiente:"),
+                    sanitize::line(&s.pending.join("; "))
+                );
             }
         }
         None => println!("(sin resumen: el run no llegó a terminar)"),
     }
-    if let Some(n) = report
-        .as_ref()
-        .and_then(|r| r["next_step"].as_str())
-    {
+    if let Some(n) = report.as_ref().and_then(|r| r["next_step"].as_str()) {
         println!("{}{}", label("siguiente:"), sanitize::line(n));
     }
     println!("{}{}", label("carpeta del run:"), run.path.display());

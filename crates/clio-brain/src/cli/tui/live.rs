@@ -169,18 +169,27 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("◌ cancelando… (termina el paso en curso)", t.warn())
     } else if l.id.is_none() {
         Span::styled(
-            format!("{} copiando el proyecto…", SPINNER[(app.now_ms / 100 % 10) as usize]),
+            format!(
+                "{} copiando el proyecto…",
+                SPINNER[(app.now_ms / 100 % 10) as usize]
+            ),
             t.accent(),
         )
     } else {
         Span::styled(
-            format!("{} trabajando en la copia…", SPINNER[(app.now_ms / 100 % 10) as usize]),
+            format!(
+                "{} trabajando en la copia…",
+                SPINNER[(app.now_ms / 100 % 10) as usize]
+            ),
             t.accent(),
         )
     };
     let width = 24;
     let session = if l.tainted {
-        Span::styled("contaminada: leyó archivos, la pasarela es más estricta", t.warn())
+        Span::styled(
+            "contaminada: leyó archivos, la pasarela es más estricta",
+            t.warn(),
+        )
     } else {
         Span::styled("limpia", t.ok())
     };
@@ -188,12 +197,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             head,
             Span::raw("   "),
+            Span::styled(l.id.as_deref().map(clean).unwrap_or_default(), t.dim()),
             Span::styled(
-                l.id.as_deref().map(clean).unwrap_or_default(),
-                t.dim(),
-            ),
-            Span::styled(
-                l.level.as_ref().map(|v| format!("   nivel {v}")).unwrap_or_default(),
+                l.level
+                    .as_ref()
+                    .map(|v| format!("   nivel {v}"))
+                    .unwrap_or_default(),
                 t.dim(),
             ),
         ]),
@@ -215,7 +224,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .title(Span::styled(
-                    format!(" {} ", clean(&l.instruction).chars().take(60).collect::<String>()),
+                    format!(
+                        " {} ",
+                        clean(&l.instruction).chars().take(60).collect::<String>()
+                    ),
                     t.bold(),
                 )),
         ),
@@ -225,9 +237,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let rows = usize::from(mid.height.saturating_sub(2));
     let skip = l.entries.len().saturating_sub(rows);
     let timeline: Vec<Line> = if l.entries.is_empty() {
-        vec![Line::from(Span::styled("  esperando la primera acción del modelo…", t.dim()))]
+        vec![Line::from(Span::styled(
+            "  esperando la primera acción del modelo…",
+            t.dim(),
+        ))]
     } else {
-        l.entries.iter().skip(skip).map(|e| entry_line(app, e)).collect()
+        l.entries
+            .iter()
+            .skip(skip)
+            .map(|e| entry_line(app, e))
+            .collect()
     };
     f.render_widget(
         Paragraph::new(timeline).block(
@@ -250,7 +269,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     s.steps,
                     s.elapsed_ms as f64 / 1000.0
                 )));
-                let msg = s.final_message.clone().unwrap_or_else(|| s.pending.join("; "));
+                let msg = s
+                    .final_message
+                    .clone()
+                    .unwrap_or_else(|| s.pending.join("; "));
                 for m in sanitize::multiline(&msg).lines() {
                     lines.push(Line::from(m.to_owned()));
                 }
@@ -287,7 +309,11 @@ fn entry_line<'a>(app: &App, e: &Entry) -> Line<'a> {
                 (Outcome::Ask, true) => ("pedido y aprobado", t.warn()),
                 _ => ("permitido", t.ok()),
             };
-            let size = if *ran { format!("  {chars} car.") } else { String::new() };
+            let size = if *ran {
+                format!("  {chars} car.")
+            } else {
+                String::new()
+            };
             Line::from(vec![
                 Span::styled(format!(" {step:>3}  "), t.dim()),
                 Span::styled(format!("{:<11}", clean(name)), t.bold()),

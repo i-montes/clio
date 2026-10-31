@@ -66,11 +66,14 @@ impl Detail {
     }
 
     fn total_lines(&self) -> usize {
-        self.rows.get(self.sel).map_or(0, |r| r.diff.lines().count())
+        self.rows
+            .get(self.sel)
+            .map_or(0, |r| r.diff.lines().count())
     }
 
     fn max_scroll(&self) -> usize {
-        self.total_lines().saturating_sub(usize::from(self.view_h.get()))
+        self.total_lines()
+            .saturating_sub(usize::from(self.view_h.get()))
     }
 }
 
@@ -102,11 +105,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             d.in_diff = false;
         }
         (KeyCode::Esc | KeyCode::Char('q'), false) => return app.go_home(),
-        (KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'), false) => {
-            if !d.rows.is_empty() {
-                d.in_diff = true;
-                d.scroll = 0;
-            }
+        (KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'), false) if !d.rows.is_empty() => {
+            d.in_diff = true;
+            d.scroll = 0;
         }
         (KeyCode::Down | KeyCode::Char('j'), false) => {
             d.sel = (d.sel + 1).min(d.rows.len().saturating_sub(1));
@@ -164,7 +165,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("   "),
             Span::styled(clean(&info.id), t.dim()),
         ]),
-        Line::from(vec![Span::styled("Carpeta ", t.dim()), Span::raw(clean(&info.workspace))]),
+        Line::from(vec![
+            Span::styled("Carpeta ", t.dim()),
+            Span::raw(clean(&info.workspace)),
+        ]),
         Line::from(vec![
             Span::styled("Pedido ", t.dim()),
             Span::raw(clean(&info.instruction)),
@@ -184,14 +188,24 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             t.fail(),
         ))),
     }
-    f.render_widget(Paragraph::new(lines).block(block(app, "Resumen".into())), sum_a);
+    f.render_widget(
+        Paragraph::new(lines).block(block(app, "Resumen".into())),
+        sum_a,
+    );
 
     let msg = info
         .summary
         .as_ref()
-        .map(|s| s.final_message.clone().unwrap_or_else(|| format!("(sin mensaje final) {}", s.pending.join("; "))))
+        .map(|s| {
+            s.final_message
+                .clone()
+                .unwrap_or_else(|| format!("(sin mensaje final) {}", s.pending.join("; ")))
+        })
         .unwrap_or_default();
-    let mut msg_lines: Vec<Line> = sanitize::multiline(&msg).lines().map(|l| Line::from(l.to_owned())).collect();
+    let mut msg_lines: Vec<Line> = sanitize::multiline(&msg)
+        .lines()
+        .map(|l| Line::from(l.to_owned()))
+        .collect();
     if info.summary.as_ref().is_some_and(|s| s.tainted) {
         msg_lines.push(Line::from(""));
         msg_lines.push(Line::from(Span::styled(
@@ -222,7 +236,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 let base = if sel { t.selected() } else { t.plain() };
                 Line::from(vec![
                     Span::styled(if sel { "▶ " } else { "  " }, base),
-                    Span::styled(format!("{} ", r.kind), if sel { t.selected() } else { kind_style }),
+                    Span::styled(
+                        format!("{} ", r.kind),
+                        if sel { t.selected() } else { kind_style },
+                    ),
                     Span::styled(clean(&r.rel), base),
                 ])
             })

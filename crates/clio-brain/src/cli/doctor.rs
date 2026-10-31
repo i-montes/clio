@@ -9,6 +9,7 @@ use serde_json::json;
 
 use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::mode;
+use super::tui::app::plural;
 use super::tui::sanitize;
 use super::ui::{Level, Style};
 
@@ -177,8 +178,9 @@ fn host_lines(o: &mut Report, script: &Path) {
         } else {
             continue;
         };
-        let hint = (lv != Level::Pass)
-            .then(|| "Del chequeo del equipo (infra/local/check-host.sh); ver docs/uso-local.md.".to_owned());
+        let hint = (lv != Level::Pass).then(|| {
+            "Del chequeo del equipo (infra/local/check-host.sh); ver docs/uso-local.md.".to_owned()
+        });
         o.say(lv, rest.trim().to_owned(), hint);
     }
     let host_failed = o.checks[before..].iter().any(|c| c.level == Level::Fail);
@@ -370,16 +372,16 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
         "{}",
         if r.ok() {
             st.green(&format!(
-                "doctor: bien ({} ok, {} avisos; los avisos son decisión tuya)",
+                "doctor: bien ({} ok, {}; los avisos son decisión tuya)",
                 r.count(Level::Pass),
-                r.count(Level::Warn)
+                plural(r.count(Level::Warn), "aviso", "avisos")
             ))
         } else {
             st.red(&format!(
-                "doctor: hay {} fallo(s) ({} ok, {} avisos)",
-                r.count(Level::Fail),
+                "doctor: hay {} ({} ok, {})",
+                plural(r.count(Level::Fail), "fallo", "fallos"),
                 r.count(Level::Pass),
-                r.count(Level::Warn)
+                plural(r.count(Level::Warn), "aviso", "avisos")
             ))
         }
     );

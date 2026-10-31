@@ -185,7 +185,11 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         mkdir_private(d)?;
         println!(
             "{ok}  {} {} (0700)",
-            if existed { "ya estaba   " } else { "creada      " },
+            if existed {
+                "ya estaba   "
+            } else {
+                "creada      "
+            },
             d.display()
         );
         Ok(())
@@ -207,7 +211,9 @@ pub fn init(dirs: &Dirs) -> Res<()> {
     }
     let key = dirs.key_file();
     match key_status(dirs) {
-        KeyStatus::Env => println!("{ok}  clave del modelo encontrada en OPENCODE_API_KEY (no se muestra)"),
+        KeyStatus::Env => {
+            println!("{ok}  clave del modelo encontrada en OPENCODE_API_KEY (no se muestra)")
+        }
         KeyStatus::File { open_mode: None } => {
             println!(
                 "{ok}  clave del modelo encontrada en {} (0600, no se muestra)",
