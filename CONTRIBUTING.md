@@ -18,4 +18,4 @@ Ninguna dependencia nueva sin pasar `cargo-deny`. Nada que parezca un secreto en
 
 Si algo salió mal en producción o en un reporte, el mismo PR que lo corrige agrega el caso en `testing/attacks/cases/` y una línea en la «Batería de ataques» de `docs/security.md`. Una prueba falla si las dos listas no coinciden.
 
-> Mientras el repositorio sea privado y en plan gratuito, GitHub no deja exigir la revisión de `CODEOWNERS` ni proteger la rama `main`. La regla se cumple por disciplina y por los checks del CI. Al hacerlo público (o con un plan de pago), activa la protección de rama con «Require review from Code Owners».
+> `CODEOWNERS` solo obliga a revisar cuando la rama `main` tiene protección con «Require review from Code Owners». Hasta que se active, la regla se cumple por disciplina y por los checks del CI.
