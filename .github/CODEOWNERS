@@ -1,0 +1,6 @@
+# S-41: nothing that can relax unsafe_code = "forbid" or the supply-chain checks changes without the owner.
+/Cargo.toml   @i-montes
+/deny.toml    @i-montes
+/.github/     @i-montes
+/crates/*/Cargo.toml  @i-montes
+/testing/*/Cargo.toml @i-montes

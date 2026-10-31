@@ -58,3 +58,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: scripts/rule-coverage.sh
+
+  unsafe-forbid:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # S-41: the workspace forbids unsafe and every crate must inherit that lint.
+      - run: |
+          grep -q '^unsafe_code = "forbid"' Cargo.toml
+          for f in crates/*/Cargo.toml testing/*/Cargo.toml; do
+            grep -A1 '^\[lints\]' "$f" | grep -q '^workspace = true' || { echo "$f does not inherit workspace lints"; exit 1; }
+          done
+          ! grep -rnE 'allow\(unsafe_code\)|unsafe (fn|impl|\{)' --include=*.rs crates testing
