@@ -9,8 +9,8 @@ Clio corre en tu propia máquina (ADR 0006): sin servidor, sin puertos públicos
 ## Instalar y preparar
 
 ```sh
-cargo build --release -p clio-brain -p clio-vault   # deja target/release/clio y clio-vault
-export PATH="$PWD/target/release:$PATH"             # o copia ambos binarios a ~/.local/bin
+just install                                        # compila y deja clio y clio-vault en ~/.local/bin
+# (a mano: cargo build --release -p clio-brain -p clio-vault y copiar target/release/clio* a ~/.local/bin)
 clio init
 ```
 
