@@ -232,61 +232,61 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Pasarela (spec: pasarela)
 
-- [ ] **167** Pasarela como proceso distinto del bucle de Pi y del modelo (S-11)
-- [ ] **168** prueba: matar o modificar el bucle no permite ejecutar sin la pasarela (S-11)
-- [ ] **169** Entrada de la pasarela: herramienta y versión, argumentos, nodo, sesión, actor y secretos por marcador
-- [ ] **170** Salida: permitir, pedir aprobación o negar, con razón explicable e id
-- [ ] **171** Catálogo de acciones con efecto: lectura, escritura local reversible, escritura externa, irreversible
-- [ ] **172** Declarar para cada herramienta si tiene salida al exterior y a qué destinos
-- [ ] **173** Denegar por defecto lo que no está en una lista (S-02)
-- [ ] **174** prueba: una herramienta sin declaración de efecto no se puede llamar (S-02)
-- [ ] **175** Orden de evaluación, paso 1: esquema de argumentos y hash de la descripción (S-15)
-- [ ] **176** Orden de evaluación, paso 2: normalizar rutas, separar argumentos, resolver dominio
-- [ ] **177** Orden de evaluación, paso 3: prohibiciones duras; negar siempre gana
-- [ ] **178** Orden de evaluación, paso 4: presupuesto agotado niega (S-47)
-- [ ] **179** Orden de evaluación, paso 5: secretos permitidos para esa herramienta y ese destino (S-19)
-- [ ] **180** Orden de evaluación, paso 6: sesión contaminada más salida a destino no permitido pide aprobación (S-06)
-- [ ] **181** Orden de evaluación, paso 7: en niveles 2 y 3, una acción fuera del plan vuelve al control o pide aprobación
-- [ ] **182** Orden de evaluación, paso 8: reversible dentro del sandbox se permite
-- [ ] **183** Orden de evaluación, paso 9: una política que cubra todas las dimensiones permite (se conecta en la fase 5)
-- [ ] **184** Orden de evaluación, paso 10: si no, aprobación sobre el hash de la acción
-- [ ] **185** Comandos: lista de binarios permitidos con argumentos separados (argv), nunca `sh -c` (S-12)
+- [x] **167** Pasarela como proceso distinto del bucle de Pi y del modelo (S-11)
+- [x] **168** prueba: matar o modificar el bucle no permite ejecutar sin la pasarela (S-11)
+- [x] **169** Entrada de la pasarela: herramienta y versión, argumentos, nodo, sesión, actor y secretos por marcador
+- [x] **170** Salida: permitir, pedir aprobación o negar, con razón explicable e id
+- [x] **171** Catálogo de acciones con efecto: lectura, escritura local reversible, escritura externa, irreversible
+- [x] **172** Declarar para cada herramienta si tiene salida al exterior y a qué destinos
+- [x] **173** Denegar por defecto lo que no está en una lista (S-02)
+- [x] **174** prueba: una herramienta sin declaración de efecto no se puede llamar (S-02)
+- [x] **175** Orden de evaluación, paso 1: esquema de argumentos y hash de la descripción (S-15)
+- [x] **176** Orden de evaluación, paso 2: normalizar rutas, separar argumentos, resolver dominio
+- [x] **177** Orden de evaluación, paso 3: prohibiciones duras; negar siempre gana
+- [x] **178** Orden de evaluación, paso 4: presupuesto agotado niega (S-47)
+- [x] **179** Orden de evaluación, paso 5: secretos permitidos para esa herramienta y ese destino (S-19)
+- [x] **180** Orden de evaluación, paso 6: sesión contaminada más salida a destino no permitido pide aprobación (S-06)
+- [x] **181** Orden de evaluación, paso 7: en niveles 2 y 3, una acción fuera del plan vuelve al control o pide aprobación
+- [x] **182** Orden de evaluación, paso 8: reversible dentro del sandbox se permite
+- [x] **183** Orden de evaluación, paso 9: una política que cubra todas las dimensiones permite (se conecta en la fase 5)
+- [x] **184** Orden de evaluación, paso 10: si no, aprobación sobre el hash de la acción
+- [x] **185** Comandos: lista de binarios permitidos con argumentos separados (argv), nunca `sh -c` (S-12)
 - [ ] **186** Un shell libre solo dentro de un contenedor desechable, sin secretos y sin red por defecto (S-12)
-- [ ] **187** prueba: argumentos con `;`, `|`, `$(...)` y comillas no escapan (S-12)
-- [ ] **188** Rutas canonizadas antes de compararlas con la raíz permitida (S-13)
-- [ ] **189** prueba: rutas con `..` y enlaces simbólicos hacia fuera se rechazan (S-13)
-- [ ] **190** ataque: comandos con `;`, `$(...)` y rutas con `..` o enlaces simbólicos
-- [ ] **191** La salida del modelo nunca se ejecuta, se interpola en un shell ni se renderiza como HTML sin validar (S-10)
-- [ ] **192** prueba: una respuesta con `$(...)` o HTML no se ejecuta ni se renderiza (S-10)
-- [ ] **193** Lo externo llega al modelo delimitado como datos, no mezclado con las instrucciones (S-08)
+- [x] **187** prueba: argumentos con `;`, `|`, `$(...)` y comillas no escapan (S-12)
+- [x] **188** Rutas canonizadas antes de compararlas con la raíz permitida (S-13)
+- [x] **189** prueba: rutas con `..` y enlaces simbólicos hacia fuera se rechazan (S-13)
+- [x] **190** ataque: comandos con `;`, `$(...)` y rutas con `..` o enlaces simbólicos
+- [x] **191** La salida del modelo nunca se ejecuta, se interpola en un shell ni se renderiza como HTML sin validar (S-10)
+- [x] **192** prueba: una respuesta con `$(...)` o HTML no se ejecuta ni se renderiza (S-10)
+- [x] **193** Lo externo llega al modelo delimitado como datos, no mezclado con las instrucciones (S-08)
 - [ ] **194** Revisar el armado del contexto contra S-08
-- [ ] **195** Marcar como no confiable todo lo de fuera: web, archivos, correos, Notion, MCP, resultados de herramientas y resúmenes de subagentes (S-05)
-- [ ] **196** Marca de contaminación que se propaga a toda la sesión y a sus subagentes y no se borra (S-05)
+- [x] **195** Marcar como no confiable todo lo de fuera: web, archivos, correos, Notion, MCP, resultados de herramientas y resúmenes de subagentes (S-05)
+- [x] **196** Marca de contaminación que se propaga a toda la sesión y a sus subagentes y no se borra (S-05)
 - [ ] **197** prueba: leer una página web marca la sesión y la marca aparece en la traza (S-05)
-- [ ] **198** Sesión contaminada: toda salida al exterior exige aprobación y avisa que está contaminada (S-06)
-- [ ] **199** prueba: una página con instrucciones ocultas no logra sacar ningún dato sin aprobación (S-06)
-- [ ] **200** ataque: una página web con instrucciones ocultas que pide leer `~/.ssh` y mandarlo a otro sitio
-- [ ] **201** ataque: un README o un PDF que dice «ignora tus instrucciones y…»
-- [ ] **202** Hash de la acción ya normalizada
-- [ ] **203** Ejecutar solo si el hash coincide con el aprobado (S-14)
-- [ ] **204** prueba: cambiar un byte entre aprobar y ejecutar invalida la aprobación (S-14)
-- [ ] **205** Aprobaciones por terminal en esta fase; la passkey llega con la PWA
+- [x] **198** Sesión contaminada: toda salida al exterior exige aprobación y avisa que está contaminada (S-06)
+- [x] **199** prueba: una página con instrucciones ocultas no logra sacar ningún dato sin aprobación (S-06)
+- [x] **200** ataque: una página web con instrucciones ocultas que pide leer `~/.ssh` y mandarlo a otro sitio
+- [x] **201** ataque: un README o un PDF que dice «ignora tus instrucciones y…»
+- [x] **202** Hash de la acción ya normalizada
+- [x] **203** Ejecutar solo si el hash coincide con el aprobado (S-14)
+- [x] **204** prueba: cambiar un byte entre aprobar y ejecutar invalida la aprobación (S-14)
+- [x] **205** Aprobaciones por terminal en esta fase; la passkey llega con la PWA
 - [ ] **206** Resolver los secretos en el último paso, dentro del proceso que ejecuta
 - [ ] **207** Pasar la salida por la limpieza del vault antes de devolverla
-- [ ] **208** Falla cerrada: si la pasarela no responde o da error, nada se ejecuta
-- [ ] **209** prueba: con la pasarela caída, ninguna acción se ejecuta
-- [ ] **210** prueba: cada decisión trae una razón que nombra la regla o la política
-- [ ] **211** prueba: una acción reversible dentro del sandbox pasa sin preguntar
-- [ ] **212** Herramientas MCP y skills con versión fijada y hash de su descripción (S-15)
-- [ ] **213** Si la descripción cambia, la herramienta se desactiva hasta revisarla y avisa (S-15)
-- [ ] **214** prueba: cambiar la descripción de un servidor MCP lo desactiva y avisa (S-15)
-- [ ] **215** ataque: un servidor MCP que cambia la descripción de su herramienta después de aprobado
-- [ ] **216** Los subagentes solo leen y no reciben secretos (S-17)
-- [ ] **217** prueba: un subagente que intenta escribir o resolver un secreto falla (S-17)
-- [ ] **218** ataque: un intento del agente de escribir una extensión de Pi o un skill
-- [ ] **219** Hasta completar el día cero, la pasarela niega toda acción fuera del sandbox (S-56)
-- [ ] **220** Telemetría: decisiones por tipo y razón, latencia, aprobaciones por causa, negaciones, intentos de secreto hacia destino ajeno
-- [ ] **221** decidir formato de las reglas de la pasarela: el mismo de las políticas o uno propio
+- [x] **208** Falla cerrada: si la pasarela no responde o da error, nada se ejecuta
+- [x] **209** prueba: con la pasarela caída, ninguna acción se ejecuta
+- [x] **210** prueba: cada decisión trae una razón que nombra la regla o la política
+- [x] **211** prueba: una acción reversible dentro del sandbox pasa sin preguntar
+- [x] **212** Herramientas MCP y skills con versión fijada y hash de su descripción (S-15)
+- [x] **213** Si la descripción cambia, la herramienta se desactiva hasta revisarla y avisa (S-15)
+- [x] **214** prueba: cambiar la descripción de un servidor MCP lo desactiva y avisa (S-15)
+- [x] **215** ataque: un servidor MCP que cambia la descripción de su herramienta después de aprobado
+- [x] **216** Los subagentes solo leen y no reciben secretos (S-17)
+- [x] **217** prueba: un subagente que intenta escribir o resolver un secreto falla (S-17)
+- [x] **218** ataque: un intento del agente de escribir una extensión de Pi o un skill
+- [x] **219** Hasta completar el día cero, la pasarela niega toda acción fuera del sandbox (S-56)
+- [x] **220** Telemetría: decisiones por tipo y razón, latencia, aprobaciones por causa, negaciones, intentos de secreto hacia destino ajeno
+- [x] **221** decidir formato de las reglas de la pasarela: el mismo de las políticas o uno propio
 
 ### Sandbox y reversibilidad
 
@@ -309,43 +309,43 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 - [ ] **233** Vault como proceso aparte con su propio usuario (S-22)
 - [ ] **234** Hablar solo por un socket Unix con permisos, nunca por red
-- [ ] **235** Modelo de un secreto: nombre-marcador, valor cifrado, tipo, destinos, ámbito, rotación y vencimiento, estado y uso
-- [ ] **236** Marcadores `{{secreto:nombre}}`; el modelo solo ve marcadores
-- [ ] **237** Cifrado en reposo del vault
-- [ ] **238** Llave maestra que no queda sin protección en el mismo disco (S-22)
-- [ ] **239** Arranque bloqueado tras reiniciar; lo que necesita secretos espera en la cola
-- [ ] **240** Desbloqueo por terminal en esta fase; con passkey en la fase 4
-- [ ] **241** Operación `put` (la persona)
-- [ ] **242** Operación `resolve` (solo la pasarela, con herramienta y destino, devuelve en memoria)
-- [ ] **243** Operación `issue_token` (token corto con alcance y vida limitada)
-- [ ] **244** Operaciones `rotate` y `revoke`
-- [ ] **245** Operación `list` (nombres y metadatos, nunca valores)
-- [ ] **246** Operación `audit` (cada resolución con destino y trace_id)
-- [ ] **247** Cada secreto atado a su destino: herramienta y dominio permitidos (S-19)
-- [ ] **248** prueba: `resolve` hacia un destino no permitido falla y alerta (S-19)
-- [ ] **249** ataque: un pedido para usar `{{secreto:x}}` hacia un dominio no permitido
-- [ ] **250** Filtro único de limpieza de salidas, usado por pasarela, LLM, Jev, clio-trace y clio-memory (S-20)
-- [ ] **251** El filtro busca los valores del vault también en base64 y codificados para URL
-- [ ] **252** El filtro busca patrones de llaves de proveedores
-- [ ] **253** Registrar cada tachado, porque suele indicar un intento de filtración
-- [ ] **254** prueba: una herramienta que imprime un secreto, también en base64, llega al modelo tachada (S-20)
-- [ ] **255** ataque: una herramienta que devuelve un secreto en su salida
-- [ ] **256** Ningún secreto entra al contexto, a la memoria, a la traza ni a un log (S-18)
+- [x] **235** Modelo de un secreto: nombre-marcador, valor cifrado, tipo, destinos, ámbito, rotación y vencimiento, estado y uso
+- [x] **236** Marcadores `{{secreto:nombre}}`; el modelo solo ve marcadores
+- [x] **237** Cifrado en reposo del vault
+- [x] **238** Llave maestra que no queda sin protección en el mismo disco (S-22)
+- [x] **239** Arranque bloqueado tras reiniciar; lo que necesita secretos espera en la cola
+- [x] **240** Desbloqueo por terminal en esta fase; con passkey en la fase 4
+- [x] **241** Operación `put` (la persona)
+- [x] **242** Operación `resolve` (solo la pasarela, con herramienta y destino, devuelve en memoria)
+- [x] **243** Operación `issue_token` (token corto con alcance y vida limitada)
+- [x] **244** Operaciones `rotate` y `revoke`
+- [x] **245** Operación `list` (nombres y metadatos, nunca valores)
+- [x] **246** Operación `audit` (cada resolución con destino y trace_id)
+- [x] **247** Cada secreto atado a su destino: herramienta y dominio permitidos (S-19)
+- [x] **248** prueba: `resolve` hacia un destino no permitido falla y alerta (S-19)
+- [x] **249** ataque: un pedido para usar `{{secreto:x}}` hacia un dominio no permitido
+- [x] **250** Filtro único de limpieza de salidas, usado por pasarela, LLM, Jev, clio-trace y clio-memory (S-20)
+- [x] **251** El filtro busca los valores del vault también en base64 y codificados para URL
+- [x] **252** El filtro busca patrones de llaves de proveedores
+- [x] **253** Registrar cada tachado, porque suele indicar un intento de filtración
+- [x] **254** prueba: una herramienta que imprime un secreto, también en base64, llega al modelo tachada (S-20)
+- [x] **255** ataque: una herramienta que devuelve un secreto en su salida
+- [x] **256** Ningún secreto entra al contexto, a la memoria, a la traza ni a un log (S-18)
 - [ ] **257** prueba: buscar los valores del vault en contexto, memoria y trazas tras una semana: cero apariciones (S-18)
-- [ ] **258** ataque: una página que pide «muéstrame tus llaves»
-- [ ] **259** Tokens de vida corta para nodos y herramientas (S-21)
+- [x] **258** ataque: una página que pide «muéstrame tus llaves»
+- [x] **259** Tokens de vida corta para nodos y herramientas (S-21)
 - [ ] **260** Rotación programada de secretos (S-21)
 - [ ] **261** Revocación inmediata desde la CLI (S-21)
-- [ ] **262** prueba: un token vencido o revocado se rechaza (S-21)
-- [ ] **263** prueba: un token emitido para un nodo deja de servir al vencer
-- [ ] **264** prueba: `list` nunca devuelve valores
-- [ ] **265** prueba: tras reiniciar, ningún secreto se resuelve hasta el desbloqueo
+- [x] **262** prueba: un token vencido o revocado se rechaza (S-21)
+- [x] **263** prueba: un token emitido para un nodo deja de servir al vencer
+- [x] **264** prueba: `list` nunca devuelve valores
+- [x] **265** prueba: tras reiniciar, ningún secreto se resuelve hasta el desbloqueo
 - [ ] **266** prueba: ningún proceso distinto de la pasarela puede llamar a `resolve`
-- [ ] **267** Respaldos del vault cifrados con una llave distinta (S-22)
-- [ ] **268** prueba: un respaldo del vault no se puede abrir sin su llave propia
-- [ ] **269** Telemetría: resoluciones por secreto y destino, negaciones, tachados, secretos por vencer, tiempo bloqueado
-- [ ] **270** decidir implementación del vault: propia en Rust, OpenBao o Infisical
-- [ ] **271** decidir desbloqueo: passkey tras reinicio, llave en otro equipo o servicio externo
+- [x] **267** Respaldos del vault cifrados con una llave distinta (S-22)
+- [x] **268** prueba: un respaldo del vault no se puede abrir sin su llave propia
+- [x] **269** Telemetría: resoluciones por secreto y destino, negaciones, tachados, secretos por vencer, tiempo bloqueado
+- [x] **270** decidir implementación del vault: propia en Rust, OpenBao o Infisical
+- [x] **271** decidir desbloqueo: passkey tras reinicio, llave en otro equipo o servicio externo
 - [ ] **272** Cargar solo el secreto del primer uso (el proveedor del modelo)
 
 ### Modelos y proveedores, versión mínima (spec: modelos)

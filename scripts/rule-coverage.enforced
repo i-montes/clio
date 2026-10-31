@@ -1,12 +1,37 @@
 # S-04: what must keep a test. A rule or spec listed here fails rule-coverage.sh when its tests
 # disappear; everything else only warns. Add a line when a rule or a whole spec gets its tests.
 S-01
+S-02
 S-04
+S-05
+S-06
+S-07
+S-08
+S-10
+S-11
+S-12
+S-13
+S-14
+S-15
+S-16
+S-17
 S-18
+S-19
+S-20
+S-21
+S-22
 S-23
 S-24
 S-25
 S-26
 S-27
+S-44
 S-46
+S-47
+S-56
 spec-clio-memory
+spec-clio-triage
+spec-clio-contract
+spec-clio-gateway
+spec-clio-models
+spec-clio-vault
