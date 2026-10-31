@@ -28,6 +28,13 @@ fi
 for id in $missing; do
   if is_enforced "$id"; then echo "error: $id is enforced and has no test" >&2; fail=1; fi
 done
+# An entry whose rule or spec was deleted would otherwise stop being checked without a sound.
+for e in $enforced; do
+  case $e in
+    S-*) echo "$ids" | grep -qx "$e" || { echo "error: $e is enforced but no document defines it" >&2; fail=1; } ;;
+    spec-*) ls docs/specs/"${e#spec-}"-spec-v*.md >/dev/null 2>&1 || { echo "error: $e is enforced but its spec file is gone" >&2; fail=1; } ;;
+  esac
+done
 
 # Acceptance tests: the numbered list under "Pruebas de aceptación" in docs/specs/<crate>-spec-v*.md.
 # A test covers number n when it is named t<n>_… (t06_t17_… covers both) or says "spec-<crate> #<n>".

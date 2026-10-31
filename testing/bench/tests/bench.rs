@@ -173,3 +173,25 @@ fn the_shipped_trivial_tasks_load_and_a_duplicate_id_or_unknown_field_is_refused
     assert!(load_tasks(&dir).is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn the_gate_blocks_a_run_that_leaves_out_a_task_of_the_baseline() {
+    let limits = Thresholds {
+        max_success_drop_points: 5.0,
+        max_cost_rise_pct: 20.0,
+    };
+    let one = |name: &str| clio_bench::TaskReport {
+        task: name.into(),
+        runs: 1,
+        successes: 1,
+        cost_micro_usd: 100,
+        duration_ms: 0,
+    };
+    let mut base = report(2, 2, 200);
+    base.tasks = vec![one("a"), one("hard")];
+    let mut now = report(1, 1, 100);
+    now.tasks = vec![one("a")];
+    let bad = regressions(&base, &now, &limits);
+    assert_eq!(bad.len(), 1);
+    assert!(bad[0].contains("hard"), "{bad:?}");
+}

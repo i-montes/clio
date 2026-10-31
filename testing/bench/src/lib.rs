@@ -316,6 +316,14 @@ pub struct Thresholds {
 /// What got worse than the baseline allows; empty means the gate passes.
 pub fn regressions(baseline: &Report, now: &Report, limits: &Thresholds) -> Vec<String> {
     let mut out = Vec::new();
+    for t in &baseline.tasks {
+        if !now.tasks.iter().any(|n| n.task == t.task) {
+            out.push(format!(
+                "task {} is in the baseline but was not run",
+                t.task
+            ));
+        }
+    }
     let drop = (baseline.success_rate() - now.success_rate()) * 100.0;
     if drop > limits.max_success_drop_points {
         out.push(format!(

@@ -13,8 +13,9 @@ if grep -qE '^\s*paths(-ignore)?:' .github/workflows/ci.yml; then
 fi
 
 # 079: the release job depends on the bench, the attacks, the chaos run and the human review.
+release=$(awk '/^  release:/{on=1; next} on && /^  [a-z-]+:/{on=0} on' .github/workflows/release.yml)
 for job in bench attacks chaos review; do
-  grep -qE "^\s+needs:.*\b$job\b" .github/workflows/release.yml || {
+  echo "$release" | grep -qE "needs:.*\b$job\b" || {
     echo "error: release.yml: the release does not wait for '$job'" >&2
     exit 1
   }

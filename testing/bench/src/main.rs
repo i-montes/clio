@@ -14,7 +14,22 @@ use clio_trace::{FixedClock, SystemClock, Trace};
 
 const HELP: &str = "usage: clio-bench <replay|record|real|synthetic-tape> --tasks DIR [--tape FILE] [--prices FILE] \
 [--repeats N] [--trace DB] [--provider P] [--model M] [--cmd PROGRAM [ARG...]] \
-[--baseline FILE --thresholds FILE] [--save-baseline FILE]";
+[--baseline FILE --thresholds FILE] [--save-baseline FILE] \
+(--cmd takes the rest of the line, so it goes last)";
+
+const FLAGS: [&str; 11] = [
+    "tasks",
+    "tape",
+    "prices",
+    "repeats",
+    "trace",
+    "provider",
+    "model",
+    "cmd",
+    "baseline",
+    "thresholds",
+    "save-baseline",
+];
 
 fn main() -> ExitCode {
     match go() {
@@ -36,7 +51,12 @@ fn go() -> Result<ExitCode, String> {
     let mut flags: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut current = String::new();
     for a in args {
-        if let Some(name) = a.strip_prefix("--") {
+        if current == "cmd" {
+            flags.entry(current.clone()).or_default().push(a);
+        } else if let Some(name) = a.strip_prefix("--") {
+            if !FLAGS.contains(&name) {
+                return Err(format!("unknown flag --{name}"));
+            }
             current = name.to_string();
             flags.entry(current.clone()).or_default();
         } else if current.is_empty() {

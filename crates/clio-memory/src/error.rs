@@ -13,7 +13,7 @@ pub enum Error {
     #[error("actor quota exceeded")]
     QuotaExceeded,
     #[error(
-        "content rejected, nothing saved: it matches a known key format or has a 32+ character high-entropy run (a long id or URL path counts); shorten or remove that part"
+        "content rejected, nothing saved: it looks like a key or token (a long id or URL path counts too); shorten or remove that part"
     )]
     SecretDetected,
     #[error("invalid validity interval")]
