@@ -271,8 +271,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **203** Ejecutar solo si el hash coincide con el aprobado (S-14)
 - [x] **204** prueba: cambiar un byte entre aprobar y ejecutar invalida la aprobación (S-14)
 - [x] **205** Aprobaciones por terminal en esta fase; la passkey llega con la PWA
-- [ ] **206** Resolver los secretos en el último paso, dentro del proceso que ejecuta
-- [ ] **207** Pasar la salida por la limpieza del vault antes de devolverla
+- [x] **206** Resolver los secretos en el último paso, dentro del proceso que ejecuta
+- [x] **207** Pasar la salida por la limpieza del vault antes de devolverla
 - [x] **208** Falla cerrada: si la pasarela no responde o da error, nada se ejecuta
 - [x] **209** prueba: con la pasarela caída, ninguna acción se ejecuta
 - [x] **210** prueba: cada decisión trae una razón que nombra la regla o la política
@@ -307,8 +307,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Vault (spec: vault)
 
-- [ ] **233** Vault como proceso aparte con su propio usuario (S-22)
-- [ ] **234** Hablar solo por un socket Unix con permisos, nunca por red
+- [x] **233** Vault como proceso aparte con su propio usuario (S-22)
+- [x] **234** Hablar solo por un socket Unix con permisos, nunca por red
 - [x] **235** Modelo de un secreto: nombre-marcador, valor cifrado, tipo, destinos, ámbito, rotación y vencimiento, estado y uso
 - [x] **236** Marcadores `{{secreto:nombre}}`; el modelo solo ve marcadores
 - [x] **237** Cifrado en reposo del vault
@@ -335,18 +335,18 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **258** ataque: una página que pide «muéstrame tus llaves»
 - [x] **259** Tokens de vida corta para nodos y herramientas (S-21)
 - [ ] **260** Rotación programada de secretos (S-21)
-- [ ] **261** Revocación inmediata desde la CLI (S-21)
+- [x] **261** Revocación inmediata desde la CLI (S-21)
 - [x] **262** prueba: un token vencido o revocado se rechaza (S-21)
 - [x] **263** prueba: un token emitido para un nodo deja de servir al vencer
 - [x] **264** prueba: `list` nunca devuelve valores
 - [x] **265** prueba: tras reiniciar, ningún secreto se resuelve hasta el desbloqueo
-- [ ] **266** prueba: ningún proceso distinto de la pasarela puede llamar a `resolve`
+- [x] **266** prueba: ningún proceso distinto de la pasarela puede llamar a `resolve`
 - [x] **267** Respaldos del vault cifrados con una llave distinta (S-22)
 - [x] **268** prueba: un respaldo del vault no se puede abrir sin su llave propia
 - [x] **269** Telemetría: resoluciones por secreto y destino, negaciones, tachados, secretos por vencer, tiempo bloqueado
 - [x] **270** decidir implementación del vault: propia en Rust, OpenBao o Infisical
 - [x] **271** decidir desbloqueo: passkey tras reinicio, llave en otro equipo o servicio externo
-- [ ] **272** Cargar solo el secreto del primer uso (el proveedor del modelo)
+- [x] **272** Cargar solo el secreto del primer uso (el proveedor del modelo)
 
 ### Modelos y proveedores, versión mínima (spec: modelos)
 
@@ -383,7 +383,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1; movida desde la fase 0, porque aún no hay vault ni nodos que aislar)
 - [ ] **298** Hay una línea base medida, sin memoria
-- [ ] **299** Pasan los ataques de inyección, de secretos y de comandos
+- [x] **299** Pasan los ataques de inyección, de secretos y de comandos
 
 ---
 
