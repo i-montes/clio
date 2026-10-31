@@ -10,26 +10,27 @@ pub struct WriterLock {
     _file: File,
 }
 
-/// Creates the file with mode 0600 if missing; refuses to use one that group or others can access (S-23).
+/// Creates the file with mode 0600 if missing; refuses to use one that group or others can access,
+/// or that is a symbolic link (S-23). Creation is `O_EXCL`, which never follows a link, so a link
+/// planted at the path in a shared directory cannot redirect the write.
 pub fn prepare_db_file(path: &Path) -> Result<()> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)?;
-    if std::fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-        return Err(Error::InsecurePermissions(path.to_path_buf()));
+    match create_private_file(path) {
+        Ok(_) => Ok(()),
+        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => check_db_file(path),
+        Err(e) => Err(e),
     }
-    Ok(())
 }
 
 /// For read-only use: the file must already exist and not be accessible by group or others (S-23).
 /// Never creates or changes anything.
 pub fn check_db_file(path: &Path) -> Result<()> {
-    let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => Error::NotFound,
         _ => Error::Io(e),
     })?;
+    if !meta.file_type().is_file() {
+        return Err(Error::NotRegularFile(path.to_path_buf()));
+    }
     if meta.permissions().mode() & 0o077 != 0 {
         return Err(Error::InsecurePermissions(path.to_path_buf()));
     }

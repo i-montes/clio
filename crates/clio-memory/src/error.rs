@@ -36,6 +36,8 @@ pub enum Error {
     ReadOnly,
     #[error("{0} must not be accessible by group or others (expected mode 0600)")]
     InsecurePermissions(PathBuf),
+    #[error("{0} is a symbolic link or not a regular file; give the path of the file itself")]
+    NotRegularFile(PathBuf),
     #[error(
         "opening a WAL database read-only needs a writable directory and writable -wal/-shm files next to it: {0}"
     )]

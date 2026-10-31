@@ -25,6 +25,8 @@ engine.revert(out.op, actor)?;
 # Ok::<(), Error>(())
 ```
 
+The file is created with mode 0600 and refused if group or others can reach it. The path must be the file itself: a symbolic link is refused (`NotRegularFile`), because in a shared directory a link planted beforehand could redirect the write. The directory it lives in may be a link.
+
 ## Finding things
 
 - **`embed_pending(limit)`** computes vectors for memories that have none for the current model (`Engine::with_embedder`). `propose` never calls the model; until a memory has a vector it is found by text only. Switching models re-embeds everything on the next call.

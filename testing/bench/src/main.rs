@@ -87,10 +87,10 @@ fn go() -> Result<ExitCode, String> {
         _ => return Err(format!("unknown mode {mode}")),
     };
     // Replay keeps time still so two runs give the same report; the others measure it.
-    let trace_path = one("trace").map_or_else(
-        || std::env::temp_dir().join(format!("clio-bench-{}.db", std::process::id())),
-        PathBuf::from,
-    );
+    let trace_path = match one("trace") {
+        Some(p) => PathBuf::from(p),
+        None => private_dir()?.join("trace.db"),
+    };
     let trace = if mode == "replay" {
         Trace::open(&trace_path, FixedClock::new(0))
     } else {
@@ -145,6 +145,21 @@ fn go() -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A new directory in the temp dir that only this user can enter. The name is made here and
+/// `create` fails if it exists, so nobody can plant a link at the path beforehand.
+fn private_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("clio-bench-{}-{nanos}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 #[derive(serde::Deserialize)]

@@ -10,12 +10,35 @@ is_enforced() { echo "$enforced" | grep -qx "$1"; }
 
 # grep exits 1 when nothing matches; that must not stop the script.
 ids=$({ grep -rhoE --include='*.md' 'S-[0-9]{2}' docs/security.md docs/specs || true; } | sort -u)
-# A rule counts as tested once any file under a tests/ directory names it, even a pending test.
+# A rule counts as tested when a test that runs says so: a `// S-xx` comment just above a
+# `#[test]` (no `#[ignore]`), or a test function named `sNN_...`. A mention in a helper, in an
+# ignored test or in a plain comment does not count.
 dirs=()
 for d in crates testing; do
   if [ -d "$d" ]; then dirs+=("$d"); else echo "warning: directory not found: $d" >&2; fi
 done
-tested=$({ [ "${#dirs[@]}" -gt 0 ] && find "${dirs[@]}" -path '*/tests/*.rs' -exec grep -hoE 'S-[0-9]{2}' {} + || true; } | sort -u)
+rules_in_tests() {
+  awk '
+    FNR == 1 { ids = ""; test = 0; ignored = 0; gap = 99 }
+    /^[[:space:]]*\/\/\/?.*S-[0-9][0-9]/ {
+      ids = ""; s = $0
+      while (match(s, /S-[0-9][0-9]/)) { ids = ids " " substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH) }
+      gap = 0; test = 0; ignored = 0; next
+    }
+    { gap++ }
+    /^[[:space:]]*#\[test\]/ { test = 1 }
+    /^[[:space:]]*#\[ignore/ { ignored = 1 }
+    /^[[:space:]]*(pub )?fn / {
+      if (test && !ignored) {
+        if (gap <= 6) print ids
+        if (match($0, /fn s_?[0-9][0-9]_/)) { n = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", n); print "S-" n }
+      }
+      ids = ""; test = 0; ignored = 0; gap = 99
+    }
+  ' "$@" | tr ' ' '\n' | grep -E '^S-[0-9]{2}$' || true
+}
+export -f rules_in_tests
+tested=$({ [ "${#dirs[@]}" -gt 0 ] && find "${dirs[@]}" -path '*/tests/*.rs' -print0 | xargs -0 -r bash -c 'rules_in_tests "$@"' _ || true; } | sort -u)
 missing=$(comm -23 <(echo "$ids") <(echo "$tested"))
 
 total=$(echo "$ids" | grep -c . || true)

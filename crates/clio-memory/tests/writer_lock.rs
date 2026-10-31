@@ -231,3 +231,32 @@ fn an_unreadable_database_file_is_not_blamed_on_the_directory() {
     );
     assert!(result.is_err());
 }
+
+// S-23: a symbolic link at the path of the file is refused, for writing and for reading, and a
+// link planted before the file exists cannot make the engine create or write its target.
+#[test]
+fn s23_a_symbolic_link_is_refused_and_its_target_is_never_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.db");
+    Engine::open(&real, OpenMode::ReadWrite, clock()).unwrap();
+    let link = dir.path().join("link.db");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    for mode in [OpenMode::ReadWrite, OpenMode::ReadOnly] {
+        assert!(
+            matches!(
+                Engine::open(&link, mode, clock()),
+                Err(Error::NotRegularFile(_))
+            ),
+            "{mode:?}"
+        );
+    }
+
+    let target = dir.path().join("victim.db");
+    let dangling = dir.path().join("dangling.db");
+    std::os::unix::fs::symlink(&target, &dangling).unwrap();
+    assert!(matches!(
+        Engine::open(&dangling, OpenMode::ReadWrite, clock()),
+        Err(Error::NotRegularFile(_))
+    ));
+    assert!(!target.exists(), "the link must not redirect the creation");
+}

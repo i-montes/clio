@@ -23,6 +23,7 @@ pub enum Error {
     Io(String),
     /// The file is readable by group or others (expected mode 0600).
     Permissions(PathBuf),
+    NotRegular(PathBuf),
     SchemaVersion(i64),
     /// No price for this provider and model at the time of the span.
     NoPrice {
@@ -43,6 +44,11 @@ impl fmt::Display for Error {
             Self::Permissions(p) => write!(
                 f,
                 "{} must not be accessible by group or others (expected mode 0600)",
+                p.display()
+            ),
+            Self::NotRegular(p) => write!(
+                f,
+                "{} is a symbolic link or not a regular file; give the path of the file itself",
                 p.display()
             ),
             Self::SchemaVersion(v) => write!(f, "schema version {v} is not {SCHEMA_VERSION}"),

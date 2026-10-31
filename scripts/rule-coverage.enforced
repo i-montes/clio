@@ -1,6 +1,7 @@
 # S-04: what must keep a test. A rule or spec listed here fails rule-coverage.sh when its tests
 # disappear; everything else only warns. Add a line when a rule or a whole spec gets its tests.
 S-01
+S-04
 S-18
 S-23
 S-24

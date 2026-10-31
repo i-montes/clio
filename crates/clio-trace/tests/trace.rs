@@ -338,3 +338,19 @@ fn every_contract_state_change_is_in_the_trace_in_order() {
     assert_eq!(t.contract_history("c-2").expect("history").len(), 1);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn a_symbolic_link_at_the_path_is_refused_and_its_target_is_never_created() {
+    let dir = std::env::temp_dir().join(format!("clio-trace-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let target = dir.join("victim.db");
+    let link = dir.join("link.db");
+    std::os::unix::fs::symlink(&target, &link).expect("link");
+    assert!(matches!(
+        Trace::open(&link, FixedClock::new(0)),
+        Err(Error::NotRegular(_))
+    ));
+    assert!(!target.exists(), "the link must not redirect the creation");
+    let _ = std::fs::remove_dir_all(dir);
+}
