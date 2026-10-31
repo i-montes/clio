@@ -38,7 +38,7 @@ clio · proyecto · beam-free                                              inici
  ▸ 1031-1816-5a67 pendiente de revisar   1 arch arregla parse_date en dates.py
    1030-0900-0b1c aplicado               2 arch agrega un README
    1029-1200-ffff fallido                0 arch refactoriza todo
- Enter abrir   n nuevo   / filtrar   c contexto   U uso   q salir   ? ayuda
+ Enter abrir   n nuevo   / filtrar   q salir   c contexto   U uso   ? ayuda
  ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
 ```
 
@@ -169,7 +169,7 @@ clio · proyecto · beam-free                                             detall
  ─ archivos cambiados (2) ─────────────────────────────────────────────────────
  ▸ M dates.py
    A docs/new.md
- Enter d ver el diff   a aplicar   u deshacer   c contexto   U uso
+ Enter d ver el diff   a aplicar   u deshacer   c contexto   U uso   ? ayuda
  ↑12,4k ↓3,1k tok · $0 · 7/40 pasos · 12 s/10 min   contexto ▕███░░░░░░░▏ 31 %
 ```
 
@@ -212,13 +212,13 @@ clio · proyecto · beam-free                                               ayud
 
  atajos · Clio trabaja en una copia; tú decides qué vuelve al original
 
- j         bajar             c         contexto
- k         subir             U         uso
- g         primero           r         refrescar
- G         último            D         doctor
- Enter     abrir             Esc       quitar el filtro
- n         nuevo             ?         ayuda
- d         diff              q         salir
+ j         bajar             q         salir
+ k         subir             c         contexto
+ g         primero           U         uso
+ G         último            r         refrescar
+ Enter     abrir             D         doctor
+ n         nuevo             Esc       quitar el filtro
+ d         diff              ?         ayuda
  a         aplicar           Ctrl-D    modo debug
  u         deshacer          Ctrl-L    redibujar
  /         filtrar
@@ -230,7 +230,7 @@ clio · proyecto · beam-free                                               ayud
 
 Iguales en todas las pantallas: un atajo significa lo mismo donde exista (`c` contexto, `U` uso, `?` ayuda, `r` refrescar, `d` diff, `a` aplicar, `u` deshacer, `g`/`G` principio y final, `j`/`k` mover). Una prueba recorre la tabla de cada pantalla y falla si una tecla está repetida o significa cosas distintas. `Esc` o `q` vuelven (en el inicio `q` sale; `Esc` solo quita el filtro); `Ctrl-C` cancela el run en vivo (la segunda vez sale) y en las demás pantallas hace lo mismo que `Esc`. Páginas con `Ctrl-F`/`Ctrl-B` (o `AvPág`/`RePág`): `Ctrl-D` no sirve de «media página» porque es el modo debug. Reparto para no chocar: `U` (mayúscula) abre el uso y `u` deshace.
 
-- **Inicio**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` abrir · `n` nuevo · `d` diff · `a` aplicar · `u` deshacer · `/` filtrar · `c` contexto · `U` uso · `r` refrescar · `D` doctor · `Esc` quitar el filtro · `?` ayuda · `q` `Ctrl-C` salir.
+- **Inicio**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` abrir · `n` nuevo · `d` diff · `a` aplicar · `u` deshacer · `/` filtrar · `q` `Ctrl-C` salir · `c` contexto · `U` uso · `r` refrescar · `D` doctor · `Esc` quitar el filtro · `?` ayuda.
 - **Inicio, escribiendo el filtro**: `Enter` dejar el filtro · `Esc` borrar el filtro · `↓` bajar · `↑` subir · `Ctrl-C` borrar el filtro.
 - **Nuevo trabajo**: `Tab` `Shift-Tab` cambiar campo · `Enter` lanzar · `Alt-Enter` `Ctrl-J` línea nueva · `Ctrl-U` borrar el campo · `F1` ayuda · `Esc` `Ctrl-C` volver.
 - **En vivo, corriendo**: `Esc` `Ctrl-C` cancelar · `Tab` tiempo / debug · `c` contexto · `U` uso · `j` `↓` más reciente · `k` `↑` más antiguo · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `?` ayuda.

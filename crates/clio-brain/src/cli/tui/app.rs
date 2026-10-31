@@ -523,14 +523,26 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
-    let mut spans: Vec<Span> = Vec::new();
+    let width = |h: &keys::Bind| h.shown.chars().count() + 1 + h.what.chars().count() + 3;
+    let hints = keys::hints(app.ctx());
+    // The help key is always the last and always shown: the others give way to it.
+    let (help, rest) = match hints.split_last() {
+        Some((h, rest)) if h.act == Act::Help => (Some(*h), rest),
+        _ => (None, hints.as_slice()),
+    };
+    let reserved = help.map_or(0, width);
+    let mut shown: Vec<&keys::Bind> = Vec::new();
     let mut used = 0usize;
-    for h in keys::hints(app.ctx()) {
-        let w = h.shown.chars().count() + 1 + h.what.chars().count() + 3;
-        if used + w > usize::from(area.width) {
+    for h in rest {
+        if used + width(h) + reserved > usize::from(area.width) {
             break;
         }
-        used += w;
+        used += width(h);
+        shown.push(h);
+    }
+    shown.extend(help);
+    let mut spans: Vec<Span> = Vec::new();
+    for h in shown {
         spans.push(Span::styled(h.shown, t.key()));
         spans.push(Span::styled(format!(" {}   ", h.what), t.dim()));
     }

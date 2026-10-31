@@ -831,6 +831,33 @@ fn the_header_is_one_line_with_folder_model_screen_and_the_debug_mark() {
 }
 
 #[test]
+fn the_help_and_quit_hints_survive_the_narrowest_terminal() {
+    let t = screen_text(&with_runs(), 60, 16);
+    let hints = t.lines().nth(14).unwrap();
+    assert!(
+        hints.contains("? ayuda") && hints.contains("q salir"),
+        "{hints:?}"
+    );
+    for (name, a) in [
+        ("en vivo", live_app()),
+        (
+            "detalle",
+            open_detail(with_runs(), detail(ID1, Status::Pending), false),
+        ),
+        (
+            "diff",
+            open_detail(with_runs(), detail(ID1, Status::Pending), true),
+        ),
+        ("contexto", feed(live_app(), vec![ch('c')]).0),
+        ("doctor", feed(with_runs(), vec![ch('D')]).0),
+    ] {
+        let t = screen_text(&a, 60, 16);
+        let hints = t.lines().nth(14).unwrap();
+        assert!(hints.contains("? ayuda"), "{name}: {hints:?}");
+    }
+}
+
+#[test]
 fn the_hint_line_comes_from_the_key_map() {
     let t = screen_text(&live_app(), 80, 24);
     let hints = t.lines().nth(22).unwrap();

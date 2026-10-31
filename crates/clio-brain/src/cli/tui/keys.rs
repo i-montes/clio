@@ -166,13 +166,13 @@ const HOME: &[Bind] = &[
     b(&[Char('a')], Act::Apply, "a", "aplicar", false),
     b(&[Char('u')], Act::Undo, "u", "deshacer", false),
     b(&[Char('/')], Act::Filter, "/", "filtrar", true),
+    b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", true),
     b(&[Char('c')], Act::Context, "c", "contexto", true),
     b(&[Char('U')], Act::Usage, "U", "uso", true),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('D')], Act::Doctor, "D", "doctor", false),
     b(&[ESC], Act::Back, "Esc", "quitar el filtro", false),
     b(&[Char('?')], Act::Help, "?", "ayuda", true),
-    b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", true),
 ];
 
 const FILTER: &[Bind] = &[
