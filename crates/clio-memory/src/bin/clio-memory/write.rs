@@ -88,6 +88,26 @@ pub fn run(cli: &Cli) -> Result<ExitCode, String> {
             let new = engine.revert(*op, actor).map_err(fail)?;
             line(&format!("reverted op {} (op {})", op.0, new.0));
         }
+        Command::Purge { id, reason, yes } => {
+            let actor = person(&engine, cli)?;
+            if engine.get(*id).is_err() {
+                return Err(match engine.tombstone(*id).map_err(fail)? {
+                    Some(_) => format!("m{} was already purged", id.0),
+                    None => format!("m{} does not exist", id.0),
+                });
+            }
+            if !yes && !confirmed(*id)? {
+                return Err("not purged".into());
+            }
+            let done = engine.purge(*id, actor, reason).map_err(fail)?;
+            line(&format!("purged m{} (op {})", id.0, done.op.0));
+            if !done.wal_truncated {
+                line(&format!(
+                    "warning: another reader kept {}-wal from being emptied; old copies of the text may remain there until a checkpoint",
+                    cli.db.display()
+                ));
+            }
+        }
         Command::Feedback { id, signal } => {
             let actor = person(&engine, cli)?;
             engine.feedback(*id, *signal, actor).map_err(fail)?;
@@ -215,6 +235,24 @@ pub fn run(cli: &Cli) -> Result<ExitCode, String> {
         _ => return Err("not a write command".into()),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Asks in the terminal; without one (a pipe, a script) the answer is no.
+fn confirmed(id: clio_memory::MemoryId) -> Result<bool, String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err("purge asks for confirmation in a terminal; pass --yes to skip it".into());
+    }
+    eprint!(
+        "Erase m{} for good, from every operation too? This cannot be undone. Type yes: ",
+        id.0
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| e.to_string())?;
+    Ok(answer.trim() == "yes")
 }
 
 /// An `import` that created the file and then failed must not leave an empty database behind.

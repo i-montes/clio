@@ -14,7 +14,7 @@ Un motor de memoria genérico y open source para agentes, en Rust y sobre un sol
 - **Sí**: Guardar, recuperar, actualizar y deshacer recuerdos de cuatro tipos; búsqueda de texto y vectorial; cuarentena; vigencia; ámbitos aislados; colas de trabajo; decisor en cascada; crate, daemon y CLI; exportar e importar.
 - **No, por ahora**: Grafo de conocimiento, ajuste fino, multiusuario con permisos finos, sincronización entre réplicas, interfaz web. Tampoco es un RAG de documentos: guarda hechos atómicos; archivos y URLs entran como referencias, no como contenido.
 
-> Nota (2026-10-29): el daemon (HTTP y MCP) pasa a la v2, como dice la hoja de ruta; PURGE también.
+> Nota (2026-10-29): el daemon (HTTP y MCP) pasa a la v2, como dice la hoja de ruta. PURGE volvió a la v1 (nota del 2026-10-31): `Engine::purge` y `clio-memory purge`, ver §7 y §8.
 
 ### 1. Modelo de datos
 
@@ -124,6 +124,7 @@ Cinco traits separan el núcleo de lo cambiable: `Store`, `VectorIndex`, `Embedd
 - **Olvidar no es borrar**: El olvido archiva. Borrar de verdad es PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida. Necesario para proyectos que manejen datos personales.
 - **Retroalimentación**: El agente o la persona marcan un recuerdo como útil o equivocado. Útil sube su confianza y lo protege del olvido; equivocado baja la confianza y, si se repite, lo manda a revisión. Es la señal más valiosa para saber si la memoria sirve.
 - **Marcha atrás**: REVERT deshace una operación o todas desde un punto, agregando operaciones nuevas; nunca reescribe la historia (salvo PURGE).
+- **PURGE, en concreto**: en una sola transacción borra el contenido del recuerdo de la tabla de recuerdos, del índice de texto, de las instantáneas (`before`/`after`) de todas las operaciones pasadas que lo tocaron (se vacían texto, hash, `topic_key`, sesión, episodio y fuente; quedan ids, estado, vigencia y los enlaces `replaced_by`/`supersedes`, para que la cadena no se rompa), del texto de las decisiones registradas de esas operaciones, y su vector, uso, retroalimentación y entradas de bloque. Agrega una operación PURGE sin cambios, que es la lápida (id, quién, cuándo, motivo; sin contenido ni hash). Después reescribe el archivo (`VACUUM`) y vacía el registro de escritura (WAL), porque SQLite deja copias del texto en páginas liberadas. Reconstruir la proyección respeta la lápida; REVERT de una operación anterior da `NotRevertible`; exportar no saca el contenido e importar rechaza un archivo que lleve una operación PURGE y todavía el contenido. **No alcanza** respaldos ni exportaciones hechos antes del PURGE, copias del archivo fuera de la máquina, ni restos que el sistema de archivos o el disco conserven por debajo de SQLite.
 
 ### 8. Interfaz
 
@@ -131,7 +132,11 @@ Cinco traits separan el núcleo de lo cambiable: `Store`, `VectorIndex`, `Embedd
 | --- | --- | --- |
 | Crate | embeber en otro programa en Rust | `context`, `propose`, `recall`, `explain`, `feedback`, `get`, `history`, `revert`, `review`, `promote`, `purge`, `scopes`, `actors`, `stats`, `doctor`, `export`, `import` (restaurar una exportación propia), `import_memories` (cargar recuerdos sueltos por `propose`) |
 | Daemon | HTTP + JSON con token, y servidor MCP (`memory_recall`, `memory_propose`) para cualquier agente | ↑ |
-| CLI | inspeccionar, revisar, deshacer, exportar, `doctor`; nunca `register_actor`, `create_scope` ni `set_retention` | ↑ |
+| CLI | `remember`, inspeccionar, revisar, deshacer, `purge`, exportar, `doctor`; nunca `register_actor`, `create_scope` ni `set_retention` | ↑ |
+
+`remember` (CLI: `clio-memory remember SCOPE TEXT... [--kind K] [--topic T] [--source S]`) es el atajo de una persona o de un agente para guardar un recuerdo: arma una `Proposal` y la manda por `propose`, el único camino de entrada, así que pasa por la cuota del actor, el detector de secretos y las reglas, igual que todo lo demás. Sin `--actor` el recuerdo es de la persona (`cli:$USER`, origen `User`); con `--actor NAME` es de un agente (origen `Agent`, cuota de agente, y un procedimiento propuesto por un agente espera en cuarentena). Imprime el resultado (`Add`, `Update` o `Noop`), el id del recuerdo, el de la operación y el estado. No existe como operación aparte del motor: en el crate es `propose`.
+
+`purge` (crate: `Engine::purge(memory, actor, reason)`; CLI: `clio-memory purge ID [--reason TEXT] [--yes]`) solo la ejerce una persona, pide confirmación en la terminal (`--yes` la salta, para pruebas) y nunca se expone por MCP. Qué borra y qué no, en §7.
 
 `explain` devuelve por qué salió cada recuerdo (puntaje de texto, de vector, de recencia y filtros aplicados). Sale de números que la búsqueda ya calculó: no usa un LLM ni gasta tokens, y solo se pide para depurar. Por MCP se expone leer, proponer y dar retroalimentación; promover, purgar y revertir quedan fuera de MCP por defecto, para que un agente engañado no pueda hacerlo. Lo mismo vale para `register_actor`, `create_scope`, `set_retention`, `archive` y las operaciones de bloques fijos (`create_block`, `block_set`): quien puede registrar un actor de tipo persona puede usar todos los poderes de revisión, así que ninguna interfaz que vea un agente debe exponerlas.
 
@@ -208,6 +213,6 @@ Un módulo `retention` en el mismo crate: dos trabajos más en la cola, `rollup`
 
 ### Hoja de ruta
 
-- **v1**: Registro y proyección, escritura con reglas y heurísticas, lectura híbrida con abstención, ámbitos, cuarentena, dos fechas por hecho, bloques fijos y `context()`, formato compacto, actores y cuotas, dueño único del archivo, retroalimentación, `explain`, reloj inyectable, extensión de telemetría, colas, CLI y crate, exportar e importar con semver, pruebas de aceptación.
-- **v2**: Daemon con HTTP y MCP, plugins de decisor (clasificador y LLM; el trait, el modo sombra y el registro de decisiones ya están en la v1), consolidación y resúmenes en árbol, entidades, PURGE, arnés de evaluación con LongMemEval y LoCoMo, módulo `retention` reutilizable por clio-trace.
+- **v1**: PURGE, registro y proyección, escritura con reglas y heurísticas, lectura híbrida con abstención, ámbitos, cuarentena, dos fechas por hecho, bloques fijos y `context()`, formato compacto, actores y cuotas, dueño único del archivo, retroalimentación, `explain`, reloj inyectable, extensión de telemetría, colas, CLI y crate, exportar e importar con semver, pruebas de aceptación.
+- **v2**: Daemon con HTTP y MCP, plugins de decisor (clasificador y LLM; el trait, el modo sombra y el registro de decisiones ya están en la v1), consolidación y resúmenes en árbol, entidades, arnés de evaluación con LongMemEval y LoCoMo, módulo `retention` reutilizable por clio-trace.
 - **Después**: Índice vectorial aproximado, adaptador de Postgres, cifrado, sincronización entre réplicas, interfaz web de revisión.

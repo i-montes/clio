@@ -3,7 +3,7 @@ use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Check, Choice, DeciderMode, DecisionRecord,
     DecisionStatus, ExportSummary, Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow,
     MemoryType, NewOperation, OpId, Operation, QueueStats, Quota, ScopeId, ScopeInfo, SearchOpts,
-    Signal, State, Stats,
+    Signal, State, Stats, Tombstone,
 };
 use crate::transfer::ExportRecord;
 use crate::vector::VectorIndex;
@@ -152,6 +152,13 @@ pub trait Store: VectorIndex + Send + Sync {
     /// overwritten (`AlreadyExists`) and a stale `.tmp` from a crash is replaced.
     fn backup_to(&self, path: &std::path::Path) -> Result<()>;
     fn vacuum(&self) -> Result<()>;
+    /// Erases the content of `op.memory` everywhere in one transaction (text, index, snapshots in
+    /// past operations, decision reasons, vector, usage, feedback, block entries), appends `op`
+    /// (a PURGE with no changes), then rewrites the file and empties the write-ahead log. The
+    /// flag is false when the log could not be emptied. `NotFound` if the memory does not exist.
+    fn purge(&self, op: NewOperation) -> Result<(OpId, bool)>;
+    /// The tombstone of a purged memory.
+    fn tombstone(&self, id: MemoryId) -> Result<Option<Tombstone>>;
 
     /// For each `(memory, at)`: `uses + 1` and `last_used = max(old, at)`, in one transaction.
     fn record_usages(&self, uses: &[(MemoryId, i64)]) -> Result<()>;

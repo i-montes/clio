@@ -758,3 +758,43 @@ fn remember_needs_an_existing_scope_and_file() {
     let o = run(Some(&db), &["remember", "work", "algo", "--kind", "raro"]);
     assert_eq!(code(&o), 2);
 }
+
+// S-25: purge is for a person, asks first, and leaves a tombstone that `get` and `history` show
+#[test]
+fn purge_needs_confirmation_a_person_and_leaves_a_tombstone() {
+    let (_dir, db) = closed();
+    // no terminal and no --yes: refused, nothing erased
+    let o = run(Some(&db), &["purge", "1"]);
+    assert_eq!(code(&o), 1);
+    assert!(err(&o).contains("--yes"), "{}", err(&o));
+    assert_eq!(state_of(&db, "1"), "Active");
+    // an agent cannot (the actor "bot" is an agent)
+    let o = run(Some(&db), &["--actor", "bot", "purge", "1", "--yes"]);
+    assert_eq!(code(&o), 1);
+    assert_eq!(state_of(&db, "1"), "Active");
+
+    let o = run(Some(&db), &["purge", "m1", "--yes", "--reason", "pedido"]);
+    assert_eq!(code(&o), 0, "{}", err(&o));
+    assert_eq!(out(&o).lines().count(), 1, "{}", out(&o));
+    assert!(out(&o).contains("purged m1 (op "), "{}", out(&o));
+
+    let got = out(&run(Some(&db), &["get", "1"]));
+    assert!(got.contains("Purged") && got.contains("pedido"), "{got}");
+    assert!(!got.contains("Medell"), "{got}");
+    let json = out(&run(Some(&db), &["--json", "get", "1"]));
+    assert!(json.contains("\"reason\":\"pedido\"") && !json.contains("Medell"));
+    let hist = out(&run(Some(&db), &["history", "1"]));
+    assert!(hist.contains("Purge") && !hist.contains("Medell"), "{hist}");
+    let hist = out(&run(Some(&db), &["--json", "history", "1"]));
+    assert!(!hist.contains("Medell"), "{hist}");
+    assert!(!dump_all(&db).contains("Medell"));
+
+    let o = run(Some(&db), &["purge", "1", "--yes"]);
+    assert_eq!(code(&o), 1);
+    assert!(err(&o).contains("already purged"), "{}", err(&o));
+    let o = run(Some(&db), &["purge", "99", "--yes"]);
+    assert!(err(&o).contains("does not exist"), "{}", err(&o));
+    assert_eq!(code(&run(Some(&db), &["get", "99"])), 1);
+    assert_eq!(code(&run(Some(&db), &["doctor"])), 0);
+    assert_eq!(code(&run(Some(&db), &["purge"])), 2);
+}

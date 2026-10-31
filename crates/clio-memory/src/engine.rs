@@ -13,8 +13,9 @@ use crate::model::{
     DeciderMode, DecisionRecord, DecisionStatus, DoctorReport, ExportSummary, FeedbackSummary,
     Format, Hit, ImportOpts, ImportSummary, JobKind, JobRecord, JobState, Limits, MemoryId,
     MemoryRow, MemoryType, Neighbor, NewOperation, OpId, OpKind, OpenMode, Operation, Origin,
-    Outcome, Proposal, Question, QueueStats, Quota, Recall, RecallHit, RecallOpts, RevertReport,
-    RunOpts, RunReport, ScopeId, ScopeInfo, SearchOpts, Signal, State, Stats,
+    Outcome, Proposal, PurgeOutcome, Question, QueueStats, Quota, Recall, RecallHit, RecallOpts,
+    RevertReport, RunOpts, RunReport, ScopeId, ScopeInfo, SearchOpts, Signal, State, Stats,
+    Tombstone,
 };
 use crate::normalize::{content_hash, normalize};
 use crate::platform;
@@ -1356,13 +1357,60 @@ impl Engine {
         self.log(row.scope, OpKind::Archive, id, changes, actor, "archived")
     }
 
+    /// PURGE: erases a memory's content everywhere (S-24, S-25) and leaves a tombstone. Only a
+    /// person may do it, and it is never reachable from an agent or MCP. `reason` is stored in the
+    /// clear: do not put the erased text in it. Revert cannot undo it. Copies of the file made
+    /// before (backups, exports) keep the content: see the README.
+    pub fn purge(&self, memory: MemoryId, actor: ActorId, reason: &str) -> Result<PurgeOutcome> {
+        let span = span!(
+            "purge",
+            memory = memory.0,
+            actor = actor.0,
+            trace_id = ::tracing::field::Empty,
+            outcome = ::tracing::field::Empty
+        );
+        outcome!(span, self.purge_inner(memory, actor, reason))
+    }
+
+    fn purge_inner(&self, memory: MemoryId, actor: ActorId, reason: &str) -> Result<PurgeOutcome> {
+        let _g = self.write_guard();
+        self.require_person(actor)?;
+        self.check_name(reason)?;
+        let scope = self.store.get(memory)?.scope;
+        let (op, wal_truncated) = self.store.purge(NewOperation {
+            scope,
+            kind: OpKind::Purge,
+            memory: Some(memory),
+            changes: Vec::new(),
+            actor,
+            reason: reason.into(),
+            at: self.clock.now(),
+            reverts: None,
+            trace_id: self.trace_id(),
+        })?;
+        event!(INFO, "purged", op = op.0);
+        Ok(PurgeOutcome { op, wal_truncated })
+    }
+
+    /// What is left of a purged memory; `None` when it was never purged.
+    pub fn tombstone(&self, id: MemoryId) -> Result<Option<Tombstone>> {
+        self.store.tombstone(id)
+    }
+
     /// Undoes one operation by appending a REVERT that restores each change's `before` (an ADD
     /// has no `before`: its memory is archived). Only allowed while every memory the operation
     /// touched is still exactly as the operation left it.
     fn revert_locked(&self, op: &Operation, actor: ActorId) -> Result<OpId> {
+        if op.kind == OpKind::Purge {
+            return Err(Error::NotRevertible(op.id)); // nothing to restore: the content is gone
+        }
         let mut changes = Vec::with_capacity(op.changes.len());
         for c in &op.changes {
-            let current = self.store.get(c.memory)?;
+            // a memory that was purged since is gone for good: the operation cannot bring it back
+            let current = match self.store.get(c.memory) {
+                Err(Error::NotFound) => return Err(Error::NotRevertible(op.id)),
+                other => other?,
+            };
             if current != c.after {
                 return Err(Error::NotRevertible(op.id));
             }
