@@ -23,6 +23,8 @@ pub mod theme;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_memory;
+#[cfg(test)]
 mod tests_views;
 
 use std::io::{IsTerminal, Stdout};

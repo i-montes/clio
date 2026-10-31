@@ -585,6 +585,20 @@ impl MemoryLink {
     /// A fact the person typed: origin `user`, active at once. Optionally in a fixed block.
     pub fn remember(&self, text: &str, block: Option<&str>) -> Res<MemoryId> {
         self.need_write()?;
+        // The block is looked up first: a wrong name must not leave a memory behind.
+        let block = match block {
+            Some(name) => Some(
+                self.engine
+                    .blocks(self.scope)
+                    .map_err(|e| explain(&e))?
+                    .into_iter()
+                    .find(|b| b.name == name)
+                    .ok_or_else(|| {
+                        format!("no hay un bloque {name:?} (identidad, reglas, preferencias)")
+                    })?,
+            ),
+            None => None,
+        };
         let out = self
             .engine
             .propose(Proposal {
@@ -601,16 +615,7 @@ impl MemoryLink {
                 valid_to: None,
             })
             .map_err(|e| explain(&e))?;
-        if let Some(name) = block {
-            let b = self
-                .engine
-                .blocks(self.scope)
-                .map_err(|e| explain(&e))?
-                .into_iter()
-                .find(|b| b.name == name)
-                .ok_or_else(|| {
-                    format!("no hay un bloque {name:?} (identidad, reglas, preferencias)")
-                })?;
+        if let Some(b) = block {
             let mut ids = self.engine.block_get(b.id).map_err(|e| explain(&e))?;
             if !ids.contains(&out.memory) {
                 ids.push(out.memory);

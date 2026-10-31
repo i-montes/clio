@@ -243,6 +243,30 @@ elif scenario in ("views", "debug_env"):
     out["code"] = finish(pid, fd)
     out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
     out["after"] = modes(fd)
+elif scenario == "memory":
+    # The Memory screen: m opens it, / searches, Esc clears and goes back, q leaves.
+    pid, fd = spawn()
+    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    mark = len(buf)
+    os.write(fd, b"m")
+    out["memory_screen"] = pump(fd, lambda: b"ZAFIRO" in buf[mark:], 10)
+    out["pending_section"] = b"pendientes" in buf[mark:]
+    mark = len(buf)
+    os.write(fd, b"/")
+    time.sleep(0.2)
+    type_text(fd, "zafiro")
+    out["search_counts"] = pump(fd, lambda: b"1 coinciden" in buf[mark:], 8)
+    os.write(fd, b"\r")  # leave the search box, keep the filter
+    time.sleep(0.2)
+    os.write(fd, b"\x1b")  # clears the filter
+    time.sleep(0.2)
+    mark = len(buf)
+    os.write(fd, b"\x1b")  # back to the home screen
+    out["back_home"] = pump(fd, lambda: b"recientes" in buf[mark:], 8)
+    os.write(fd, b"q")
+    out["code"] = finish(pid, fd)
+    out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
+    out["after"] = modes(fd)
 else:
     sys.exit("unknown scenario")
 print(json.dumps(out))
