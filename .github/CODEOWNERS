@@ -4,3 +4,4 @@
 /.github/     @i-montes
 /crates/*/Cargo.toml  @i-montes
 /testing/*/Cargo.toml @i-montes
+/scripts/rule-coverage.*  @i-montes

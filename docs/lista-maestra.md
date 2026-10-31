@@ -60,7 +60,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **037** Pasar cada spec del artefacto a `docs/specs/<crate>-spec-v0.1.md` con su sección «Pruebas de aceptación» numerada, para que `rule-coverage.sh` las cuente
 - [x] **038** Pasar la pestaña de seguridad completa a `docs/security.md` y mantenerla sincronizada con el artefacto
 - [ ] **039** Reconciliar el artefacto con el spec del repo en conflictos (el artefacto aún dice «en conflicto»)
-- [ ] **040** Hacer que `rule-coverage.sh` bloquee en vez de avisar, regla por regla, a medida que cada regla tenga prueba (S-04)
+- [x] **040** Hacer que `rule-coverage.sh` bloquee en vez de avisar, regla por regla, a medida que cada regla tenga prueba (S-04)
 
 ### Documentos de proyecto
 
