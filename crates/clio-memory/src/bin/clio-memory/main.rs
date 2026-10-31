@@ -24,7 +24,10 @@ fn main() -> ExitCode {
             }
         },
         Err(args::UsageError(message)) => {
-            output::error(&format!("error: {message}\n\n{}", args::USAGE));
+            // The full text is ~14 KB; a caller (often an agent) pays for it on every typo.
+            output::error(&format!(
+                "error: {message}\nhelp: `clio-memory --help` prints the usage"
+            ));
             ExitCode::from(2)
         }
     }
