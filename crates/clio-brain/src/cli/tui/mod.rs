@@ -121,7 +121,8 @@ pub fn run(dirs: Dirs) -> Res<i32> {
     }
     let t0 = Instant::now();
     // Only for the terminal-restoration test: a deliberate panic inside the alternate screen.
-    if std::env::var_os("CLIO_TUI_PANIC_TEST").is_some() {
+    // Test hook for the terminal-restore test; compiled out of release builds (what `just install` ships).
+    if cfg!(debug_assertions) && std::env::var_os("CLIO_TUI_PANIC_TEST").is_some() {
         panic!("deliberate panic to test that the terminal is restored");
     }
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
