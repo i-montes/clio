@@ -4,6 +4,6 @@
   "rules": [
     "S-54"
   ],
-  "status": "pending",
+  "status": "active",
   "expect": "refused"
 }
