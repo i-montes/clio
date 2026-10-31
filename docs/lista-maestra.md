@@ -122,7 +122,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ---
 
-## Fase 1 · Corte mínimo: un nodo (el VPS), sin memoria, a propósito
+## Fase 1 · Corte mínimo: un nodo (el equipo de la persona; el VPS es opcional), sin memoria, a propósito
 
 ### Medir con un modelo real (movidas desde la fase 0)
 
@@ -130,19 +130,21 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral. Probado en GitHub el 2026-10-31: el nightly corre el modelo real (`beam-free`, 60/60, 73 s) con el secreto `OPENCODE_API_KEY`. Pendiente aparte: un tope de gasto en el panel del proveedor (S-45) si algún día se usa un modelo de pago.
 - [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones reales (decidir); hoy hay valores provisionales en `testing/bench/thresholds.json`. Va después de 067 y 076.
 
-### VPS e infraestructura (S-38 a S-40)
+### Equipo anfitrión: este PC (el VPS es opcional) (S-38 a S-40)
 
-- [ ] **085** Infraestructura como código en `infra/` para reconstruir el VPS desde cero
-- [ ] **086** Sin puertos públicos: solo Tailscale (S-38)
-- [ ] **087** SSH desactivado o solo por Tailscale (S-38)
-- [ ] **088** prueba: escaneo externo de puertos, nada abierto (S-38)
+Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)): la base es el PC de la persona; un VPS queda como opción. `infra/local/check-host.sh` comprueba lo que se puede comprobar aquí.
+
+- [ ] **085** Infraestructura como código en `infra/` para reconstruir el entorno desde cero: en este PC (`infra/local/`, hecho el comprobador; falta el instalador y las unidades de usuario) y, opcional, en un VPS (`infra/vps/`, borrador sin probar)
+- [x] **086** Sin puertos públicos: solo Tailscale (S-38). Verificado en este PC el 2026-10-31: solo loopback, DNS de Docker y la interfaz `tailscale0`; lo vigila `infra/local/check-host.sh`
+- [x] **087** SSH desactivado o solo por Tailscale (S-38). Verificado: `sshd` inactivo en este PC
+- [x] **088** prueba: nada de Clio escucha fuera de loopback ni de `tailscale0` (S-38): `infra/local/check-host.sh`. El escaneo desde fuera de la tailnet solo aplica a un VPS (`infra/vps/check-open-ports.sh`)
 - [ ] **089** Procesos separados por usuario: agente, vault, memoria, trace (S-39)
 - [ ] **090** Contenedores sin root (S-39)
 - [ ] **091** Actualizaciones de seguridad automáticas (S-39)
-- [ ] **092** Disco cifrado (S-40)
-- [ ] **093** Respaldos cifrados fuera del VPS (S-40)
+- [x] **092** Disco cifrado (S-40). Verificado: este PC usa LUKS (`crypto_LUKS` bajo btrfs)
+- [ ] **093** Respaldos cifrados fuera del equipo anfitrión (S-40): no hay restic, borg ni kopia instalados; falta elegir herramienta y destino
 - [ ] **094** Primera restauración probada en una máquina limpia (S-40)
-- [ ] **095** Llaves de Tailscale con vencimiento y Tailnet Lock (S-31)
+- [ ] **095** Llaves de Tailscale con vencimiento y Tailnet Lock (S-31): la llave de este PC vence el 2027-03-11 (hecho); Tailnet Lock no está activado (decidir)
 - [ ] **096** Revisión por componente de qué puede hacer y por qué lo necesita (S-03)
 
 ### Adaptador de Pi (D16)
@@ -558,7 +560,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [ ] **423** Revocar un dispositivo perdido en un paso: Tailscale, llave del nodo y sesiones (S-32)
 - [ ] **424** prueba: simulacro de dispositivo perdido (S-32)
 - [ ] **425** medir D18: pedir a un nodo algo que su lista no permite, tumbar el VPS a mitad de tarea y revocar el cerebro en Tailscale
-- [ ] **426** Decidir si se puede empezar solo con el VPS o el primer nodo es obligatorio
+- [x] **426** Decidir si se puede empezar solo con el VPS o el primer nodo es obligatorio: se empieza solo con este PC; ni el VPS ni otro nodo son obligatorios (ADR 0006)
 
 ### Enrutador y orquestador
 
@@ -665,12 +667,12 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [ ] **512** Migraciones con copia previa de los datos y vuelta atrás o respaldo
 - [ ] **513** prueba: una migración se puede deshacer o restaurar desde su copia previa
 - [ ] **514** Daemons de los nodos actualizados de forma escalonada y dentro de una versión de protocolo compatible
-- [ ] **515** prueba: el VPS se reconstruye desde cero con el código de infraestructura y un respaldo
+- [ ] **515** prueba: el entorno (este PC o un VPS) se reconstruye desde cero con el código de infraestructura y un respaldo
 - [ ] **516** Telemetría de despliegues, vueltas atrás, tiempo de cambio y PRs de Clio aceptados
 
 ### Día cero (spec: día cero)
 
-- [ ] **517** Paso 1: instalar el cerebro en el VPS con la infraestructura como código, todo cerrado
+- [ ] **517** Paso 1: instalar el cerebro (en este PC por defecto; en un VPS si algún día se quiere) con la infraestructura como código, todo cerrado
 - [ ] **518** Paso 2: registrar la passkey desde la PWA en el teléfono
 - [ ] **519** prueba: sin passkey registrada, ninguna otra operación del día cero está disponible
 - [ ] **520** Paso 3: desbloquear el vault por primera vez y cargar solo los secretos del primer uso

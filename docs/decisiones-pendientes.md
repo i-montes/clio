@@ -4,11 +4,11 @@ Escrito durante la fase 1, con la persona desconectada. Aquí está lo que se de
 
 ## Para decidir (bloquean trabajo)
 
-### 1. Servidor (VPS) y Tailscale · tareas 085 a 096
-Sin esto no hay un segundo nodo real ni se pueden probar las reglas S-38, S-39 y S-40. Hay un borrador provider-neutral en `infra/vps/` (no probado).
-- **Qué elegir:** proveedor, región y tamaño del servidor; una cuenta de Tailscale (con vencimiento de llaves y Tailnet Lock, S-31).
-- **Costo:** un VPS pequeño y una cuenta de Tailscale personal; consulta los precios actuales del proveedor que elijas, no los inventé.
-- **Si no decides:** el agente sigue corriendo en tu máquina, que es suficiente para desarrollar, pero no se puede cerrar la fase 1 ni medir el corte «un nodo = el VPS».
+### 1. Respaldos cifrados y Tailnet Lock en este PC · tareas 093, 094, 095
+Decidiste que no hay servidor por ahora, así que el PC es la base (ADR 0006) y `infra/local/check-host.sh` ya confirma lo esencial: disco LUKS, cortafuegos, SSH apagado, nada de Clio fuera de loopback, llave de Tailscale con vencimiento.
+- **Falta elegir:** una herramienta de respaldo (restic, borg o kopia; no hay ninguna instalada) y un destino fuera de este PC (un disco externo o un almacenamiento en la nube cifrado), y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
+- **Tailnet Lock** no está activado; es opcional y lo decides tú (095).
+- **Un VPS, si algún día quieres uno:** es opcional; el borrador está en `infra/vps/` y no bloquea nada.
 
 ### 2. Adaptador de Pi · tareas 098 a 102
 Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría diaria) pero el adaptador no se escribió.
@@ -16,8 +16,8 @@ Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría 
 - **Dato nuevo:** la última publicación de Pi en npm es de mayo de 2026; si el proyecto se detuvo, conviene saberlo antes de depender de él.
 - **Si no decides:** se sigue con el bucle propio; no se pierde nada.
 
-### 2 bis. Usuario propio del vault y dueño de cada socket · tarea 233 en producción
-El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero con un solo usuario del sistema la separación es una convención, no una pared. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Va con la decisión del servidor (punto 1).
+### 2 bis. Usuarios separados y jaula para ejecutar comandos
+El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero en un PC con un solo usuario la separación es una convención, no una pared. Dos opciones para endurecerla: usuarios del sistema distintos para el vault y el agente (necesita `sudo`), o una jaula `bwrap` para lo que el agente ejecute (`bwrap` ya está instalado). Hoy el agente no ejecuta comandos, así que no corre riesgo; decídelo antes de darle una herramienta que ejecute código. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Solo aplica si algún día hay un servidor; en este PC todo corre como tu usuario (ver el riesgo en `docs/threat-model.md`).
 
 ### 2 ter. ¿Parar la tarea tras N negaciones seguidas de la pasarela?
 Hoy el cortacircuito solo frena lo que correría solo; lo que acaba el bucle es el tope de pasos. Añadir un `Stop::Denials` cortaría antes a un modelo que insiste con herramientas prohibidas. Es más estricto: ¿lo quieres? Por defecto no.

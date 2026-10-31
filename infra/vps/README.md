@@ -1,4 +1,6 @@
-# VPS (draft, not tested)
+# VPS (optional, draft, not tested)
+
+> The VPS is **optional** (ADR 0006): the base is the user's own machine, checked with `infra/local/check-host.sh`. Use this folder only if a server is ever added.
 
 Nothing in this folder has run on a real server. It is a provider-neutral start so that, once a provider and a Tailscale account are chosen, the machine is rebuilt from files and not by hand (task 085).
 

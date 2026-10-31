@@ -1,6 +1,6 @@
 # clio-brain
 
-The brain that runs on the VPS. This crate is the library; the binary comes later.
+The brain. It runs on the user's own machine by default (a VPS is optional, ADR 0006). This crate is the library; the binary comes later.
 
 - `control`: hard budgets per task and per day (S-47), anti-loop counter, retry budget,
   checkpoints, plan check, rule feasibility, retry evidence package, model output filter.

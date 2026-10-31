@@ -16,9 +16,13 @@ Las tareas de la lista (085 a 299) se agrupan por crate. Los grupos A a E no dep
 
 Yo me ocupo de: los prompts versionados y su escáner (104–107), la integración y el CI de todo lo anterior, las mediciones que se pueden hacer con el modelo gratuito (285, 286), y de mantener la lista y las decisiones.
 
+## Actualización 2026-10-31: sin servidor
+
+La persona decidió que por ahora no hay VPS: todo corre en su PC, que ya tiene Tailscale, y el VPS es una opción, no la base ([ADR 0006](../decisions/0006-local-first-vps-optional.md)). Las tareas 085 a 096 pasan a ser del equipo anfitrión (este PC); `infra/local/check-host.sh` verifica las que se pueden verificar, y `infra/vps/` queda como camino opcional. Falta un punto de entrada para usar Clio de verdad aquí (la CLI `clio`).
+
 ## Lo que no se puede ejecutar sin la persona
 
-- **VPS e infraestructura (085–096):** hace falta elegir proveedor y cuenta, una cuenta de Tailscale y dinero. Sin eso solo se puede escribir en seco. Queda como decisión. No invento credenciales ni creo recursos de pago.
+- **Respaldos cifrados y su restauración (093, 094):** hace falta elegir herramienta y destino (no hay restic, borg ni kopia instalados).
 - **Adaptador de Pi (097–103):** hace falta fijar una versión de Pi y decidir si el adaptador es TypeScript o un proceso aparte. Queda como decisión.
 - **Mediciones con el agente real (284, 287–297):** necesitan el agente completo corriendo con un modelo; se hacen cuando el cerebro exista.
 - **074** (umbrales) y la **055** (aislamiento de preproducción) dependen de lo anterior.

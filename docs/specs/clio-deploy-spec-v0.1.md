@@ -1,5 +1,7 @@
 ## clio-deploy · spec v0.1
 
+> **Actualización 2026-10-31 ([ADR 0006](../decisions/0006-local-first-vps-optional.md)):** la base es el equipo de la persona. Donde este spec dice «VPS», léase «el equipo anfitrión (este PC por defecto)»; el VPS es opcional.
+
 _Despliegue y automodificación. Fuente: pestaña «Spec: despliegue y automodificación» del artefacto «Clio · diseño del agente»._
 
 Cómo se actualiza Clio sin perder nada, y qué puede y qué no puede hacer cuando trabaja sobre su propio código.

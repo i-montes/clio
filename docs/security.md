@@ -25,7 +25,7 @@ Lo que encontré al revisar cada pieza del diagrama, ordenado por gravedad. Cada
 - **Cada mensaje sale a Jev**: El triaje manda cada mensaje a un tercero; sin limpieza, ahí van datos personales o secretos. (S-44)
 - **Fatiga y urgencia falsa**: Una inyección puede provocar notificaciones «urgentes» para que apruebes sin leer. (S-36)
 - **Autonomía que se crea sola**: Un trabajo programado o una política permanente es autonomía que sigue corriendo cuando nadie mira; si una inyección logra crearlos, se queda para siempre. (S-49 a S-52)
-- **El VPS como punto único**: Si cae el VPS, cae todo; si lo comprometen, tienen el cerebro. Las listas propias de cada nodo limitan el daño. (S-29, S-30, S-38 a S-40)
+- **El equipo anfitrión como punto único** (este PC o, si algún día se usa, un VPS): si cae, cae todo; si lo comprometen, tienen el cerebro. Las listas propias de cada nodo limitan el daño. (S-29, S-30, S-38 a S-40)
 
 ### Reglas obligatorias
 
@@ -77,10 +77,10 @@ La columna OWASP indica el riesgo del [OWASP Top 10 para aplicaciones con LLM (2
 | S-35 | El push no lleva contenido, solo «tienes algo pendiente». El detalle se ve en la PWA autenticada. | Inspeccionar los payloads de push: sin datos. | LLM02 |
 | S-36 | La pantalla de aprobación muestra la acción exacta (comando, archivo, diff, destino), quién la originó y si la sesión está contaminada; nunca solo un resumen escrito por el modelo. | Revisión de interfaz con casos sembrados. | LLM06 · LLM09 |
 | S-37 | Sesión con passkey; cookies Secure, HttpOnly y SameSite=Strict; vencimiento corto. | Escáner de cabeceras y prueba de sesión vencida. | — |
-| **VPS e infraestructura** |  |  |  |
+| **Equipo anfitrión (este PC o un VPS) e infraestructura** |  |  |  |
 | S-38 | Sin puertos públicos: solo Tailscale. SSH desactivado o solo por Tailscale. | Escaneo externo de puertos: nada abierto. | — |
 | S-39 | Procesos separados por usuario (agente, vault, memoria, trace), contenedores sin root y actualizaciones de seguridad automáticas. | Revisión de despliegue. | — |
-| S-40 | Disco cifrado, respaldos fuera del VPS cifrados, y restauración probada cada mes. | Restauración mensual en una máquina limpia. | — |
+| S-40 | Disco cifrado, respaldos cifrados fuera del equipo anfitrión, y restauración probada cada mes. | Restauración mensual en una máquina limpia. | — |
 | **Cadena de suministro** |  |  |  |
 | S-41 | Rust: `Cargo.lock` versionado, `cargo-audit` y `cargo-deny` en CI, revisión de cada bloque `unsafe`. | La CI falla con una vulnerabilidad conocida. | LLM03 |
 | S-42 | Pi y npm: versión fijada, lockfile, instalación sin scripts y revisión de cada actualización (un solo mantenedor). | La CI falla si cambia el lockfile sin revisión. | LLM03 |

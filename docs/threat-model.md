@@ -19,13 +19,22 @@ Qué protege Clio y de qué. Las reglas que lo cierran (S-xx), con su prueba, es
 - Dependencias, extensiones, skills o servidores MCP comprometidos.
 - Un dispositivo robado o perdido.
 - Un dispositivo comprometido dentro de la tailnet.
-- El VPS comprometido.
+- El equipo anfitrión comprometido (este PC o, si se usa, un VPS).
 - Proveedores que ven los datos.
 - Errores del propio modelo, sin malicia.
 
 ### Lo más grave: la trifecta letal
 
 Clio junta datos privados (memoria, archivos), contenido no confiable (web, Notion, correos) y salida al exterior (red, mensajes). Por eso la pasarela decide por sesión, no solo por acción (S-05, S-06). Los demás huecos conocidos y las reglas que los cierran están en [`security.md`](security.md#huecos-en-el-diseño-actual).
+
+### Si todo corre en tu propio PC (la base, ADR 0006)
+
+Sin servidor aparte, el agente corre como tu usuario. Eso trae un riesgo que un VPS no tenía: tus archivos personales (`~/.ssh`, el perfil del navegador, otros proyectos) están al alcance de cualquier cosa que el agente pueda ejecutar. Lo que lo limita hoy:
+- el sandbox de `clio-node` (carpeta de trabajo, rutas canonizadas, enlaces simbólicos hacia fuera rechazados) y la pasarela, que niega por defecto y no deja ejecutar comandos libres;
+- el vault y la pasarela son procesos aparte con sockets 0600, y ningún proceso de Clio escucha fuera de loopback ni de `tailscale0` (`infra/local/check-host.sh` lo vigila);
+- el disco cifrado, el cortafuegos activo y SSH apagado.
+
+Lo que aún falta y conviene saber: una **jaula a nivel de sistema** para ejecutar comandos (`bwrap` está instalado, no se usa todavía) y que pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe quedar fuera del alcance del agente. Mientras no haya jaula, el agente no ejecuta comandos: solo lee y escribe dentro del sandbox.
 
 ### Fuera de alcance
 

@@ -1,5 +1,7 @@
 ## clio-day-zero · spec v0.1
 
+> **Actualización 2026-10-31 ([ADR 0006](../decisions/0006-local-first-vps-optional.md)):** la base es el equipo de la persona. Donde este spec dice «VPS», léase «el equipo anfitrión (este PC por defecto)»; el VPS es opcional.
+
 _Día cero. Fuente: pestaña «Spec: día cero» del artefacto «Clio · diseño del agente»._
 
 Cómo nace Clio: lo que hay que hacer, en qué orden y qué no puede hacer hasta terminar.
