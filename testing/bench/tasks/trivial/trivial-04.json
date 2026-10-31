@@ -1,0 +1,11 @@
+{
+  "id": "trivial-04",
+  "input": "¿De qué color es el cielo en un día despejado?",
+  "check": {
+    "kind": "contains",
+    "value": "azul"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

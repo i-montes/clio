@@ -1,0 +1,11 @@
+{
+  "id": "trivial-11",
+  "input": "¿Cuántos minutos tiene una hora?",
+  "check": {
+    "kind": "contains",
+    "value": "60"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

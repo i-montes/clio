@@ -100,12 +100,12 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 ### Banco de evaluación
 
 - [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por señal externa, no por el modelo
-- [ ] **068** Escribir los 20 pedidos triviales que acompañan al banco
-- [ ] **069** Formato de una tarea del banco: entrada, criterio, comprobación, tope de pasos, costo y tiempo
-- [ ] **070** Runner del banco que repite cada tarea varias veces
-- [ ] **071** Runner del banco que devuelve éxito, costo y tiempo, en modo reproducción y en modo real
-- [ ] **072** Guardar cada corrida del banco en clio-trace
-- [ ] **073** Guardar una línea base como referencia fija
+- [x] **068** Escribir los 20 pedidos triviales que acompañan al banco
+- [x] **069** Formato de una tarea del banco: entrada, criterio, comprobación, tope de pasos, costo y tiempo
+- [x] **070** Runner del banco que repite cada tarea varias veces
+- [x] **071** Runner del banco que devuelve éxito, costo y tiempo, en modo reproducción y en modo real
+- [x] **072** Guardar cada corrida del banco en clio-trace
+- [x] **073** Guardar una línea base como referencia fija
 - [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones (decidir)
 
 ### Compuerta en el CI
@@ -122,7 +122,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Cierre de la fase 0
 
-- [ ] **084** El banco corre en modo reproducción y devuelve un número: éxito, costo y tiempo
+- [x] **084** El banco corre en modo reproducción y devuelve un número: éxito, costo y tiempo
 
 ---
 

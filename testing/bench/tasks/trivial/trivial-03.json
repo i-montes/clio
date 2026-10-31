@@ -1,0 +1,11 @@
+{
+  "id": "trivial-03",
+  "input": "¿Cuántos días tiene una semana?",
+  "check": {
+    "kind": "contains",
+    "value": "7"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

@@ -1,0 +1,11 @@
+{
+  "id": "trivial-07",
+  "input": "¿Cuál es el resultado de 10 × 3?",
+  "check": {
+    "kind": "contains",
+    "value": "30"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

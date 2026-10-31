@@ -1,0 +1,11 @@
+{
+  "id": "trivial-05",
+  "input": "¿Cuántos meses tiene un año?",
+  "check": {
+    "kind": "contains",
+    "value": "12"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

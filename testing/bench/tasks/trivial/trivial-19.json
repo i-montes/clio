@@ -1,0 +1,11 @@
+{
+  "id": "trivial-19",
+  "input": "¿En qué estación hace más frío en el hemisferio norte?",
+  "check": {
+    "kind": "contains",
+    "value": "invierno"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

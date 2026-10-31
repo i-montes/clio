@@ -1,0 +1,11 @@
+{
+  "id": "trivial-17",
+  "input": "¿Cuánto es la mitad de 50?",
+  "check": {
+    "kind": "contains",
+    "value": "25"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

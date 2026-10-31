@@ -1,0 +1,19 @@
+[package]
+name = "clio-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clio-fake-llm = { path = "../fake-llm" }
+clio-trace = { path = "../../crates/clio-trace" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+
+[lints]
+workspace = true

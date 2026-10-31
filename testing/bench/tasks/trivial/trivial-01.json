@@ -1,0 +1,11 @@
+{
+  "id": "trivial-01",
+  "input": "¿Cuál es la capital de Francia?",
+  "check": {
+    "kind": "contains",
+    "value": "París"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

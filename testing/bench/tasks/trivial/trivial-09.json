@@ -1,0 +1,11 @@
+{
+  "id": "trivial-09",
+  "input": "¿Cuántas letras tiene la palabra «gato»?",
+  "check": {
+    "kind": "contains",
+    "value": "4"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

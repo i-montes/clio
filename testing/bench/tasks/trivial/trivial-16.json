@@ -1,0 +1,11 @@
+{
+  "id": "trivial-16",
+  "input": "¿Qué día viene después del lunes?",
+  "check": {
+    "kind": "contains",
+    "value": "martes"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

@@ -1,0 +1,11 @@
+{
+  "id": "trivial-13",
+  "input": "¿Cuál es el opuesto de «frío»?",
+  "check": {
+    "kind": "contains",
+    "value": "caliente"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}

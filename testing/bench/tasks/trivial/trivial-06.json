@@ -1,0 +1,11 @@
+{
+  "id": "trivial-06",
+  "input": "¿Cómo se dice «hello» en español?",
+  "check": {
+    "kind": "contains",
+    "value": "hola"
+  },
+  "max_steps": 1,
+  "max_cost_micro_usd": 1000,
+  "max_duration_ms": 10000
+}
