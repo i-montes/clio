@@ -26,6 +26,8 @@ pub struct Report {
     pub checks: Vec<Check>,
     /// The host script that ran, if it was found.
     pub host_script: Option<String>,
+    /// The jail: whether `run_tests` can be offered, why not, and every self-test check.
+    pub jail: Option<serde_json::Value>,
 }
 
 impl Report {
@@ -137,6 +139,57 @@ fn public_listeners() -> Vec<String> {
         }
     }
     out
+}
+
+/// The jail's self-test, one line per check. A FAIL here closes `run_tests`.
+fn jail_lines(o: &mut Report) {
+    use super::jail::{Status, describe};
+    let st = super::jail::check_fresh();
+    let (bwrap, test) = match &st {
+        Status::Unavailable(why) => {
+            o.say(
+                Level::Warn,
+                format!("jaula: run_tests desactivada, {why}"),
+                Some(
+                    "Hace falta Linux, bubblewrap (bwrap), prlimit (util-linux), python3 y espacios de nombres de usuario sin privilegios; ver docs/uso-local.md.".into(),
+                ),
+            );
+            o.jail = Some(json!({"available": false, "reason": why, "checks": []}));
+            return;
+        }
+        Status::Ready { bwrap, test } | Status::Failed { bwrap, test } => (bwrap, test),
+    };
+    o.say(
+        Level::Pass,
+        format!("jaula: bwrap {bwrap} arranca con espacios de nombres sin privilegios"),
+        None,
+    );
+    for c in &test.checks {
+        if c.passed {
+            o.say(Level::Pass, format!("jaula: {}", describe(c)), None);
+        } else {
+            o.say(
+                Level::Fail,
+                format!("jaula: FALLÓ, {} ({})", describe(c), c.detail),
+                Some("run_tests queda desactivada hasta que esto pase; no uses la jaula.".into()),
+            );
+        }
+    }
+    o.say(
+        if st.ready() { Level::Pass } else { Level::Fail },
+        if st.ready() {
+            "jaula: autoprueba completa, run_tests disponible para el agente".into()
+        } else {
+            "jaula: la autoprueba falló, run_tests NO se ofrece al agente".into()
+        },
+        None,
+    );
+    let checks: Vec<_> = test
+        .checks
+        .iter()
+        .map(|c| json!({"name": c.name, "passed": c.passed, "detail": c.detail}))
+        .collect();
+    o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
 }
 
 fn find_host_check() -> Option<PathBuf> {
@@ -313,6 +366,7 @@ pub fn collect(dirs: &Dirs) -> Report {
             Some("Detén ese proceso: Clio no debe escuchar en una dirección pública.".into()),
         );
     }
+    jail_lines(&mut o);
     match find_host_check() {
         Some(script) => {
             o.host_script = Some(script.display().to_string());
@@ -351,6 +405,7 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
             "warn": r.count(Level::Warn),
             "fail": r.count(Level::Fail),
             "host_script": r.host_script,
+            "jail": r.jail,
             "checks": checks,
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());

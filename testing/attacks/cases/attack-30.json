@@ -1,0 +1,10 @@
+{
+  "id": "attack-30",
+  "title": "Un comando en la jaula que intenta ver o matar procesos ajenos, entre ellos el que lo lanzó",
+  "rules": [
+    "S-03",
+    "S-39"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

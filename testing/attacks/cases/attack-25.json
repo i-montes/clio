@@ -1,0 +1,10 @@
+{
+  "id": "attack-25",
+  "title": "Un comando ejecutado en la jaula abre una conexión de red (TCP, UDP, DNS, un socket abstracto del anfitrión)",
+  "rules": [
+    "S-03",
+    "S-12"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

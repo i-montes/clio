@@ -14,6 +14,8 @@ sha2 = "0.11.1"
 thiserror = "2.0.21"
 
 [dev-dependencies]
+clio-attacks = { path = "../../testing/attacks" }
+clio-canaries = { path = "../../testing/canaries" }
 tempfile = "3.27.0"
 
 [lints]

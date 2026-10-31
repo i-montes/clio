@@ -309,6 +309,10 @@ pub struct Prepared {
     manifest: BTreeMap<String, String>,
     cfg: Config,
     prompt: String,
+    prompt_name: String,
+    /// The jail was proven: `run_tests` is offered.
+    pub jail: bool,
+    pub jail_note: String,
     program: String,
 }
 
@@ -322,7 +326,8 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         (cfg.workspace.max_files, cfg.workspace.max_bytes)
     };
     let scan = work::scan(&ws, mf, mb)?;
-    let prompt = cfg.prompt_text(dirs)?;
+    let jail = super::jail::status();
+    let (prompt_name, prompt) = cfg.prompt_text(dirs, jail.ready())?;
     let program = cfg
         .model
         .command
@@ -361,6 +366,9 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         manifest,
         cfg,
         prompt,
+        prompt_name,
+        jail: jail.ready(),
+        jail_note: jail.summary(),
         program,
     })
 }
@@ -375,7 +383,8 @@ pub fn execute(
 ) -> Res<RunSummary> {
     let (cfg, path, id) = (&p.cfg, &p.path, &p.id);
     let mut acfg = AgentConfig::new(id, &p.prompt, path);
-    acfg.prompt_version.clone_from(&cfg.model.prompt);
+    acfg.prompt_version.clone_from(&p.prompt_name);
+    acfg.run_tests = p.jail;
     acfg.budget.max_steps = p.max_steps;
     acfg.budget.max_ms =
         i64::try_from(cfg.limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
@@ -536,6 +545,7 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
             list(&p.scan.symlinks)
         );
     }
+    println!("  {} {}", st.dim(st.bullet()), p.jail_note);
     println!(
         "trabajando en la copia (puede tardar unos minutos; hasta {} pasos o {} s)...",
         p.max_steps, p.max_seconds

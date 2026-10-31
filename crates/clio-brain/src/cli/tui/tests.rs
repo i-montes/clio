@@ -617,6 +617,7 @@ fn report() -> Report {
             },
         ],
         host_script: None,
+        jail: None,
     }
 }
 
@@ -964,6 +965,7 @@ fn hostile_doctor_and_notice_text_is_cleaned() {
             hint: Some("h\u{1b}]0;pwned-title\u{7}".into()),
         }],
         host_script: None,
+        jail: None,
     });
     a.notice =
         Some("rechazado:\n  \u{1b}[2J.git/x\u{1b}]0;pwned-title\u{7}: ruta protegida\rFAKE".into());

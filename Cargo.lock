@@ -320,6 +320,8 @@ version = "0.0.0"
 name = "clio-node"
 version = "0.0.0"
 dependencies = [
+ "clio-attacks",
+ "clio-canaries",
  "clio-core",
  "serde",
  "serde_json",

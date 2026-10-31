@@ -1,0 +1,10 @@
+{
+  "id": "attack-31",
+  "title": "Un comando en la jaula que intenta heredar las claves del entorno de quien lo lanzó (OPENCODE_API_KEY, SSH_AUTH_SOCK)",
+  "rules": [
+    "S-03",
+    "S-20"
+  ],
+  "status": "active",
+  "expect": "refused"
+}
