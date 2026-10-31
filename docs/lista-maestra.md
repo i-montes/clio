@@ -81,8 +81,8 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 - [x] **052** `testing/canaries`: escáner que busca los señuelos (en claro, base64 y codificados para URL) en trazas, logs, payloads, memoria y contexto
 - [x] **053** prueba: un señuelo que aparece en una traza hace fallar la compuerta (`a_decoy_in_a_trace_fails_the_gate`; el CI corre `cargo test --workspace`)
 - [x] **054** Datos sintéticos: generador de memoria y archivos de prueba, nunca datos reales
-- [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1)
-- [ ] **056** Decidir si Jev, el push y los proveedores falsos se escriben ahora o con su fase (se escriben en las fases 4 y 6)
+- [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1) — se prueba con el vault y los nodos de la fase 1; aún no hay nada que aislar
+- [x] **056** Decidir si Jev, el push y los proveedores falsos se escriben ahora o con su fase (se escriben en las fases 4 y 6)
 
 ### clio-trace mínimo
 
@@ -99,14 +99,14 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Banco de evaluación
 
-- [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por señal externa, no por el modelo
+- [ ] **067** Elegir las 10 tareas reales (tuyas), el banco propio de D15: éxito comprobable por señal externa, no por el modelo — pendiente de ti; ver `testing/bench/tasks/real/README.md`
 - [x] **068** Escribir los 20 pedidos triviales que acompañan al banco
 - [x] **069** Formato de una tarea del banco: entrada, criterio, comprobación, tope de pasos, costo y tiempo
 - [x] **070** Runner del banco que repite cada tarea varias veces
 - [x] **071** Runner del banco que devuelve éxito, costo y tiempo, en modo reproducción y en modo real
 - [x] **072** Guardar cada corrida del banco en clio-trace
 - [x] **073** Guardar una línea base como referencia fija
-- [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones (decidir)
+- [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones (decidir) — hay valores provisionales en `testing/bench/thresholds.json`; faltan corridas reales
 
 ### Compuerta en el CI
 
