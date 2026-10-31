@@ -1,13 +1,11 @@
 name: release
 
 # 077: before a release, everything the PR checks run, plus the bench, the attacks, the chaos
-# run and the human review of the gateway, the vault and the node signatures.
-#
-# The `review` job FAILS ON PURPOSE until someone can really approve: GitHub only offers required
-# reviewers on environments for a public repository or a paid plan, and without them an
-# environment approves itself. A release that nobody can review must not go out. When it is
-# possible, replace the failing step with `environment: release-review` (required reviewer: the
-# owner) and delete the `run`.
+# run and the human review of the gateway, the vault and the node signatures. The `review` job
+# uses the `release-review` environment, whose required reviewer is the owner: the release waits
+# there until a person approves it. Before approving, read what changed in the sensitive paths:
+#   git diff <last tag>..<this tag> -- crates/clio-gateway crates/clio-vault crates/clio-node apps/pwa
+# Never create that environment without a required reviewer: it would approve itself.
 
 on:
   push:
@@ -54,10 +52,9 @@ jobs:
       - run: cargo test --locked -p clio-chaos
   review:
     runs-on: ubuntu-latest
+    environment: release-review
     steps:
-      - run: |
-          echo "::error::Release blocked: there is no way to require a human review yet (needs a public repository or a paid GitHub plan). See the comment at the top of this file."
-          exit 1
+      - run: echo "A person approved this release after reading the changes to the gateway, the vault, the node signatures and the PWA."
   release:
     needs: [checks, bench, attacks, chaos, review]
     runs-on: ubuntu-latest
