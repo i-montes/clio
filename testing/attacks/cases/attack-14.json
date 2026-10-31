@@ -4,6 +4,6 @@
   "rules": [
     "S-16"
   ],
-  "status": "pending",
+  "status": "active",
   "expect": "refused"
 }

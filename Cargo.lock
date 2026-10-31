@@ -165,6 +165,14 @@ dependencies = [
 [[package]]
 name = "clio-gateway"
 version = "0.0.0"
+dependencies = [
+ "clio-attacks",
+ "clio-canaries",
+ "clio-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "clio-memory"
