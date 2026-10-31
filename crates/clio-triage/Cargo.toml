@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+description = "Rule-based message triage: assigns the level of a request."
+
+[dependencies]
+clio-core = { path = "../clio-core" }
 
 [lints]
 workspace = true

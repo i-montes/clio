@@ -141,6 +141,14 @@ version = "0.0.0"
 [[package]]
 name = "clio-contract"
 version = "0.0.0"
+dependencies = [
+ "clio-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "clio-core"
@@ -213,6 +221,9 @@ dependencies = [
 [[package]]
 name = "clio-triage"
 version = "0.0.0"
+dependencies = [
+ "clio-core",
+]
 
 [[package]]
 name = "clio-vault"
