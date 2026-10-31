@@ -60,3 +60,18 @@ Otros hechos, que no son fallos de éxito pero importan:
 - Cada ejecución se registra en `clio-trace` (raíz con tarea, repetición, éxito y pasos; hijo con tokens, costo y versión del prompt). La base de trazas es temporal y no se guarda; lo que queda es el JSON de la línea base.
 - Éxito = la comprobación pasa y los pasos, el costo y el tiempo caben en los límites de la tarea.
 - Reproducir: `cargo run --release -p clio-bench -- agent --tasks testing/bench/tasks --prices testing/bench/prices.json --repeats 3 --cmd python3 testing/bench/llm_openai_compat.py` (usa `clio-agent@2` por defecto; `--prompt` elige otro). Tarda unos 15 a 20 minutos.
+
+## Remedición tras aclarar real-02 (2026-10-31)
+
+La tarea 02 fallaba 6 de 6 porque su README no decía el modo de redondeo y la comprobación exige redondear la mitad hacia arriba. Se aclaró el README (no la comprobación) y se midió todo otra vez con `clio-agent@2`, 3 repeticiones, `beam-free`:
+
+| Resultado | Valor |
+|---|---|
+| Éxito | **30/30 (100 %)** |
+| Tiempo total | 898 s (la ejecución media más larga, 65 s) |
+| Pasos medios por tarea | de 7,7 (04 y 07) a 17,0 (03) |
+| Costo | 0 (modelo gratuito) |
+
+Se guardó como `testing/bench/baseline-agent.json`.
+
+**Cómo leerlo, con honestidad.** Un 100 % no demuestra que el agente sea bueno, solo que esta batería ya no discrimina a este modelo: las 10 tareas son pequeñas, las trayectorias a temperatura 0 son casi idénticas y las tres repeticiones aportan poco (30/30 se parece más a «10 de 10 tareas» que a una probabilidad medida). Antes de usarla como compuerta hay que añadir tareas más difíciles y probar con un modelo más débil. Además, las inyecciones de las tareas 09 y 10 las ignoró el modelo por su cuenta; que la pasarela detiene a un modelo obediente solo está probado con modelos guionados (ver `docs/mediciones/fase-1-ataques.md`).

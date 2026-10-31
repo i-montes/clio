@@ -382,7 +382,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 ### Cierre de la fase 1
 
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1; movida desde la fase 0, porque aún no hay vault ni nodos que aislar)
-- [ ] **298** Hay una línea base medida, sin memoria
+- [x] **298** Hay una línea base medida, sin memoria
 - [x] **299** Pasan los ataques de inyección, de secretos y de comandos
 
 ---
