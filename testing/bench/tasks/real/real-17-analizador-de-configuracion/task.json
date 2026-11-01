@@ -8,7 +8,7 @@
   },
   "max_steps": 40,
   "max_cost_micro_usd": 100000,
-  "max_duration_ms": 600000,
+  "max_duration_ms": 1200000,
   "tags": [
     "code",
     "parser",

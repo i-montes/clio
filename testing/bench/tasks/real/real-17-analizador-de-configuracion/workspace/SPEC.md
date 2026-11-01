@@ -26,7 +26,7 @@ Escapes dentro de una cadena: `\"`, `\\`, `\n`, `\t`, `\r` y `\uXXXX` (exactamen
 
 ## Secciones
 
-`[nombre]` o `[a.b.c]` abre una sección: las claves siguientes van dentro de ese diccionario anidado (`[a.b]` crea `{"a": {"b": {...}}}`). Las partes siguen la sintaxis de las claves, sin espacios. Abrir `[a.b]` crea `a` si no existía; abrir después `[a]` es válido. Es un error: abrir dos veces la misma sección, abrir una sección cuyo nombre ya es una clave con valor (`a = 1` y luego `[a]`) o repetir una clave que ya existe como sección dentro de una sección.
+`[nombre]` o `[a.b.c]` abre una sección: las claves siguientes van dentro de ese diccionario anidado (`[a.b]` crea `{"a": {"b": {...}}}`). Las partes siguen la sintaxis de las claves, sin espacios: dentro de los corchetes no se admiten espacios (`[ a ]` y `[a. b]` son errores), pero sí antes de la cabecera y entre ella y un comentario. Abrir `[a.b]` crea `a` si no existía; abrir después `[a]` es válido. Es un error: abrir dos veces la misma sección, abrir una sección cuyo nombre ya es una clave con valor (`a = 1` y luego `[a]`) o repetir una clave que ya existe como sección dentro de una sección.
 
 ## Errores
 
