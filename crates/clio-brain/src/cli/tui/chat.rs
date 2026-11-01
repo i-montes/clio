@@ -174,7 +174,7 @@ impl Chat {
         self.meter.refresh(&r.stats);
         if r.tainted && !self.tainted {
             self.items.push(Item::Note(
-                "esta sesión leyó contenido externo: todo lo que traiga es solo dato".into(),
+                "esta sesión leyó contenido externo: lo trata como información, nunca como órdenes".into(),
             ));
         }
         self.tainted |= r.tainted;
