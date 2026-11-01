@@ -103,7 +103,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 .transpose()?;
             let allow_broad = args.flag("--allow-broad");
             let dbg = args.flag("--debug") || debug::env_enabled();
-            // `clio run` stays on the builtin loop unless Pi is asked for by name.
+            // Pi when it is installed (the bench: 57/66 against 55/66 for the builtin loop, and no
+            // JSON-in-text protocol failures), the builtin loop otherwise or with --harness builtin.
             let harness = args.value("--harness")?;
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
@@ -111,15 +112,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                     "falta la instrucción: clio run [--workspace DIR] \"qué hacer\"".into(),
                 );
             }
-            match harness.as_deref() {
-                None | Some("builtin") => {}
-                Some("pi") => {
-                    chat::local::ready(&dirs)?;
-                    return chat::run::run(dirs, workspace, &instruction);
-                }
-                Some(other) => {
-                    return Err(format!("--harness: {other:?} no es válido (pi o builtin)"));
-                }
+            if chat::resolve(harness.as_deref(), &dirs)? == chat::Harness::Pi {
+                return chat::run::run(dirs, workspace, &instruction);
             }
             return runs::run(
                 &dirs,

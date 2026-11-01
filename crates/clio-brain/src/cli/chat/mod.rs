@@ -28,10 +28,9 @@ pub enum Harness {
     Builtin,
 }
 
-/// ONE LINE to change what `clio` opens when nobody says: `true` is Pi when it is installed, and
-/// the builtin loop otherwise; `false` is always the builtin loop. `--harness` and `CLIO_HARNESS`
-/// override it either way. `clio run` is not affected: it stays on the builtin loop until the
-/// bench passes with Pi.
+/// ONE LINE to change what `clio` and `clio run` use when nobody says: `true` is Pi when it is
+/// installed, and the builtin loop otherwise; `false` is always the builtin loop. `--harness` and
+/// `CLIO_HARNESS` override it either way.
 pub const TUI_PI_WHEN_INSTALLED: bool = true;
 
 /// `--harness`, then `CLIO_HARNESS`, then the default above. Asking for `pi` when it cannot run
