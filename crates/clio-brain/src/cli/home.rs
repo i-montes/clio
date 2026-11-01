@@ -70,6 +70,10 @@ pub struct ModelCfg {
     pub prompt: String,
     pub price_in_micro_per_mtok: u64,
     pub price_out_micro_per_mtok: u64,
+    /// Where Pi reaches the model (the `pi` harness; the builtin adapter has its own address).
+    /// `None`: the provider's usual address. Meant for a local fake model in tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +106,7 @@ impl Config {
                 prompt: DEFAULT_PROMPT_NAME.into(),
                 price_in_micro_per_mtok: 0,
                 price_out_micro_per_mtok: 0,
+                base_url: None,
             },
             limits: Limits {
                 max_steps: 40,

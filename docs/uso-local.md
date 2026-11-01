@@ -243,6 +243,9 @@ Iguales en todas las pantallas: un atajo significa lo mismo donde exista (`c` co
 - **Ayuda**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` el principio · `G` `Fin` el final · `Ctrl-F` `AvPág` página abajo · `Ctrl-B` `RePág` página arriba · `Esc` `q` `?` `Enter` `Ctrl-C` cerrar la ayuda.
 - **Memoria**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` ver completo · `p` aprobar · `a` archivar · `/` buscar · `r` refrescar · `?` ayuda · `Esc` `q` `Ctrl-C` volver.
 - **Memoria, escribiendo la búsqueda**: `Enter` dejar la búsqueda · `Esc` borrar la búsqueda · `↓` bajar · `↑` subir · `Ctrl-C` borrar la búsqueda.
+- **Sesiones de Pi**: `j` `↓` bajar · `k` `↑` subir · `g` `Inicio` primero · `G` `Fin` último · `Enter` abrir · `n` nueva · `r` refrescar · `D` doctor · `m` memoria · `q` `Ctrl-C` salir · `?` ayuda.
+- **Chat, en espera**: `Enter` enviar · `Alt-Enter` `Ctrl-J` línea nueva · `Ctrl-U` borrar el mensaje · `↑` `↓` desplazar · `Ctrl-B` `RePág` página arriba · `Ctrl-F` `AvPág` página abajo · `F1` ayuda · `Esc` sesiones · `Ctrl-C` salir.
+- **Chat, el agente trabaja**: `Enter` orientar al agente (steer) · `Esc` `Ctrl-C` abortar el turno · el resto igual.
 - **En todas**: `Ctrl-D` modo debug · `Ctrl-L` redibujar.
 
 ### Modo debug
@@ -515,9 +518,15 @@ clio vault stop
 
 Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en `CLIO_VAULT_BIN`/`PATH`). Los dos sockets quedan en `$XDG_RUNTIME_DIR/clio/` con permisos 0600; el archivo de la bóveda en `~/.local/share/clio/vault.bin`.
 
-## Pi, el arnés del agente (en preparación)
+## Pi, el arnés del agente
 
-Pi (decisión 0007) será quien corra el bucle del agente, los proveedores, las sesiones y la compactación. Todavía NO lo usan la interfaz ni `clio run` (siguen con el arnés `builtin`); lo que ya existe es la base:
+Pi (decisión 0007) corre el bucle del agente, los proveedores, las sesiones y la compactación. Con Pi instalado, `clio` abre **el selector de sesiones y el chat** sobre Pi (`clio --harness builtin` o `CLIO_HARNESS=builtin` vuelven a la lista de runs del arnés propio; `clio --harness pi` exige Pi y dice qué falta). `clio run` sigue con el arnés `builtin` hasta que el bench pase con Pi; `clio run --harness pi "instrucción"` corre un prompt sobre Pi sin terminal.
+
+**El selector** lista «nueva sesión» (una copia del proyecto actual) y las sesiones de la carpeta de Pi de Clio (`Enter` abre, `n` nueva); una fila `remoto: pendiente` ya está para las sesiones por `ssh <host> clio serve-rpc`, que todavía no existen. **El chat** muestra el texto del agente según llega, una línea por herramienta (nombre, argumentos resumidos, duración, `negado` o `falló` si no), líneas discretas para compactación y reintentos, y un aviso cuando la sesión leyó contenido externo (`externo` en la barra de estado). `Enter` envía; con el agente trabajando, `Enter` lo orienta (steer) y `Esc` aborta el turno. La barra de estado muestra tokens, costo, pasos (llamadas al modelo), tiempo y el contexto, de las cifras de Pi. `Ctrl-D` muestra debajo los eventos de Pi tal como llegan.
+
+**Qué arranca una sesión** (todo en un solo lugar, `src/cli/chat/local.rs`): una copia del proyecto como un run (`~/.local/share/clio/runs/<id>/sandbox`, así que `clio diff|apply|undo <id>` sirven para lo que Pi cambió), `clio toolhost` sobre esa copia (el único que toca archivos y corre comandos, dentro de la jaula) y Pi con la guardia `clio-guard`. Todo se detiene al salir de la sesión, al salir de `clio`, con un pánico y también si matan a `clio` (Pi y el toolhost terminan solos al cerrarse su entrada). Una sesión que no es una copia de Clio (la creó otra herramienta) se lista pero no se abre aquí. La clave sale solo de `OPENCODE_API_KEY` o de `~/.config/clio/opencode-api-key`.
+
+Lo que ya existía:
 
 ```sh
 clio pi install            # instala Pi fijado (1.4.0) con `npm ci --ignore-scripts`; `clio init` y `just install` también

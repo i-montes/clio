@@ -1090,3 +1090,58 @@ fn a_decoy_in_an_answer_a_file_name_a_tool_call_or_a_reason_reaches_no_view_no_l
         &std::fs::read_to_string(tmp.path().join("debug.log")).unwrap(),
     );
 }
+
+#[test]
+fn the_selector_and_the_chat_never_draw_hostile_text_and_fit_every_size() {
+    use super::chat::{Chat, Item, ToolState};
+    use crate::cli::chat::{RemoteSource, Row, RowKind, SessionSource};
+    let h = HOSTILE.join(" ");
+    let mut app = with_runs();
+    app.use_pi();
+    let mut rows = vec![Row {
+        kind: RowKind::Session,
+        title: h.clone(),
+        detail: h.clone(),
+        messages: 3,
+        last_ms: Some(0),
+        reference: String::new(),
+        unavailable: Some(h.clone()),
+    }];
+    rows.extend(RemoteSource.list());
+    app.sessions.set(rows);
+    app.sessions.sel = 1;
+    for (w, h) in SIZES {
+        let s = screen_text(&app, w, h);
+        assert_clean(&s);
+        assert_fits(&s, w, h);
+    }
+    app.screen = Screen::Chat;
+    app.chat = Chat::opening(1, 0);
+    app.chat.opened(h.clone(), h.clone(), &[], None, 0);
+    app.chat.input = h.clone();
+    app.chat.items = vec![
+        Item::User(h.clone()),
+        Item::Assistant {
+            text: format!("{h}\n{h} una linea larga {}", "palabra ".repeat(60)),
+            live: true,
+        },
+        Item::Tool {
+            id: "1".into(),
+            name: h.clone(),
+            summary: h.clone(),
+            state: ToolState::Denied,
+            ms: Some(12),
+        },
+        Item::Note(h.clone()),
+        Item::Error(h.clone()),
+    ];
+    app.chat.raw.push_back(h.clone());
+    for debug in [false, true] {
+        app.debug = debug;
+        for (w, h) in SIZES {
+            let s = screen_text(&app, w, h);
+            assert_clean(&s);
+            assert_fits(&s, w, h);
+        }
+    }
+}

@@ -230,6 +230,7 @@ dependencies = [
  "clio-gateway",
  "clio-memory",
  "clio-node",
+ "clio-toolhost",
  "clio-triage",
  "clio-vault",
  "crossterm",
