@@ -168,7 +168,13 @@ export default function clioGuard(pi: ExtensionAPI) {
 		const schema = d.parameters ?? { type: "object", properties: {} };
 		pi.registerTool({
 			...d,
-			parameters: { ...schema, properties: { ...schema.properties, reason: { type: "string", description: REASON } } },
+			// Required, not optional: a model ignores an optional field (measured with beam-free).
+			parameters: {
+				...schema,
+				properties: { ...schema.properties, reason: { type: "string", minLength: 1, description: REASON } },
+				required: [...new Set([...(schema.required ?? []), "reason"])],
+			},
+			promptGuidelines: [...(d.promptGuidelines ?? []), "Always fill `reason`: 2 to 6 words, in the user's language, saying why you use this tool."],
 			// biome-ignore lint/suspicious/noExplicitAny: same
 			execute: (id: string, params: any, ...more: any[]) => {
 				const { reason: _reason, ...own } = params ?? {};

@@ -266,7 +266,7 @@ fn steering_a_running_turn_and_a_tool_line_with_its_duration() {
         return;
     }
     let w = World::new(
-        r#"[{"delay_ms":2500,"tool_calls":[{"name":"write","arguments":{"path":"out.txt","content":"x\n"}},{"name":"write","arguments":{"path":".git/hook","content":"x\n"}},{"name":"read","arguments":{"path":"app.py"}}]},{"text":"done after the steer","usage":[80,6]}]"#,
+        r#"[{"delay_ms":2500,"tool_calls":[{"name":"write","arguments":{"reason":"probar","path":"out.txt","content":"x\n"}},{"name":"write","arguments":{"reason":"probar","path":".git/hook","content":"x\n"}},{"name":"read","arguments":{"reason":"probar","path":"app.py"}}]},{"text":"done after the steer","usage":[80,6]}]"#,
     );
     let v = w.pty("steer");
     ok(
@@ -361,7 +361,7 @@ fn clio_run_with_pi_prints_the_answer_and_the_change_shows_in_diff() {
         return;
     }
     let w = World::new(
-        r#"[{"tool_calls":[{"name":"write","arguments":{"path":"new.txt","content":"hi\n"}}]},{"text":"hello from the fake model","usage":[100,5]}]"#,
+        r#"[{"tool_calls":[{"name":"write","arguments":{"reason":"probar","path":"new.txt","content":"hi\n"}}]},{"text":"hello from the fake model","usage":[100,5]}]"#,
     );
     let o = w
         .clio(&["run", "--harness", "pi", "haz algo"])
