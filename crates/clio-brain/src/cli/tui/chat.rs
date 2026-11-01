@@ -476,18 +476,25 @@ pub fn wrap(text: &str, w: usize) -> Vec<String> {
     out
 }
 
-/// What a tool is doing, in words: "Leyó" when done, "Leyendo" while it runs.
-fn action(name: &str, running: bool) -> String {
-    let (done, doing) = match name {
-        "read" => ("Leyó", "Leyendo"),
-        "write" => ("Escribió", "Escribiendo"),
-        "edit" => ("Editó", "Editando"),
-        "bash" => ("Ejecutó", "Ejecutando"),
-        "ls" => ("Listó", "Listando"),
-        "find" => ("Buscó", "Buscando"),
-        other => return clean(other),
-    };
-    (if running { doing } else { done }).to_owned()
+/// What a tool does, as a title ("Leer archivo"), like Aria's steps.
+fn title(name: &str) -> String {
+    match name {
+        "read" => "Leer archivo".into(),
+        "write" => "Escribir archivo".into(),
+        "edit" => "Editar archivo".into(),
+        "bash" => "Ejecutar comando".into(),
+        "ls" => "Listar carpeta".into(),
+        "find" => "Buscar archivos".into(),
+        other => clean(other),
+    }
+}
+
+/// What a step works on: a file by its name, a command or a pattern.
+fn chip(name: &str, summary: &str) -> String {
+    if matches!(name, "read" | "write" | "edit") {
+        return summary.rsplit('/').next().unwrap_or_default().to_owned();
+    }
+    summary.to_owned()
 }
 
 /// A kind of block; a blank line separates two blocks of different kinds, and the speaker's label
@@ -515,7 +522,6 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
         if last != Some(kind) && last.is_some() {
             lines.push(Line::from(""));
         }
-        let new_block = last != Some(kind);
         last = Some(kind);
         let indented =
             |text: &str, style: ratatui::style::Style, lines: &mut Vec<Line<'static>>| {
@@ -525,14 +531,20 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
             };
         match it {
             Item::User(text) => {
-                // Two messages in a row are two blocks: label each one.
-                lines.push(Line::from(Span::styled("tú", t.accent())));
-                indented(text, t.plain(), &mut lines);
+                // The accent marks you, as the composer's `›` does.
+                for (i, row) in wrap(&sanitize::multiline(text), body)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let lead = if i == 0 {
+                        Span::styled(format!("{} ", t.sel()), t.accent())
+                    } else {
+                        Span::raw("  ")
+                    };
+                    lines.push(Line::from(vec![lead, Span::styled(row, t.accent())]));
+                }
             }
             Item::Assistant { text, .. } => {
-                if new_block {
-                    lines.push(Line::from(Span::styled("clio", t.bold())));
-                }
                 indented(text, t.plain(), &mut lines);
             }
             Item::Tool {
@@ -550,9 +562,10 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 };
                 let dur = ms.map_or_else(String::new, |m| format!("  {}", usage::ms_label(m)));
                 let tail = format!("{word}{dur}");
-                let label = action(name, *state == ToolState::Running);
+                let label = title(name);
+                let summary = chip(name, summary);
                 let room = w.saturating_sub(4 + label.chars().count() + 2 + tail.chars().count());
-                let summary = super::debug_view::fit(&clean(summary), room.max(8), t);
+                let summary = super::debug_view::fit(&clean(&summary), room.max(8), t);
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(format!("{mark} "), style),
