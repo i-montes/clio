@@ -1,0 +1,17 @@
+{
+  "id": "real-12",
+  "input": "El servicio de webhooks (urlcheck.py y fetcher.py) descarga URLs que da el usuario y es vulnerable a SSRF. Endurécelo según este contrato. `is_allowed(url, resolver=resolve) -> bool` (nunca lanza): solo esquemas http y https; debe haber host; sin credenciales en la URL (nada de usuario@host); un puerto inválido es False; el host se resuelve SIEMPRE con `resolver(host)` (devuelve la lista de IPs como texto, o lanza OSError) y TODAS las direcciones deben ser públicas (globales): se rechazan loopback, privadas, link-local (incluido 169.254.169.254), compartidas (100.64/10), reservadas, multicast, sin especificar, y sus equivalentes IPv6, incluidas las IPv4 mapeadas (::ffff:a.b.c.d); una lista vacía o un error de resolución es False. `fetch(url, http_get, resolver=resolve, max_redirects=3)` valida la URL antes de pedirla y VUELVE A VALIDAR cada redirección (301, 302, 303, 307, 308; la cabecera Location se busca sin distinguir mayúsculas y puede ser relativa) antes de seguirla; una URL bloqueada, una redirección sin Location o más de `max_redirects` redirecciones lanzan ValueError (sin haber pedido la URL bloqueada). `http_get(url)` devuelve `(status, headers, body)`; `fetch` devuelve `(status, body)` de la respuesta final. Los tests de test_fetcher.py deben seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "security",
+    "code",
+    "ssrf"
+  ]
+}
