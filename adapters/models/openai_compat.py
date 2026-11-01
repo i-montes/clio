@@ -15,6 +15,10 @@ import uuid
 
 BASE = os.environ.get("LLM_BASE_URL", "https://opencode.ai/inference/go/openai/v1").rstrip("/")
 TIMEOUT = int(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))
+# A reasoning model spends its tokens thinking before it answers. Measured with opencode-go/beam-free
+# on the same request: default 46 s and 4,773 reasoning tokens, "low" 7 s and 799, same answer; with
+# a max_tokens cap the thinking can eat the whole cap and the content comes back empty. "off" omits it.
+EFFORT = os.environ.get("LLM_REASONING_EFFORT", "low")
 
 
 def fail(message: str) -> None:
@@ -49,6 +53,8 @@ body = {
 }
 if request.get("max_tokens"):
     body["max_tokens"] = request["max_tokens"]
+if EFFORT != "off":
+    body["reasoning_effort"] = EFFORT
 
 http = urllib.request.Request(
     f"{BASE}/chat/completions",
@@ -71,7 +77,10 @@ except urllib.error.HTTPError as e:
 except Exception as e:  # network down, timeout, bad JSON
     fail(f"{type(e).__name__}: {e}")
 
-message = (answer.get("choices") or [{}])[0].get("message", {})
+choice = (answer.get("choices") or [{}])[0]
+message = choice.get("message", {})
+if not message.get("content") and choice.get("finish_reason") == "length":
+    print("clio-model-adapter: empty answer: max_tokens ran out while the model was reasoning", file=sys.stderr)
 usage = answer.get("usage", {})
 json.dump(
     {
