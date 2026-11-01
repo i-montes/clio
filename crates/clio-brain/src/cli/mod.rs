@@ -4,6 +4,7 @@
 //! decides what goes back to the original (S-14).
 
 pub mod apply;
+pub mod chat;
 pub mod debug;
 pub mod diff;
 pub mod doctor;

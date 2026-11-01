@@ -13,6 +13,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use super::chat::Chat;
 use super::detail::Detail;
 use super::doctor::DoctorView;
 use super::home::{Header, Home};
@@ -21,8 +22,10 @@ use super::live::Live;
 use super::memory::{MemoryData, MemoryView};
 use super::new_run::{NewRun, Preview};
 use super::sanitize;
+use super::sessions::Sessions;
 use super::theme::Theme;
 use super::{meter, status};
+use crate::cli::chat::{Opened, Refresh, Row};
 use crate::cli::doctor::Report;
 use crate::cli::runs::{RunInfo, RunSummary};
 use crate::cli::usage::{DEFAULT_WINDOW, RunLimits, RunUsage, Snapshot};
@@ -38,6 +41,16 @@ pub enum Screen {
     Context,
     Usage,
     Memory,
+    /// The Pi harness: the session selector and the chat.
+    Sessions,
+    Chat,
+}
+
+/// What to open in a Pi chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenTarget {
+    New { project: String },
+    Existing { reference: String },
 }
 
 /// Something to do outside of `update`.
@@ -79,6 +92,22 @@ pub enum Cmd {
         id: i64,
         useful: bool,
     },
+    LoadSessions,
+    /// Open a Pi session; `seq` says which request the answer belongs to.
+    ChatOpen {
+        seq: u64,
+        target: OpenTarget,
+    },
+    ChatSend {
+        text: String,
+    },
+    /// A message to the run in progress.
+    ChatSteer {
+        text: String,
+    },
+    ChatAbort,
+    /// Leave the chat: stop its Pi and its toolhost.
+    ChatClose,
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),
     /// Clear the terminal and draw everything again.
@@ -110,6 +139,36 @@ pub enum Bg {
     Planned(Result<Planned, String>),
     Memory(Result<Box<MemoryData>, String>),
     Done(Result<String, String>),
+    Sessions(Vec<Row>),
+    ChatOpened {
+        seq: u64,
+        result: Result<Box<ChatInfo>, String>,
+    },
+    ChatEvent(clio_brain::pi::rpc::Event),
+    /// The run ended; `refresh` is Pi's own totals if it could still give them.
+    ChatSettled {
+        result: Result<clio_brain::pi::rpc::RunSummary, String>,
+        refresh: Option<Refresh>,
+    },
+}
+
+/// What the screen keeps of an opened session (the session itself stays with the runtime).
+pub struct ChatInfo {
+    pub id: String,
+    pub workspace: String,
+    pub history: Vec<serde_json::Value>,
+    pub refresh: Option<Refresh>,
+}
+
+impl From<&Opened> for ChatInfo {
+    fn from(o: &Opened) -> Self {
+        Self {
+            id: o.id.clone(),
+            workspace: o.workspace.clone(),
+            history: o.history.clone(),
+            refresh: o.refresh,
+        }
+    }
 }
 
 pub struct Planned {
@@ -162,6 +221,11 @@ pub struct App {
     pub detail: Option<Detail>,
     pub doctor: DoctorView,
     pub memory: MemoryView,
+    /// The Pi harness is on: the selector replaces the list of runs as the first screen.
+    pub pi: bool,
+    pub sessions: Sessions,
+    pub chat: Chat,
+    pub chat_seq: u64,
     pub confirm: Option<Confirm>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
@@ -190,6 +254,10 @@ impl App {
             detail: None,
             doctor: DoctorView::default(),
             memory: MemoryView::default(),
+            pi: false,
+            sessions: Sessions::default(),
+            chat: Chat::default(),
+            chat_seq: 0,
             confirm: None,
             flash: None,
             notice: None,
@@ -200,11 +268,26 @@ impl App {
     }
 
     /// The commands to run when the TUI opens.
-    pub fn start_cmds() -> Vec<Cmd> {
-        vec![Cmd::LoadHome, Cmd::RunDoctor]
+    pub fn start_cmds(&self) -> Vec<Cmd> {
+        let mut v = vec![Cmd::LoadHome, Cmd::RunDoctor];
+        if self.pi {
+            v.push(Cmd::LoadSessions);
+        }
+        v
+    }
+
+    /// Turns the Pi harness on: the selector is the first screen.
+    pub fn use_pi(&mut self) {
+        self.pi = true;
+        self.screen = Screen::Sessions;
+        self.sessions.loading = true;
     }
 
     pub fn go_home(&mut self) -> Vec<Cmd> {
+        if self.pi {
+            self.screen = Screen::Sessions;
+            return vec![Cmd::LoadHome, Cmd::LoadSessions];
+        }
         self.screen = Screen::Home;
         vec![Cmd::LoadHome]
     }
@@ -229,6 +312,9 @@ impl App {
             Screen::Help => Ctx::Help,
             Screen::Memory if self.memory.filtering => Ctx::MemoryFilter,
             Screen::Memory => Ctx::Memory,
+            Screen::Sessions => Ctx::Sessions,
+            Screen::Chat if self.chat.running => Ctx::ChatRun,
+            Screen::Chat => Ctx::Chat,
         }
     }
 
@@ -246,12 +332,14 @@ impl App {
     /// The screen whose run the views show: for the overlays, the one they were opened from.
     pub fn data_screen(&self) -> Screen {
         match self.screen {
-            Screen::Memory => Screen::Home,
+            Screen::Memory | Screen::Sessions => Screen::Home,
             Screen::Context | Screen::Usage => self.back,
             Screen::Help if matches!(self.before_help, Screen::Context | Screen::Usage) => {
                 self.back
             }
-            Screen::Help if self.before_help == Screen::Memory => Screen::Home,
+            Screen::Help if matches!(self.before_help, Screen::Memory | Screen::Sessions) => {
+                Screen::Home
+            }
             Screen::Help => self.before_help,
             s => s,
         }
@@ -316,9 +404,14 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             vec![]
         }
         Input::Paste(text) => {
-            if app.screen == Screen::NewRun && app.confirm.is_none() && app.notice.is_none() {
+            if app.confirm.is_some() || app.notice.is_some() {
+                vec![]
+            } else if app.screen == Screen::NewRun {
                 super::new_run::paste(app, &text)
             } else {
+                if app.screen == Screen::Chat {
+                    super::chat::paste(app, &text);
+                }
                 vec![]
             }
         }
@@ -354,6 +447,8 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 Screen::Detail => super::detail::key(app, &k),
                 Screen::Doctor => super::doctor::key(app, &k),
                 Screen::Memory => super::memory::key(app, &k),
+                Screen::Sessions => super::sessions::key(app, &k),
+                Screen::Chat => super::chat::key(app, &k),
                 Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
             }
         }
@@ -479,6 +574,45 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.notice = Some(e);
             vec![]
         }
+        Bg::Sessions(rows) => {
+            app.sessions.set(rows);
+            vec![]
+        }
+        Bg::ChatOpened { seq, result } => {
+            // An answer for a chat the person already left: the runtime has closed it.
+            if seq != app.chat.seq || app.screen != Screen::Chat {
+                return vec![];
+            }
+            match result {
+                Ok(info) => app.chat.opened(
+                    info.id,
+                    info.workspace,
+                    &info.history,
+                    info.refresh,
+                    app.now_ms,
+                ),
+                Err(e) => {
+                    app.chat.opening = false;
+                    app.chat.failed = Some(e);
+                }
+            }
+            vec![]
+        }
+        Bg::ChatEvent(e) => {
+            app.chat.on_event(&e);
+            vec![]
+        }
+        Bg::ChatSettled { result, refresh } => {
+            app.chat.running = false;
+            app.chat.aborting = false;
+            if let Err(e) = result {
+                app.chat.items.push(super::chat::Item::Error(e));
+            }
+            if let Some(r) = refresh {
+                app.chat.refresh(&r);
+            }
+            vec![]
+        }
     }
 }
 
@@ -525,6 +659,8 @@ fn screen_name(app: &App) -> &'static str {
         Screen::Context => "contexto",
         Screen::Usage => "uso",
         Screen::Memory => "memoria",
+        Screen::Sessions => "sesiones",
+        Screen::Chat => "chat",
     }
 }
 
@@ -598,6 +734,11 @@ fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let line = match app.run_data() {
+        _ if app.screen == Screen::Chat => status::line(
+            t,
+            &app.chat.snapshot(app.now_ms, app.fallback()),
+            usize::from(area.width),
+        ),
         Some((snap, _)) => status::line(t, &snap, usize::from(area.width)),
         None => Line::from(Span::styled(
             if app.screen == Screen::NewRun || app.screen == Screen::Doctor {
@@ -651,6 +792,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Context => meter::draw_context(f, body, app),
         Screen::Usage => meter::draw_usage(f, body, app),
         Screen::Memory => super::memory::draw(f, body, app),
+        Screen::Sessions => super::sessions::draw(f, body, app),
+        Screen::Chat => super::chat::draw(f, body, app),
         Screen::Help => meter::draw_help(f, body, app),
     }
     if let Some(msg) = &app.flash {

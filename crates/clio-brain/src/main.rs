@@ -5,14 +5,16 @@ mod cli;
 
 use std::io::IsTerminal;
 
+use cli::chat;
 use cli::home::Dirs;
 use cli::{Args, Res, apply, debug, doctor, home, memory, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
-  clio [--debug]                              abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug
+  clio [--debug] [--harness pi|builtin]       abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
+                                              con Pi instalado abre el selector de sesiones y el chat (CLIO_HARNESS=builtin lo apaga)
   clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
-  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] \"instrucción\"
+  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] \"instrucción\"
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
@@ -34,26 +36,29 @@ fn id_arg(args: Args) -> Res<String> {
 }
 
 fn dispatch(argv: Vec<String>) -> Res<i32> {
-    let mut it = argv.into_iter();
-    let Some(cmd) = it.next() else {
-        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::run(Dirs::from_env()?, debug::env_enabled());
-        }
-        println!("{USAGE}");
-        return Ok(0);
-    };
-    // `clio --debug` alone opens the TUI with debug on.
-    if cmd == "--debug" {
-        let rest: Vec<String> = it.collect();
-        if !rest.is_empty() {
-            return Err("--debug va solo (abre la interfaz) o después de un comando: clio run --debug \"...\"".into());
+    let mut it = argv.into_iter().peekable();
+    // `clio` alone, or with only its own flags, opens the interface.
+    if it
+        .peek()
+        .is_none_or(|a| matches!(a.as_str(), "--debug" | "--harness"))
+    {
+        let mut args = Args::new(it.collect());
+        let dbg = args.flag("--debug") || debug::env_enabled();
+        let harness = args.value("--harness")?;
+        if !args.rest()?.is_empty() {
+            return Err("--debug y --harness van solos (abren la interfaz) o después de un comando: clio run --debug \"...\"".into());
         }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::run(Dirs::from_env()?, true);
+            let dirs = Dirs::from_env()?;
+            let h = chat::resolve(harness.as_deref(), &dirs)?;
+            return tui::run(dirs, dbg, h);
         }
         println!("{USAGE}");
         return Ok(0);
     }
+    let Some(cmd) = it.next() else {
+        return Ok(0);
+    };
     let mut args = Args::new(it.collect());
     if matches!(cmd.as_str(), "-h" | "--help" | "help") {
         println!("{USAGE}");
@@ -72,9 +77,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "doctor"
             | "memory"
             | "pi"
+            | "toolhost"
     ) {
         eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
         return Ok(2);
+    }
+    // Internal: the tool host of a Pi session, started by `clio` from its own executable.
+    if cmd == "toolhost" {
+        return clio_toolhost::cli::run(args.into_raw()).map(|()| 0);
     }
     let dirs = Dirs::from_env()?;
     match cmd.as_str() {
@@ -93,11 +103,23 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 .transpose()?;
             let allow_broad = args.flag("--allow-broad");
             let dbg = args.flag("--debug") || debug::env_enabled();
+            // `clio run` stays on the builtin loop unless Pi is asked for by name.
+            let harness = args.value("--harness")?;
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(
                     "falta la instrucción: clio run [--workspace DIR] \"qué hacer\"".into(),
                 );
+            }
+            match harness.as_deref() {
+                None | Some("builtin") => {}
+                Some("pi") => {
+                    chat::local::ready(&dirs)?;
+                    return chat::run::run(dirs, workspace, &instruction);
+                }
+                Some(other) => {
+                    return Err(format!("--harness: {other:?} no es válido (pi o builtin)"));
+                }
             }
             return runs::run(
                 &dirs,

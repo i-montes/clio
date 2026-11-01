@@ -7,6 +7,7 @@
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod chat;
 pub mod debug_view;
 pub mod detail;
 pub mod doctor;
@@ -17,6 +18,7 @@ pub mod memory;
 pub mod meter;
 pub mod new_run;
 pub mod sanitize;
+pub mod sessions;
 pub mod status;
 pub mod theme;
 
@@ -37,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use clio_brain::agent::{Event, Observer};
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
+use clio_brain::pi::rpc::Cancel;
 use clio_memory::Signal;
 use crossterm::event::{self, Event as Term, KeyEventKind};
 use crossterm::terminal::{
@@ -46,12 +49,13 @@ use crossterm::{cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use self::app::{App, Bg, Cmd, Input, Planned, draw, update};
+use self::app::{App, Bg, ChatInfo, Cmd, Input, OpenTarget, Planned, draw, update};
 use self::detail::Detail;
 use self::home::{Header, KeyState};
 use self::memory::MemoryData;
 use self::new_run::Preview;
 use super::apply;
+use super::chat::{Harness, Session, SessionSource, Target};
 use super::debug::DebugCtl;
 use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::runs::{self, RunOpts};
@@ -124,12 +128,16 @@ impl Drop for Guard {
 }
 
 /// Opens the TUI and returns the exit code.
-pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
+pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     install_panic_hook();
     let (_guard, mut term) = Guard::enter()?;
     let (tx, rx) = channel::<Input>();
+    let dirs = Arc::new(dirs);
     let ctx = Ctx {
-        dirs: Arc::new(dirs),
+        sources: Arc::new(super::chat::sources(dirs.clone())),
+        chat: Arc::default(),
+        chat_cancel: Mutex::new(Cancel::new()),
+        dirs,
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         debug: DebugCtl::new(debug, false),
@@ -139,7 +147,10 @@ pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
     app.debug = debug;
-    for c in App::start_cmds() {
+    if harness == Harness::Pi {
+        app.use_pi();
+    }
+    for c in app.start_cmds() {
         ctx.exec(c);
     }
     let t0 = Instant::now();
@@ -149,9 +160,15 @@ pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
         panic!("deliberate panic to test that the terminal is restored");
     }
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
+    // Only for the pseudo-terminal tests (debug builds): the text of every frame, to a file.
+    let dump = std::env::var_os("CLIO_TUI_SCREEN_DUMP").filter(|_| cfg!(debug_assertions));
     while !app.quit {
-        term.draw(|f| draw(f, &app))
+        let frame = term
+            .draw(|f| draw(f, &app))
             .map_err(|e| format!("terminal: {e}"))?;
+        if let Some(path) = &dump {
+            dump_screen(frame.buffer, std::path::Path::new(path));
+        }
         let mut inputs: Vec<Input> = Vec::new();
         if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
@@ -185,10 +202,39 @@ pub fn run(dirs: Dirs, debug: bool) -> Res<i32> {
             }
         }
     }
+    // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
+    ctx.stop_chat_now();
     Ok(0)
 }
 
+/// The screen as plain text, replaced atomically.
+fn dump_screen(buf: &ratatui::buffer::Buffer, path: &std::path::Path) {
+    let a = buf.area;
+    let mut text = String::new();
+    for y in a.y..a.y + a.height {
+        for x in a.x..a.x + a.width {
+            text.push_str(buf[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// The open Pi session, if any, and which `ChatOpen` is the current one: an open that finishes
+/// after the person left (or after a newer one started) shuts its own session down.
+#[derive(Default)]
+struct Slot {
+    latest: u64,
+    session: Option<Arc<dyn Session>>,
+}
+
 struct Ctx {
+    sources: Arc<Vec<Box<dyn SessionSource>>>,
+    chat: Arc<Mutex<Slot>>,
+    chat_cancel: Mutex<Cancel>,
     dirs: Arc<Dirs>,
     tx: Sender<Input>,
     cancel: Mutex<Arc<AtomicBool>>,
@@ -260,7 +306,41 @@ fn check(dirs: &Dirs, dir: &str) -> Result<Preview, String> {
     Ok(Preview::new(ws.display().to_string(), scan))
 }
 
+impl Drop for Ctx {
+    fn drop(&mut self) {
+        self.stop_chat_now();
+    }
+}
+
 impl Ctx {
+    /// Makes `latest` the current open and takes the open session out, if any.
+    fn take_chat(&self, latest: u64) -> Option<Arc<dyn Session>> {
+        let mut g = self
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.latest = latest;
+        g.session.take()
+    }
+
+    /// Stops the session, here and now (the interface is leaving).
+    fn stop_chat_now(&self) {
+        if let Some(s) = self.take_chat(0) {
+            s.shutdown();
+        }
+    }
+
+    /// Stops the session on its own thread (shutting down can take a moment).
+    fn stop_chat_later(&self, latest: u64) {
+        if let Some(s) = self.take_chat(latest) {
+            std::thread::spawn(move || s.shutdown());
+        }
+    }
+
+    fn current_chat(&self) -> Option<Arc<dyn Session>> {
+        self.chat.lock().ok().and_then(|g| g.session.clone())
+    }
+
     fn send(&self, b: Bg) {
         let _ = self.tx.send(Input::Bg(b));
     }
@@ -352,6 +432,94 @@ impl Ctx {
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
             Cmd::Redraw => {}
+            Cmd::LoadSessions => {
+                let sources = self.sources.clone();
+                self.spawn(
+                    move |_, _| sources.iter().flat_map(|s| s.list()).collect::<Vec<_>>(),
+                    |r| match r {
+                        Ok(rows) => Bg::Sessions(rows),
+                        Err(e) => Bg::Done(Err(e)),
+                    },
+                );
+            }
+            Cmd::ChatOpen { seq, target } => {
+                self.stop_chat_later(seq);
+                let (sources, slot) = (self.sources.clone(), self.chat.clone());
+                self.spawn(
+                    move |d, _| -> Result<Box<ChatInfo>, String> {
+                        let target = match target {
+                            OpenTarget::New { project } => Target::New {
+                                project: expand(&project, &d.home),
+                            },
+                            OpenTarget::Existing { reference } => Target::Existing { reference },
+                        };
+                        // The local source is the first; the remote rows are never openable.
+                        let opened = sources
+                            .first()
+                            .ok_or("no hay fuente de sesiones")?
+                            .open(&target)?;
+                        let mut g = slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if g.latest != seq {
+                            drop(g);
+                            opened.session.shutdown();
+                            return Err("cancelado".into());
+                        }
+                        g.session = Some(opened.session.clone());
+                        Ok(Box::new(ChatInfo::from(&opened)))
+                    },
+                    move |r| Bg::ChatOpened {
+                        seq,
+                        result: r.and_then(|x| x),
+                    },
+                );
+            }
+            Cmd::ChatSend { text } => {
+                let Some(session) = self.current_chat() else {
+                    self.send(Bg::Done(Err("no hay una sesión abierta".into())));
+                    return;
+                };
+                let cancel = Cancel::new();
+                if let Ok(mut c) = self.chat_cancel.lock() {
+                    *c = cancel.clone();
+                }
+                self.spawn(
+                    move |_, tx| {
+                        let mut forward = |e: &clio_brain::pi::rpc::Event| {
+                            let _ = tx.send(Input::Bg(Bg::ChatEvent(e.clone())));
+                        };
+                        let result = session
+                            .run_prompt(&text, &cancel, &mut forward)
+                            .map_err(|e| e.to_string());
+                        (result, session.refresh().ok())
+                    },
+                    |r| match r {
+                        Ok((result, refresh)) => Bg::ChatSettled { result, refresh },
+                        Err(e) => Bg::ChatSettled {
+                            result: Err(e),
+                            refresh: None,
+                        },
+                    },
+                );
+            }
+            Cmd::ChatSteer { text } => {
+                if let Some(session) = self.current_chat() {
+                    self.spawn(
+                        move |_, _| session.steer(&text).map_err(|e| e.to_string()),
+                        |r| match r.and_then(|x| x) {
+                            Ok(()) => Bg::Done(Ok("mensaje enviado al agente".into())),
+                            Err(e) => Bg::Done(Err(e)),
+                        },
+                    );
+                }
+            }
+            Cmd::ChatAbort => {
+                if let Ok(c) = self.chat_cancel.lock() {
+                    c.cancel();
+                }
+            }
+            Cmd::ChatClose => self.stop_chat_later(0),
             Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
                 if let Ok(flag) = self.cancel.lock() {

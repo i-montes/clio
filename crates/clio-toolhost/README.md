@@ -8,6 +8,7 @@ toca la máquina: la extensión `clio-guard` de Pi solo le manda peticiones.
 clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off] [--vault-socket P]
 ```
 
+- `clio toolhost ...` (hidden subcommand of the `clio` binary) takes the same arguments and is what the interface starts for a Pi session: no second binary to install.
 - `D` debe existir con modo 0700 y ser del usuario; el socket es `D/toolhost.sock` (0600). Si no, no arranca.
 - `W` es la copia de trabajo de la sesión; `S` (instantáneas) y `R` (registro de efectos) van fuera de `W`.
 - Imprime `READY <ruta del socket>` y corre hasta que se cierra su stdin (así no sobrevive a quien lo lanzó).

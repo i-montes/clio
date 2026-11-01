@@ -192,7 +192,7 @@ fn on_selected(app: &mut App, act: Act) -> Vec<Cmd> {
 }
 
 /// The one dim line of state: key, vault, doctor. Only a problem gets a color.
-fn state_line(app: &App, t: Theme, width: usize) -> Vec<Line<'static>> {
+pub(super) fn state_line(app: &App, t: Theme, width: usize) -> Vec<Line<'static>> {
     let sep = || Span::styled(format!(" {} ", t.dot()), t.dim());
     let Some(h) = &app.home.header else {
         return vec![Line::from(Span::styled("cargando…", t.dim()))];

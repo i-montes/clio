@@ -115,10 +115,13 @@ pub enum Ctx {
     Help,
     Memory,
     MemoryFilter,
+    Sessions,
+    Chat,
+    ChatRun,
 }
 
 #[cfg(test)]
-pub const ALL: [Ctx; 13] = [
+pub const ALL: [Ctx; 16] = [
     Ctx::Home,
     Ctx::Filter,
     Ctx::NewRun,
@@ -132,6 +135,9 @@ pub const ALL: [Ctx; 13] = [
     Ctx::Help,
     Ctx::Memory,
     Ctx::MemoryFilter,
+    Ctx::Sessions,
+    Ctx::Chat,
+    Ctx::ChatRun,
 ];
 
 /// On every screen.
@@ -735,6 +741,129 @@ const HELP: &[Bind] = &[
     ),
 ];
 
+const SESSIONS: &[Bind] = &[
+    b(
+        &[Char('j'), Code(KeyCode::Down)],
+        Act::Down,
+        "j",
+        "bajar",
+        false,
+    ),
+    b(
+        &[Char('k'), Code(KeyCode::Up)],
+        Act::Up,
+        "k",
+        "subir",
+        false,
+    ),
+    b(
+        &[Char('g'), Code(KeyCode::Home)],
+        Act::Top,
+        "g",
+        "primero",
+        false,
+    ),
+    b(
+        &[Char('G'), Code(KeyCode::End)],
+        Act::Bottom,
+        "G",
+        "último",
+        false,
+    ),
+    b(&[ENTER], Act::Open, "Enter", "abrir", true),
+    b(&[Char('n')], Act::New, "n", "nueva", true),
+    b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
+    b(&[Char('D')], Act::Doctor, "D", "doctor", false),
+    b(&[Char('m')], Act::Memory, "m", "memoria", true),
+    b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", true),
+    b(&[Char('?')], Act::Help, "?", "ayuda", true),
+];
+
+/// The scroll keys of the chat; letters are text there, so only arrows and pages.
+macro_rules! chat_scroll {
+    () => {
+        [
+            b(&[Code(KeyCode::Up)], Act::Up, "↑", "subir", false),
+            b(&[Code(KeyCode::Down)], Act::Down, "↓", "bajar", false),
+            b(
+                &[CTRL_B, Code(KeyCode::PageUp)],
+                Act::PageUp,
+                "Ctrl-B",
+                "página arriba",
+                false,
+            ),
+            b(
+                &[CTRL_F, Code(KeyCode::PageDown)],
+                Act::PageDown,
+                "Ctrl-F",
+                "página abajo",
+                false,
+            ),
+        ]
+    };
+}
+
+const CHAT: &[Bind] = &{
+    let [up, down, pu, pd] = chat_scroll!();
+    [
+        b(&[ENTER], Act::Open, "Enter", "enviar", true),
+        b(
+            &[Alt(KeyCode::Enter), Ctrl('j')],
+            Act::Newline,
+            "Alt-Enter",
+            "línea nueva",
+            true,
+        ),
+        b(
+            &[Ctrl('u')],
+            Act::Clear,
+            "Ctrl-U",
+            "borrar el mensaje",
+            false,
+        ),
+        up,
+        down,
+        pu,
+        pd,
+        b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
+        b(&[ESC], Act::Back, "Esc", "sesiones", true),
+        b(&[Ctrl('c')], Act::Quit, "Ctrl-C", "salir", true),
+    ]
+};
+
+const CHAT_RUN: &[Bind] = &{
+    let [up, down, pu, pd] = chat_scroll!();
+    [
+        b(&[ENTER], Act::Open, "Enter", "orientar al agente", true),
+        b(
+            &[Alt(KeyCode::Enter), Ctrl('j')],
+            Act::Newline,
+            "Alt-Enter",
+            "línea nueva",
+            false,
+        ),
+        b(
+            &[Ctrl('u')],
+            Act::Clear,
+            "Ctrl-U",
+            "borrar el mensaje",
+            false,
+        ),
+        up,
+        down,
+        pu,
+        pd,
+        b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
+        b(
+            &[ESC, Ctrl('c')],
+            Act::Cancel,
+            "Esc",
+            "abortar el turno",
+            true,
+        ),
+    ]
+};
+
 pub fn table(ctx: Ctx) -> &'static [Bind] {
     match ctx {
         Ctx::Home => HOME,
@@ -750,6 +879,9 @@ pub fn table(ctx: Ctx) -> &'static [Bind] {
         Ctx::Help => HELP,
         Ctx::Memory => MEMORY,
         Ctx::MemoryFilter => MEMORY_FILTER,
+        Ctx::Sessions => SESSIONS,
+        Ctx::Chat => CHAT,
+        Ctx::ChatRun => CHAT_RUN,
     }
 }
 
@@ -921,6 +1053,9 @@ mod tests {
             (Ctx::Help, "Ayuda"),
             (Ctx::Memory, "Memoria"),
             (Ctx::MemoryFilter, "Memoria, escribiendo la búsqueda"),
+            (Ctx::Sessions, "Sesiones de Pi"),
+            (Ctx::Chat, "Chat, en espera"),
+            (Ctx::ChatRun, "Chat, el agente trabaja"),
         ];
         for (ctx, name) in names {
             let entries: Vec<String> = table(ctx)

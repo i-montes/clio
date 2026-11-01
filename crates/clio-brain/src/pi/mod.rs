@@ -11,7 +11,8 @@
 //! - [`sessions`]: fast listing of Pi's `.jsonl` session files.
 //! - [`text`]: sanitizing of everything that comes from outside.
 //!
-//! This is a library: the TUI and `clio run` do not use it yet (the `builtin` harness stays).
+//! The TUI (selector and chat) and `clio run --harness pi` use it through `cli/chat/`; the
+//! `builtin` harness stays the default of `clio run`.
 
 pub mod install;
 pub mod launch;

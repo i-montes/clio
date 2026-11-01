@@ -144,6 +144,7 @@ impl Rig {
             name: None,
             guard: None,
             guard_tools: vec![],
+            extra_env: vec![],
         }
     }
 }

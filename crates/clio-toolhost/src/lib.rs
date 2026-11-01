@@ -19,6 +19,7 @@
 //!
 //! Nothing in this crate talks to the network. See `README.md` for the protocol.
 
+pub mod cli;
 mod ops;
 mod sanitize;
 mod server;

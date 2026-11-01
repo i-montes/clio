@@ -22,6 +22,7 @@ clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }
 clio-node = { path = "../clio-node" }
+clio-toolhost = { path = "../clio-toolhost" }
 clio-triage = { path = "../clio-triage" }
 clio-vault = { path = "../clio-vault" }
 crossterm = "0.29.0"

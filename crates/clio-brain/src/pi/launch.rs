@@ -55,6 +55,8 @@ pub struct Provider {
     pub headers: BTreeMap<String, String>,
     /// Name of the environment variable that carries the API key.
     pub api_key_env: String,
+    /// Price in US dollars per million tokens, `(input, output)`: Pi computes the cost from it.
+    pub dollars_per_mtok: (f64, f64),
 }
 
 impl Provider {
@@ -75,6 +77,7 @@ impl Provider {
                 ),
             ]),
             api_key_env: "OPENCODE_API_KEY".into(),
+            dollars_per_mtok: (0.0, 0.0),
         }
     }
 
@@ -85,7 +88,8 @@ impl Provider {
             "api": self.api,
             "apiKey": format!("${{{}}}", self.api_key_env),
             "headers": self.headers,
-            "models": [{"id": self.model, "name": self.model, "reasoning": self.reasoning, "contextWindow": self.context_window}],
+            "models": [{"id": self.model, "name": self.model, "reasoning": self.reasoning, "contextWindow": self.context_window,
+                "cost": {"input": self.dollars_per_mtok.0, "output": self.dollars_per_mtok.1, "cacheRead": 0, "cacheWrite": 0}}],
         }}})
     }
 }
@@ -123,6 +127,9 @@ pub struct Launch {
     pub guard: Option<PathBuf>,
     /// EXACTLY the tools the guard registers (empty without a guard: Pi must have none).
     pub guard_tools: Vec<String>,
+    /// Extra variables for the guard (`CLIO_GUARD_PROMPT_*`, `CLIO_TOOLHOST_SOCKET`). Empty
+    /// without a guard.
+    pub extra_env: Vec<(String, String)>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -276,6 +283,7 @@ pub fn hardened_env(l: &Launch, session_id: &str) -> Vec<(String, String)> {
     if let Some(k) = &l.api_key {
         e.push((l.provider.api_key_env.clone(), k.expose().to_owned()));
     }
+    e.extend(l.extra_env.iter().cloned());
     e
 }
 
@@ -433,6 +441,7 @@ mod tests {
             name: Some("n".into()),
             guard: guard.map(Into::into),
             guard_tools: vec![],
+            extra_env: vec![],
         }
     }
 
