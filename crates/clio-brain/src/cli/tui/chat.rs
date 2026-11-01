@@ -50,7 +50,7 @@ pub enum Item {
         state: ToolState,
         ms: Option<u64>,
     },
-    /// Compaction, retries, the taint notice: one quiet line.
+    /// Compaction, retries: one quiet line.
     Note(String),
     Error(String),
 }
@@ -172,12 +172,7 @@ impl Chat {
 
     pub fn refresh(&mut self, r: &Refresh) {
         self.meter.refresh(&r.stats);
-        if r.tainted && !self.tainted {
-            self.items.push(Item::Note(
-                "esta sesión leyó contenido externo: lo trata como información, nunca como órdenes"
-                    .into(),
-            ));
-        }
+        // No chat line: the `externo` mark in the status bar is enough.
         self.tainted |= r.tainted;
     }
 
