@@ -212,7 +212,7 @@ elif scenario == "steer":
     type_text(fd, "mejor en minúsculas")
     send(fd, ENTER)
     out["steer_sent"] = wait_screen(fd, "mensaje enviado al agente", 15)
-    out["tool_line"] = wait_screen(fd, "write", 30)
+    out["tool_line"] = wait_screen(fd, "Escribi", 30)
     out["final"] = wait_screen(fd, "done after the steer", 60) and wait_screen(fd, "listo", 30)
     out["tool_ok_with_duration"] = " s" in screen() or " ms" in screen()
     out["denied_line"] = wait_screen(fd, "negado", 10)

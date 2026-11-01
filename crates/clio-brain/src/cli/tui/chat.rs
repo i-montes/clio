@@ -476,42 +476,64 @@ pub fn wrap(text: &str, w: usize) -> Vec<String> {
     out
 }
 
+/// What a tool is doing, in words: "Leyó" when done, "Leyendo" while it runs.
+fn action(name: &str, running: bool) -> String {
+    let (done, doing) = match name {
+        "read" => ("Leyó", "Leyendo"),
+        "write" => ("Escribió", "Escribiendo"),
+        "edit" => ("Editó", "Editando"),
+        "bash" => ("Ejecutó", "Ejecutando"),
+        "ls" => ("Listó", "Listando"),
+        "find" => ("Buscó", "Buscando"),
+        other => return clean(other),
+    };
+    (if running { doing } else { done }).to_owned()
+}
+
+/// A kind of block; a blank line separates two blocks of different kinds, and the speaker's label
+/// goes on top of the user's and the agent's blocks.
+#[derive(PartialEq, Clone, Copy)]
+enum Block {
+    User,
+    Agent,
+    Tools,
+    Notes,
+}
+
 fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
     let c = &app.chat;
     let mut lines: Vec<Line> = Vec::new();
-    let hang = |first: Span<'static>,
-                text: &str,
-                style: ratatui::style::Style,
-                lines: &mut Vec<Line<'static>>| {
-        for (i, row) in wrap(&sanitize::multiline(text), w.saturating_sub(2))
-            .into_iter()
-            .enumerate()
-        {
-            let lead = if i == 0 {
-                first.clone()
-            } else {
-                Span::raw("  ")
-            };
-            lines.push(Line::from(vec![lead, Span::styled(row, style)]));
+    let body = w.saturating_sub(2);
+    let mut last: Option<Block> = None;
+    for it in &c.items {
+        let kind = match it {
+            Item::User(_) => Block::User,
+            Item::Assistant { .. } => Block::Agent,
+            Item::Tool { .. } => Block::Tools,
+            Item::Note(_) | Item::Error(_) => Block::Notes,
+        };
+        if last != Some(kind) && last.is_some() {
+            lines.push(Line::from(""));
         }
-    };
-    for (n, it) in c.items.iter().enumerate() {
+        let new_block = last != Some(kind);
+        last = Some(kind);
+        let indented =
+            |text: &str, style: ratatui::style::Style, lines: &mut Vec<Line<'static>>| {
+                for row in wrap(&sanitize::multiline(text), body) {
+                    lines.push(Line::from(vec![Span::raw("  "), Span::styled(row, style)]));
+                }
+            };
         match it {
             Item::User(text) => {
-                if n > 0 {
-                    lines.push(Line::from(""));
-                }
-                hang(
-                    Span::styled(format!("{} ", t.sel()), t.accent()),
-                    text,
-                    t.plain(),
-                    &mut lines,
-                );
+                // Two messages in a row are two blocks: label each one.
+                lines.push(Line::from(Span::styled("tú", t.accent())));
+                indented(text, t.plain(), &mut lines);
             }
             Item::Assistant { text, .. } => {
-                for row in wrap(&sanitize::multiline(text), w) {
-                    lines.push(Line::from(row));
+                if new_block {
+                    lines.push(Line::from(Span::styled("clio", t.bold())));
                 }
+                indented(text, t.plain(), &mut lines);
             }
             Item::Tool {
                 name,
@@ -528,12 +550,13 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 };
                 let dur = ms.map_or_else(String::new, |m| format!("  {}", usage::ms_label(m)));
                 let tail = format!("{word}{dur}");
-                let name = clean(name);
-                let room = w.saturating_sub(2 + name.chars().count() + 2 + tail.chars().count());
+                let label = action(name, *state == ToolState::Running);
+                let room = w.saturating_sub(4 + label.chars().count() + 2 + tail.chars().count());
                 let summary = super::debug_view::fit(&clean(summary), room.max(8), t);
                 lines.push(Line::from(vec![
+                    Span::raw("  "),
                     Span::styled(format!("{mark} "), style),
-                    Span::styled(name, t.bold()),
+                    Span::styled(label, t.bold()),
                     Span::styled(format!("  {summary}"), t.dim()),
                     Span::styled(
                         tail,
@@ -546,15 +569,22 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 ]));
             }
             Item::Note(text) => lines.push(Line::from(Span::styled(
-                format!("{} {}", t.dot(), clean(text)),
+                format!("  {} {}", t.dot(), clean(text)),
                 t.dim(),
             ))),
-            Item::Error(text) => hang(
-                Span::styled(format!("{} ", t.cross()), t.fail()),
-                text,
-                t.fail(),
-                &mut lines,
-            ),
+            Item::Error(text) => {
+                for (i, row) in wrap(&sanitize::multiline(text), body.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let lead = if i == 0 {
+                        Span::styled(format!("  {} ", t.cross()), t.fail())
+                    } else {
+                        Span::raw("    ")
+                    };
+                    lines.push(Line::from(vec![lead, Span::styled(row, t.fail())]));
+                }
+            }
         }
     }
     lines
