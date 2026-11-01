@@ -1,0 +1,24 @@
+[package]
+name = "clio-toolhost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clio-core = { path = "../clio-core" }
+clio-gateway = { path = "../clio-gateway" }
+clio-node = { path = "../clio-node" }
+clio-vault = { path = "../clio-vault" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+
+[dev-dependencies]
+clio-attacks = { path = "../../testing/attacks" }
+clio-canaries = { path = "../../testing/canaries" }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
