@@ -45,6 +45,8 @@ pub enum Item {
         id: String,
         name: String,
         summary: String,
+        /// The model's own few words on why (the step's title), if it gave them.
+        reason: String,
         state: ToolState,
         ms: Option<u64>,
     },
@@ -145,6 +147,7 @@ impl Chat {
                             id: b["id"].as_str().unwrap_or("").to_owned(),
                             name: b["name"].as_str().unwrap_or("?").to_owned(),
                             summary: summarize(b["name"].as_str().unwrap_or(""), &b["arguments"]),
+                            reason: reason_of(&b["arguments"]),
                             state: ToolState::Ok,
                             ms: None,
                         });
@@ -232,6 +235,7 @@ impl Chat {
                 id: id.clone(),
                 name: name.clone(),
                 summary: summarize(name, args),
+                reason: reason_of(args),
                 state: ToolState::Running,
                 ms: None,
             }),
@@ -341,6 +345,18 @@ fn state_of(is_error: bool, text: &str) -> ToolState {
     } else {
         ToolState::Failed
     }
+}
+
+/// The model's own words on why it uses a tool (`reason`), one line.
+fn reason_of(args: &Value) -> String {
+    args["reason"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// What a tool was asked, in a few words.
@@ -477,7 +493,10 @@ pub fn wrap(text: &str, w: usize) -> Vec<String> {
 }
 
 /// What a tool does, as a title ("Leer archivo"), like Aria's steps.
-fn title(name: &str) -> String {
+fn title(name: &str, reason: &str) -> String {
+    if !reason.is_empty() {
+        return clean(reason);
+    }
     match name {
         "read" => "Leer archivo".into(),
         "write" => "Escribir archivo".into(),
@@ -550,6 +569,7 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
             Item::Tool {
                 name,
                 summary,
+                reason,
                 state,
                 ms,
                 ..
@@ -562,7 +582,7 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 };
                 let dur = ms.map_or_else(String::new, |m| format!("  {}", usage::ms_label(m)));
                 let tail = format!("{word}{dur}");
-                let label = title(name);
+                let label = title(name, reason);
                 let summary = chip(name, summary);
                 let room = w.saturating_sub(4 + label.chars().count() + 2 + tail.chars().count());
                 let summary = super::debug_view::fit(&clean(&summary), room.max(8), t);
@@ -767,6 +787,31 @@ mod tests {
             (s.tokens_out, s.steps, s.secs, s.cost_micro),
             (2, 1, 5, 500_000)
         );
+    }
+
+    #[test]
+    fn a_step_is_titled_by_the_models_reason_or_by_what_the_tool_does() {
+        let mut c = chat();
+        let start = |id: &str, name: &str, args: Value| Event::ToolStart {
+            id: id.into(),
+            name: name.into(),
+            args,
+        };
+        c.on_event(&start(
+            "1",
+            "bash",
+            json!({"command":"ls","reason":" Revisar la estructura\nmás"}),
+        ));
+        c.on_event(&start("2", "read", json!({"path":"src/a.rs"})));
+        let titles: Vec<_> = c
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Tool { name, reason, .. } => title(name, reason),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(titles, ["Revisar la estructura", "Leer archivo"]);
     }
 
     #[test]

@@ -1129,6 +1129,7 @@ fn the_selector_and_the_chat_never_draw_hostile_text_and_fit_every_size() {
             id: "1".into(),
             name: h.clone(),
             summary: h.clone(),
+            reason: h.clone(),
             state: ToolState::Denied,
             ms: Some(12),
         },
