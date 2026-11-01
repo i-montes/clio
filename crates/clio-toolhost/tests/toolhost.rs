@@ -48,13 +48,13 @@ fn call_t(e: &Env, session: &str, tool: &str, args: Value, tainted: bool) -> Res
 }
 
 #[test]
-fn read_wraps_as_data_and_taints_and_write_does_not() {
+fn reads_are_external_and_taint_and_writes_are_not() {
     let e = env();
     std::fs::write(e.work.join("a.txt"), "hello").unwrap();
     let w = call(
         &e,
         "s1",
-        "write_file",
+        "fs_write",
         json!({"path":"b/c.txt","content":"x"}),
     );
     assert!(w.ok && !w.external && !w.tainted, "{w:?}");
@@ -63,40 +63,74 @@ fn read_wraps_as_data_and_taints_and_write_does_not() {
         "x"
     );
     assert_eq!(w.decision.outcome, "allow");
-    let r = call(&e, "s1", "read_file", json!({"path":"a.txt"}));
-    assert!(r.ok && r.external && r.tainted, "{r:?}");
-    assert!(r.content.starts_with("<<<UNTRUSTED-DATA file ") && r.content.contains("hello"));
-    // The mark does not go away, and is reported on every later answer, even a plain write.
-    let w2 = call(
-        &e,
-        "s1",
-        "write_file",
-        json!({"path":"d.txt","content":"y"}),
+    // A stat says nothing about content: it does not taint either.
+    let st = call(&e, "s1", "fs_stat", json!({"path":"a.txt"}));
+    assert!(st.ok && !st.tainted && st.data["exists"] == true && st.data["is_dir"] == false);
+    let r = call(&e, "s1", "fs_read", json!({"path":"a.txt"}));
+    assert!(
+        r.ok && r.external && r.tainted && r.content == "hello",
+        "{r:?}"
     );
+    // The mark does not go away, and is reported on every later answer, even a plain write.
+    let w2 = call(&e, "s1", "fs_write", json!({"path":"d.txt","content":"y"}));
     assert!(w2.ok && w2.tainted && !w2.external);
     // Another session is not marked.
-    assert!(!call(&e, "s2", "make_dir", json!({"path":"z"})).tainted);
+    assert!(!call(&e, "s2", "fs_mkdir", json!({"path":"z"})).tainted);
     // The caller says "tainted" (restored from Pi's session): it raises the mark, and a later
     // "not tainted" does not clear it.
-    assert!(call_t(&e, "s3", "make_dir", json!({"path":"y"}), true).tainted);
-    assert!(call_t(&e, "s3", "make_dir", json!({"path":"y2"}), false).tainted);
+    assert!(call_t(&e, "s3", "fs_mkdir", json!({"path":"y"}), true).tainted);
+    assert!(call_t(&e, "s3", "fs_mkdir", json!({"path":"y2"}), false).tainted);
+}
+
+#[test]
+fn list_and_glob_do_not_follow_links_and_are_external() {
+    let e = env();
+    std::fs::create_dir_all(e.work.join("src/deep")).unwrap();
+    std::fs::write(e.work.join("src/a.py"), "").unwrap();
+    std::fs::write(e.work.join("src/deep/b.py"), "").unwrap();
+    std::fs::write(e.work.join("c.txt"), "").unwrap();
+    std::os::unix::fs::symlink("/etc", e.work.join("etc_link")).unwrap();
+    let l = call(&e, "s", "fs_list", json!({"path":"."}));
+    assert!(l.ok && l.external && l.tainted, "{l:?}");
+    assert_eq!(l.data["entries"], json!(["c.txt", "etc_link", "src"]));
+    let g = call(
+        &e,
+        "s",
+        "fs_glob",
+        json!({"path":".","pattern":"**/*.py","limit":100}),
+    );
+    assert_eq!(
+        g.data["paths"],
+        json!(["src/a.py", "src/deep/b.py"]),
+        "{g:?}"
+    );
+    let g = call(
+        &e,
+        "s",
+        "fs_glob",
+        json!({"path":".","pattern":"*.py","limit":1}),
+    );
+    assert_eq!(g.data["paths"], json!(["src/a.py"]));
+    assert!(
+        !call(&e, "s", "fs_list", json!({"path":"etc_link"})).ok,
+        "a link out is not followed"
+    );
+    assert!(
+        !call(
+            &e,
+            "s",
+            "fs_glob",
+            json!({"path":"etc_link","pattern":"*","limit":5})
+        )
+        .ok
+    );
 }
 
 #[test]
 fn write_replaces_atomically_and_leaves_no_temporary_file() {
     let e = env();
-    call(
-        &e,
-        "s",
-        "write_file",
-        json!({"path":"f.txt","content":"one"}),
-    );
-    call(
-        &e,
-        "s",
-        "write_file",
-        json!({"path":"f.txt","content":"two"}),
-    );
+    call(&e, "s", "fs_write", json!({"path":"f.txt","content":"one"}));
+    call(&e, "s", "fs_write", json!({"path":"f.txt","content":"two"}));
     assert_eq!(
         std::fs::read_to_string(e.work.join("f.txt")).unwrap(),
         "two"
@@ -116,46 +150,52 @@ fn the_gateway_denies_by_default_and_each_deny_has_its_rule() {
     std::os::unix::fs::symlink("/etc", e.work.join("etc")).unwrap();
     let cases = [
         ("bash", json!({"command":"id"}), "S-02"),
-        ("read_file", json!({"path":"../../etc/passwd"}), "S-13"),
-        ("read_file", json!({"path":"/etc/passwd"}), "S-13"),
-        ("read_file", json!({"path":"etc/passwd"}), "S-13"),
-        ("read_file", json!({"path":"~/.ssh/id_rsa"}), "S-13"),
+        ("read_file", json!({"path":"a"}), "S-02"),
+        ("exec", json!({"command":"id"}), "S-02"), // no proven jail here: not declared
+        ("fs_read", json!({"path":"../../etc/passwd"}), "S-13"),
+        ("fs_read", json!({"path":"/etc/passwd"}), "S-13"),
+        ("fs_read", json!({"path":"etc/passwd"}), "S-13"),
+        ("fs_read", json!({"path":"~/.ssh/id_rsa"}), "S-13"),
+        ("fs_stat", json!({"path":"../x"}), "S-13"),
         (
-            "write_file",
+            "fs_write",
             json!({"path":"extensions/x.ts","content":"c"}),
             "S-16",
         ),
         (
-            "write_file",
+            "fs_write",
             json!({"path":".pi/extensions/x.ts","content":"c"}),
             "S-16",
         ),
+        ("fs_write", json!({"path":"ln/x.ts","content":"c"}), "S-16"),
         (
-            "write_file",
-            json!({"path":"ln/x.ts","content":"c"}),
-            "S-16",
-        ),
-        (
-            "write_file",
+            "fs_write",
             json!({"path":".git/hooks/p","content":"c"}),
             "S-16",
         ),
         (
-            "write_file",
+            "fs_write",
+            json!({"path":".agents/skills/s","content":"c"}),
+            "S-16",
+        ),
+        (
+            "fs_write",
             json!({"path":"skills/s/SKILL.md","content":"c"}),
             "S-16",
         ),
-        ("make_dir", json!({"path":".claude"}), "S-16"),
+        ("fs_mkdir", json!({"path":".claude"}), "S-16"),
         (
-            "write_file",
+            "fs_write",
             json!({"path":"a.txt","content":"c","mode":"777"}),
             "step-1-schema",
         ),
-        ("write_file", json!({"path":"a.txt"}), "step-1-schema"),
-        ("read_file", json!({"path":5}), "step-1-schema"),
+        ("fs_write", json!({"path":"a.txt"}), "step-1-schema"),
+        ("fs_read", json!({"path":5}), "step-1-schema"),
+        ("fs_glob", json!({"path":"."}), "step-1-schema"),
     ];
-    for (tool, args, rule) in cases {
-        let r = call(&e, "deny", tool, args.clone());
+    for (i, (tool, args, rule)) in cases.into_iter().enumerate() {
+        // One session each: the breaker (tested apart) would open after ten denials in a row.
+        let r = call(&e, &format!("deny{i}"), tool, args.clone());
         assert!(!r.ok, "{tool} {args}: {r:?}");
         assert_eq!(
             (r.decision.outcome.as_str(), r.decision.rule.as_str()),
@@ -172,17 +212,17 @@ fn the_gateway_denies_by_default_and_each_deny_has_its_rule() {
 }
 
 #[test]
-fn without_a_proven_jail_run_tests_is_not_declared_and_is_denied() {
+fn exec_is_not_offered_without_a_proven_jail() {
     let e = env();
-    assert!(e.host.run_tests_available().is_err());
-    let r = call(&e, "s", "run_tests", json!({"runner":"unittest"}));
+    assert!(e.host.exec_available().is_err());
+    let r = call(&e, "s", "exec", json!({"command":"echo hi"}));
     assert_eq!((r.ok, r.decision.rule.as_str()), (false, "S-02"));
 }
 
 #[test]
-fn run_tests_runs_in_the_jail_when_it_can() {
+fn exec_runs_in_the_jail_when_it_can_and_has_its_own_rule() {
     let e = env_with(|c| c.jail = JailMode::Auto);
-    if let Err(why) = e.host.run_tests_available() {
+    if let Err(why) = e.host.exec_available() {
         eprintln!("SKIPPED (the jail cannot run here, nothing was tested): {why}");
         assert!(
             std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
@@ -190,62 +230,119 @@ fn run_tests_runs_in_the_jail_when_it_can() {
         );
         return;
     }
-    std::fs::write(
-        e.work.join("test_a.py"),
-        "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 2)\n",
-    )
-    .unwrap();
     let r = call(
         &e,
         "s",
-        "run_tests",
-        json!({"runner":"unittest","target":"test_a.py"}),
+        "exec",
+        json!({"command":"echo hello; echo oops >&2; exit 3"}),
     );
     assert!(r.ok && r.external && r.tainted, "{r:?}");
     assert!(
-        r.content
-            .starts_with("Result of run_tests: FAILED (exit code 1)."),
+        r.content.contains("hello") && r.content.contains("oops"),
         "{}",
         r.content
     );
-    assert!(
-        r.content.contains("UNTRUSTED-DATA tool-result"),
-        "{}",
-        r.content
+    assert_eq!(r.data["exit_code"], 3);
+    // The jail's own view: no HOME of the person, nothing outside /work is writable.
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command":"pwd; echo x > /usr/x 2>&1; echo $?; ls /home 2>&1 | wc -l"}),
     );
+    assert!(r.content.starts_with("/work"), "{}", r.content);
+    assert!(!std::path::Path::new("/usr/x").exists());
+    // The shape rule: empty, NUL, too long.
     for bad in [
-        json!({"runner":"unittest","target":"--foo"}),
-        json!({"runner":"unittest","target":"../x"}),
-        json!({"runner":"bash"}),
+        json!({"command":"   "}),
+        json!({"command":"echo \u{0}"}),
+        json!({"command":"a".repeat(9000)}),
     ] {
-        assert!(!call(&e, "s", "run_tests", bad).ok);
+        let r = call(&e, "s", "exec", bad);
+        assert_eq!(
+            (r.ok, r.decision.rule.as_str()),
+            (false, "S-12/bash"),
+            "{r:?}"
+        );
     }
+    // Protected folders: read-only inside the jail even when they do not exist; nothing is left.
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command":"mkdir -p .pi/extensions && echo x > .pi/extensions/x.ts"}),
+    );
+    assert!(r.data["exit_code"].as_i64().unwrap_or(0) != 0, "{r:?}");
+    assert!(
+        !e.work.join(".pi").exists(),
+        "no protected folder is left behind"
+    );
+    // A timeout is reported, not hidden.
+    let r = call(&e, "s", "exec", json!({"command":"sleep 30","timeout":1}));
+    assert_eq!(r.data["timed_out"], true, "{r:?}");
 }
 
 #[test]
-fn output_is_cleaned_scrubbed_and_never_split_by_a_hidden_character() {
+fn raw_reads_keep_the_bytes_and_clean_ones_do_not_and_filter_cleans_and_wraps() {
     let canaries = Canaries::fresh();
     let secret = canaries.value("notion").unwrap().to_owned();
     let scrubber = Scrubber::new(Arc::new(SystemClock));
     scrubber.add("notion", &secret);
     let e = env_with(|c| c.scrubber = Some(scrubber));
     let (a, b) = secret.split_at(10);
-    std::fs::write(
-        e.work.join("n.txt"),
-        format!("{secret}\n{a}\u{200b}{b}\n{a}\u{1b}[31m{b}\u{1b}[0m"),
-    )
-    .unwrap();
-    std::fs::write(e.work.join("bad\u{1b}[2Jname"), "x").unwrap();
-    let r = call(&e, "s", "read_file", json!({"path":"n.txt"}));
+    let body = format!("{secret}\n{a}\u{200b}{b}\n{a}\u{1b}[31m{b}\u{1b}[0m");
+    std::fs::write(e.work.join("n.txt"), &body).unwrap();
+    let r = call(&e, "s", "fs_read", json!({"path":"n.txt"}));
     assert!(
         r.ok && !r.content.contains(&secret) && !r.content.contains(b),
         "{}",
         r.content
     );
-    assert!(r.content.matches("notion").count() >= 3, "{}", r.content);
-    let l = call(&e, "s", "list_dir", json!({"path":"."}));
-    assert!(l.ok && l.content.contains("badname"), "{}", l.content);
-    assert!(!l.content.contains('\u{1b}'));
+    assert!(r.content.matches("tachado").count() >= 3, "{}", r.content);
+    // `edit` needs the real bytes (it writes the file back); they are filtered at the end.
+    let raw = call(&e, "s", "fs_read", json!({"path":"n.txt","raw":true}));
+    assert_eq!(raw.content, body);
+    let f = call(
+        &e,
+        "s",
+        "filter",
+        json!({"items":[{"text":body,"wrap":"file"},{"text":format!("x {secret}")}]}),
+    );
+    assert!(f.ok, "{f:?}");
+    let items = f.data["items"].as_array().unwrap();
+    let wrapped = items[0].as_str().unwrap();
+    assert!(
+        wrapped.starts_with("<<<UNTRUSTED-DATA file ")
+            && !wrapped.contains(&secret)
+            && !wrapped.contains(b),
+        "{wrapped}"
+    );
+    assert!(
+        !items[1].as_str().unwrap().contains(&secret)
+            && !items[1].as_str().unwrap().starts_with("<<<")
+    );
+    // Bad filter requests do nothing.
+    assert!(
+        !call(
+            &e,
+            "s",
+            "filter",
+            json!({"items":[{"text":"x","wrap":"memory"}]})
+        )
+        .ok
+    );
+    assert!(!call(&e, "s", "filter", json!({"items":"x"})).ok);
+    // Names are cleaned by the filter, not by the listing (Pi must be able to stat each one).
+    std::fs::write(e.work.join("bad\u{1b}[2Jname"), "x").unwrap();
+    let l = call(&e, "s", "fs_list", json!({"path":"."}));
+    assert!(l.data["entries"].to_string().contains("\\u001b"));
+    let f = call(
+        &e,
+        "s",
+        "filter",
+        json!({"items":[{"text":l.data["entries"][0].as_str().unwrap()}]}),
+    );
+    assert!(!f.data["items"][0].as_str().unwrap().contains('\u{1b}'));
 }
 
 #[test]
@@ -253,23 +350,25 @@ fn if_the_vault_cannot_filter_the_output_is_withheld() {
     let dead = Path::new("/nonexistent/vault.sock");
     let e = env_with(|c| c.vault = Some(VaultClient::new(dead)));
     std::fs::write(e.work.join("a.txt"), "harmless but unfiltered").unwrap();
-    let r = call(&e, "s", "read_file", json!({"path":"a.txt"}));
+    let r = call(&e, "s", "fs_read", json!({"path":"a.txt"}));
     assert!(!r.content.contains("harmless"), "{}", r.content);
     assert!(r.content.contains("withheld"));
+    let f = call(&e, "s", "filter", json!({"items":[{"text":"harmless"}]}));
+    assert!(f.data["items"][0].as_str().unwrap().contains("withheld"));
 }
 
 #[test]
-fn an_oversized_output_is_withheld_not_cut() {
+fn an_oversized_file_is_refused_and_an_oversized_write_too() {
     let e = env();
-    std::fs::write(e.work.join("big.txt"), vec![b'a'; 3 << 20]).unwrap();
-    let r = call(&e, "s", "read_file", json!({"path":"big.txt"}));
+    std::fs::write(e.work.join("big.txt"), vec![b'a'; 9 << 20]).unwrap();
+    let r = call(&e, "s", "fs_read", json!({"path":"big.txt"}));
     assert!(
-        !r.ok && r.content.contains("withheld"),
+        !r.ok && r.content.contains("more than"),
         "{}",
         &r.content[..100.min(r.content.len())]
     );
     let big = "z".repeat(2 << 20);
-    let w = call(&e, "s", "write_file", json!({"path":"w.txt","content":big}));
+    let w = call(&e, "s", "fs_write", json!({"path":"w.txt","content":big}));
     assert_eq!(w.decision.rule, "toolhost-limit");
     assert!(!e.work.join("w.txt").exists());
 }
@@ -280,13 +379,13 @@ fn the_breaker_opens_after_ten_denials_and_an_ask_is_a_no() {
     std::fs::write(e.work.join("ok.txt"), "fine").unwrap();
     for _ in 0..10 {
         assert_eq!(
-            call(&e, "b", "read_file", json!({"path":"../x"}))
+            call(&e, "b", "fs_read", json!({"path":"../x"}))
                 .decision
                 .rule,
             "S-13"
         );
     }
-    let r = call(&e, "b", "read_file", json!({"path":"ok.txt"}));
+    let r = call(&e, "b", "fs_read", json!({"path":"ok.txt"}));
     assert!(!r.ok, "{r:?}");
     assert_eq!(
         (r.decision.outcome.as_str(), r.decision.rule.as_str()),
@@ -294,7 +393,7 @@ fn the_breaker_opens_after_ten_denials_and_an_ask_is_a_no() {
     );
     assert!(!r.content.contains("fine"));
     // Another session is not affected.
-    assert!(call(&e, "other", "read_file", json!({"path":"ok.txt"})).ok);
+    assert!(call(&e, "other", "fs_read", json!({"path":"ok.txt"})).ok);
 }
 
 #[test]
@@ -304,9 +403,9 @@ fn bad_lines_run_nothing() {
         "",
         "not json",
         "{}",
-        r#"{"id":"1","tool":"write_file","args":"a","session":"s","call_id":"c"}"#,
-        r#"{"id":"1","tool":"write_file","args":{"path":"x","content":"c"},"session":"bad session\u001b","call_id":"c"}"#,
-        r#"{"id":"1","tool":"write_file","args":{"path":"x","content":"c"},"session":"s","call_id":"c","extra":1}"#,
+        r#"{"id":"1","tool":"fs_write","args":"a","session":"s","call_id":"c"}"#,
+        r#"{"id":"1","tool":"fs_write","args":{"path":"x","content":"c"},"session":"bad session\u001b","call_id":"c"}"#,
+        r#"{"id":"1","tool":"fs_write","args":{"path":"x","content":"c"},"session":"s","call_id":"c","extra":1}"#,
     ] {
         let r: Response = serde_json::from_str(&e.host.handle_line(line)).unwrap();
         assert!(!r.ok, "{line}");
@@ -343,7 +442,7 @@ fn the_socket_is_private_and_goes_away_with_the_server() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
-    let line = json!({"id":"1","tool":"make_dir","args":{"path":"d"},"session":"s","call_id":"c"})
+    let line = json!({"id":"1","tool":"fs_mkdir","args":{"path":"d"},"session":"s","call_id":"c"})
         .to_string();
     let r: Response = serde_json::from_str(&ask_over_socket(server.path(), &line)).unwrap();
     assert!(r.ok, "{r:?}");
@@ -412,10 +511,10 @@ fn the_binary_serves_and_stops_when_its_parent_lets_go() {
         .expect(&ready)
         .trim()
         .to_owned();
-    let line = json!({"id":"1","tool":"write_file","args":{"path":"x","content":"c"},"session":"s","call_id":"c"}).to_string();
+    let line = json!({"id":"1","tool":"fs_write","args":{"path":"x","content":"c"},"session":"s","call_id":"c"}).to_string();
     let t0 = Instant::now();
     let resp: Response = serde_json::from_str(&ask_over_socket(Path::new(&sock), &line)).unwrap();
-    eprintln!("socket round trip (write_file, cold): {:?}", t0.elapsed());
+    eprintln!("socket round trip (fs_write, cold): {:?}", t0.elapsed());
     assert!(resp.ok);
     drop(child.stdin.take()); // the parent lets go
     let end = Instant::now() + std::time::Duration::from_secs(10);
@@ -441,7 +540,7 @@ fn latency_of_a_call_through_the_socket() {
     let dir = private_dir(&t);
     let server = Server::start(Arc::new(e.host), &dir).unwrap();
     let line =
-        json!({"id":"1","tool":"read_file","args":{"path":"a.txt"},"session":"s","call_id":"c"})
+        json!({"id":"1","tool":"fs_read","args":{"path":"a.txt"},"session":"s","call_id":"c"})
             .to_string();
     let mut times = Vec::new();
     for _ in 0..200 {
@@ -452,7 +551,7 @@ fn latency_of_a_call_through_the_socket() {
     }
     times.sort();
     eprintln!(
-        "read_file over the socket, 200 calls: median {:?}, p95 {:?}, max {:?}",
+        "fs_read over the socket, 200 calls: median {:?}, p95 {:?}, max {:?}",
         times[100], times[190], times[199]
     );
     assert!(times[100] < std::time::Duration::from_millis(50));

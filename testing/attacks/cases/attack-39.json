@@ -1,6 +1,6 @@
 {
   "id": "attack-39",
-  "title": "Con Pi real: el modelo lee ../../etc/passwd, /etc/passwd, ~/.ssh y un enlace simbólico hacia fuera con read_file: nada fuera de la carpeta sale",
+  "title": "Con Pi real: read, ls, find y edit sobre ../../etc/passwd, /etc, ~/.ssh y un enlace simbólico hacia fuera: nada fuera de la carpeta sale",
   "rules": [
     "S-13",
     "S-20"

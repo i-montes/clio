@@ -1424,7 +1424,7 @@ const OURS: [&str; 20] = [
 ];
 
 /// Run by `clio-toolhost/tests/pi_stack.rs`: they attack Pi with its guard, not the own loop.
-const PI_STACK_CASES: [&str; 10] = [
+const PI_STACK_CASES: [&str; 12] = [
     "attack-38",
     "attack-39",
     "attack-40",
@@ -1435,6 +1435,8 @@ const PI_STACK_CASES: [&str; 10] = [
     "attack-45",
     "attack-46",
     "attack-47",
+    "attack-48",
+    "attack-49",
 ];
 
 /// Run by `clio-node/tests/jail.rs`: they attack the jail itself, not the agent.
@@ -1494,7 +1496,7 @@ fn the_active_cases_are_refused_by_the_whole_agent() {
     let cases: Vec<Case> = cases()
         .into_iter()
         .filter(|c| c.id != "attack-04" && !JAIL_CASES.contains(&c.id.as_str()))
-        // 38 to 47 attack the Pi stack (real Pi, clio-guard, clio-toolhost): they are run by
+        // 38 to 49 attack the Pi stack (real Pi, clio-guard, clio-toolhost): they are run by
         // clio-toolhost/tests/pi_stack.rs.
         .filter(|c| !PI_STACK_CASES.contains(&c.id.as_str()))
         .filter(|c| c.id != "attack-34" || jail)

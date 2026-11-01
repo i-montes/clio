@@ -1,20 +1,25 @@
 //! The tool host: the only thing in a Pi session that runs effects on the machine (ADR 0007).
 //!
-//! Pi runs the agent loop; its built-in tools are off. The model gets five tools registered by
-//! the `clio-guard` extension, and each of them is just a call to this service over a Unix
-//! socket. For every request the host does, in this order, and fails closed at each step:
+//! Pi keeps its own tools (`read`, `write`, `edit`, `bash`, `find`, `ls`: truncation, diff, path
+//! resolution, rendering). The `clio-guard` extension builds them with custom `operations`, and
+//! each primitive operation (read a file, write a file, stat, mkdir, list, glob, run a command)
+//! is a request to this service over a Unix socket. For every request the host does, in this
+//! order, and fails closed at each step:
 //!
-//! 1. the gateway decides (`Gateway::decide_or_deny`, rules in JSON, deny by default);
-//! 2. on an allow, the `clio-node` executor runs the tool inside the session's working copy
-//!    (sandbox, canonical paths, symlinks out rejected, protected folders), `run_tests` inside
-//!    the `bwrap` jail and only if the jail's self-test passed;
-//! 3. the output is cleaned (escape sequences out), scrubbed (known secret values and key
-//!    patterns out) and cut;
-//! 4. external content is wrapped as data (`wrap_untrusted`) and marks the session as tainted;
-//!    the mark never goes away and is reported in every answer (S-05).
+//! 1. the gateway decides the normalized operation (`Gateway::decide_or_deny`, rules in JSON,
+//!    deny by default);
+//! 2. on an allow, the `clio-node` executor runs it inside the session's working copy (sandbox,
+//!    canonical paths, symlinks out rejected, protected folders); a command (`exec`) runs ONLY in
+//!    the `bwrap` jail, and only if the jail's self-test passed;
+//! 3. the output is cleaned (escape sequences out) and scrubbed (known secret values and key
+//!    patterns out);
+//! 4. external content marks the session as tainted; the mark never goes away and is reported in
+//!    every answer (S-05). The `filter` operation cleans, scrubs and wraps (`wrap_untrusted`) the
+//!    final text of any tool result, whatever Pi made of it.
 //!
 //! Nothing in this crate talks to the network. See `README.md` for the protocol.
 
+mod ops;
 mod sanitize;
 mod server;
 
@@ -30,22 +35,19 @@ use clio_gateway::{
     ActionRequest, ArgKind, ArgSpec, Budget, Decision, Egress, Gateway, Outcome, Rules,
     SessionInfo, Source, Telemetry, ToolDecl, wrap_untrusted,
 };
-use clio_node::{Action, EffectLog, Executor, Jail, Registry, Sandbox, register_run_tests};
+use clio_node::{Action, EffectLog, Executor, Jail, Registry, Sandbox};
 use clio_vault::{Scrubber, VaultClient};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use sanitize::sanitize;
 pub use server::Server;
 
-/// The only tools the host knows. Anything else is denied by the gateway (S-02).
-pub const TOOLS: [&str; 5] = [
-    "read_file",
-    "list_dir",
-    "write_file",
-    "make_dir",
-    "run_tests",
+/// The operations the host knows (`filter` is handled apart: it has no effect). Anything else is
+/// denied by the gateway (S-02). `exec` is declared only when the jail is proven.
+pub const OPS: [&str; 7] = [
+    "fs_read", "fs_stat", "fs_list", "fs_glob", "fs_write", "fs_mkdir", "exec",
 ];
 
 /// Folders under the working copy that load code or settings by themselves (S-16): Pi
@@ -56,13 +58,13 @@ pub const PROTECTED_PATHS: [&str; 6] =
 
 /// A request line longer than this is refused and the connection closed.
 pub const MAX_REQUEST_BYTES: usize = 4 << 20;
-/// The largest `content` of a `write_file`.
+/// The largest `content` of an `fs_write`.
 const MAX_WRITE_BYTES: usize = 1 << 20;
 /// What a tool may produce before it is cleaned: above this the output is withheld, not cut, so
 /// a secret is never split by a cut before the scrubber saw it whole.
 const MAX_RAW_BYTES: usize = 2 << 20;
-/// What the model gets of an output (after cleaning).
-const MAX_RESULT_CHARS: usize = 32_000;
+/// A command longer than this is refused.
+const MAX_COMMAND_BYTES: usize = 8192;
 /// Breaker: this many denials in a row and the session stops being let through on its own.
 const BREAKER: u32 = 10;
 const MAX_SESSIONS: usize = 256;
@@ -95,12 +97,15 @@ pub struct Response {
     pub id: String,
     /// False: the tool did not run, or failed; `content` says why.
     pub ok: bool,
-    /// What the model sees. External text inside is wrapped as data.
+    /// Text of the answer (the cleaned output of a read or a command), or why the call failed.
     pub content: String,
+    /// Structured part (listing, stat, exit code, filtered texts); `null` if there is none.
+    #[serde(default)]
+    pub data: Value,
     pub decision: DecisionOut,
     /// The session's taint after this call. It only ever goes from false to true.
     pub tainted: bool,
-    /// `content` carries text from outside (a file, a listing, test output).
+    /// The answer carries text from outside (a file, a listing, command output).
     pub external: bool,
 }
 
@@ -119,9 +124,9 @@ impl Asker for NobodyHome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JailMode {
-    /// No `run_tests`.
+    /// No `exec`.
     Off,
-    /// `run_tests` only if `bwrap` is there, starts, and the jail's self-test passes.
+    /// `exec` only if `bwrap` is there, starts, and the jail's self-test passes.
     Auto,
 }
 
@@ -182,7 +187,7 @@ pub struct ToolHost {
     /// One call at a time: the tools change the working copy and the gateway keeps counters.
     busy: Mutex<()>,
     counter: AtomicU64,
-    run_tests: Result<(), String>,
+    exec_status: Result<(), String>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -202,16 +207,21 @@ fn arg_specs(tool: &str) -> Vec<ArgSpec> {
         kind,
         required,
     };
+    let path = a("path", ArgKind::Path, true);
     match tool {
-        "write_file" => vec![
-            a("path", ArgKind::Path, true),
-            a("content", ArgKind::Text, true),
+        "fs_read" => vec![path, a("raw", ArgKind::Bool, false)],
+        "fs_stat" => vec![path, a("mode", ArgKind::Text, false)],
+        "fs_glob" => vec![
+            path,
+            a("pattern", ArgKind::Text, true),
+            a("limit", ArgKind::Int, false),
         ],
-        "run_tests" => vec![
-            a("runner", ArgKind::Text, true),
-            a("target", ArgKind::Path, false),
+        "fs_write" => vec![path, a("content", ArgKind::Text, true)],
+        "exec" => vec![
+            a("command", ArgKind::Text, true),
+            a("timeout", ArgKind::Int, false),
         ],
-        _ => vec![a("path", ArgKind::Path, true)],
+        _ => vec![path],
     }
 }
 
@@ -226,17 +236,18 @@ fn valid_session(s: &str) -> bool {
 impl ToolHost {
     pub fn new(cfg: Config) -> Result<Self, String> {
         let e = |x: &dyn std::fmt::Display| x.to_string();
-        let mut registry = Registry::basic().map_err(|x| e(&x))?;
-        let run_tests = match cfg.jail {
+        let exec_status = match cfg.jail {
             JailMode::Off => Err("the jail is switched off".to_owned()),
-            JailMode::Auto => prove_jail().and_then(|()| {
-                register_run_tests(&mut registry).map_err(|x| format!("run_tests: {x}"))
-            }),
+            JailMode::Auto => prove_jail(),
         };
+        let mut registry = Registry::new();
+        for t in ops::tools(exec_status.is_ok()) {
+            registry.register(t).map_err(|x| e(&x))?;
+        }
         let (mut tools, mut descriptions) = (Vec::new(), HashMap::new());
-        for name in TOOLS {
+        for name in OPS {
             let Some(found) = registry.get(name) else {
-                continue; // run_tests without a proven jail: no declaration, so a deny (S-02)
+                continue; // `exec` without a proven jail: no declaration, so a deny (S-02)
             };
             let hash = digest_hex(&found.tool.description);
             tools.push(ToolDecl {
@@ -270,7 +281,8 @@ impl ToolHost {
         }
         let gateway = Gateway::new(Rules {
             sandbox_root: cfg.work.clone(),
-            // No tool here runs a command line, so no binary is allowed (S-12).
+            // `exec` takes a shell string, not an argv: it is not about binaries but about the
+            // jail it runs in (see `bash_rule`), so no binary list applies (S-12).
             allowed_binaries: vec![],
             // No tool here has egress: nothing is trusted because nothing goes out.
             trusted_domains: vec![],
@@ -301,7 +313,7 @@ impl ToolHost {
             sessions: Mutex::new(HashMap::new()),
             busy: Mutex::new(()),
             counter: AtomicU64::new(0),
-            run_tests,
+            exec_status,
         })
     }
 
@@ -311,9 +323,9 @@ impl ToolHost {
         self
     }
 
-    /// `Ok` when `run_tests` is offered; otherwise why it is not.
-    pub fn run_tests_available(&self) -> Result<(), &str> {
-        self.run_tests.as_ref().copied().map_err(String::as_str)
+    /// `Ok` when `exec` (bash, in the jail) is offered; otherwise why it is not.
+    pub fn exec_available(&self) -> Result<(), &str> {
+        self.exec_status.as_ref().copied().map_err(String::as_str)
     }
 
     pub fn telemetry(&self) -> Telemetry {
@@ -336,7 +348,7 @@ impl ToolHost {
             ),
         };
         serde_json::to_string(&resp).unwrap_or_else(|_| {
-            r#"{"id":"","ok":false,"content":"[toolhost] internal error","decision":{"outcome":"deny","rule":"fail-closed","reason":"internal error"},"tainted":true,"external":false}"#.into()
+            r#"{"id":"","ok":false,"content":"[toolhost] internal error","data":null,"decision":{"outcome":"deny","rule":"fail-closed","reason":"internal error"},"tainted":true,"external":false}"#.into()
         })
     }
 
@@ -371,6 +383,7 @@ impl ToolHost {
             id: id.to_owned(),
             ok: false,
             content: format!("[toolhost] the call was not run (rule {rule}): {why}"),
+            data: Value::Null,
             decision: DecisionOut {
                 outcome: "deny".into(),
                 rule: rule.into(),
@@ -403,6 +416,9 @@ impl ToolHost {
                 tainted,
             );
         };
+        if req.tool == "filter" {
+            return self.filter(&req, &map, tainted);
+        }
         if map
             .get("content")
             .and_then(Value::as_str)
@@ -437,7 +453,7 @@ impl ToolHost {
             plan: vec![],
         };
         let d = self.gateway.decide_or_deny(&ar);
-        let allowed = match d.outcome {
+        let mut allowed = match d.outcome {
             Outcome::Allow => true,
             Outcome::Ask => {
                 let yes = self.asker.approve(&d, &req.tool, &map);
@@ -448,11 +464,23 @@ impl ToolHost {
             }
             Outcome::Deny => false,
         };
-        let out = DecisionOut {
+        let mut out = DecisionOut {
             outcome: d.outcome.as_str().into(),
             rule: d.rule.clone(),
             reason: self.clean(&d.reason),
         };
+        // The gateway's rules know paths and domains; what is specific to a shell string is here.
+        if allowed
+            && req.tool == "exec"
+            && let Some(why) = bash_rule(&map)
+        {
+            allowed = false;
+            out = DecisionOut {
+                outcome: "deny".into(),
+                rule: "S-12/bash".into(),
+                reason: why.into(),
+            };
+        }
         if !allowed {
             let why = if d.outcome == Outcome::Ask {
                 format!(
@@ -465,12 +493,13 @@ impl ToolHost {
             let content = format!(
                 "[gateway] {} was not run (rule {}): {why}",
                 self.clean(&req.tool),
-                d.rule
+                out.rule
             );
             return Response {
                 id: req.id,
                 ok: false,
                 content,
+                data: Value::Null,
                 decision: out,
                 tainted: self.is_tainted(&req.session),
                 external: false,
@@ -490,24 +519,21 @@ impl ToolHost {
         let ran = catch_unwind(AssertUnwindSafe(|| {
             self.executor.execute(&action, &approval)
         }));
-        let (ok, content, external) = match ran {
+        let (ok, content, data, external) = match ran {
             Ok(Ok(o)) => self.present(&req, &o.result),
             Ok(Err(e)) => (
                 false,
-                format!(
-                    "[tool error] {} failed: {}",
-                    req.tool,
-                    self.clean(&e.to_string())
-                ),
+                format!("{} failed: {}", req.tool, self.clean(&e.to_string())),
+                Value::Null,
                 false,
             ),
-            Err(_) => (false, "[tool error] the tool panicked".to_owned(), false),
+            Err(_) => (false, "the tool panicked".to_owned(), Value::Null, false),
         };
         if external {
             self.mark(
                 &req.session,
-                if req.tool == "run_tests" {
-                    "tool-result"
+                if req.tool == "exec" {
+                    "command"
                 } else {
                     "file"
                 },
@@ -517,106 +543,133 @@ impl ToolHost {
             id: req.id,
             ok,
             content,
+            data,
             decision: out,
             tainted: self.is_tainted(&req.session),
             external,
         }
     }
 
-    /// The text for the model: `(ok, content, external)`.
-    fn present(&self, req: &Request, result: &Value) -> (bool, String, bool) {
-        let path = req
-            .args
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let raw = match req.tool.as_str() {
-            "read_file" => result
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            "list_dir" => result.get("entries").and_then(Value::as_array).map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }),
-            "run_tests" => result
-                .get("output")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            "write_file" | "make_dir" => {
-                let what = if req.tool == "write_file" {
-                    let n = req
-                        .args
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .map_or(0, str::len);
-                    format!("wrote {n} bytes to")
+    /// The text of a result, as it should reach the model: `(ok, content, data, external)`.
+    fn present(&self, req: &Request, result: &Value) -> (bool, String, Value, bool) {
+        let too_big = |n: usize| {
+            (
+                false,
+                format!(
+                    "[withheld] the output is {n} bytes, more than the {MAX_RAW_BYTES} allowed"
+                ),
+                Value::Null,
+                false,
+            )
+        };
+        match req.tool.as_str() {
+            "fs_read" | "exec" => {
+                let key = if req.tool == "exec" {
+                    "output"
                 } else {
-                    "created the folder".to_owned()
+                    "content"
                 };
-                return (true, format!("ok: {what} {}", self.clean(path)), false);
+                let raw = result.get(key).and_then(Value::as_str).unwrap_or_default();
+                if raw.len() > MAX_RAW_BYTES {
+                    return too_big(raw.len());
+                }
+                // `raw` is for `edit`: it reads the file, changes a part and writes it back, so
+                // cleaning here would damage the file. Its result is filtered at the end anyway.
+                let keep = req.args.get("raw").and_then(Value::as_bool) == Some(true);
+                let text = if keep {
+                    raw.to_owned()
+                } else {
+                    self.clean(raw)
+                };
+                let data = if req.tool == "exec" {
+                    json!({
+                        "exit_code": result["exit_code"],
+                        "signal": result["signal"],
+                        "timed_out": result["timed_out"],
+                        "timeout_secs": result["timeout_secs"],
+                    })
+                } else {
+                    Value::Null
+                };
+                (true, text, data, true)
             }
-            _ => None,
-        };
-        let Some(raw) = raw else {
-            return (
+            // Names are external text. They stay as they are here so Pi can stat each one; the
+            // result Pi builds from them is filtered at the end.
+            "fs_list" => (true, String::new(), result.clone(), true),
+            "fs_glob" => (true, String::new(), result.clone(), true),
+            "fs_stat" => (true, String::new(), result.clone(), false),
+            "fs_write" | "fs_mkdir" => (true, String::new(), Value::Null, false),
+            _ => (
                 false,
-                "[tool error] the tool returned an unexpected result".into(),
+                "the tool returned an unexpected result".into(),
+                Value::Null,
                 false,
-            );
-        };
-        if raw.len() > MAX_RAW_BYTES {
-            return (
-                false,
-                format!(
-                    "[withheld] the output is {} bytes, more than the {MAX_RAW_BYTES} allowed",
-                    raw.len()
-                ),
-                false,
-            );
+            ),
         }
-        let keep_end = req.tool == "run_tests";
-        let text = cut(&self.clean(&raw), keep_end);
-        if req.tool == "run_tests" {
-            let passed = result["passed"].as_bool() == Some(true);
-            let how = if result["timed_out"].as_bool() == Some(true) {
-                "killed: time limit".to_owned()
-            } else {
-                format!(
-                    "exit code {}",
-                    result["exit_code"]
-                        .as_i64()
-                        .map_or("none".into(), |c| c.to_string())
-                )
+    }
+
+    /// `filter`: no effect, no path. Cleans and scrubs texts and wraps the ones that ask for it
+    /// as external data. `{"items": [{"text": "...", "wrap": "file" | "tool-result"}]}`.
+    fn filter(&self, req: &Request, args: &Map<String, Value>, tainted: bool) -> Response {
+        let bad = |why: &str| self.refuse(&req.id, "protocol", why.into(), tainted);
+        let Some(items) = args.get("items").and_then(Value::as_array) else {
+            return bad("`items` must be an array");
+        };
+        if items.len() > 256 {
+            return bad("too many items");
+        }
+        let mut total = 0;
+        let mut out = Vec::new();
+        for it in items {
+            let Some(text) = it.get("text").and_then(Value::as_str) else {
+                return bad("every item needs a `text`");
             };
-            // The exit code is the jail's own word: it goes outside the markers.
-            return (
-                true,
-                format!(
-                    "Result of run_tests: {} ({how}).\n{}",
-                    if passed { "PASSED" } else { "FAILED" },
-                    wrap_untrusted(Source::ToolResult, &text)
-                ),
-                true,
-            );
+            total += text.len();
+            if total > MAX_RAW_BYTES * 2 {
+                return bad("the texts are too large");
+            }
+            let source = match it.get("wrap").and_then(Value::as_str) {
+                None => None,
+                Some("file") => Some(Source::File),
+                Some("tool-result") => Some(Source::ToolResult),
+                Some(_) => return bad("unknown wrap source"),
+            };
+            let clean = self.clean(text);
+            out.push(Value::String(match source {
+                Some(s) => wrap_untrusted(s, &clean),
+                None => clean,
+            }));
         }
-        (true, wrap_untrusted(Source::File, &text), true)
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: String::new(),
+            data: json!({ "items": out }),
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "filter".into(),
+                reason: "cleaning text has no effect".into(),
+            },
+            tainted: self.is_tainted(&req.session),
+            external: false,
+        }
     }
 }
 
-/// Keeps `MAX_RESULT_CHARS`: the start, or (test output) the end, where the failures are.
-fn cut(text: &str, keep_end: bool) -> String {
-    let n = text.chars().count();
-    if n <= MAX_RESULT_CHARS {
-        return text.to_owned();
-    }
-    if keep_end {
-        let tail: String = text.chars().skip(n - MAX_RESULT_CHARS).collect();
-        format!("[truncated: the end is shown]\n{tail}")
+/// The rule for a shell string, on top of the gateway's: it is not empty, has no NUL and is of
+/// a sane size. Everything else a command might do is held by the jail, not by reading it: no
+/// network, no home, only the working copy, protected folders read-only, limits on time,
+/// processes and output (S-12, S-13, S-16).
+fn bash_rule(args: &Map<String, Value>) -> Option<&'static str> {
+    let c = args.get("command").and_then(Value::as_str)?;
+    if c.trim().is_empty() {
+        Some("the command is empty")
+    } else if c.contains('\0') {
+        Some("the command has a NUL byte")
+    } else if c.len() > MAX_COMMAND_BYTES {
+        Some("the command is too long")
     } else {
-        text.chars().take(MAX_RESULT_CHARS).collect::<String>() + "\n[truncated]"
+        None
     }
 }
 

@@ -7,6 +7,8 @@ export interface HostResponse {
 	id: string;
 	ok: boolean;
 	content: string;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	data: Record<string, any>;
 	decision: { outcome: string; rule: string; reason: string };
 	tainted: boolean;
 	external: boolean;
@@ -55,6 +57,7 @@ export function callHost(
 					if (typeof r.ok !== "boolean" || typeof r.content !== "string" || r.id !== request.id) {
 						return finish(unknown("sent an answer that does not match the request"));
 					}
+					r.data = r.data && typeof r.data === "object" ? r.data : {};
 					finish(undefined, r);
 				} catch {
 					finish(unknown("sent an answer that is not valid JSON"));

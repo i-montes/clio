@@ -60,11 +60,13 @@ fn run() -> Result<(), String> {
         cfg.scrubber = Some(s);
     }
     let host = Arc::new(ToolHost::new(cfg)?);
-    match host.run_tests_available() {
+    match host.exec_available() {
         Ok(()) => {
-            eprintln!("clio-toolhost: run_tests is available (the jail passed its self-test)")
+            eprintln!(
+                "clio-toolhost: exec (bash in the jail) is available (the jail passed its self-test)"
+            )
         }
-        Err(why) => eprintln!("clio-toolhost: run_tests is NOT offered: {why}"),
+        Err(why) => eprintln!("clio-toolhost: exec (bash) is NOT offered: {why}"),
     }
     let server = Server::start(host, &dir)?;
     println!("READY {}", server.path().display());

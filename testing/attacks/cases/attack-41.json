@@ -1,6 +1,6 @@
 {
   "id": "attack-41",
-  "title": "Con Pi real: run_tests con target hostil (--foo, ../x, a;b, enlaces hacia fuera), runner libre o argumentos extra: no corre nada",
+  "title": "Con Pi real: bash confinado en la jaula: sin red (curl y sockets hacia un servidor local fallan), HOME oculto (cat ~/.ssh/id_* no encuentra nada), sin escritura fuera de la copia, enlaces hacia fuera no seguidos; el bash del cliente RPC va por la misma jaula",
   "rules": [
     "S-12",
     "S-13"
