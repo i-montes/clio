@@ -150,10 +150,10 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 ### Adaptador de Pi (D16)
 
 - [x] **097** Fijar la versión de Pi, con lockfile e instalación sin scripts (S-42): `@earendil-works/pi-coding-agent` 1.4.0, con correcciones forzadas de `undici` y `minimatch` (auditoría limpia)
-- [ ] **098** Adaptador propio entre Pi y Clio (ADR 0007): el lado Rust que lanza `pi --mode rpc` con las banderas endurecidas, habla JSON por líneas, relaya los eventos y lista/abre las sesiones de Pi
-- [ ] **099** Cambiado por decisión de la persona (ADR 0007): Pi guarda las sesiones, locales y remotas; Clio las lista, las abre y las reabre desde las suyas, no se construye un sistema de sesiones propio
-- [ ] **100** Desactivar la carga y la escritura de extensiones, skills y servidores MCP por parte del agente (S-16): `--no-builtin-tools --no-extensions -e clio-guard --no-mcp --no-skills --no-prompt-templates --no-approve` y la pasarela niega escribir en `.pi`
-- [ ] **101** prueba: un intento de escribir en la carpeta de extensiones se bloquea (S-16)
+- [x] **098** Adaptador propio entre Pi y Clio (ADR 0007): el lado Rust que lanza `pi --mode rpc` con las banderas endurecidas, habla JSON por líneas, relaya los eventos y lista/abre las sesiones de Pi
+- [x] **099** Cambiado por decisión de la persona (ADR 0007): Pi guarda las sesiones, locales y remotas; Clio las lista, las abre y las reabre desde las suyas, no se construye un sistema de sesiones propio
+- [x] **100** Desactivar la carga y la escritura de extensiones, skills y servidores MCP por parte del agente (S-16): `--no-builtin-tools --no-extensions -e clio-guard --no-mcp --no-skills --no-prompt-templates --no-approve` y la pasarela niega escribir en `.pi`
+- [x] **101** prueba: un intento de escribir en la carpeta de extensiones se bloquea (S-16)
 - [ ] **102** Revisar cada actualización de Pi antes de adoptarla (S-42)
 - [x] **103** prueba: el CI falla si el lockfile de npm cambia sin revisión (S-42)
 - [x] **104** Prompts de sistema versionados en el repositorio: `prompts/system/<nombre>@<versión>.md`, con `MANIFEST.json` de sha256 y revisión del dueño (`CODEOWNERS`); una versión publicada no se edita
