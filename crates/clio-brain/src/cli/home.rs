@@ -230,6 +230,7 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         write_private(&cfg, text.as_bytes())?;
         println!("{ok}  creada       {} (0600)", cfg.display());
     }
+    super::pi::init_lines(dirs);
     let key = dirs.key_file();
     match key_status(dirs) {
         KeyStatus::Env => {

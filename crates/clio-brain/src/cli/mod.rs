@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod home;
 pub mod jail;
 pub mod memory;
+pub mod pi;
 pub mod runs;
 pub mod tui;
 pub mod ui;

@@ -78,6 +78,7 @@ impl Env {
         c.args(args)
             .env("HOME", self.home())
             .env("XDG_RUNTIME_DIR", self.tmp.path().join("run"))
+            .env("CLIO_SKIP_PI_INSTALL", "1")
             .env(
                 "CLIO_HOST_CHECK",
                 self.tmp.path().join("script/host-check.sh"),
