@@ -123,3 +123,5 @@ jobs:
         working-directory: adapters/pi
       - run: npm audit --audit-level=high
         working-directory: adapters/pi
+      - run: npm run check
+        working-directory: adapters/pi

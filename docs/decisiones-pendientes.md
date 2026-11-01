@@ -42,3 +42,6 @@ Ver la lista maestra (`docs/lista-maestra.md`): tareas de la fase 1 aún abierta
 
 ## Pendiente de probar en un Mac
 El flujo interactivo de la TUI (lanzar un trabajo y cancelarlo desde la pantalla, pruebas `pty_*`) se atasca en el CI de macOS y no se pudo depurar sin un Mac, así que esas dos pruebas corren solo en Linux. En macOS sí pasan abrir, salir, la restauración tras un pánico y la ayuda por tubería. Tampoco corre en macOS la prueba de la secuencia de atajos (`Ctrl-D`, `c`, `U`, `?`, `Ctrl-L`, `q`): allí `q` no sale a tiempo, y hay que mirar con un Mac si es un fallo real de la TUI o del controlador de la prueba. Tu PC es Linux, así que no te afecta; solo importa si algún día usas Clio en un Mac.
+
+- **CI con Pi real:** los tests con Pi (`pi_real`, ataques 38–49) se saltan en CI porque el runner no trae Node ≥ 22.19. Para exigirlos hace falta `actions/setup-node` fijado por SHA (verificar el SHA antes de fijarlo) y `CLIO_REQUIRE_PI=1`. Localmente ya pasan todos.
+- **Cortacircuito de la guardia:** se abre a las 10 negadas seguidas y no se cierra solo; hoy solo sirve empezar otra sesión. ¿Quieres un diálogo para reanudarla?
