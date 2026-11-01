@@ -250,6 +250,10 @@ pub fn hardened_args(l: &Launch, session_args: &[OsString]) -> Vec<OsString> {
         l.provider.id.clone().into(),
         "--model".into(),
         l.provider.model.clone().into(),
+        // A reasoning model thinks for thousands of tokens on a simple step at Pi's default
+        // ("medium"): measured 46 s against 7 s at "low" for the same answer.
+        "--thinking".into(),
+        "low".into(),
     ]);
     a.extend(session_args.iter().cloned());
     if let Some(n) = &l.name {
@@ -466,6 +470,7 @@ mod tests {
             "--no-context-files",
             "--no-approve",
             "--offline",
+            "--thinking",
         ] {
             assert!(a.iter().any(|x| x == f), "{f}");
         }
