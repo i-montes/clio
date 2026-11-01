@@ -44,3 +44,5 @@ install:
     install -d -m 0755 "$HOME/.local/bin"
     install -m 0755 target/release/clio target/release/clio-vault "$HOME/.local/bin/"
     @echo "installed clio and clio-vault in $HOME/.local/bin"
+    # Pi, the agent harness, pinned by version and lockfile (npm ci --ignore-scripts; needs Node 22.19+ and the network once).
+    -"$HOME/.local/bin/clio" pi install

@@ -6,7 +6,7 @@ mod cli;
 use std::io::IsTerminal;
 
 use cli::home::Dirs;
-use cli::{Args, Res, apply, debug, doctor, home, memory, runs, tui, vault};
+use cli::{Args, Res, apply, debug, doctor, home, memory, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
@@ -21,6 +21,7 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
                                               lo que Clio recuerda (clio memory --help)
   clio doctor [--json]                        revisa permisos, clave, sockets y el equipo
+  clio pi doctor|install|sessions [--json]    Pi (el arnés del agente): estado, instalación, sesiones
 
 Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
 
@@ -70,6 +71,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "vault"
             | "doctor"
             | "memory"
+            | "pi"
     ) {
         eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
         return Ok(2);
@@ -128,6 +130,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
         "memory" => return memory::run(&dirs, args.into_raw()),
+        "pi" => return pi::run(&dirs, args.into_raw()),
         "doctor" => {
             let json = args.flag("--json");
             args.rest()?;

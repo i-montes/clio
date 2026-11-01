@@ -372,6 +372,9 @@ pub fn collect(dirs: &Dirs) -> Report {
             Some("Detén ese proceso: Clio no debe escuchar en una dirección pública.".into()),
         );
     }
+    for (level, msg, hint) in super::pi::checks(dirs) {
+        o.say(level, msg, hint);
+    }
     jail_lines(&mut o);
     match find_host_check() {
         Some(script) => {

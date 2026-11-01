@@ -515,13 +515,28 @@ clio vault stop
 
 Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en `CLIO_VAULT_BIN`/`PATH`). Los dos sockets quedan en `$XDG_RUNTIME_DIR/clio/` con permisos 0600; el archivo de la bóveda en `~/.local/share/clio/vault.bin`.
 
+## Pi, el arnés del agente (en preparación)
+
+Pi (decisión 0007) será quien corra el bucle del agente, los proveedores, las sesiones y la compactación. Todavía NO lo usan la interfaz ni `clio run` (siguen con el arnés `builtin`); lo que ya existe es la base:
+
+```sh
+clio pi install            # instala Pi fijado (1.4.0) con `npm ci --ignore-scripts`; `clio init` y `just install` también
+clio pi doctor [--json]    # Node 22.19+, Pi instalado y de la versión fijada, que su carpeta no sea ~/.pi
+clio pi sessions [--json]  # las sesiones que Pi guardó (título, mensajes, carpeta, última actividad)
+```
+
+- Hace falta **Node 22.19 o más** en el `PATH` (mise, nvm o el gestor de tu sistema) y red la primera vez. Si falta algo, el mensaje dice qué hacer. `clio init` nunca falla por Pi: avisa y puedes repetir con `clio pi install`.
+- Pi vive solo en las carpetas de Clio, todas 0700: `~/.local/share/clio/pi/1.4.0/` (la instalación, desde el `package-lock.json` incrustado en el binario, sin scripts de instalación), `pi/agent/` (`models.json`, sin la clave), `pi/sessions/` (las sesiones, 0600) y `pi/home/`. Tu `~/.pi` (el de tu propio Pi) no se toca ni se lee, y `clio doctor` lo comprueba.
+- La clave del modelo no se escribe en ningún archivo ni en la línea de comandos: va solo en el entorno del proceso de Pi, que arranca con un entorno vacío (nada de `SSH_AUTH_SOCK`, tu `HOME` ni otras variables tuyas).
+- `clio pi sessions` lee solo la cabecera y lo mínimo de cada archivo (abre al instante con cientos); los títulos y nombres se limpian de secuencias de escape; un archivo roto se ignora con un aviso. El número de mensajes lleva `~` cuando es una estimación (archivos grandes).
+
 ## Comprobar la máquina
 
 ```sh
 clio doctor
 ```
 
-Revisa: la jaula (autoprueba, una línea por comprobación, ver arriba), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, ya en español). Clio lo corre con `CLIO_DOCTOR_EMBEDDED=1`, que le hace omitir las dos comprobaciones que `clio` ya hizo por su cuenta (permisos de las carpetas y archivos de Clio, S-23, y procesos de Clio que escuchan fuera de loopback, S-38): cada una sale una sola vez. Si corres el script solo, hace todas y termina con `equipo: sin FAIL` (o `equipo: hay FAIL, mira arriba`), con el mismo código de salida de siempre. Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}` (las mismas claves de siempre; cambia que los mensajes del script del equipo están en español y que ya no hay comprobaciones repetidas). La TUI muestra lo mismo con `D`.
+Revisa: Node y Pi (ver «Pi, el arnés del agente»), la jaula (autoprueba, una línea por comprobación, ver arriba), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, y ejecuta `infra/local/check-host.sh` (lo busca junto al repositorio o en `CLIO_HOST_CHECK`) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, ya en español). Clio lo corre con `CLIO_DOCTOR_EMBEDDED=1`, que le hace omitir las dos comprobaciones que `clio` ya hizo por su cuenta (permisos de las carpetas y archivos de Clio, S-23, y procesos de Clio que escuchan fuera de loopback, S-38): cada una sale una sola vez. Si corres el script solo, hace todas y termina con `equipo: sin FAIL` (o `equipo: hay FAIL, mira arriba`), con el mismo código de salida de siempre. Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}` (las mismas claves de siempre; cambia que los mensajes del script del equipo están en español y que ya no hay comprobaciones repetidas). La TUI muestra lo mismo con `D`.
 
 ## Qué NO hace Clio todavía
 
