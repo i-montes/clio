@@ -8,6 +8,8 @@
 //!   environment of S-16/S-42, writes `models.json` (no key inside), and fails closed.
 //! - [`rpc`]: JSONL framing (LF only), commands, the tolerant [`rpc::Event`] type, timeouts,
 //!   cancellation, `Drop` that kills the process group, sanitized stderr, a usage meter.
+//! - [`session`]: the guard extension, the prompt file and `clio toolhost` around one session,
+//!   shared by the chat and the bench.
 //! - [`sessions`]: fast listing of Pi's `.jsonl` session files.
 //! - [`text`]: sanitizing of everything that comes from outside.
 //!
@@ -17,6 +19,7 @@
 pub mod install;
 pub mod launch;
 pub mod rpc;
+pub mod session;
 pub mod sessions;
 pub mod text;
 

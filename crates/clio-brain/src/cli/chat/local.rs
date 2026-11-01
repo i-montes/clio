@@ -14,55 +14,22 @@
 //! Pi and the toolhost both exit when their stdin closes, so nothing is left behind even if this
 //! process is killed with `SIGKILL`.
 
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::channel;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use clio_brain::pi::install::{self, PiInstall};
+use clio_brain::pi::PiError;
+use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, read_api_key, start};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
+use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
-use clio_brain::pi::{PiError, PiPaths};
 use serde_json::{Value, json};
 
 use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
+use crate::cli::Res;
 use crate::cli::home::{Config, Dirs};
 use crate::cli::runs::{self, RunOpts};
 use crate::cli::usage;
-use crate::cli::{Res, mkdir_private, write_private};
-
-/// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 6] = ["read", "write", "edit", "bash", "find", "ls"];
-const PROMPT_NAME: &str = "clio-agent@4";
-const PROMPT: &str = include_str!("../../../../../prompts/system/clio-agent@4.md");
-/// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
-/// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
-const GUARD_FILES: [(&str, &str); 4] = [
-    (
-        "index.ts",
-        include_str!("../../../../../adapters/pi/extensions/clio-guard/index.ts"),
-    ),
-    (
-        "data.ts",
-        include_str!("../../../../../adapters/pi/extensions/clio-guard/data.ts"),
-    ),
-    (
-        "host.ts",
-        include_str!("../../../../../adapters/pi/extensions/clio-guard/host.ts"),
-    ),
-    (
-        "prompt.ts",
-        include_str!("../../../../../adapters/pi/extensions/clio-guard/prompt.ts"),
-    ),
-];
-const TOOLHOST_READY: Duration = Duration::from_secs(60);
-const TOOLHOST_GRACE: Duration = Duration::from_secs(3);
 
 fn text(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -162,22 +129,13 @@ impl SessionSource for LocalSource {
         let run_dir = d.runs.join(&id);
         let work = self.copy_of(&id);
         // 2. the toolhost
-        let toolhost = Toolhost::start(d, &paths, &run_dir, &work, &key)?;
+        let exe = std::env::current_exe().map_err(text)?;
+        let toolhost = Toolhost::start(&exe, d.need_runtime()?, &paths, &run_dir, &work, &key)?;
         // 3. Pi
         let launch = Launch {
             guard: Some(ensure_guard(&install)?),
             guard_tools: GUARD_TOOLS.map(String::from).to_vec(),
-            extra_env: vec![
-                (
-                    "CLIO_GUARD_PROMPT_FILE".into(),
-                    write_prompt(&paths)?.display().to_string(),
-                ),
-                ("CLIO_GUARD_PROMPT_VERSION".into(), PROMPT_NAME.into()),
-                (
-                    "CLIO_TOOLHOST_SOCKET".into(),
-                    toolhost.socket.display().to_string(),
-                ),
-            ],
+            extra_env: guard_env(&paths, &toolhost)?,
             provider: provider_of(d, &cfg),
             api_key: Some(key),
             cwd: work.clone(),
@@ -219,170 +177,6 @@ fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
         m.price_out_micro_per_mtok as f64 / 1e6,
     );
     p
-}
-
-/// The guard: the checkout's own next to Pi's `node_modules` if there is one, else the copy that
-/// travels inside this binary, written beside the installed Pi (refreshed when the binary's
-/// differs). The result is the entry file, which is what `pi -e` and the launch checks take.
-fn ensure_guard(install: &PiInstall) -> Result<PathBuf, String> {
-    let dir = install.dir.join("extensions/clio-guard");
-    let marker = dir.join(".clio-embedded");
-    let entry = |d: &Path| d.join("index.ts").canonicalize().map_err(text);
-    if dir.join("index.ts").is_file() && !marker.exists() {
-        return entry(&dir);
-    }
-    let sum = crate::cli::sha_hex(GUARD_FILES.map(|f| f.1).concat().as_bytes());
-    if std::fs::read_to_string(&marker).ok().as_deref() != Some(&sum) {
-        mkdir_private(&dir)?;
-        for (name, body) in GUARD_FILES {
-            write_private(&dir.join(name), body.as_bytes())?;
-        }
-        write_private(&marker, sum.as_bytes())?;
-    }
-    entry(&dir)
-}
-
-fn write_prompt(paths: &PiPaths) -> Result<PathBuf, String> {
-    let dir = paths.root.join("prompts");
-    mkdir_private(&dir)?;
-    let p = dir.join(format!("{PROMPT_NAME}.md"));
-    write_private(&p, PROMPT.as_bytes())?;
-    Ok(p)
-}
-
-/// `clio toolhost` running on the session's copy.
-struct Toolhost {
-    child: Mutex<Option<Child>>,
-    stdin: Mutex<Option<ChildStdin>>,
-    socket: PathBuf,
-    sock_dir: PathBuf,
-}
-
-static TOOLHOSTS: AtomicU32 = AtomicU32::new(0);
-
-impl Toolhost {
-    fn start(
-        d: &Dirs,
-        paths: &PiPaths,
-        run_dir: &Path,
-        work: &Path,
-        key: &clio_brain::pi::launch::Secret,
-    ) -> Res<Self> {
-        let rt = d.need_runtime()?;
-        mkdir_private(rt)?;
-        // A short path: Unix sockets cannot be longer than about 100 bytes.
-        let sock_dir = rt.join(format!(
-            "th-{}-{}",
-            std::process::id(),
-            TOOLHOSTS.fetch_add(1, Ordering::SeqCst)
-        ));
-        let socket = sock_dir.join("toolhost.sock");
-        if socket.as_os_str().len() > 100 {
-            return Err(format!(
-                "la ruta del socket ({}) es demasiado larga para un socket Unix: usa un XDG_RUNTIME_DIR más corto",
-                socket.display()
-            ));
-        }
-        mkdir_private(&sock_dir)?;
-        let (scratch, effects) = (run_dir.join("scratch"), run_dir.join("toolhost"));
-        mkdir_private(&scratch)?;
-        mkdir_private(&effects)?;
-        mkdir_private(&paths.home_dir())?;
-        let log = run_dir.join("toolhost.log");
-        let logf = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&log)
-            .map_err(|e| format!("{}: {e}", log.display()))?;
-        let jail = if std::env::var("CLIO_JAIL").is_ok_and(|v| v == "off") {
-            "off"
-        } else {
-            "auto"
-        };
-        let exe = std::env::current_exe().map_err(text)?;
-        let mut child = Command::new(exe)
-            .arg("toolhost")
-            .arg("--socket-dir")
-            .arg(&sock_dir)
-            .arg("--work")
-            .arg(work)
-            .arg("--scratch")
-            .arg(&scratch)
-            .arg("--run-dir")
-            .arg(&effects)
-            .args(["--jail", jail])
-            .env_clear()
-            .env("HOME", paths.home_dir())
-            .env("PATH", "/usr/bin:/bin")
-            .env(
-                "CLIO_TOOLHOST_SCRUB_JSON",
-                json!({"opencode_api_key": key.expose()}).to_string(),
-            )
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(logf))
-            .spawn()
-            .map_err(|e| format!("no pude iniciar clio toolhost: {e}"))?;
-        let stdin = child.stdin.take();
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            return Err("clio toolhost sin salida".into());
-        };
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            for l in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx.send(l);
-            }
-        });
-        let this = Self {
-            child: Mutex::new(Some(child)),
-            stdin: Mutex::new(stdin),
-            socket,
-            sock_dir,
-        };
-        // On any failure `this` drops here and stops the process.
-        let line = rx.recv_timeout(TOOLHOST_READY).map_err(|_| {
-            format!(
-                "clio toolhost no dijo READY a tiempo (mira {})",
-                log.display()
-            )
-        })?;
-        if line.strip_prefix("READY ").map(|s| Path::new(s.trim())) != Some(&this.socket) {
-            return Err(format!(
-                "clio toolhost arrancó mal (mira {})",
-                log.display()
-            ));
-        }
-        Ok(this)
-    }
-
-    /// Closes its stdin (its orderly stop), waits a moment, then kills; removes the socket folder.
-    fn stop(&self) {
-        if let Ok(mut g) = self.stdin.lock() {
-            *g = None;
-        }
-        if let Ok(mut g) = self.child.lock()
-            && let Some(mut c) = g.take()
-        {
-            let end = Instant::now() + TOOLHOST_GRACE;
-            while Instant::now() < end && matches!(c.try_wait(), Ok(None)) {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if matches!(c.try_wait(), Ok(None)) {
-                let _ = c.kill();
-            }
-            let _ = c.wait();
-        }
-        let _ = std::fs::remove_dir_all(&self.sock_dir);
-    }
-}
-
-impl Drop for Toolhost {
-    fn drop(&mut self) {
-        self.stop();
-    }
 }
 
 /// An open session: Pi, and the toolhost beside it. Field order is the order they are dropped:
@@ -454,24 +248,5 @@ mod tests {
         assert!(!is_taint(
             &json!({"type":"custom","customType":"clio-guard.taint","data":{}})
         ));
-    }
-
-    #[test]
-    fn the_guard_tools_are_the_six_the_extension_registers() {
-        // Same list as TOOL_NAMES in adapters/pi/extensions/clio-guard/index.ts.
-        let (_, index) = GUARD_FILES[0];
-        let line = index
-            .lines()
-            .find(|l| l.contains("export const TOOL_NAMES"))
-            .unwrap();
-        for t in GUARD_TOOLS {
-            assert!(line.contains(&format!("\"{t}\"")), "{t}");
-        }
-        assert_eq!(line.matches('"').count(), GUARD_TOOLS.len() * 2);
-    }
-
-    #[test]
-    fn the_prompt_is_the_one_the_guard_checks() {
-        assert!(PROMPT.starts_with("version: 4"));
     }
 }
