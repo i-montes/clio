@@ -4,6 +4,7 @@
 //! real run asks a command (see `CommandLlm`).
 
 pub mod agent_bench;
+pub mod pi_bench;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
