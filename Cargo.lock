@@ -340,6 +340,22 @@ name = "clio-synthetic"
 version = "0.0.0"
 
 [[package]]
+name = "clio-toolhost"
+version = "0.0.0"
+dependencies = [
+ "clio-attacks",
+ "clio-canaries",
+ "clio-core",
+ "clio-gateway",
+ "clio-node",
+ "clio-vault",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "clio-trace"
 version = "0.0.0"
 dependencies = [

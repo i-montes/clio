@@ -50,6 +50,29 @@ Pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe 
 - **Un `kill -9` a `clio` durante `doctor`** puede dejar un archivo señuelo inofensivo en tu HOME.
 - **`cargo test`** no se ofrece: haría falta montar parte de tu HOME.
 
+### La pila con Pi: Pi + `clio-guard` + `clio-toolhost` (ADR 0007)
+
+Pi corre el bucle del agente, los proveedores y las sesiones; Clio le quita todo lo que toca la máquina y le pone encima su propia guardia. Pi 1.4.0 arranca con `--no-builtin-tools --no-extensions -e clio-guard --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`. Pi mismo dice que no es un límite de seguridad: la seguridad viene de aislar lo que puede alcanzar. Capa por capa:
+
+| Capa | Qué defiende | Qué NO defiende |
+|---|---|---|
+| Banderas de arranque de Pi | Sin `bash`/`read`/`write`/`edit`, sin extensiones ajenas, sin MCP, sin skills, sin archivos de contexto; una extensión que no carga detiene a Pi (no queda ninguna herramienta). | No es un límite: corre dentro del proceso de Pi. |
+| Extensión `clio-guard` (`adapters/pi/extensions/clio-guard/`) | Registra solo cinco herramientas, bloquea y reporta cualquier otra y las escrituras que el servicio rechazaría, niega siempre `project_trust` y el `bash` del cliente RPC, añade el prompt versionado (falla cerrado si falta), marca todo resultado de herramienta como datos, guarda la contaminación en la sesión de Pi y la restaura al reabrirla. | **Corre como la persona, dentro del proceso de Pi.** Un fallo de Pi o de una dependencia de Pi anula esta capa; por eso no decide nada que el servicio no decida también. |
+| Servicio `clio-toolhost` | Lo único que ejecuta efectos. Socket Unix 0600 en una carpeta 0700; la pasarela decide cada llamada (niega por defecto, falla cerrada, cortacircuito a las 10 negadas seguidas); el ejecutor de `clio-node` trabaja en la copia (rutas canonizadas, enlaces hacia fuera rechazados, `extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents` sin escritura); toda salida se sanea (secuencias de escape), pasa por el limpiador del vault y se envuelve como datos; la contaminación de la sesión no se borra y va en cada respuesta. Si el servicio cae o calla, la herramienta falla y no se ejecuta nada. | Comparte usuario con Pi: quien controle a Pi puede hablar con su socket (es lo que hace la extensión) y puede intentar lo mismo que el modelo, con la misma pasarela delante. Un «preguntar» de la pasarela se niega (no hay diálogos en esta fase). |
+| Jaula `bwrap` | Lo único que se ejecuta de verdad, `run_tests`, corre sin red, con solo la copia visible, y solo si la autoprueba pasa. | Lo que ya dice la sección anterior (sin seccomp, sin cuotas de disco). |
+| Vault / limpiador | Valores conocidos y patrones de llaves salen tachados de toda salida, incluso partidos con caracteres invisibles (se sanea antes de limpiar). | Solo lo que conoce. Si se configura un vault y no contesta, la salida se retiene. |
+
+**Límites honestos de esta pila:**
+
+- El **proceso de Pi y la extensión corren como la persona**, con sus archivos y su red; solo las herramientas están confinadas. Pi lee su `models.json` y la llave del proveedor, y habla con el proveedor por la red. Una vulnerabilidad en Pi o en una de sus ~120 dependencias de Node no la detiene nada de esto.
+- **La contaminación no cierra aún ninguna salida**: las cinco herramientas no tienen red, así que S-06 todavía no se ejercita; la marca existe, persiste y se informa, para cuando haya herramientas con salida.
+- **El aviso de contaminación en el prompt de sistema** se arma al empezar cada ejecución, no entre turnos de una misma ejecución; dentro de una, lo que protege es el envoltorio de datos en cada resultado.
+- **Una vez abierto el cortacircuito** (10 negadas seguidas) la sesión no vuelve a ejecutar nada por sí sola: hace falta que la persona decida (no hay diálogo todavía); el remedio actual es empezar otra sesión.
+- La comprobación de herramientas al arrancar se apoya en lo que la extensión informa (`pi.getActiveTools()` / `pi.getAllTools()` con su origen) y en la lista de herramientas que recibe el modelo; el RPC de Pi no tiene un comando que las liste.
+- El enlace entre la extensión y el servicio no está autenticado más allá de los permisos del socket (carpeta 0700, socket 0600, mismo usuario).
+
+**Trabajo futuro:** correr Pi mismo dentro de `bwrap`, con red limitada al proveedor del modelo y solo la copia, el socket del servicio y su carpeta de datos visibles; es lo que cambia el límite de «solo las herramientas» a «todo el proceso».
+
 ### La memoria como superficie (persistencia de inyecciones)
 
 Una inyección normal muere con el run: el contenido hostil solo vive en el contexto de esa sesión. La memoria entre runs cambia eso: si un texto de un archivo, una web o una salida de pruebas logra quedar guardado como «recuerdo», vuelve al contexto de cada run futuro, ya sin el aviso de que vino de fuera. Es una inyección que persiste, y también una forma de envenenar lo que Clio cree de ti (por ejemplo «la persona autorizó X»). Lo que la acota (`crates/clio-brain/src/memory_link.rs`):

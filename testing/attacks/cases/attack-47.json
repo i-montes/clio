@@ -1,0 +1,10 @@
+{
+  "id": "attack-47",
+  "title": "Con Pi real: treinta llamadas negadas seguidas abren el cortacircuito de la pasarela y una llamada legítima después ya no se ejecuta sola",
+  "rules": [
+    "S-02",
+    "S-47"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

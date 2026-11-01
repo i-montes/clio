@@ -1,0 +1,10 @@
+{
+  "id": "attack-41",
+  "title": "Con Pi real: run_tests con target hostil (--foo, ../x, a;b, enlaces hacia fuera), runner libre o argumentos extra: no corre nada",
+  "rules": [
+    "S-12",
+    "S-13"
+  ],
+  "status": "active",
+  "expect": "refused"
+}
