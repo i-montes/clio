@@ -216,7 +216,7 @@ elif scenario == "steer":
     out["final"] = wait_screen(fd, "done after the steer", 60) and wait_screen(fd, "listo", 30)
     out["tool_ok_with_duration"] = " s" in screen() or " ms" in screen()
     out["denied_line"] = wait_screen(fd, "negado", 10)
-    out["taint_notice"] = wait_screen(fd, "externo", 10) and "externo" in screen().splitlines()[-1]
+    out["taint_hidden"] = "externo" not in screen()
     send(fd, ESC)
     time.sleep(0.5)
     send(fd, b"q")

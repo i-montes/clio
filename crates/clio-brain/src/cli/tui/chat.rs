@@ -312,7 +312,8 @@ impl Chat {
             ctx: c.and_then(|c| c.tokens),
             window: window.unwrap_or(fallback.0),
             window_known: window.is_some() || fallback.1,
-            tainted: self.tainted,
+            // Not shown: nearly every useful session reads a file, so the mark would always be on.
+            tainted: false,
         }
     }
 }

@@ -278,6 +278,7 @@ fn steering_a_running_turn_and_a_tool_line_with_its_duration() {
             "tool_line",
             "final",
             "tool_ok_with_duration",
+            "taint_hidden",
         ],
     );
     assert_eq!(v["code"], json!(0), "{v:#}");
