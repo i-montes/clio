@@ -16,6 +16,12 @@ const MAX_CONNECTIONS: usize = 32;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SOCKET_NAME: &str = "toolhost.sock";
 
+/// The effective uid of this process. Not from `/proc/self` (macOS has no `/proc`, so the server
+/// could never start there) and not from `id -u` (a poisoned PATH would answer for it).
+fn current_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 /// The listening socket. Dropping it stops the accept loop and removes the socket file.
 pub struct Server {
     path: PathBuf,
@@ -28,9 +34,7 @@ impl Server {
     /// folder others can enter is refused (fail closed).
     pub fn start(host: Arc<ToolHost>, dir: &Path) -> Result<Self, String> {
         let meta = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let me = std::fs::metadata("/proc/self")
-            .map_err(|e| format!("/proc/self: {e}"))?
-            .uid();
+        let me = current_uid();
         if !meta.is_dir() || meta.permissions().mode() & 0o777 != 0o700 || meta.uid() != me {
             return Err(format!(
                 "{} must be a folder with mode 0700 owned by this user",
@@ -118,5 +122,19 @@ fn serve(host: &ToolHost, conn: UnixStream) {
         if writeln!(out, "{reply}").and_then(|()| out.flush()).is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_uid_is_the_owner_of_what_this_process_creates() {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("f");
+        std::fs::write(&f, b"").unwrap();
+        assert_eq!(current_uid(), std::fs::metadata(&f).unwrap().uid());
     }
 }

@@ -52,7 +52,9 @@ jobs:
           echo "CLIO_REQUIRE_PI=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --workspace --all-features
+      # --no-fail-fast: cargo stops at the first failing test binary, and what runs after it is
+      # never seen; that hid the macOS failures of whole crates for weeks.
+      - run: cargo test --locked --workspace --all-features --no-fail-fast
       # Acceptance 25: recall over 50k memories in under 150 ms; ignored in the normal run because it builds a big file
       - run: cargo test --locked --release -p clio-memory --test recall t25 -- --ignored --nocapture
         if: matrix.os == 'ubuntu-latest'

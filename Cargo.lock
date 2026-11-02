@@ -350,6 +350,7 @@ dependencies = [
  "clio-gateway",
  "clio-node",
  "clio-vault",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
