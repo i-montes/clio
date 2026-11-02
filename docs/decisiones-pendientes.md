@@ -17,7 +17,7 @@ Pi 1.4.0 (publicada el 2026-10-21, activa) es el arnés: bucle, proveedores, ses
 Se configura en la web del proveedor, no en código. Hoy se usa solo el modelo gratuito, así que el riesgo es nulo; hazlo antes de usar un modelo de pago.
 
 ### 4. Rotar la clave de OpenCode
-Se pegó en el chat de esta sesión. Rótala cuando termines de probar. Después: `gh secret set OPENCODE_API_KEY < ~/.config/clio/opencode-api-key` (actualizando antes el archivo).
+Se pegó en el chat de una sesión de la fase 1. **Decidido el 2026-11-02: no se rota por ahora.** Si se rota después: actualizar `~/.config/clio/opencode-api-key` y luego `gh secret set OPENCODE_API_KEY < ~/.config/clio/opencode-api-key`.
 
 ## Decididas por defecto (cámbialas si no te sirven)
 

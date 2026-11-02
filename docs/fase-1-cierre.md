@@ -35,4 +35,4 @@ La medición de Pi contra `builtin` (22 tareas, 57/66 contra 55/66) ya está hec
 
 ## Lo que la fase 1 deja abierto en el diseño
 
-El camino Pi, que es el predeterminado, aplica presupuesto y anti-bucle por prompt (S-47), pero **no triaje, contrato ni verificación**: esos tres siguen solo en el bucle `builtin`. Es lo primero que decide la fase 2, porque la memoria y el diagnóstico se cuelgan del mismo lugar. Los huecos de presupuesto (una llamada ya iniciada todavía corre; el tope por día no tiene valor en la configuración) están en `decisiones-pendientes.md`.
+El camino Pi, que es el predeterminado, aplica presupuesto y anti-bucle por prompt (S-47), pero **no triaje, contrato ni verificación**: esos tres siguen solo en el bucle `builtin`. Decidido el 2026-11-02: viven en el cerebro, alrededor de `run_prompt` ([ADR 0008](decisions/0008-control-wraps-the-pi-run-in-the-brain.md)); falta construirlos. Los huecos de presupuesto (una llamada ya iniciada todavía corre; el tope por día no tiene valor en la configuración) están en `decisiones-pendientes.md`.

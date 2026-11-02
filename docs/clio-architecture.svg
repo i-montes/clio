@@ -261,7 +261,7 @@
 <text class="lab" x="626" y="847" text-anchor="middle">resultado</text>
 <line class="dot" x1="455" y1="1024" x2="455" y2="1050"/><line class="dot" x1="795" y1="878" x2="795" y2="1050"/>
 <rect class="cont" x="20" y="1050" width="970" height="226" rx="10"/>
-<text class="cap" x="36" y="1072">CLIO-NETWORK · EL CEREBRO VIVE EN UN VPS QUE NO SE APAGA</text>
+<text class="cap" x="36" y="1072">CLIO-NETWORK · EL CEREBRO VIVE EN EL EQUIPO ANFITRIÓN (ESTE PC; UN VPS ES OPCIONAL)</text>
 <g transform="translate(948,1066)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
 <g transform="translate(968,1066)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
 <rect class="box" x="34" y="1084" width="180" height="66" rx="8" style="stroke-width:1.8"/>
@@ -270,7 +270,7 @@
 <text class="s11" x="46" y="1133">contrato y política fijos</text>
 <path class="ln" d="M214 1117 H224" marker-end="url(#g1a)"/>
 <rect class="core" x="226" y="1084" width="180" height="66" rx="10"/>
-<text class="h2" x="238" y="1105">Cerebro · VPS</text>
+<text class="h2" x="238" y="1105">Cerebro · anfitrión</text>
 <text class="s11" x="238" y="1118">cola por prioridad; una sesión</text>
 <text class="s11" x="238" y="1133">por contrato; orquesta en código</text>
 <path class="ln" d="M406 1117 H416" marker-end="url(#g1a)"/>
@@ -291,7 +291,7 @@
 <path class="ln" d="M609 1156 V1162" marker-end="url(#g1a)"/>
 <path class="ln" d="M851 1156 V1162" marker-end="url(#g1a)"/>
 <rect class="box" x="34" y="1164" width="206" height="50" rx="8"/>
-<text class="h2" x="46" y="1184">Daemon del VPS (aparte)</text>
+<text class="h2" x="46" y="1184">Daemon anfitrión (aparte)</text>
 <text class="s11" x="46" y="1202">investigar, sandbox, sin secretos</text>
 <rect class="box" x="252" y="1164" width="230" height="50" rx="8"/>
 <text class="h2" x="264" y="1184">Nodo: laptop</text>
@@ -334,8 +334,8 @@
 <text class="h2" x="284" y="1389">Skills y AGENTS.md</text>
 <text class="mono m" x="488" y="1389" text-anchor="end">SKILL.md</text>
 <rect class="box" x="510" y="1370" width="228" height="30" rx="7"/>
-<text class="h2" x="522" y="1389">Sin sesiones de Pi</text>
-<text class="mono m" x="726" y="1389" text-anchor="end">propias</text>
+<text class="h2" x="522" y="1389">Sesiones de Pi</text>
+<text class="mono m" x="726" y="1389" text-anchor="end">JSONL</text>
 <rect class="box" x="748" y="1370" width="228" height="30" rx="7"/>
 <text class="h2" x="760" y="1389">Modelos</text>
 <text class="mono m" x="964" y="1389" text-anchor="end">alternativo por nivel</text>
