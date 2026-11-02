@@ -7,6 +7,9 @@
 //   "crash"   exits with code 3 after writing escape sequences to stderr
 //   "flood"   writes 200 KB to stderr, then settles
 //   "evil"    starts a tool that is not allowed
+//   "tools:N" starts N tools with different paths, one every 20 ms, then waits for `abort`
+//   "same:N"  the same, with the same path every time
+//   "deaf:N"  like "tools:N" but never answers `abort` with a settle (a Pi that does not stop)
 // Env FAKE_PI_PIDFILE: writes its own pid and the pid of a `sleep` child (same group).
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -20,6 +23,8 @@ const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 const resp = (id, command, data, success = true, error) =>
   out({ id, type: "response", command, success, ...(success ? { data } : { error }) });
 let hanging = false;
+let ticker = null;
+let deaf = false;
 const usage = (i, o) => ({ input: i, output: o, cacheRead: 0, cacheWrite: 0, totalTokens: i + o, cost: { total: 0.01 } });
 const settle = (aborted) => { out({ type: "agent_end", messages: [], willRetry: false }); out({ type: "agent_settled", aborted }); };
 
@@ -33,6 +38,18 @@ function prompt(id, msg) {
   out({ type: "agent_start" });
   out({ type: "turn_start" });
   if (msg === "hang") { hanging = true; return; }
+  const burst = /^(tools|same|deaf):(\d+)$/.exec(msg);
+  if (burst) {
+    let i = 0;
+    deaf = burst[1] === "deaf";
+    ticker = setInterval(() => {
+      if (i >= Number(burst[2])) { clearInterval(ticker); ticker = null; hanging = true; return; }
+      const path = burst[1] === "same" ? "a.txt" : `f${i}.txt`;
+      out({ type: "tool_execution_start", toolCallId: `c${i}`, toolName: "read", args: { path } });
+      i += 1;
+    }, 20);
+    return;
+  }
   if (msg === "slow") { setTimeout(() => settle(false), 5000); return; }
   if (msg === "flood") process.stderr.write("x".repeat(200000));
   if (msg === "evil") out({ type: "tool_execution_start", toolCallId: "c9", toolName: "bash", args: { command: "id" } });
@@ -56,6 +73,8 @@ function handle(line) {
     case "prompt": return prompt(id, c.message);
     case "abort":
       resp(id, "abort", undefined);
+      if (deaf) return;
+      if (ticker) { clearInterval(ticker); ticker = null; hanging = true; }
       if (hanging) { hanging = false; settle(true); }
       return;
     case "get_state": {

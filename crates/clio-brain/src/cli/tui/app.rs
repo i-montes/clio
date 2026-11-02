@@ -605,8 +605,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
             app.chat.aborting = false;
-            if let Err(e) = result {
-                app.chat.items.push(super::chat::Item::Error(e));
+            match result {
+                Err(e) => app.chat.items.push(super::chat::Item::Error(e)),
+                Ok(summary) => {
+                    if let Some(notice) = summary.stop_notice() {
+                        app.chat.items.push(super::chat::Item::Error(notice));
+                    }
+                }
             }
             if let Some(r) = refresh {
                 app.chat.refresh(&r);

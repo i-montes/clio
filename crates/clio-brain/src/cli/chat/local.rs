@@ -14,10 +14,16 @@
 //! Pi and the toolhost both exit when their stdin closes, so nothing is left behind even if this
 //! process is killed with `SIGKILL`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use clio_core::SystemClock;
+
+use clio_brain::agent::AgentConfig;
+use clio_brain::control::{Budget, DayBudget};
 use clio_brain::pi::PiError;
+use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, read_api_key, start};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
@@ -27,7 +33,7 @@ use serde_json::{Value, json};
 
 use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
 use crate::cli::Res;
-use crate::cli::home::{Config, Dirs};
+use crate::cli::home::{Config, Dirs, Limits};
 use crate::cli::runs::{self, RunOpts};
 use crate::cli::usage;
 
@@ -151,6 +157,10 @@ impl SessionSource for LocalSource {
             pi,
             toolhost,
             down: Mutex::new(false),
+            budget: task_budget(&cfg.limits),
+            // The configuration has no daily cap yet, like the builtin loop: no cap.
+            day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
+            prompts: AtomicU64::new(0),
         };
         let refresh = s.refresh().ok();
         Ok(Opened {
@@ -181,10 +191,23 @@ fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
 
 /// An open session: Pi, and the toolhost beside it. Field order is the order they are dropped:
 /// Pi first, then the toolhost.
+/// The caps of one prompt: the configured limits, and the anti-loop and retries of the builtin loop.
+fn task_budget(limits: &Limits) -> Budget {
+    let mut b = AgentConfig::new("pi", "", Path::new("")).budget;
+    b.max_steps = limits.max_steps;
+    b.max_ms = i64::try_from(limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
+    b.max_cost_micro = limits.max_cost_micro_usd;
+    b
+}
+
 struct ChatSession {
     pi: PiProcess,
     toolhost: Toolhost,
     down: Mutex<bool>,
+    /// S-47: each prompt is a task with these caps; the day's spend is shared by all of them.
+    budget: Budget,
+    day: Arc<Mutex<DayBudget>>,
+    prompts: AtomicU64,
 }
 
 impl Session for ChatSession {
@@ -194,7 +217,16 @@ impl Session for ChatSession {
         cancel: &Cancel,
         on_event: &mut dyn FnMut(&Event),
     ) -> Result<RunSummary, PiError> {
-        self.pi.client.run_prompt(text, cancel, on_event)
+        let n = self.prompts.fetch_add(1, Ordering::Relaxed);
+        let mut guard = RunGuard::new(
+            Arc::new(SystemClock),
+            &format!("{}-{n}", self.pi.session_id),
+            self.budget,
+            self.day.clone(),
+        );
+        self.pi
+            .client
+            .run_prompt_limited(text, cancel, &mut guard, on_event)
     }
 
     fn steer(&self, text: &str) -> Result<(), PiError> {
@@ -236,6 +268,30 @@ fn is_taint(e: &Value) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // S-47: the Pi path gets the same caps as the builtin loop, from the same configuration.
+    #[test]
+    fn a_prompt_is_a_task_with_the_configured_caps_and_the_builtin_anti_loop() {
+        let b = task_budget(&Limits {
+            max_steps: 40,
+            max_seconds: 600,
+            max_cost_micro_usd: 100_000,
+        });
+        assert_eq!(
+            (b.max_steps, b.max_ms, b.max_cost_micro, b.max_repeats),
+            (40, 600_000, 100_000, 4)
+        );
+    }
+
+    #[test]
+    fn a_huge_time_limit_does_not_overflow() {
+        let b = task_budget(&Limits {
+            max_steps: 1,
+            max_seconds: u64::MAX,
+            max_cost_micro_usd: 1,
+        });
+        assert_eq!(b.max_ms, i64::MAX);
+    }
 
     #[test]
     fn only_the_guards_taint_entry_counts() {
