@@ -82,6 +82,21 @@ r.retry("a", 3)
 r.claim("w")
 expect(r.retry("a", 3) is False and r.dead == ["a"] and r.pending == [], "retry at the limit must send the job to dead")
 
+# B2) the last job with several workers. A worker that looks at `pending` and THEN claims loses the
+# race and hands the handler a None. A slow `claim` holds that window open for every thread, so the
+# check does not depend on the scheduler's luck.
+class SlowQueue(JobQueue):
+    def claim(self, name):
+        time.sleep(0.02)
+        return super().claim(name)
+
+
+q = SlowQueue(["only"])
+seen = []
+errs = run_threads(4, lambda i: run_worker(q, f"w{i}", seen.append))
+expect(not errs, f"workers raised: {errs[:2]}")
+expect(seen == ["only"], f"the handler saw {seen}, want exactly ['only'] (never None, never twice)")
+
 # C) full workers with failures and a monitor of consistent stats
 handled = collections.Counter()
 lock = threading.Lock()

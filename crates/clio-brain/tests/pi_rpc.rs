@@ -228,3 +228,21 @@ fn drop_kills_the_process_and_its_group() {
         "something survived the Drop"
     );
 }
+
+// The test helper itself: it must work where there is no /proc (macOS), so it asks `ps`.
+#[test]
+fn pid_alive_tells_the_living_from_zombies_and_from_the_gone() {
+    let mut kid = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = kid.id();
+    assert!(pid_alive(pid), "a running process is alive");
+    kid.kill().unwrap();
+    // Killed but not yet reaped: a zombie is as good as dead.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while pid_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!pid_alive(pid), "a zombie counts as dead");
+    kid.wait().unwrap();
+    assert!(!pid_alive(pid), "a reaped process is gone");
+    assert!(pid_alive(std::process::id()), "this very process is alive");
+}

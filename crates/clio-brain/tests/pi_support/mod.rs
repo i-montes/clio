@@ -149,13 +149,15 @@ impl Rig {
     }
 }
 
+/// Alive means `ps` lists it and it is not a zombie. `ps` exists on Linux and on macOS; `/proc`
+/// only on Linux, which made this answer "dead" for everything on macOS.
 pub fn pid_alive(pid: u32) -> bool {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        // `pid (comm) S ...`: a zombie is as good as dead.
-        Ok(s) => s
-            .rsplit(')')
-            .next()
-            .is_some_and(|r| !r.trim_start().starts_with('Z')),
-        Err(_) => false,
-    }
+    std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            let stat = stat.trim_start();
+            o.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        })
 }

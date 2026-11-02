@@ -15,6 +15,8 @@ env:
 jobs:
   rust:
     strategy:
+      # One OS failing must not hide the other's result: a cancelled job verified nothing.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -35,6 +37,19 @@ jobs:
           else
             echo "::warning::bwrap or user namespaces are NOT available on this runner: the jail tests are skipped, not verified here"
           fi
+      # The tests with the real Pi (attacks 38 to 49) are mandatory here: Node 22.19+ and Pi from the
+      # lockfile, without install scripts (S-42). Without these two steps they skip, which proves nothing.
+      - name: Node and Pi for the real-Pi tests
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Pi from the lockfile
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: adapters/pi
+        run: |
+          npm ci --ignore-scripts
+          echo "CLIO_REQUIRE_PI=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
