@@ -309,7 +309,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### Vault (spec: vault)
 
-- [x] **233** Vault como proceso aparte con su propio usuario (S-22)
+- [x] **233** Vault como proceso aparte (S-22). Con usuario propio no: corre con el de la persona (ADR 0006); eso es la 089
 - [x] **234** Hablar solo por un socket Unix con permisos, nunca por red
 - [x] **235** Modelo de un secreto: nombre-marcador, valor cifrado, tipo, destinos, ámbito, rotación y vencimiento, estado y uso
 - [x] **236** Marcadores `{{secreto:nombre}}`; el modelo solo ve marcadores
@@ -382,6 +382,8 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 - [ ] **297** medir D23: sobrecarga de latencia con la telemetría encendida y apagada
 
 ### Cierre de la fase 1
+
+Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a propósito y se explican en [`docs/fase-1-cierre.md`](fase-1-cierre.md). Ninguna se da por hecha.
 
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1; movida desde la fase 0, porque aún no hay vault ni nodos que aislar)
 - [x] **298** Hay una línea base medida, sin memoria
