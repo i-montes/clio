@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 // (File is the append handle)
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -38,7 +39,14 @@ impl EffectLog {
                 }
             }
         }
-        let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+        // S-23: it says what was done to the person's files. Created 0600, and a log an older
+        // version left readable is closed now.
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         if torn {
             f.write_all(b"\n")?; // the next line must not glue onto the torn one
         }

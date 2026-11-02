@@ -381,3 +381,22 @@ fn a_tool_can_be_registered_once() {
     r.register(mk()).unwrap();
     assert!(matches!(r.register(mk()), Err(Error::Duplicate(_))));
 }
+
+// S-23: what an effect log says about the person's files is private to the person: a new log is
+// created 0600, and one an older version left readable is closed when it is opened again.
+#[test]
+fn the_effect_log_is_private_when_created_and_when_reopened() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let fresh = t.path().join("fresh.jsonl");
+    drop(EffectLog::open(&fresh).unwrap());
+    assert_eq!(mode(&fresh), 0o600, "a new log");
+
+    let old = t.path().join("old.jsonl");
+    std::fs::write(&old, b"").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(EffectLog::open(&old).unwrap());
+    assert_eq!(mode(&old), 0o600, "a log that was left 0644");
+}
