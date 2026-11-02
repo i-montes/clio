@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.clio.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@REPO@/infra/local/backup.unix.sh</string>
+  </array>
+  <!-- launchd has a short PATH: Homebrew (Apple silicon and Intel) and ~/.local/bin for clio-memory -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:@HOME@/.local/bin</string>
+  </dict>
+  <!-- every day at 03:30; if the Mac was asleep, launchd runs it when it wakes -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/clio-backup.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/clio-backup.log</string>
+</dict>
+</plist>

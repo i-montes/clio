@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # S-40: prove the backup can be read back. Restores the latest snapshot into a throwaway folder and
 # checks what came out (the memory opens and passes SQLite's integrity check; the vault and the
-# configuration are not empty). Touches nothing of the real data. Linux only (ADR 0002).
+# configuration are not empty). Touches nothing of the real data. Linux and macOS (ADR 0002).
 set -euo pipefail
 ENV_FILE="${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}"
 [ -r "$ENV_FILE" ] || { echo "restore-test: falta $ENV_FILE" >&2; exit 2; }

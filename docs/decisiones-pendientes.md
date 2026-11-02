@@ -6,7 +6,7 @@ Escrito durante la fase 1, con la persona desconectada. Aquí está lo que se de
 
 ### 1. Respaldos cifrados y Tailnet Lock en este PC · tareas 093, 094, 095
 Decidiste que no hay servidor por ahora, así que el PC es la base (ADR 0006) y `infra/local/check-host.sh` ya confirma lo esencial: disco LUKS, cortafuegos, SSH apagado, nada de Clio fuera de loopback, llave de Tailscale con vencimiento.
-- **Herramienta: restic (decidido el 2026-11-02),** instalado, con scripts en `infra/local/` (`docs/respaldos.md`). **Falta elegir el destino fuera de este PC** (un disco externo o un almacenamiento en la nube cifrado), crear el repositorio y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
+- **Herramienta: restic (decidido el 2026-11-02),** instalado, con scripts en `infra/local/` (`docs/respaldos.md`). Lugar por defecto según el sistema (Linux y macOS, fuera de la carpeta de datos) y solo las 2 últimas copias (decidido el 2026-11-02). Ese lugar está en el mismo disco: **falta un destino fuera de este PC** (un disco externo o un almacenamiento en la nube cifrado), crear el repositorio y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
 - **Tailnet Lock** no está activado; es opcional y lo decides tú (095).
 - **Un VPS, si algún día quieres uno:** es opcional; el borrador está en `infra/vps/` y no bloquea nada.
 
