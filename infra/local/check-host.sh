@@ -73,7 +73,33 @@ else say WARN "tailscale no está instalado"; fi
 command -v bwrap >/dev/null 2>&1 && say PASS "bwrap está instalado: es posible una jaula a nivel del sistema para los comandos" || say WARN "bwrap no está instalado: todavía no hay jaula a nivel del sistema para los comandos"
 id -nG | tr ' ' '\n' | grep -qx docker && say WARN "tu usuario está en el grupo docker, que equivale a root: mantén Docker fuera del alcance del agente"
 for b in restic borg kopia; do command -v "$b" >/dev/null 2>&1 && have_backup=$b; done
-[ -n "${have_backup:-}" ] && say PASS "herramienta de copias de seguridad encontrada: $have_backup (S-40)" || say WARN "no hay herramienta de copias de seguridad (restic, borg, kopia): no hay copias cifradas fuera del equipo (S-40)"
+if [ -z "${have_backup:-}" ]; then
+  say WARN "no hay herramienta de copias de seguridad (restic, borg, kopia): no hay copias cifradas fuera del equipo (S-40)"
+elif [ "$have_backup" != restic ]; then
+  say PASS "herramienta de copias de seguridad encontrada: $have_backup (S-40)"
+else
+  # restic is the one Clio's scripts use (infra/local/backup.unix.sh): is there a repository, and is the last snapshot recent?
+  env_file="${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}"
+  if [ ! -r "$env_file" ]; then
+    say WARN "restic está instalado pero no hay repositorio configurado: corre infra/local/backup-init.unix.sh (S-40)"
+  else
+    # shellcheck source=/dev/null
+    last=$( (set -a; . "$env_file"; set +a; restic snapshots --tag clio --latest 1 --json 2>/dev/null) | grep -oE '"time":"[^"]+"' | tail -1 | cut -d'"' -f4)
+    if [ -z "$last" ]; then
+      say WARN "no se pudo leer ningún snapshot del repositorio de respaldos (¿el disco de destino está conectado, o aún no hay copias?) (S-40)"
+    else
+      age=$(( ( $(date +%s) - $(date -d "$last" +%s 2>/dev/null || echo 0) ) / 86400 ))
+      if [ "$age" -le 8 ]; then say PASS "último respaldo con restic hace $age día(s) (S-40)"; else say WARN "el último respaldo con restic es de hace $age días (S-40)"; fi
+    fi
+    # A repository on this same disk does not survive losing it.
+    # shellcheck source=/dev/null
+    repo=$( (set -a; . "$env_file"; set +a; printf '%s' "${RESTIC_REPOSITORY:-}") )
+    case "$repo" in /*)
+      if [ "$(df -P "$(dirname "$repo")" 2>/dev/null | awk 'NR==2{print $1}')" = "$(df -P "$HOME" | awk 'NR==2{print $1}')" ]; then
+        say WARN "el repositorio de respaldos está en el mismo disco que tus datos: protege de borrados, no de perder el disco (S-40)"
+      fi ;; esac
+  fi
+fi
 
 [ "$fail" -eq 0 ] && echo "equipo: sin FAIL" || echo "equipo: hay FAIL, mira arriba"
 exit "$fail"

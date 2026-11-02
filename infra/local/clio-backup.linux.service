@@ -1,0 +1,8 @@
+[Unit]
+Description=Encrypted backup of Clio (S-40)
+
+[Service]
+Type=oneshot
+# A user service has a short PATH: clio-memory lives in ~/.local/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@REPO@/infra/local/backup.unix.sh
