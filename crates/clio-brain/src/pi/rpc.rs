@@ -486,8 +486,18 @@ pub struct RunSummary {
     /// `handled`: an extension consumed the prompt, no run happened.
     pub handled: bool,
     pub tool_calls: u32,
+    /// Why the run was cut by its budget (S-47), if it was.
+    pub stopped: Option<crate::control::Stop>,
     /// Provider errors reported inside messages (`stopReason: error`), as sent.
     pub errors: Vec<String>,
+}
+
+impl RunSummary {
+    /// What to tell the person when a budget cap cut the run (S-47).
+    pub fn stop_notice(&self) -> Option<String> {
+        self.stopped
+            .map(|s| format!("se detuvo la tarea: {}", s.reason()))
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<String, Sender<Response>>>>;
@@ -853,10 +863,33 @@ impl RpcClient {
     /// the ones that end the run). Ends with `Timeout` on the silence or run limits (after a
     /// best-effort `abort`), and honors `cancel` by sending `abort` and waiting up to the grace
     /// period for the run to settle.
+    /// Like [`Self::run_prompt`], but the run is a task with hard caps (see [`super::budget`]).
+    /// When a cap is hit Pi is aborted and the summary says which one in `stopped`; a Pi that does
+    /// not settle within the grace time is killed and the call fails with [`PiError::Budget`].
+    pub fn run_prompt_limited(
+        &self,
+        message: &str,
+        cancel: &Cancel,
+        guard: &mut super::budget::RunGuard,
+        on_event: &mut dyn FnMut(&Event),
+    ) -> Result<RunSummary, PiError> {
+        self.run(message, cancel, Some(guard), on_event)
+    }
+
     pub fn run_prompt(
         &self,
         message: &str,
         cancel: &Cancel,
+        on_event: &mut dyn FnMut(&Event),
+    ) -> Result<RunSummary, PiError> {
+        self.run(message, cancel, None, on_event)
+    }
+
+    fn run(
+        &self,
+        message: &str,
+        cancel: &Cancel,
+        mut guard: Option<&mut super::budget::RunGuard>,
         on_event: &mut dyn FnMut(&Event),
     ) -> Result<RunSummary, PiError> {
         // Anything left over belongs to an earlier run.
@@ -871,7 +904,11 @@ impl RpcClient {
         let mut last = start;
         let mut abort_sent: Option<Instant> = None;
         loop {
-            if cancel.is_cancelled() && abort_sent.is_none() {
+            // A cap that moves by itself (time) is checked on every pass, events or not.
+            if let Some(s) = guard.as_deref_mut().and_then(|g| g.tick()) {
+                sum.stopped.get_or_insert(s);
+            }
+            if (cancel.is_cancelled() || sum.stopped.is_some()) && abort_sent.is_none() {
                 abort_sent = Some(Instant::now());
                 let _ = self.abort();
             }
@@ -879,7 +916,10 @@ impl RpcClient {
                 && t.elapsed() > self.timeouts.grace
             {
                 self.kill();
-                return Err(PiError::Cancelled);
+                return Err(match sum.stopped {
+                    Some(s) => PiError::Budget(s.reason().into()),
+                    None => PiError::Cancelled,
+                });
             }
             if start.elapsed() > self.timeouts.run || last.elapsed() > self.timeouts.silence {
                 let (what, secs) = if start.elapsed() > self.timeouts.run {
@@ -909,6 +949,9 @@ impl RpcClient {
                 }
                 Event::ToolStart { .. } => sum.tool_calls += 1,
                 _ => {}
+            }
+            if let Some(s) = guard.as_deref_mut().and_then(|g| g.observe(&ev)) {
+                sum.stopped.get_or_insert(s);
             }
             on_event(&ev);
             if let Event::AgentSettled { aborted } = ev {

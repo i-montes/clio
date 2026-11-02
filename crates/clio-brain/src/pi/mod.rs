@@ -16,6 +16,7 @@
 //! The TUI (selector and chat) and `clio run` use it through `cli/chat/`: Pi is the default when
 //! it is installed, and the `builtin` harness is the fallback (`--harness builtin` forces it).
 
+pub mod budget;
 pub mod install;
 pub mod launch;
 pub mod rpc;
@@ -52,6 +53,8 @@ pub enum PiError {
     Verification(String),
     /// The caller cancelled.
     Cancelled,
+    /// A budget cap cut the run (S-47) and Pi did not stop when asked: it was killed.
+    Budget(String),
 }
 
 impl fmt::Display for PiError {
@@ -69,6 +72,7 @@ impl fmt::Display for PiError {
             Self::Protocol(m) => write!(f, "protocolo de Pi roto: {m}"),
             Self::Verification(m) => write!(f, "Pi no cumple lo pedido, se detuvo: {m}"),
             Self::Cancelled => f.write_str("cancelado"),
+            Self::Budget(m) => write!(f, "se agotó el presupuesto de la tarea: {m}"),
         }
     }
 }

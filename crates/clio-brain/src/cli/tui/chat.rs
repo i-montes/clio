@@ -981,6 +981,36 @@ mod tests {
         assert!(quit.quit);
     }
 
+    // S-47: a run cut by its budget says which cap, in the chat; a run that was not cut says nothing.
+    #[test]
+    fn a_run_cut_by_its_budget_says_which_cap_in_the_chat() {
+        use clio_brain::control::Stop;
+        let settle = |stopped| {
+            let summary = clio_brain::pi::rpc::RunSummary {
+                stopped,
+                ..Default::default()
+            };
+            let (app, _) = super::super::app::update(
+                open_chat(),
+                super::super::app::Input::Bg(super::super::app::Bg::ChatSettled {
+                    result: Ok(summary),
+                    refresh: None,
+                }),
+            );
+            app
+        };
+        let cut = settle(Some(Stop::Steps));
+        assert!(
+            cut.chat
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Error(m) if m.contains("tope de pasos"))),
+            "the chat shows the cap that cut the run"
+        );
+        let clean = settle(None);
+        assert!(!clean.chat.items.iter().any(|i| matches!(i, Item::Error(_))));
+    }
+
     #[test]
     fn a_chat_that_is_still_opening_does_not_send() {
         let mut app = open_chat();

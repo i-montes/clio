@@ -246,3 +246,94 @@ fn pid_alive_tells_the_living_from_zombies_and_from_the_gone() {
     assert!(!pid_alive(pid), "a reaped process is gone");
     assert!(pid_alive(std::process::id()), "this very process is alive");
 }
+
+// ---- S-47: a prompt is a task with hard caps (control layer on the Pi path) ----
+
+use clio_brain::control::{Budget, DayBudget, Stop};
+use clio_brain::pi::budget::RunGuard;
+use clio_core::SystemClock;
+use std::sync::{Arc, Mutex};
+
+fn caps(max_steps: u32, max_repeats: u32) -> Budget {
+    Budget {
+        max_steps,
+        max_ms: 60_000,
+        max_cost_micro: 1_000_000,
+        max_repeats,
+        max_retries: 3,
+    }
+}
+
+fn limited(
+    c: &RpcClient,
+    msg: &str,
+    b: Budget,
+) -> Result<clio_brain::pi::rpc::RunSummary, PiError> {
+    let day = Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
+    let mut g = RunGuard::new(Arc::new(SystemClock), "t", b, day);
+    c.run_prompt_limited(msg, &Cancel::new(), &mut g, &mut |_| {})
+}
+
+// S-47: the run is aborted as soon as the cap is reached (the third call is the last allowed),
+// well before Pi would have made its ten calls; a call already in flight when the abort lands
+// may still run.
+#[test]
+fn a_run_over_the_tool_cap_is_aborted_and_says_why() {
+    if need("a_run_over_the_tool_cap", false).is_none() {
+        return;
+    }
+    let c = fake(None);
+    let r = limited(&c, "tools:10", caps(3, 4)).unwrap();
+    assert_eq!(r.stopped, Some(Stop::Steps));
+    assert!(r.aborted);
+    assert!(
+        (3..10).contains(&r.tool_calls),
+        "tool calls: {}",
+        r.tool_calls
+    );
+}
+
+// S-47: the same call again and again is a loop.
+#[test]
+fn the_same_call_repeated_is_aborted_as_a_loop() {
+    if need("the_same_call_repeated", false).is_none() {
+        return;
+    }
+    let c = fake(None);
+    let r = limited(&c, "same:10", caps(100, 2)).unwrap();
+    assert_eq!(r.stopped, Some(Stop::Repeats));
+    assert!(r.aborted);
+}
+
+// A run inside its caps is not touched.
+#[test]
+fn a_run_inside_its_caps_is_left_alone() {
+    if need("a_run_inside_its_caps", false).is_none() {
+        return;
+    }
+    let c = fake(None);
+    let r = limited(&c, "ok", caps(10, 4)).unwrap();
+    assert_eq!(r.stopped, None);
+    assert!(!r.aborted);
+    assert_eq!(r.tool_calls, 1);
+}
+
+// S-47: a Pi that does not stop when asked is killed, and the error names the cap.
+#[test]
+fn a_pi_that_ignores_the_abort_is_killed_and_the_error_names_the_cap() {
+    if need("a_pi_that_ignores_the_abort", false).is_none() {
+        return;
+    }
+    let mut c = fake(None);
+    c.timeouts = Timeouts {
+        request: Duration::from_secs(5),
+        silence: Duration::from_secs(30),
+        run: Duration::from_secs(30),
+        grace: Duration::from_millis(300),
+    };
+    let t = Instant::now();
+    let e = limited(&c, "deaf:10", caps(2, 4)).unwrap_err();
+    assert!(matches!(e, PiError::Budget(_)), "{e}");
+    assert!(e.to_string().contains("pasos"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(5));
+}
