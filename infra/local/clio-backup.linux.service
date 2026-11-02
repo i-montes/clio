@@ -1,0 +1,6 @@
+[Unit]
+Description=Encrypted backup of Clio (S-40)
+
+[Service]
+Type=oneshot
+ExecStart=@REPO@/infra/local/backup.linux.sh

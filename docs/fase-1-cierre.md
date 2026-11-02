@@ -8,7 +8,7 @@ Quedan 34 tareas sin marcar. Ninguna se da por hecha: se **aplazan** a propósit
 
 | Tarea | Qué falta |
 |---|---|
-| 093, 094 | Elegir herramienta de respaldo (restic, borg o kopia) y un destino fuera de este PC, y probar una restauración. Es el único pendiente con riesgo de pérdida: la memoria y el vault solo viven en este disco. |
+| 093, 094 | Herramienta decidida el 2026-11-02: restic, ya instalado, con scripts probados contra un repositorio de juguete (`docs/respaldos.md`). Falta **el destino fuera de este PC**, crear el repositorio (`backup-init`), guardar la frase fuera del equipo y probar la primera restauración. Es el único pendiente con riesgo de pérdida: la memoria y el vault solo viven en este disco. |
 | 095 | Tailnet Lock: opcional, lo decide la persona. La llave de este PC ya vence el 2027-03-11. |
 | 281 | Topes de gasto en el panel de cada proveedor. Hoy solo se usa el modelo gratuito; hacerlo antes de usar uno de pago. |
 | 137 | Dónde vive el registro del contrato. Por defecto: el archivo que se le pase (ver `decisiones-pendientes.md`). |
