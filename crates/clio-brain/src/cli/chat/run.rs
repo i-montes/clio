@@ -60,6 +60,9 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str) -> Res<i32> {
     let refresh = opened.session.refresh().ok();
     opened.session.shutdown();
     let r = r.map_err(|e| e.to_string())?;
+    if let Some(a) = &r.assessment {
+        println!("pedido juzgado como {}", a.notice());
+    }
     if let Some(notice) = r.stop_notice() {
         println!("{notice}");
     }

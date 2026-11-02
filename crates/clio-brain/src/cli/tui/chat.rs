@@ -1011,6 +1011,45 @@ mod tests {
         assert!(!clean.chat.items.iter().any(|i| matches!(i, Item::Error(_))));
     }
 
+    // The person sees the level their request was judged at, and a run that was not assessed
+    // (a bare client) says nothing.
+    #[test]
+    fn a_settled_run_says_the_level_it_was_judged_at() {
+        use clio_brain::pi::level::Assessor;
+        let assessed = Assessor::new(std::sync::Arc::new(clio_core::SystemClock))
+            .assess("Borra la carpeta de pruebas");
+        let settle = |assessment| {
+            let summary = clio_brain::pi::rpc::RunSummary {
+                assessment,
+                ..Default::default()
+            };
+            let (app, _) = super::super::app::update(
+                open_chat(),
+                super::super::app::Input::Bg(super::super::app::Bg::ChatSettled {
+                    result: Ok(summary),
+                    refresh: None,
+                }),
+            );
+            app
+        };
+        let judged = settle(Some(assessed));
+        assert!(
+            judged
+                .chat
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Note(m) if m.contains("nivel 2"))),
+            "the chat shows the level"
+        );
+        assert!(
+            !settle(None)
+                .chat
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Note(_)))
+        );
+    }
+
     #[test]
     fn a_chat_that_is_still_opening_does_not_send() {
         let mut app = open_chat();

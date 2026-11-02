@@ -19,6 +19,7 @@
 pub mod budget;
 pub mod install;
 pub mod launch;
+pub mod level;
 pub mod rpc;
 pub mod session;
 pub mod sessions;

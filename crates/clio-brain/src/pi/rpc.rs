@@ -488,6 +488,8 @@ pub struct RunSummary {
     pub tool_calls: u32,
     /// Why the run was cut by its budget (S-47), if it was.
     pub stopped: Option<crate::control::Stop>,
+    /// What triage decided about the prompt, when it went through [`super::level::run_assessed`].
+    pub assessment: Option<super::level::Assessment>,
     /// Provider errors reported inside messages (`stopReason: error`), as sent.
     pub errors: Vec<String>,
 }

@@ -26,6 +26,7 @@ use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, read_api_key, start};
+use clio_brain::pi::level::{Assessor, run_assessed};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
@@ -161,6 +162,7 @@ impl SessionSource for LocalSource {
             // The configuration has no daily cap yet, like the builtin loop: no cap.
             day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
             prompts: AtomicU64::new(0),
+            assessor: Assessor::new(Arc::new(SystemClock)),
         };
         let refresh = s.refresh().ok();
         Ok(Opened {
@@ -208,6 +210,8 @@ struct ChatSession {
     budget: Budget,
     day: Arc<Mutex<DayBudget>>,
     prompts: AtomicU64,
+    /// The level of each prompt, decided from the person's words alone (S-07, ADR 0008).
+    assessor: Assessor,
 }
 
 impl Session for ChatSession {
@@ -224,9 +228,14 @@ impl Session for ChatSession {
             self.budget,
             self.day.clone(),
         );
-        self.pi
-            .client
-            .run_prompt_limited(text, cancel, &mut guard, on_event)
+        run_assessed(
+            &self.pi.client,
+            &self.assessor,
+            text,
+            cancel,
+            &mut guard,
+            on_event,
+        )
     }
 
     fn steer(&self, text: &str) -> Result<(), PiError> {

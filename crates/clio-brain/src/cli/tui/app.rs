@@ -608,6 +608,12 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             match result {
                 Err(e) => app.chat.items.push(super::chat::Item::Error(e)),
                 Ok(summary) => {
+                    if let Some(a) = &summary.assessment {
+                        app.chat.items.push(super::chat::Item::Note(format!(
+                            "pedido juzgado como {}",
+                            a.notice()
+                        )));
+                    }
                     if let Some(notice) = summary.stop_notice() {
                         app.chat.items.push(super::chat::Item::Error(notice));
                     }
