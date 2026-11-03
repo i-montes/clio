@@ -4,7 +4,7 @@ Antes de abrir un PR: `just setup` (activa el hook que rechaza secretos), `just 
 
 ## Cada PR nombra las reglas de seguridad que toca
 
-En la descripción, la sección **Reglas** lista los S-xx de [`docs/security.md`](docs/security.md) que el cambio toca y las pruebas que los cubren. Si no toca ninguna, escribe «ninguna». Una regla sin prueba no está cumplida; las que ya la tienen están en `scripts/rule-coverage.enforced` y el CI falla si la pierden (S-04).
+En la descripción, la sección **Reglas** lista los S-xx de [`docs/security.md`](docs/security.md) que el cambio toca y las pruebas que los cubren. Si no toca ninguna, escribe «ninguna». Una regla sin prueba no está cumplida, y el CI lo exige para todas (S-04): cada regla de `docs/security.md` necesita una prueba que corra (un comentario `// S-xx` justo encima de un `#[test]`) o una línea en `scripts/rule-coverage.exempt` que diga, con motivo, dónde más se comprueba (un trabajo de CI, un script del equipo, una parte que aún no existe). Una regla nueva sin ninguna de las dos hace fallar el CI; una exención que ya tiene prueba también, para que no quede obsoleta.
 
 ## Estas rutas las revisa una persona, no un agente
 
