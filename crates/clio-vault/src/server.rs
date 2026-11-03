@@ -13,10 +13,14 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// A `scrub` request can carry a long tool output; anything bigger is refused.
 const MAX_LINE: u64 = 16 * 1024 * 1024;
+/// Connections served at once on each socket. Every one holds a thread and up to `MAX_LINE` bytes;
+/// the rest are dropped at once (S-47). The gateway and the person each make a few.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Runs one request with the capability of `side`. No I/O, so it can be tested directly.
 pub fn handle(vault: &Vault, side: Side, req: Request) -> Response {
@@ -199,9 +203,17 @@ pub fn serve(vault: Arc<Vault>, gateway_sock: &Path, person_sock: &Path) -> std:
         .map(|(side, l)| {
             let vault = vault.clone();
             std::thread::spawn(move || {
+                let active = Arc::new(AtomicUsize::new(0));
                 for stream in l.incoming().flatten() {
-                    let vault = vault.clone();
-                    std::thread::spawn(move || serve_conn(&vault, side, stream));
+                    if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        continue; // dropped: too many at once
+                    }
+                    let (vault, active) = (vault.clone(), active.clone());
+                    std::thread::spawn(move || {
+                        serve_conn(&vault, side, stream);
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    });
                 }
             })
         })

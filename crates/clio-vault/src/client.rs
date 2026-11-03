@@ -7,10 +7,17 @@ use crate::{SecretValue, Token, VaultError};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long a call waits for the vault, for each read and each write. The vault answers in
+/// milliseconds (an unlock takes a fraction of a second); a long wait means it is stuck, and the
+/// caller must fail rather than hold whatever it holds, forever (S-47).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct VaultClient {
     path: PathBuf,
+    timeout: Duration,
 }
 
 fn io(e: impl ToString) -> VaultError {
@@ -42,11 +49,21 @@ impl VaultClient {
     pub fn new(socket: &Path) -> Self {
         Self {
             path: socket.to_path_buf(),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// A different wait for each read and write of a call (tests; a caller that cannot wait long).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub fn call(&self, req: &Request) -> Result<Response, VaultError> {
         let mut stream = UnixStream::connect(&self.path).map_err(io)?;
+        stream.set_read_timeout(Some(self.timeout)).map_err(io)?;
+        stream.set_write_timeout(Some(self.timeout)).map_err(io)?;
         let line = serde_json::to_string(req).map_err(io)?;
         writeln!(stream, "{line}")
             .and_then(|()| stream.flush())
