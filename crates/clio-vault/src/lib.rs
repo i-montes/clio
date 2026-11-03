@@ -15,7 +15,7 @@ pub mod server;
 
 #[cfg(unix)]
 pub use client::VaultClient;
-pub use scrub::{Form, Redaction, Scrubber};
+pub use scrub::{Form, Redaction, Scrubber, count_masks, has_mask};
 
 use clio_core::Clock;
 use serde::{Deserialize, Serialize};
