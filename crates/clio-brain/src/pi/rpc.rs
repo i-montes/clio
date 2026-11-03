@@ -556,11 +556,13 @@ pub struct RpcClient {
 /// Kills a whole process group (Pi and anything it started). Only called while the leader has
 /// not been reaped, so the pid cannot belong to someone else.
 fn kill_group(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-s", "KILL", "--", &format!("-{pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // Not the `kill` found in the PATH: that is a program someone else could have put there.
+    if let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
 }
 
 impl RpcClient {
@@ -1126,6 +1128,40 @@ mod tests {
         assert!(answers.iter().all(|e| *e), "none can be answered");
         assert!(abort_failed);
         assert!(took < Duration::from_secs(50), "took {took:?}");
+    }
+
+    // Second audit, batch D: killing Pi kills what Pi started too, without asking the PATH for a
+    // `kill` program.
+    #[test]
+    fn killing_the_client_kills_the_whole_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("grandchild");
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 1000 & echo $! > \"$0\"; wait"])
+            .arg(&file);
+        let c = RpcClient::spawn(&mut cmd).unwrap();
+        let started = Instant::now();
+        let pid = loop {
+            if let Some(p) = std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|t| t.trim().parse::<i32>().ok())
+            {
+                break p;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "no grandchild");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let alive = || {
+            rustix::process::Pid::from_raw(pid)
+                .is_some_and(|p| rustix::process::test_kill_process(p).is_ok())
+        };
+        assert!(alive());
+        c.kill();
+        let started = Instant::now();
+        while alive() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the grandchild survived the kill of the group");
     }
 
     #[test]

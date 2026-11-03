@@ -1,7 +1,7 @@
 """Drives `clio` inside a real pseudo-terminal (stdlib only) and prints a JSON verdict.
 
 usage: python3 -I pty_driver.py SCENARIO CONFIG_JSON
-SCENARIO: quit | ctrl_c | panic | help_when_piped | live | cancel | views | debug_env
+SCENARIO: quit | ctrl_c | sigterm | sighup | typeahead | panic | help_when_piped | live | cancel | views | debug_env
 The raw terminal stream is not parsed (a diff-based renderer repaints only changed cells), so the
 scenarios check what is robust: the alternate-screen and cursor sequences, the terminal modes,
 the exit status, and effects on the disk.
@@ -45,13 +45,13 @@ signal.signal(signal.SIGALRM, on_alarm)
 signal.alarm(110)
 
 
-def spawn(extra_env=None):
+def spawn(extra_env=None, args=()):
     env = dict(cfg["env"], **(extra_env or {}))
     pid, fd = pty.fork()
     if pid == 0:
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         os.chdir(cfg["cwd"])
-        os.execve(cfg["clio"], ["clio"], env)
+        os.execve(cfg["clio"], ["clio", *args], env)
     CHILDREN.append(pid)
     return pid, fd
 
@@ -99,7 +99,7 @@ def wait_for(path_fn, timeout=25.0):
 # On a loaded CI runner a key can be lost in the terminal; a person would press `q` again, so the
 # driver does too (at most 3 times, every 5 s) and reports how many it needed. `ctrl_c` and `panic`
 # never retry: they must leave without help.
-RETRY_KEY = None if scenario in ("ctrl_c", "panic") else b"q"
+RETRY_KEY = None if scenario in ("ctrl_c", "panic", "sigterm", "sighup", "typeahead") else b"q"
 RETRIES = 0
 SCREEN_TAIL = ""
 
@@ -164,6 +164,25 @@ if scenario in ("quit", "ctrl_c"):
     out["code"] = finish(pid, fd)
     out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
     out["after"] = modes(fd)
+elif scenario in ("sigterm", "sighup"):
+    # Closing the terminal window (SIGHUP) or `kill` (SIGTERM) must give the terminal back too.
+    pid, fd = spawn()
+    out["alt_on"] = pump(fd, lambda: ALT_ON in buf)
+    pump(fd, lambda: b"recientes" in buf)
+    os.kill(pid, signal.SIGTERM if scenario == "sigterm" else signal.SIGHUP)
+    out["code"] = finish(pid, fd)
+    out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
+    out["after"] = modes(fd)
+elif scenario == "typeahead":
+    # An "s" and a newline typed before `clio apply` asks must not answer its question.
+    run = os.path.basename(latest_run())
+    pid, fd = spawn(args=["apply", run])
+    os.write(fd, b"s\n")
+    out["asked"] = pump(fd, lambda: b"[s/N]" in buf)
+    time.sleep(0.3)
+    os.write(fd, b"\n")  # a person who really answers: no
+    out["code"] = finish(pid, fd)
+    out["untouched"] = read(cfg["app_py"]) == cfg["old"]
 elif scenario == "panic":
     pid, fd = spawn({"CLIO_TUI_PANIC_TEST": "1"})
     out["code"] = finish(pid, fd)

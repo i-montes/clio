@@ -34,13 +34,22 @@ pub enum Harness {
 pub const TUI_PI_WHEN_INSTALLED: bool = true;
 
 /// `--harness`, then `CLIO_HARNESS`, then the default above. Asking for `pi` when it cannot run
-/// is an error that says why; the default quietly falls back to the builtin loop.
+/// is an error that says why; the default falls back to the builtin loop and says so on stderr
+/// (the builtin loop is not the jailed one, so a Pi that broke must not go unnoticed).
 pub fn resolve(flag: Option<&str>, dirs: &Dirs) -> Res<Harness> {
     let env = std::env::var("CLIO_HARNESS").ok().filter(|v| !v.is_empty());
     match flag.or(env.as_deref()) {
         Some("builtin") => Ok(Harness::Builtin),
         Some("pi") => local::ready(dirs).map(|()| Harness::Pi),
-        None if TUI_PI_WHEN_INSTALLED && local::ready(dirs).is_ok() => Ok(Harness::Pi),
+        None if TUI_PI_WHEN_INSTALLED => Ok(match local::ready(dirs) {
+            Ok(()) => Harness::Pi,
+            Err(why) => {
+                eprintln!(
+                    "aviso: Pi no está disponible ({why}); uso el bucle propio de Clio, que no corre en la jaula de Pi. `--harness builtin` silencia este aviso."
+                );
+                Harness::Builtin
+            }
+        }),
         None => Ok(Harness::Builtin),
         Some(other) => Err(format!("--harness: {other:?} no es válido (pi o builtin)")),
     }

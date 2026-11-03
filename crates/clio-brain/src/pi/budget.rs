@@ -19,6 +19,11 @@ use crate::control::{Budget, Controller, DayBudget, Stop};
 /// Micro-USD per dollar: Pi reports cost in dollars.
 const MICRO: f64 = 1_000_000.0;
 
+/// What an assistant message counts for when Pi reports no usage at all (US$ 0.01): a provider
+/// that hides its usage must not turn the cost cap into no cap. The tool-call and time caps
+/// bound a run anyway; this makes the cost cap bound it too, at a pessimistic price per message.
+const UNREPORTED_MESSAGE_MICRO: u64 = 10_000;
+
 pub struct RunGuard {
     ctl: Controller<Arc<dyn Clock>>,
     day: Arc<Mutex<DayBudget>>,
@@ -52,11 +57,11 @@ impl RunGuard {
                 .begin_step(&format!("{name}:{args}"), 0, &mut day)
                 .err(),
             Event::MessageEnd(m) if m.role == "assistant" => {
-                if let Some(u) = &m.usage {
-                    // `max` also turns a NaN into 0; the cast saturates.
-                    self.ctl
-                        .settle(0, (u.cost.max(0.0) * MICRO).round() as u64, &mut day);
-                }
+                // `max` also turns a NaN into 0; the cast saturates.
+                let spent = m.usage.as_ref().map_or(UNREPORTED_MESSAGE_MICRO, |u| {
+                    (u.cost.max(0.0) * MICRO).round() as u64
+                });
+                self.ctl.settle(0, spent, &mut day);
                 self.ctl.halted()
             }
             _ => None,
@@ -118,6 +123,25 @@ mod tests {
             }),
             ..MessageInfo::default()
         })
+    }
+
+    // Second audit, batch D: a message with no usage is not free.
+    #[test]
+    fn a_message_without_usage_still_counts_against_the_cost_cap() {
+        let mut g = guard(Budget {
+            max_cost_micro: 25_000,
+            ..budget()
+        });
+        let silent = || {
+            Event::MessageEnd(MessageInfo {
+                role: "assistant".into(),
+                usage: None,
+                ..MessageInfo::default()
+            })
+        };
+        assert_eq!(g.observe(&silent()), None);
+        assert_eq!(g.observe(&silent()), None);
+        assert_eq!(g.observe(&silent()), Some(Stop::Cost));
     }
 
     // S-47: the tool-call cap cuts at the first call over it, and stays cut.

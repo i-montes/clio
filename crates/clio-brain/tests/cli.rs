@@ -12,9 +12,10 @@ use serde_json::{Value, json};
 const CLIO: &str = env!("CARGO_BIN_EXE_clio");
 
 const ADAPTER: &str = r#"import json, os, sys, time
-sys.stdin.read()
+seen = sys.stdin.read()
 time.sleep(float(os.environ.get("ADAPTER_SLEEP", "0")))
 d = os.path.dirname(os.path.abspath(__file__))
+open(d + "/seen", "a").write(seen + "\n")
 n = int(open(d + "/n").read()) if os.path.exists(d + "/n") else 0
 r = json.load(open(d + "/responses.json"))
 open(d + "/n", "w").write(str(n + 1))
@@ -569,6 +570,81 @@ fn run_prints_a_line_per_step_and_a_plain_panel_without_escape_codes() {
     );
 }
 
+// Second audit, batch D: `clio run` keeps escape sequences and hidden characters out of what the
+// model is shown of a file and of what is saved, and leaves tabs alone.
+#[test]
+fn run_strips_escape_sequences_and_hidden_text_from_what_it_saves() {
+    let e = Env::new();
+    std::fs::write(
+        e.proj().join("notes.txt"),
+        "all:\n\tmake\n\u{1b}[31mred\u{1b}[0m\u{e0041}\u{202e}x\n",
+    )
+    .unwrap();
+    e.script(&[
+        json!({"tool": "read_file", "args": {"path": "notes.txt"}}),
+        json!({"final": "done\u{1b}[2J\u{e0042}"}),
+    ]);
+    e.clio(&["run", "--workspace", &e.path("proj"), "lee notes.txt"]);
+    // What the model was shown of the file: the text, the tab, none of the rest.
+    let seen = std::fs::read_to_string(e.tmp.path().join("script/seen")).unwrap();
+    assert!(seen.contains("make"), "{seen}");
+    assert!(
+        !seen.contains(['\u{e0041}', '\u{202e}']) && !seen.contains("\\u001b"),
+        "the model was shown hidden text: {seen}"
+    );
+    let runs = e.home().join(".local/share/clio/runs");
+    let run = std::fs::read_dir(runs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let transcript: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("transcript.json")).unwrap())
+            .unwrap();
+    let all: String = transcript
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        all.contains("all:\n\tmake\nred"),
+        "text and tab kept: {all:?}"
+    );
+    assert!(
+        !all.contains(['\u{1b}', '\u{e0041}', '\u{e0042}', '\u{202e}']),
+        "{all:?}"
+    );
+}
+
+// Second audit, batch D: the default harness is Pi; when Pi cannot run, falling back to the builtin
+// loop (not jailed the same way) is said, and asking for the builtin loop is not a fallback.
+#[test]
+fn the_default_harness_says_when_it_falls_back_to_the_builtin_loop() {
+    let e = Env::new();
+    e.script_fix();
+    let proj = e.path("proj");
+    let o = e.try_clio(&["run", "--workspace", &proj, "arregla total en app.py"]);
+    assert!(o.status.success());
+    assert!(
+        text(&o.stderr).contains("Pi no está disponible"),
+        "{}",
+        text(&o.stderr)
+    );
+    e.script_fix();
+    let o = e.try_clio(&[
+        "run",
+        "--harness",
+        "builtin",
+        "--workspace",
+        &proj,
+        "arregla total en app.py",
+    ]);
+    assert!(o.status.success());
+    assert!(!text(&o.stderr).contains("Pi no está disponible"));
+}
+
 #[test]
 fn runs_show_and_doctor_speak_json() {
     let e = Env::new();
@@ -608,6 +684,31 @@ fn pty_the_tui_opens_in_the_alternate_screen_and_q_restores_the_terminal() {
         assert_eq!(v["after"]["canonical"], true, "cooked mode back: {v}");
         assert_eq!(v["after"]["echo"], true, "echo back: {v}");
     }
+}
+
+// Second audit, batch D: a signal that ends the process must not leave the terminal in the
+// alternate screen in raw mode.
+#[test]
+fn pty_sigterm_and_sighup_give_the_terminal_back() {
+    let e = Env::new();
+    for (scenario, code) in [("sigterm", 143), ("sighup", 129)] {
+        let v = e.pty(scenario, "0");
+        assert_eq!(v["alt_on"], true, "{scenario}: {v}");
+        assert_eq!(v["code"], code, "{scenario}: {v}");
+        assert_eq!(v["alt_off_after_on"], true, "{scenario}: {v}");
+        assert_eq!(v["after"]["canonical"], true, "{scenario}: {v}");
+        assert_eq!(v["after"]["echo"], true, "{scenario}: {v}");
+    }
+}
+
+// Second audit, batch D: text typed or pasted before the question is not the answer to it.
+#[test]
+fn pty_what_was_typed_before_apply_asks_does_not_answer() {
+    let e = Env::new();
+    e.run_fix();
+    let v = e.pty("typeahead", "0");
+    assert_eq!(v["asked"], true, "{v}");
+    assert_eq!(v["untouched"], true, "typeahead applied the run: {v}");
 }
 
 // On macOS CI `q` did not leave after the key sequence (timeout); it needs a Mac to debug, so Linux only.
