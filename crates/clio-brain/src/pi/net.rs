@@ -131,7 +131,13 @@ impl EgressProxy {
         let thread = std::thread::spawn(move || {
             while !flag.load(Ordering::SeqCst) {
                 let conn = match listener.accept() {
-                    Ok((conn, _)) => conn,
+                    Ok((conn, _)) => {
+                        // On macOS an accepted socket inherits the listener's non-blocking mode
+                        // (on Linux it does not): every read would return at once, and a tunnel
+                        // would end before it began.
+                        let _ = conn.set_nonblocking(false);
+                        conn
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(ACCEPT_POLL);
                         continue;
@@ -224,6 +230,23 @@ fn read_head(c: &mut UnixStream) -> Result<(String, Vec<u8>), &'static str> {
     }
 }
 
+/// Answers a refusal and closes without cutting the answer off. Closing with the client's bytes
+/// still unread resets the connection on some systems (macOS, with its small socket buffers), and
+/// the client then never sees the status: so stop sending, then read and drop what is still
+/// arriving, for a moment and up to a limit.
+fn refuse(c: &mut UnixStream, status: &str) {
+    reply(c, status);
+    let _ = c.shutdown(std::net::Shutdown::Write);
+    let _ = c.set_read_timeout(Some(Duration::from_millis(200)));
+    let (mut sink, mut dropped) = ([0u8; 4096], 0usize);
+    while dropped < 256 * 1024 {
+        match c.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => dropped += n,
+        }
+    }
+}
+
 fn reply(c: &mut UnixStream, status: &str) {
     // One write: `write!` on a socket sends each piece of the format on its own, and a reader
     // that reads once can then see only the start of the answer.
@@ -236,29 +259,29 @@ fn handle(mut c: UnixStream, allow: &str, log: &Mutex<Vec<String>>) {
     let _ = c.set_read_timeout(Some(HEAD_TIMEOUT));
     let (head, rest) = match read_head(&mut c) {
         Ok(h) => h,
-        Err(status) => return reply(&mut c, status),
+        Err(status) => return refuse(&mut c, status),
     };
     let line = head.lines().next().unwrap_or("");
     let mut parts = line.split_ascii_whitespace();
     let (Some(method), Some(target), Some(version), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return reply(&mut c, "400 Bad Request");
+        return refuse(&mut c, "400 Bad Request");
     };
     if !version.starts_with("HTTP/1.") {
-        return reply(&mut c, "400 Bad Request");
+        return refuse(&mut c, "400 Bad Request");
     }
     // Only a tunnel. A plain request would make the proxy fetch for Pi, and read what it gets.
     if method != "CONNECT" {
         remember(log, format!("{method} (no es CONNECT)"));
-        return reply(&mut c, "405 Method Not Allowed");
+        return refuse(&mut c, "405 Method Not Allowed");
     }
     if target.to_ascii_lowercase() != allow {
         remember(log, target.chars().take(120).collect());
-        return reply(&mut c, "403 Forbidden");
+        return refuse(&mut c, "403 Forbidden");
     }
     let Some(up) = connect_upstream(allow) else {
-        return reply(&mut c, "502 Bad Gateway");
+        return refuse(&mut c, "502 Bad Gateway");
     };
     reply_open(&mut c);
     let _ = c.set_read_timeout(None);
