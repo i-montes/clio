@@ -3,6 +3,8 @@
 //! real memory sits behind `MemoryPort` in `clio-brain`; nothing here opens a database.
 #![allow(clippy::unwrap_used)]
 
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +13,7 @@ use clio_core::SystemClock;
 use clio_toolhost::{
     Config, Found, JailMode, MemoryItem, MemoryPort, Origin, Request, Response, ToolHost,
 };
-use clio_vault::Scrubber;
+use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -302,7 +304,8 @@ fn query_and_limit_are_clamped() {
     let e = env(&port);
     let seen = || port.last_search.lock().unwrap().clone().unwrap();
     search(&e, "s1", &"q".repeat(500));
-    assert_eq!(seen().0.chars().count(), 200);
+    // Cut at 200 characters as they are: no ellipsis in the query the port is asked.
+    assert_eq!(seen().0, "q".repeat(200));
     assert_eq!(seen().1, 5, "absent limit");
     let with = |limit: Value| {
         call(
@@ -451,4 +454,272 @@ fn no_memory_text_reaches_the_effects_log() {
             assert!(!text.contains(marker) && !text.contains(query), "{path:?}");
         }
     }
+}
+
+fn run_dir(e: &Env) -> PathBuf {
+    e.t.path().canonicalize().unwrap().join("run")
+}
+
+/// A second service over the same folders, as after a restart.
+fn restarted(e: &Env, port: &Arc<FakePort>) -> ToolHost {
+    let r = e.t.path().canonicalize().unwrap();
+    let mut cfg = Config::new(&r.join("work"), &r.join("scratch"), &r.join("run"));
+    cfg.jail = JailMode::Off;
+    cfg.memory = Some(Arc::clone(port) as Arc<dyn MemoryPort>);
+    ToolHost::new(cfg).unwrap()
+}
+
+fn denied_by_budget(r: &Response) -> bool {
+    !r.ok && r.decision.outcome == "deny" && r.decision.rule == "S-47/memory"
+}
+
+fn spend_twenty(e: &Env) {
+    for n in 0..20 {
+        assert!(search(e, "s1", "q").ok, "call {n}");
+    }
+}
+
+// S-47
+#[test]
+fn the_budget_runs_out_at_20_calls_or_24_kib() {
+    // Twenty calls, the twenty-first is denied and the port is not asked.
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    spend_twenty(&e);
+    let r = search(&e, "s1", "q");
+    assert!(denied_by_budget(&r), "{r:?}");
+    assert!(!r.external, "{r:?}");
+    assert_eq!(port.calls(), 20);
+    let g = call(&e, "s1", "memory_get", json!({ "id": 1 }));
+    assert!(denied_by_budget(&g), "{g:?}");
+    assert_eq!(port.calls(), 20);
+
+    // Memories of about 1.2 KiB each: a full answer is about 4 KiB. The text returned never goes
+    // over 24 KiB, the last answers are cut short to what is left, and then the calls are denied.
+    let big: Vec<MemoryItem> = (1..=6)
+        .map(|i| item(i, Origin::Person, &"é".repeat(600)))
+        .collect();
+    let port = FakePort::new(big, Mode::Items);
+    let e = env(&port);
+    let (mut total, mut lens) = (0, Vec::new());
+    let denied_at = (1..=20).find(|n| {
+        let r = search(&e, "s1", "q");
+        if r.ok {
+            total += r.content.len();
+            lens.push(r.content.len());
+            false
+        } else {
+            assert!(denied_by_budget(&r), "call {n}: {r:?}");
+            true
+        }
+    });
+    assert!(denied_at.is_some_and(|n| n < 20), "{denied_at:?} {lens:?}");
+    assert!(total <= 24 * 1024, "{total} {lens:?}");
+    assert!(total > 24 * 1024 - 1024, "{total} {lens:?}");
+    assert!(
+        lens.last() < lens.first(),
+        "the last answer is cut: {lens:?}"
+    );
+    assert_eq!(port.calls(), lens.len());
+}
+
+// S-47
+#[test]
+fn rejected_and_failed_calls_spend_the_budget() {
+    // Calls the gateway denied do not spend it (five, so the breaker is not reached).
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    for _ in 0..5 {
+        let r = call(
+            &e,
+            "s1",
+            "memory_search",
+            json!({"query": "x", "scope": "all"}),
+        );
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+    }
+    spend_twenty(&e);
+    assert!(denied_by_budget(&search(&e, "s1", "q")));
+
+    // Calls that fail validation do.
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    for _ in 0..20 {
+        let r = search(&e, "s1", " ");
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+    }
+    assert!(denied_by_budget(&search(&e, "s1", "q")));
+    assert_eq!(port.calls(), 0);
+
+    // And so do the ones that fail in the port.
+    let port = FakePort::new(vec![], Mode::Fail("boom".into()));
+    let e = env(&port);
+    for _ in 0..20 {
+        let r = search(&e, "s1", "q");
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+    }
+    assert!(denied_by_budget(&search(&e, "s1", "q")));
+    assert_eq!(port.calls(), 20);
+}
+
+// S-47
+#[test]
+fn the_budget_survives_a_new_host_on_the_same_run_dir() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    spend_twenty(&e);
+    let again = restarted(&e, &port);
+    let r = again.handle(Request {
+        id: "i1".into(),
+        tool: "memory_search".into(),
+        args: json!({ "query": "q" }),
+        session: "s1".into(),
+        call_id: "c1".into(),
+        tainted: false,
+    });
+    assert!(denied_by_budget(&r), "{r:?}");
+    assert_eq!(port.calls(), 20);
+}
+
+// S-47
+#[test]
+fn a_denial_by_the_budget_does_not_count_for_the_breaker() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    spend_twenty(&e);
+    for _ in 0..12 {
+        assert!(denied_by_budget(&search(&e, "s1", "q")));
+    }
+    let l = call(&e, "s1", "fs_list", json!({ "path": "." }));
+    assert!(l.ok && l.decision.outcome == "allow", "{l:?}");
+}
+
+// S-47
+#[test]
+fn a_broken_budget_file_fails_closed() {
+    type Break = (&'static str, fn(&Path));
+    let broken: [Break; 4] = [
+        ("garbage", |p| std::fs::write(p, "no es json").unwrap()),
+        ("wrong shape", |p| {
+            std::fs::write(p, r#"{"calls": "ninguna"}"#).unwrap();
+        }),
+        ("empty", |p| std::fs::write(p, "").unwrap()),
+        ("a folder", |p| std::fs::create_dir(p).unwrap()),
+    ];
+    for (what, make) in broken {
+        let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+        let e = env(&port);
+        make(&run_dir(&e).join("memory-budget.json"));
+        let r = search(&e, "s1", "q");
+        assert!(denied_by_budget(&r), "{what}: {r:?}");
+        assert_eq!(port.calls(), 0, "{what}");
+    }
+
+    // Nowhere to write the budget: denied, not let through without a count.
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env(&port);
+    let run = run_dir(&e);
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let probe = std::fs::write(run.join("probe"), "");
+    let r = search(&e, "s1", "q");
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if probe.is_err() {
+        assert!(denied_by_budget(&r), "{r:?}");
+        assert_eq!(port.calls(), 0);
+    } else {
+        eprintln!("SKIPPED the read-only folder case: permissions do not apply here");
+    }
+}
+
+// S-47, S-60
+#[test]
+fn the_log_has_facts_never_text() {
+    let marker = "frase-distintiva-del-recuerdo-4711";
+    let query = "consulta-distintiva-4712";
+    let port = FakePort::new(
+        vec![
+            item(1, Origin::Agent, marker),
+            item(2, Origin::Person, "otro texto"),
+        ],
+        Mode::Items,
+    );
+    let e = env(&port);
+    assert!(search(&e, "s1", query).ok);
+    assert!(search(&e, "s1", query).ok);
+    assert!(search(&e, "s1", "otra-consulta-4713").ok);
+    assert!(call(&e, "s1", "memory_get", json!({ "id": 2 })).ok);
+    assert!(!search(&e, "s1", " ").ok);
+
+    let run = run_dir(&e);
+    let log = std::fs::read_to_string(run.join("memory.jsonl")).unwrap();
+    let rows: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 5, "{log}");
+    let hash = |i: usize| rows[i]["query_hash"].as_str().unwrap().to_owned();
+    assert!(hash(0).len() == 8 && hash(0).bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(hash(0), hash(1));
+    assert_ne!(hash(0), hash(2));
+    assert_eq!(rows[0]["tool"], "memory_search");
+    assert_eq!(rows[0]["ids"], json!([1, 2]));
+    assert_eq!(rows[0]["results"], 2);
+    assert_eq!(rows[0]["tainted"], true);
+    assert!(rows[0]["bytes"].as_u64().unwrap() > 0);
+    assert!(rows[0]["at"].as_u64().unwrap() > 0);
+    assert_eq!(rows[3]["tool"], "memory_get");
+    assert_eq!(rows[3]["ids"], json!([2]));
+    assert_eq!(rows[3]["tainted"], false);
+    assert_eq!(rows[4]["results"], 0, "a call that failed is logged too");
+    assert_eq!(rows[4]["bytes"], 0);
+
+    // Neither file has the query or what a memory said; both are private.
+    for name in ["memory.jsonl", "memory-budget.json"] {
+        let path = run.join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains(marker) && !text.contains(query) && !text.contains("otro texto"),
+            "{name}: {text}"
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{name}");
+    }
+    let budget: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("memory-budget.json")).unwrap())
+            .unwrap();
+    assert_eq!(budget["calls"], 5);
+    assert!(budget["bytes"].as_u64().unwrap() > 0);
+}
+
+// S-60
+#[test]
+fn what_is_not_shown_is_not_counted_as_masked() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    // Three memories fit; the two with the value do not, so nothing was crossed out in
+    // what the model saw.
+    let mut items: Vec<MemoryItem> = (1..=3)
+        .map(|i| item(i, Origin::Person, &"é".repeat(600)))
+        .collect();
+    items.extend((4..=5).map(|i| item(i, Origin::Person, &format!("{value} {}", "é".repeat(600)))));
+    let e = env_with(Some(&FakePort::new(items, Mode::Items)), |c| {
+        c.scrubber = Some(scrubber)
+    });
+    let r = search(&e, "s1", "q");
+    assert!(r.ok && r.data["count"].as_u64().unwrap() < 5, "{r:?}");
+    assert_eq!(r.data["masked"], 0, "{r:?}");
+}
+
+// S-60
+#[test]
+fn if_the_vault_cannot_filter_the_query_the_call_fails() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
+    let e = env_with(Some(&port), |c| {
+        c.vault = Some(VaultClient::new(Path::new("/nonexistent/vault.sock")));
+    });
+    let r = search(&e, "s1", "q");
+    assert!(!r.ok && !r.external, "{r:?}");
+    assert_eq!(port.calls(), 0, "the port was asked with the withheld text");
+    assert!(r.content.contains("vault"), "{r:?}");
 }

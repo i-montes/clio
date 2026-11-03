@@ -196,6 +196,8 @@ pub struct ToolHost {
     exec_status: Result<(), String>,
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
+    /// Where the memory tools keep their budget and their log.
+    run_dir: PathBuf,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -330,6 +332,7 @@ impl ToolHost {
             exec_status,
             memory: cfg.memory,
             memory_timeout: memory::MEMORY_TIMEOUT,
+            run_dir: cfg.run_dir,
         })
     }
 
@@ -377,13 +380,18 @@ impl ToolHost {
     }
 
     fn clean(&self, text: &str) -> String {
+        self.try_clean(text)
+            .unwrap_or_else(|| "[withheld: the vault could not filter this text]".into())
+    }
+
+    /// `clean`, but `None` when the vault could not filter: for text that is an input to
+    /// something else (a query), where the stand-in text for a withheld output would be wrong.
+    fn try_clean(&self, text: &str) -> Option<String> {
         // In this order: a hidden character inside a value must not stop the scrubber.
         let t = self.scrubber.scrub(&sanitize(text));
         match &self.vault {
-            None => t,
-            Some(v) => v
-                .scrub(&t)
-                .unwrap_or_else(|_| "[withheld: the vault could not filter this text]".into()),
+            None => Some(t),
+            Some(v) => v.scrub(&t).ok(),
         }
     }
 
