@@ -1078,6 +1078,22 @@ impl Engine {
             let _s = span!("rules");
             decide(p.kind, origin, existing)
         };
+        // The same untrusted text twice is one candidate: a second copy neither adds a row to
+        // review nor spends the cap. Only when this proposal would wait itself: a person's text
+        // that equals a pending candidate must still become active.
+        let verdict = match verdict {
+            Verdict::Add {
+                state: State::Quarantine,
+                ..
+            } => match self
+                .store
+                .find_quarantined_by_hash(p.scope, &row.content_hash)?
+            {
+                Some(waiting) => Verdict::Noop(waiting.id),
+                None => verdict,
+            },
+            v => v,
+        };
         let mut decisions: Vec<NewDecision> = Vec::new();
         let mut review_by: Option<String> = None;
         if matches!(
@@ -1119,6 +1135,14 @@ impl Engine {
                     state
                 };
                 row.supersedes = supersedes;
+                // What would wait for review is counted per actor, whoever sent it to quarantine
+                // (the rules or a decider).
+                if row.state == State::Quarantine
+                    && self.store.count_quarantined_by(p.scope, p.actor)?
+                        >= self.limits.max_quarantine_per_actor
+                {
+                    return Err(Error::QuarantineFull);
+                }
                 let reason = match (&review_by, state, origin) {
                     (Some(who), _, _) => format!("review requested by {who}"),
                     (None, State::Quarantine, Origin::External) => "external origin".to_string(),

@@ -48,6 +48,9 @@ pub fn explain(e: &Error) -> String {
         Error::SecretDetected => "rechazado: parece una clave o un secreto".into(),
         Error::QuotaExceeded => "rechazado: cuota de propuestas agotada para este actor".into(),
         Error::TooLong => "rechazado: demasiado largo".into(),
+        Error::QuarantineFull => {
+            "rechazado: hay demasiados recuerdos de este actor esperando tu revisión; revisa los pendientes (`clio memory review`)".into()
+        }
         Error::EmptyContent => "rechazado: vacío".into(),
         Error::WriterLocked => "otro proceso está escribiendo la memoria; reintenta".into(),
         Error::NotAllowed => "no permitido para este actor".into(),

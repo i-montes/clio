@@ -1157,6 +1157,22 @@ impl Store for SqliteStore {
         )
     }
 
+    fn find_quarantined_by_hash(&self, scope: ScopeId, hash: &str) -> Result<Option<MemoryRow>> {
+        self.find_one(
+            &format!("SELECT {MEM_COLS} FROM memories WHERE scope = ?1 AND content_hash = ?2 AND state = 'Quarantine' ORDER BY id LIMIT 1"),
+            &[&scope.0, &hash],
+        )
+    }
+
+    fn count_quarantined_by(&self, scope: ScopeId, actor: ActorId) -> Result<usize> {
+        let n: i64 = self.reader()?.query_row(
+            "SELECT COUNT(*) FROM memories WHERE scope = ?1 AND actor = ?2 AND state = 'Quarantine'",
+            params![scope.0, actor.0],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(usize::MAX))
+    }
+
     fn find_active_by_topic(
         &self,
         scope: ScopeId,

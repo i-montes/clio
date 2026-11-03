@@ -68,7 +68,7 @@ La columna OWASP indica el riesgo del [OWASP Top 10 para aplicaciones con LLM (2
 | S-24 | Los vectores son tan sensibles como el texto (permiten reconstruir parte del contenido): mismo cifrado, mismos permisos y PURGE también los borra. | Después de un PURGE no queda el vector. | LLM08 |
 | S-25 | Lo externo entra en cuarentena y solo PROMOTE lo saca. PROMOTE, PURGE y REVERT nunca se exponen por MCP. | Llamar PROMOTE por MCP no es posible. | LLM04 |
 | S-26 | Los recuerdos procedimentales (planes y skills, que luego actúan como instrucciones) solo se activan con revisión humana. | Un procedimiento propuesto por el agente queda pendiente hasta aprobarlo. | LLM04 · LLM01 |
-| S-27 | Aislamiento de ámbitos, cuota por actor y detector de secretos antes de escribir, probados en cada versión. | Pruebas de aceptación 3, 5 y de cuotas del spec. | LLM02 · LLM04 |
+| S-27 | Aislamiento de ámbitos, cuota por actor, tope de candidatos en cuarentena por actor y detector de secretos antes de escribir, probados en cada versión. | Pruebas de aceptación 3, 5 y de cuotas del spec. | LLM02 · LLM04 |
 | **clio-network y nodos** |  |  |  |
 | S-28 | Reglas de Tailscale que niegan por defecto: el cerebro solo llega al puerto del daemon de cada nodo, los nodos no se ven entre sí y el teléfono solo llega a la PWA. | Desde un nodo, intentar conectar con otro falla. | — |
 | S-29 | Estar en la tailnet no basta. Cada nodo tiene su par de llaves y cada orden del cerebro va firmada, con ID y vencimiento. El nodo rechaza órdenes sin firma válida, repetidas o vencidas. | Órdenes sin firma, repetidas o vencidas se rechazan. | LLM06 |

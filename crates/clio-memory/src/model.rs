@@ -317,6 +317,10 @@ pub struct Limits {
     pub max_content_bytes: usize,
     /// For `topic_key`, `session`, `episode`, `source` and scope, actor and block names.
     pub max_field_bytes: usize,
+    /// Candidates one actor may have waiting in quarantine. Past it a proposal that would wait is
+    /// refused with `Error::QuarantineFull`: what a person has to review must not be buried by
+    /// whoever writes the most (an agent, outside text). Reviewing (promote, archive) makes room.
+    pub max_quarantine_per_actor: usize,
 }
 
 impl Default for Limits {
@@ -324,6 +328,7 @@ impl Default for Limits {
         Self {
             max_content_bytes: 16 * 1024,
             max_field_bytes: 256,
+            max_quarantine_per_actor: 50,
         }
     }
 }

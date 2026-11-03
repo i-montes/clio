@@ -97,7 +97,9 @@ Orden, sin saltarse pasos:
 
 ## Antes de la etapa 2
 
-`memory_propose` solo se construye cuando haya un **tope de la cuarentena** (hoy no hay ninguno: hallazgo 7 de la segunda pasada). Sin él, un modelo hostil con 5 propuestas por sesión y 20 por hora (cuota del actor `agente`) puede llenar la lista de revisión hasta que lo legítimo quede enterrado. Hace falta: deduplicar también contra la cuarentena (hoy solo contra lo activo), y un máximo de pendientes por actor, con un mensaje claro a la persona cuando se llena. Es un cambio en `clio-memory` con su propio diseño corto y sus pruebas.
+**Hecho el 2026-11-03:** el tope y la deduplicación de la cuarentena ya existen en `clio-memory` (`Limits::max_quarantine_per_actor`, 50 por actor, y un mismo texto no confiable pendiente es un solo candidato), así que la etapa 2 ya no espera por esto; lo que sigue falta es su propio diseño corto. Lo que sigue explica por qué hacía falta.
+
+`memory_propose` solo se construye cuando haya un **tope de la cuarentena** (no lo había: hallazgo 7 de la segunda pasada). Sin él, un modelo hostil con 5 propuestas por sesión y 20 por hora (cuota del actor `agente`) puede llenar la lista de revisión hasta que lo legítimo quede enterrado. Hace falta: deduplicar también contra la cuarentena (hoy solo contra lo activo), y un máximo de pendientes por actor, con un mensaje claro a la persona cuando se llena. Es un cambio en `clio-memory` con su propio diseño corto y sus pruebas.
 
 ## Pruebas y casos de ataque
 
