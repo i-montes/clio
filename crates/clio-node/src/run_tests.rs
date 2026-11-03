@@ -11,8 +11,22 @@ use std::time::Duration;
 /// they load code or settings by themselves). They are mounted read-only.
 /// Folders under the working copy that load code or settings by themselves (S-16). The one list:
 /// the toolhost, the built-in agent and `apply` all use it. `.agents` is where Pi looks for
-/// project skills.
-pub const READ_ONLY: [&str; 6] = ["extensions", "skills", ".pi", ".claude", ".git", ".agents"];
+/// project skills. The last five are loaded AND RUN by tools when a project is opened, built or
+/// committed: an editor's tasks, git hooks, cargo's config (runner, rustc wrapper), a dev
+/// container's commands.
+pub const READ_ONLY: [&str; 11] = [
+    "extensions",
+    "skills",
+    ".pi",
+    ".claude",
+    ".git",
+    ".agents",
+    ".vscode",
+    ".husky",
+    ".githooks",
+    ".cargo",
+    ".devcontainer",
+];
 
 /// `cargo_test` is NOT offered: a `cargo` under /usr is usually a rustup shim whose toolchains
 /// live in the person's home, and making it work would mean mounting part of that home (and the

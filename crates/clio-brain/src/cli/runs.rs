@@ -345,6 +345,33 @@ pub struct Prepared {
     program: String,
 }
 
+/// A run id: the second it started and four random hex digits, asking `taken` until one is free.
+/// The suffix used to come from the millisecond and the process id, and two runs in the same
+/// second (a script, a test) sometimes got the same one and the second failed.
+fn unique_id(started: i64, taken: &dyn Fn(&str) -> bool) -> Res<String> {
+    for _ in 0..16 {
+        let id = format!("{}-{:04x}", stamp(started), random_u16());
+        if !taken(&id) {
+            return Ok(id);
+        }
+    }
+    Err("no encontré un id libre para el run; inténtalo de nuevo".into())
+}
+
+fn random_u16() -> u16 {
+    use std::io::Read;
+    let mut b = [0u8; 2];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok()
+    {
+        return u16::from_le_bytes(b);
+    }
+    // An id is not a secret, it only has to differ: the clock and the pid will do without urandom.
+    let mixed = now_ms().rem_euclid(65_536) ^ i64::from(std::process::id() & 0xffff);
+    u16::try_from(mixed).unwrap_or(0)
+}
+
 /// Validates the workspace, scans it and makes the copy. Nothing of the original is touched.
 pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     let cfg = Config::load(dirs)?;
@@ -364,15 +391,8 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         .ok_or("config: model.command está vacío (revisa ~/.config/clio/config.json)")?
         .clone();
     let started = now_ms();
-    let id = format!(
-        "{}-{:04x}",
-        stamp(started),
-        started.rem_euclid(65_536) ^ i64::from(std::process::id() & 0xffff)
-    );
+    let id = unique_id(started, &|c| dirs.runs.join(c).exists())?;
     let path = dirs.runs.join(&id);
-    if path.exists() {
-        return Err(format!("el run {id} ya existe; inténtalo de nuevo"));
-    }
     mkdir_private(&path)?;
     let manifest = work::copy_tree(&ws, &scan.files, &path.join("sandbox"))?;
     write_json(&path.join("manifest.json"), &manifest)?;
@@ -983,4 +1003,42 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
     }
     println!("{}{}", label("carpeta del run:"), run.path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    // Two runs in one second (a script, a test) must both get an id. The old suffix came from the
+    // millisecond and the process id and sometimes matched; a taken id is now replaced, not reported.
+    #[test]
+    fn a_taken_id_is_replaced_not_reported() {
+        let (calls, seen) = (Cell::new(0), RefCell::new(Vec::new()));
+        let id = unique_id(1_700_000_000_000, &|c| {
+            seen.borrow_mut().push(c.to_owned());
+            calls.set(calls.get() + 1);
+            calls.get() <= 3
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 4, "it asked until one was free");
+        assert_eq!(Some(&id), seen.borrow().last());
+        let (day, suffix) = id.rsplit_once('-').unwrap();
+        assert_eq!(day, stamp(1_700_000_000_000));
+        assert!(
+            suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{id}"
+        );
+    }
+
+    #[test]
+    fn it_gives_up_when_every_id_is_taken() {
+        let calls = Cell::new(0);
+        let r = unique_id(1_700_000_000_000, &|_| {
+            calls.set(calls.get() + 1);
+            true
+        });
+        assert!(r.is_err());
+        assert_eq!(calls.get(), 16, "a bounded number of tries");
+    }
 }

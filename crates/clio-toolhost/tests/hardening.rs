@@ -130,6 +130,58 @@ fn exec_output_is_never_written_to_disk_unscrubbed() {
 }
 
 // Built from two pieces: a scanner reads the source, not the program.
+/// Folders a tool loads and RUNS when the project is opened, built or committed: an editor's tasks,
+/// git hooks, cargo's config (runner, rustc wrapper), a dev container's commands.
+const RUNS_CODE: [&str; 5] = [".vscode", ".husky", ".githooks", ".cargo", ".devcontainer"];
+
+// S-16: the agent cannot write where code runs by itself. The person may open the copy in an editor
+// to look at it, and `apply` is the only way out: both must find these folders as they were.
+#[test]
+fn the_host_does_not_write_the_folders_that_run_code_when_a_project_opens() {
+    let e = env(JailMode::Off, None);
+    for dir in RUNS_CODE {
+        let r = call(
+            &e.host,
+            "fs_write",
+            json!({"path": format!("{dir}/x.json"), "content": "{}"}),
+        );
+        assert!(!r.ok && r.decision.rule == "S-16", "{dir}: {r:?}");
+        assert!(!e.work.join(dir).exists(), "{dir} was created");
+    }
+    // A folder that only shares a word is an ordinary one.
+    let ok = call(
+        &e.host,
+        "fs_write",
+        json!({"path": "docs/vscode/guide.md", "content": "x"}),
+    );
+    assert!(ok.ok, "{ok:?}");
+}
+
+// S-16: and the jail mounts them read-only, whether or not they exist, and leaves nothing behind.
+#[test]
+fn a_command_in_the_jail_cannot_write_the_folders_that_run_code_when_a_project_opens() {
+    let e = env(JailMode::Auto, None);
+    if let Err(why) = e.host.exec_available() {
+        eprintln!("SKIPPED (the jail cannot run here, nothing was tested): {why}");
+        assert!(
+            std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+            "CLIO_REQUIRE_JAIL is set: {why}"
+        );
+        return;
+    }
+    for dir in RUNS_CODE {
+        let cmd = format!("mkdir -p {dir}; echo x > {dir}/x.json; echo rc=$?");
+        let r = call(&e.host, "exec", json!({ "command": cmd }));
+        assert!(r.ok, "{dir}: {r:?}");
+        assert!(
+            !r.content.contains("rc=0"),
+            "{dir} was written: {}",
+            r.content
+        );
+        assert!(!e.work.join(dir).exists(), "{dir} was left behind");
+    }
+}
+
 const GH: &str = concat!("ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
 
 // Finding 1 (attack-52), S-18, S-44: a token inside an ordinary file reaches the model masked, and
