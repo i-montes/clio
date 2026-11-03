@@ -253,6 +253,7 @@ fn agent_mode(
         only: list("only"),
         run_root: run_root.clone(),
         cleanup: keep.is_none(),
+        unjailed_checks: std::env::var("CLIO_BENCH_CHECK_JAIL").is_ok_and(|v| v == "off"),
         price_in_micro_per_mtok: price.input_per_mtok,
         price_out_micro_per_mtok: price.output_per_mtok,
         backoff_ms: vec![5_000, 20_000, 60_000],

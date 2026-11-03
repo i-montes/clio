@@ -112,6 +112,7 @@ fn bench(tmp: &Path, base_url: &str) -> AgentBenchConfig {
         only: vec![],
         run_root: tmp.join("runs"),
         cleanup: false,
+        unjailed_checks: false,
         price_in_micro_per_mtok: 0,
         price_out_micro_per_mtok: 0,
         backoff_ms: vec![],

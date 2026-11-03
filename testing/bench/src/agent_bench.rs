@@ -39,6 +39,9 @@ pub struct AgentBenchConfig {
     pub backoff_ms: Vec<u64>,
     /// `Some`: Pi is the harness (and `system_prompt`, `program` and `backoff_ms` are not used).
     pub pi: Option<PiBench>,
+    /// Run the task checks without the jail when there is none (see `run_check`). Off by default:
+    /// the check runs code the model wrote.
+    pub unjailed_checks: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,8 +206,15 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
 /// injection bait of the hostile tasks: that code must not run as the person, with their keys and
 /// the network. It runs in the same `bwrap` jail as the agent's own commands (no network, none of
 /// the person's files or environment, `/work` its working folder). Without a jail it does not run,
-/// unless `CLIO_BENCH_CHECK_JAIL=off` (for a throwaway CI runner), and then with an empty environment.
-fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool, String), String> {
+/// unless `unjailed` (`CLIO_BENCH_CHECK_JAIL=off`, for a machine with nothing of the person's), and
+/// then with an empty environment.
+fn run_check(
+    task: &Task,
+    work: &Path,
+    sink: &Path,
+    out: &Path,
+    unjailed: bool,
+) -> Result<(bool, String), String> {
     let Check::Command(line) = &task.check else {
         return Err(format!(
             "task {}: only command checks run on a workspace",
@@ -214,7 +224,7 @@ fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool,
     let dir = task.dir.canonicalize().map_err(|e| e.to_string())?;
     match Jail::detect().and_then(|j| j.probe().map(|()| j)) {
         Ok(jail) => run_check_jailed(&jail, line, &dir, work, sink, out),
-        Err(why) if std::env::var("CLIO_BENCH_CHECK_JAIL").is_ok_and(|v| v == "off") => {
+        Err(why) if unjailed => {
             eprintln!(
                 "warning: the check of {} runs WITHOUT a jail ({why})",
                 task.id
@@ -388,7 +398,13 @@ fn one_run(task: &Task, n: u32, cfg: &AgentBenchConfig) -> Result<(Done, bool, S
             setup_ms: 0,
         }
     };
-    let (passed, tail) = run_check(task, &work, &sink, &base.join("check.out"))?;
+    let (passed, tail) = run_check(
+        task,
+        &work,
+        &sink,
+        &base.join("check.out"),
+        cfg.unjailed_checks,
+    )?;
     Ok((done, passed, tail))
 }
 
@@ -581,7 +597,7 @@ sys.exit(1 if bad else 0)
         }
         let sink = root.join("sink.log");
         std::fs::write(&sink, "").unwrap();
-        run_check(task, &work, &sink, &root.join("out")).unwrap()
+        run_check(task, &work, &sink, &root.join("out"), false).unwrap()
     }
 
     // Moving the checks into the jail must not change what they decide: each of the real tasks'
@@ -645,7 +661,7 @@ sys.exit(1 if bad else 0)
             &task_dir,
             format!("python3 {{task_dir}}/check.py {home} {port}"),
         );
-        let (passed, tail) = run_check(&t, &work, &sink, &tmp.path().join("out")).unwrap();
+        let (passed, tail) = run_check(&t, &work, &sink, &tmp.path().join("out"), false).unwrap();
         assert!(passed, "the check saw the outside: {tail}");
         assert!(tail.contains("isolated"), "{tail}");
     }
