@@ -33,6 +33,16 @@ struct Entry {
     /// Hash of the original before (None if it did not exist) and of what was written.
     before: Option<String>,
     after: Option<String>,
+    /// False from the moment the journal names the file until it is written: a process that died in
+    /// between left this file in a state nobody knows (old, new or half-written), and `undo` must
+    /// put the original back whatever it finds. Journals written before this field existed are
+    /// complete.
+    #[serde(default = "finished")]
+    complete: bool,
+}
+
+fn finished() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -255,9 +265,12 @@ pub fn commit(p: &Plan) -> Res<usize> {
         at_ms: now_ms(),
         ..Applied::default()
     };
-    let result = write_all(&p.ws, &p.run, &p.changes, &contents, &mut done);
-    // Record what was done even if it stopped halfway, so `undo` can put it back.
-    write_json(&p.run.path.join("applied.json"), &done)?;
+    let journal = p.run.path.join("applied.json");
+    let result = write_all(&p.ws, &p.run, &p.changes, &contents, &mut done, &mut |d| {
+        save_journal(&journal, d)
+    });
+    // Also when it stopped halfway, so `undo` can put it back.
+    save_journal(&journal, &done)?;
     result?;
     Ok(done.entries.len())
 }
@@ -291,12 +304,24 @@ pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
     Ok(())
 }
 
+/// Saves the journal in one piece: a temporary file and a rename, so a process that dies while
+/// saving leaves the previous journal, never half of a new one.
+fn save_journal(path: &Path, done: &Applied) -> Res<()> {
+    let tmp = path.with_extension("json.tmp");
+    write_json(&tmp, done)?;
+    std::fs::rename(&tmp, path).map_err(|e| io_err(path, &e))
+}
+
+/// Writes the files of a plan. `persist` saves the journal: it is called BEFORE each file is touched
+/// (with that file's entry marked incomplete, its original already copied to `backup/`) and again
+/// when the file is done, so whatever the process dies in the middle of, `undo` knows about it.
 fn write_all(
     ws: &Path,
     run: &Run,
     ch: &[Change],
     contents: &BTreeMap<String, Vec<u8>>,
     done: &mut Applied,
+    persist: &mut dyn FnMut(&Applied) -> Res<()>,
 ) -> Res<()> {
     for c in ch {
         let target = ws.join(&c.rel);
@@ -309,28 +334,36 @@ fn write_all(
             let bytes = std::fs::read(&target).map_err(|e| io_err(&target, &e))?;
             super::write_private(&b, &bytes)?;
         }
-        let after = match c.kind {
-            Kind::Deleted => {
-                std::fs::remove_file(&target).map_err(|e| io_err(&target, &e))?;
-                None
-            }
-            Kind::Modified | Kind::Created => {
-                let bytes = contents
+        let bytes = match c.kind {
+            Kind::Deleted => None,
+            Kind::Modified | Kind::Created => Some(
+                contents
                     .get(&c.rel)
-                    .ok_or_else(|| format!("{}: falta lo revisado", sanitize::line(&c.rel)))?;
-                if let Some(parent) = target.parent() {
-                    make_dirs(ws, parent, done)?;
-                }
-                std::fs::write(&target, bytes).map_err(|e| io_err(&target, &e))?;
-                Some(sha_hex(bytes))
-            }
+                    .ok_or_else(|| format!("{}: falta lo revisado", sanitize::line(&c.rel)))?,
+            ),
         };
+        // Journal first: from here until the write is done, this file may be in any state.
         done.entries.push(Entry {
             path: c.rel.clone(),
             action: action(c.kind).into(),
             before,
-            after,
+            after: bytes.map(|b| sha_hex(b)),
+            complete: false,
         });
+        persist(done)?;
+        match bytes {
+            None => std::fs::remove_file(&target).map_err(|e| io_err(&target, &e))?,
+            Some(bytes) => {
+                if let Some(parent) = target.parent() {
+                    make_dirs(ws, parent, done)?;
+                }
+                std::fs::write(&target, bytes).map_err(|e| io_err(&target, &e))?;
+            }
+        }
+        if let Some(last) = done.entries.last_mut() {
+            last.complete = true;
+        }
+        persist(done)?;
     }
     Ok(())
 }
@@ -355,6 +388,22 @@ fn make_dirs(ws: &Path, dir: &Path, done: &mut Applied) -> Res<()> {
     Ok(())
 }
 
+/// What stops an undo: a path that may never be written, or a file the person changed after `apply`.
+/// An entry that never finished (the process died while applying it) is restored whatever state it
+/// is in: nobody knows it, and its original is in `backup/`.
+fn undo_problems(ws: &Path, done: &Applied, force: bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    for e in &done.entries {
+        let rel = sanitize::line(&e.path);
+        if let Some(why) = hard_refusal(&e.path).or_else(|| symlink_check(ws, &e.path).err()) {
+            problems.push(format!("{rel}: {why}"));
+        } else if e.complete && hash_of(&ws.join(&e.path)) != e.after && !force {
+            problems.push(format!("{rel}: cambió después de `apply`"));
+        }
+    }
+    problems
+}
+
 /// Puts the originals back; returns how many files per action (`modified`, `created`, `deleted`).
 pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usize>> {
     let run = runs::resolve(dirs, id)?;
@@ -367,15 +416,7 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
     }
     let done: Applied = read_json(&ap)?;
     let ws = workspace(&run.meta()?.workspace)?;
-    let mut problems = Vec::new();
-    for e in &done.entries {
-        let rel = sanitize::line(&e.path);
-        if let Some(why) = hard_refusal(&e.path).or_else(|| symlink_check(&ws, &e.path).err()) {
-            problems.push(format!("{rel}: {why}"));
-        } else if hash_of(&ws.join(&e.path)) != e.after && !force {
-            problems.push(format!("{rel}: cambió después de `apply`"));
-        }
-    }
+    let problems = undo_problems(&ws, &done, force);
     if !problems.is_empty() {
         return Err(format!(
             "no se deshizo (--force pisa lo que cambió después de apply):\n  {}",
@@ -431,6 +472,100 @@ pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    // Second audit: `apply` wrote every file and only then `applied.json`. A process that dies in
+    // between (the terminal closes, a `kill`, a power cut) left originals overwritten, the copies in
+    // `backup/`, and no record: `undo` said nothing had been applied. The journal is written BEFORE
+    // each file is touched and again when it is done.
+    #[test]
+    fn the_journal_is_written_before_each_file_is_touched() {
+        let t = tempfile::tempdir().unwrap();
+        let (ws, run_dir) = (t.path().join("ws"), t.path().join("run"));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(ws.join("a.txt"), "viejo").unwrap();
+        let run = Run {
+            id: "r".into(),
+            path: run_dir.clone(),
+        };
+        let ch = [
+            Change {
+                rel: "a.txt".into(),
+                kind: Kind::Modified,
+            },
+            Change {
+                rel: "sub/b.txt".into(),
+                kind: Kind::Created,
+            },
+        ];
+        let contents = BTreeMap::from([
+            ("a.txt".to_owned(), b"nuevo".to_vec()),
+            ("sub/b.txt".to_owned(), b"otro".to_vec()),
+        ]);
+        // What the world looked like each time the journal was saved.
+        #[derive(Debug, PartialEq)]
+        struct Seen {
+            complete: Vec<bool>,
+            a: String,
+            b_exists: bool,
+            backup_of_a: bool,
+        }
+        let seen = RefCell::new(Vec::new());
+        let mut done = Applied::default();
+        write_all(&ws, &run, &ch, &contents, &mut done, &mut |d: &Applied| {
+            seen.borrow_mut().push(Seen {
+                complete: d.entries.iter().map(|e| e.complete).collect(),
+                a: std::fs::read_to_string(ws.join("a.txt")).unwrap(),
+                b_exists: ws.join("sub/b.txt").exists(),
+                backup_of_a: run_dir.join("backup/a.txt").exists(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let seen = seen.into_inner();
+        let s = |complete: &[bool], a: &str, b: bool, backup: bool| Seen {
+            complete: complete.to_vec(),
+            a: a.into(),
+            b_exists: b,
+            backup_of_a: backup,
+        };
+        assert_eq!(
+            seen,
+            vec![
+                s(&[false], "viejo", false, true), // journaled, the original not yet touched, its copy saved
+                s(&[true], "nuevo", false, true),
+                s(&[true, false], "nuevo", false, true), // the second one, before it exists
+                s(&[true, true], "nuevo", true, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_undo_after_a_crash_accepts_what_was_left_half_written() {
+        let t = tempfile::tempdir().unwrap();
+        let ws = t.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "a medias").unwrap(); // neither the old text nor the new
+        std::fs::write(ws.join("b.txt"), "cambiado despues").unwrap();
+        let entry = |path: &str, complete: bool| Entry {
+            path: path.into(),
+            action: "modified".into(),
+            before: Some(sha_hex(b"viejo")),
+            after: Some(sha_hex(b"nuevo")),
+            complete,
+        };
+        let done = Applied {
+            entries: vec![entry("a.txt", false), entry("b.txt", true)],
+            ..Applied::default()
+        };
+        // The unfinished entry is restored whatever state it is in; a finished one that the person
+        // changed afterwards still asks for `--force`.
+        let problems = undo_problems(&ws, &done, false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("b.txt"), "{problems:?}");
+        assert!(undo_problems(&ws, &done, true).is_empty());
+    }
 
     #[test]
     fn protected_paths_are_refused_by_any_case_and_depth() {

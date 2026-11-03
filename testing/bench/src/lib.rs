@@ -74,6 +74,23 @@ pub fn load_tasks(dir: &Path) -> Result<Vec<Task>, String> {
         let mut task: Task =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))?;
         task.dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        // A task is a file somebody wrote (a pull request can add one) and the bench runs it: the
+        // id becomes a folder that is later deleted and the workspace a folder that is copied.
+        if !is_plain_id(&task.id) {
+            return Err(format!(
+                "{}: task id {:?} must be a plain name (letters, digits, `.`, `_`, `-`; up to 64)",
+                file.display(),
+                task.id
+            ));
+        }
+        if let Some(w) = &task.workspace
+            && !is_inside_relative(w)
+        {
+            return Err(format!(
+                "{}: workspace {w:?} must be a relative path inside the task folder",
+                file.display()
+            ));
+        }
         if !seen.insert(task.id.clone()) {
             return Err(format!("{}: duplicate task id {}", file.display(), task.id));
         }
@@ -83,10 +100,35 @@ pub fn load_tasks(dir: &Path) -> Result<Vec<Task>, String> {
     Ok(tasks)
 }
 
+/// A name that is one path component and cannot be mistaken for an option or a hidden file.
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+}
+
+/// A relative path made only of normal components: no `..`, no root, no `.`.
+fn is_inside_relative(p: &str) -> bool {
+    !p.is_empty()
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.is_dir() {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        // A link is not followed: one that leads back up is a loop, one that leads out brings in
+        // tasks from somewhere that is not this folder.
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             // Fixture folders hold the files of a task, which may well be `.json`.
             if matches!(
                 path.file_name().and_then(|n| n.to_str()),

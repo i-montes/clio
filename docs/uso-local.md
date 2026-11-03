@@ -152,7 +152,7 @@ clio · proyecto · beam-free                                                 us
  ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
 ```
 
-**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter` o `d`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` atenuado. `a` aplica y `u` deshace. Antes de aplicar, el recuadro de confirmación lista los archivos que se van a escribir (`M` cambiado, `+` nuevo, `-` borrado) y avisa si el agente leyó contenido de fuera o si el run no guardó registro de eso; el diff completo está en esta pantalla (`Enter` o `d`). Solo una `y` o `s` sola confirma (Ctrl-S o Alt-Y no cuentan), y si el plan tarda y ya cambiaste de pantalla, el recuadro no aparece: se te avisa y lo pides otra vez. Es el mismo código que `clio apply` y `clio undo`.
+**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter` o `d`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` atenuado. `a` aplica y `u` deshace. Antes de aplicar, el recuadro de confirmación lista los archivos que se van a escribir (`M` cambiado, `+` nuevo, `-` borrado) y avisa si el agente leyó contenido de fuera o si el run no guardó registro de eso; el diff completo está en esta pantalla (`Enter` o `d`). El aviso de si el agente leyó contenido de fuera, en una sesión de chat, lo da el servicio de herramientas (que es quien lo vio: Pi podría decir que no leyó nada) y lo deja en la carpeta del run (`toolhost/tainted.json`, solo si ocurrió); si el servicio corrió y no dejó nada, el recuadro no avisa, y si no hay ningún registro dice «Sin registro». Solo una `y` o `s` sola confirma (Ctrl-S o Alt-Y no cuentan), y si el plan tarda y ya cambiaste de pantalla, el recuadro no aparece: se te avisa y lo pides otra vez. Es el mismo código que `clio apply` y `clio undo`.
 
 ```
 clio · proyecto · beam-free                                             detalle
@@ -503,7 +503,7 @@ El agente no puede ejecutar nada por su cuenta. Lo único que puede ejecutar es 
 | El agente | Triaje, contrato (desde el nivel 2), pasarela, ejecutor y límites de pasos/tiempo/costo; solo ve la copia | Reglas S-05, S-13, S-16, S-47 |
 | Las pruebas (`run_tests`) | Dentro de la jaula `bwrap`: sin red, sin tu HOME, sin tu entorno, con límites | Un comando sin jaula tendría tu usuario entero (ADR 0006) |
 | Pi (el chat) | Dentro de una jaula `bwrap`: no ve el baúl ni tus archivos, la copia le es de solo lectura y su red solo llega al proveedor del modelo; si la jaula no arranca o falla su autoprueba, Pi no arranca (ver «La jaula de Pi») | Pi y sus dependencias de npm corren con tu usuario (ADR 0009, S-59) |
-| `apply` | Comprueba cada ruta, pide confirmación, respalda lo que sobrescribe | S-14: lo que sale del sandbox lo aprueba una persona |
+| `apply` | Comprueba cada ruta, pide confirmación, respalda lo que sobrescribe y anota en un diario (`applied.json`) cada archivo **antes** de tocarlo: si el proceso muere a mitad (se cierra la terminal, un `kill`, un corte de luz), `clio undo` devuelve los originales, también el que quedó a medio escribir | S-14: lo que sale del sandbox lo aprueba una persona |
 
 Qué comprueba `apply` antes de escribir nada (todo o nada: si una ruta falla, no se aplica ningún archivo):
 

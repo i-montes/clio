@@ -54,7 +54,7 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install --locked cargo-fuzz
       - run: |
-          for target in traceparent bench_task; do
+          for target in traceparent bench_task pi_text rpc_event scrubber; do
             cargo +nightly fuzz run "$target" -- -max_total_time=60
           done
 

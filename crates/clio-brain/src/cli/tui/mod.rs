@@ -592,11 +592,7 @@ impl Ctx {
                                 format!("{mark} {}", c.rel)
                             })
                             .collect(),
-                        tainted: runs::read_json::<runs::RunSummary>(
-                            &p.run.path.join("summary.json"),
-                        )
-                        .ok()
-                        .map(|s| s.tainted),
+                        tainted: runs::run_taint(&p.run.path),
                     })
                 },
                 |r| Bg::Planned(r.and_then(|x| x)),

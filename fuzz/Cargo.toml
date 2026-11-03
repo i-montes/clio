@@ -14,6 +14,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 clio-trace = { path = "../crates/clio-trace" }
 clio-bench = { path = "../testing/bench" }
+clio-brain = { path = "../crates/clio-brain" }
+clio-core = { path = "../crates/clio-core" }
+clio-vault = { path = "../crates/clio-vault" }
 serde_json = "1.0.154"
 
 [[bin]]
@@ -26,6 +29,27 @@ bench = false
 [[bin]]
 name = "bench_task"
 path = "fuzz_targets/bench_task.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pi_text"
+path = "fuzz_targets/pi_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpc_event"
+path = "fuzz_targets/rpc_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scrubber"
+path = "fuzz_targets/scrubber.rs"
 test = false
 doc = false
 bench = false
