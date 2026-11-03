@@ -10,8 +10,6 @@
 //! bash say SKIPPED (and fail with `CLIO_REQUIRE_JAIL=1`).
 #![allow(clippy::unwrap_used)]
 
-mod common;
-
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -22,9 +20,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::common::fake_model::{FakeModel, Turn, gullible_from_tool_text};
+use crate::common::*;
 use clio_attacks::{Case, Observed, Status, Target, load_cases, run};
-use common::fake_model::{FakeModel, Turn, gullible_from_tool_text};
-use common::*;
 use serde_json::{Value, json};
 
 /// Pi's own tools, as the guard registers them. `grep` is not here: see the extension.

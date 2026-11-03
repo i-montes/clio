@@ -3,12 +3,10 @@
 //! and the executor. The asserts are loose on purpose (machines differ); the numbers are the point.
 #![allow(clippy::unwrap_used)]
 
-mod common;
-
 use std::time::Duration;
 
-use common::fake_model::{FakeModel, Turn};
-use common::*;
+use crate::common::fake_model::{FakeModel, Turn};
+use crate::common::*;
 use serde_json::json;
 
 #[test]

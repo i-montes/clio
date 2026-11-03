@@ -1423,7 +1423,7 @@ const OURS: [&str; 20] = [
     "attack-37",
 ];
 
-/// Run by `clio-toolhost/tests/pi_stack.rs`: they attack Pi with its guard, not the own loop.
+/// Run by `tests/pi_stack/stack.rs`: they attack Pi with its guard, not the own loop.
 const PI_STACK_CASES: [&str; 12] = [
     "attack-38",
     "attack-39",
@@ -1508,7 +1508,7 @@ fn the_active_cases_are_refused_by_the_whole_agent() {
         .into_iter()
         .filter(|c| c.id != "attack-04" && !JAIL_CASES.contains(&c.id.as_str()))
         // 38 to 49 attack the Pi stack (real Pi, clio-guard, clio-toolhost): they are run by
-        // clio-toolhost/tests/pi_stack.rs.
+        // tests/pi_stack/stack.rs.
         .filter(|c| !PI_STACK_CASES.contains(&c.id.as_str()))
         .filter(|c| !HARDENING_CASES.contains(&c.id.as_str()))
         .filter(|c| c.id != "attack-34" || jail)

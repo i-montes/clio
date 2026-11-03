@@ -49,8 +49,9 @@ Las rutas son relativas a la copia de trabajo. Cada operación (menos `filter`) 
 
 ## Pruebas
 
-`cargo test -p clio-toolhost`. `tests/toolhost.rs` prueba el servicio solo; `tests/pi_stack.rs`,
-`pi_failclosed.rs` y `pi_latency.rs` lanzan el Pi real (de `adapters/pi/node_modules`) con las
-banderas endurecidas contra un modelo falso OpenAI-compatible (`tests/common/fake_model.rs`, solo
-127.0.0.1). Sin `node` o sin `npm ci` dicen `SKIPPED`; con `CLIO_REQUIRE_PI=1` fallan. Los procesos
-hijos tienen guardias `Drop`.
+`cargo test -p clio-toolhost`. `tests/toolhost.rs` y `tests/hardening.rs` prueban el servicio solo.
+Las pruebas con el Pi real están en `clio-brain` (`cargo test -p clio-brain --test pi_stack`, carpeta
+`crates/clio-brain/tests/pi_stack/`): lanzan Pi por `pi::launch::build`, dentro de su jaula, con las
+banderas endurecidas y `clio toolhost`, contra un modelo falso OpenAI-compatible
+(`common/fake_model.rs`, solo 127.0.0.1). Sin `node` o sin `npm ci` dicen `SKIPPED`; con
+`CLIO_REQUIRE_PI=1` fallan. Los procesos hijos tienen guardias `Drop`.
