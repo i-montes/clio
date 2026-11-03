@@ -11,16 +11,7 @@
 
 const REPLACEMENT: char = '\u{FFFD}';
 
-/// Bidi controls and invisible characters that can reorder or hide what the person reads.
-fn is_deceptive(c: char) -> bool {
-    matches!(c,
-        '\u{061C}' | '\u{00AD}' | '\u{180E}'
-        | '\u{200B}'..='\u{200F}'
-        | '\u{2028}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'
-        | '\u{FEFF}')
-}
+use clio_brain::pi::text::is_deceptive;
 
 /// One-line text: newlines become spaces.
 pub fn line(text: &str) -> String {
@@ -109,6 +100,17 @@ fn skip_string(it: &mut Chars) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // Second audit: the same invisible characters the Pi-side cleaner removes become a visible
+    // replacement here, so the person sees that something was there.
+    #[test]
+    fn tag_characters_and_invisible_fillers_are_replaced() {
+        assert_eq!(
+            line("a\u{e0041}\u{3164}\u{2800}b"),
+            "a\u{fffd}\u{fffd}\u{fffd}b"
+        );
+        assert_eq!(line("ñandú ❤\u{fe0f}"), "ñandú ❤\u{fe0f}");
+    }
 
     fn nasty(s: &str) -> bool {
         s.chars()

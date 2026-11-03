@@ -201,9 +201,17 @@ impl<C: Clock> Controller<C> {
 
     /// Replace the reservation with the real cost. A real cost above the cap stops the task.
     pub fn settle(&mut self, est_cost_micro: u64, real_cost_micro: u64, day: &mut DayBudget) {
-        self.state.cost_micro =
-            self.state.cost_micro.saturating_sub(est_cost_micro) + real_cost_micro;
-        day.spent_micro = day.spent_micro.saturating_sub(est_cost_micro) + real_cost_micro;
+        // Saturating: the real cost comes from numbers the adapter or Pi report, and a sum that wraps
+        // (release) or panics (debug) would let a huge cost slip under the cap.
+        self.state.cost_micro = self
+            .state
+            .cost_micro
+            .saturating_sub(est_cost_micro)
+            .saturating_add(real_cost_micro);
+        day.spent_micro = day
+            .spent_micro
+            .saturating_sub(est_cost_micro)
+            .saturating_add(real_cost_micro);
         if self.state.cost_micro > self.state.budget.max_cost_micro {
             self.halted = Some(Stop::Cost);
         } else if day.spent_micro > day.max_cost_micro {
