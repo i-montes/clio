@@ -176,7 +176,14 @@ impl Sandbox {
             self.next.fetch_add(1, Ordering::SeqCst)
         ));
         fs::write(&tmp, data)?;
-        if let Err(e) = fs::rename(&tmp, &p) {
+        // The new file takes the old one's permissions: an executable script stays executable.
+        let swap = (|| {
+            if let Ok(old) = fs::metadata(&p) {
+                fs::set_permissions(&tmp, old.permissions())?;
+            }
+            fs::rename(&tmp, &p)
+        })();
+        if let Err(e) = swap {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }

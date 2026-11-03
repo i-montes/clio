@@ -94,12 +94,32 @@ impl Provider {
     }
 }
 
-/// The API key: the variable if set and not empty, else the first line of the file.
-pub fn read_api_key(env_var: &str, key_file: &Path) -> Option<Secret> {
+/// The API key: the variable if set and not empty, else the first line of the file. A file that
+/// group or others can read is refused (S-23): the key is already exposed, so it must be changed.
+pub fn read_api_key(env_var: &str, key_file: &Path) -> Result<Option<Secret>, String> {
+    use std::os::unix::fs::PermissionsExt;
     let from_env = std::env::var(env_var).ok().filter(|v| !v.trim().is_empty());
-    let v = from_env.or_else(|| std::fs::read_to_string(key_file).ok())?;
+    let v = match from_env {
+        Some(v) => v,
+        None => {
+            let Ok(meta) = std::fs::metadata(key_file) else {
+                return Ok(None);
+            };
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Err(format!(
+                    "{} puede leerla otra persona: `chmod 600 {}` y cambia la llave, que ya estuvo expuesta",
+                    key_file.display(),
+                    key_file.display()
+                ));
+            }
+            match std::fs::read_to_string(key_file) {
+                Ok(v) => v,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
     let k = v.lines().next().unwrap_or("").trim().to_owned();
-    (!k.is_empty()).then(|| Secret::new(k))
+    Ok((!k.is_empty()).then(|| Secret::new(k)))
 }
 
 #[derive(Debug, Clone)]
@@ -464,6 +484,39 @@ mod tests {
             extra_env: vec![],
             helper: "/p/clio".into(),
         }
+    }
+
+    // The key file is read by `clio`: one that group or others can read is refused, as the model
+    // adapter already does, and its message never carries the key.
+    #[test]
+    fn a_key_file_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |f: &Path, m| std::fs::set_permissions(f, std::fs::Permissions::from_mode(m)).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("key");
+        std::fs::write(&f, "sk-test-key-value\n").unwrap();
+        let none = "CLIO_TEST_NO_SUCH_VARIABLE";
+        mode(&f, 0o644);
+        let err = read_api_key(none, &f).unwrap_err();
+        assert!(
+            err.contains("chmod 600") && !err.contains("sk-test-key-value"),
+            "{err}"
+        );
+        mode(&f, 0o600);
+        assert_eq!(
+            read_api_key(none, &f).unwrap().unwrap().expose(),
+            "sk-test-key-value"
+        );
+        // The environment wins, and then the file is not even looked at.
+        mode(&f, 0o644);
+        assert!(read_api_key("PATH", &f).unwrap().is_some());
+        // No file and no variable: no key, which is not an error here.
+        assert!(
+            read_api_key(none, &d.path().join("missing"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

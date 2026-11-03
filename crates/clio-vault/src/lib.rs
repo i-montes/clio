@@ -25,6 +25,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const FILE_CHECK: &[u8] = b"clio-vault:v1";
+/// A token is short-lived (S-21): an hour at most, and at least a millisecond.
+const MAX_TOKEN_TTL_MS: i64 = 3_600_000;
+/// Tokens alive at once (S-47). Expired ones are forgotten when a new one is issued.
+const MAX_LIVE_TOKENS: usize = 1024;
 const BACKUP_MAGIC: &[u8] = b"CLIOBK1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -642,6 +646,11 @@ impl Vault {
         node: &str,
         ttl_ms: i64,
     ) -> Result<Token> {
+        if !(1..=MAX_TOKEN_TTL_MS).contains(&ttl_ms) {
+            return Err(VaultError::Denied(format!(
+                "a token lives between 1 ms and {MAX_TOKEN_TTL_MS} ms"
+            )));
+        }
         let mut i = self.inner();
         if i.key.is_none() {
             return Err(VaultError::Locked);
@@ -655,11 +664,16 @@ impl Vault {
                 "{tool} is not a destination tool"
             )));
         }
+        let now = self.clock.now_ms();
+        i.tokens.retain(|_, t| now < t.expires_at_ms);
+        if i.tokens.len() >= MAX_LIVE_TOKENS {
+            return Err(VaultError::Denied("too many live tokens".into()));
+        }
         let id: String = crypto::random::<16>()?
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        let expires_at_ms = self.clock.now_ms() + ttl_ms;
+        let expires_at_ms = now.saturating_add(ttl_ms);
         i.tokens.insert(
             format!("ctk_{id}"),
             TokenRec {
