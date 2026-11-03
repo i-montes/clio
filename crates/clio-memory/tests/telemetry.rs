@@ -154,9 +154,10 @@ fn one_decay_run_is_one_trace() {
 fn trace_id_survives_export_and_import() {
     let f = fixture();
     let m = add(&f, "vive en Medellín");
-    f.engine.feedback(m, Signal::Wrong, f.agent).unwrap();
-    f.engine.feedback(m, Signal::Wrong, f.agent).unwrap();
-    f.engine.feedback(m, Signal::Wrong, f.agent).unwrap(); // the third one flags it
+    // A person's review counts signal by signal (an agent repeating itself would count once).
+    f.engine.feedback(m, Signal::Wrong, f.person).unwrap();
+    f.engine.feedback(m, Signal::Wrong, f.person).unwrap();
+    f.engine.feedback(m, Signal::Wrong, f.person).unwrap(); // the third one flags it
     let mut out = Vec::new();
     f.engine.export(&mut out).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -636,7 +637,7 @@ fn t22_no_span_or_event_field_contains_memory_text() {
             .engine
             .register_actor("zebra-person", ActorKind::Person, Quota::default())
             .unwrap();
-        let agent = f
+        let _agent = f
             .engine
             .register_actor("zebra-agent", ActorKind::Agent, Quota::default())
             .unwrap();
@@ -667,7 +668,7 @@ fn t22_no_span_or_event_field_contains_memory_text() {
             )
             .unwrap();
         for _ in 0..3 {
-            f.engine.feedback(old, Signal::Wrong, agent).unwrap();
+            f.engine.feedback(old, Signal::Wrong, person).unwrap();
         }
         f.engine.promote(old, person).unwrap();
         f.engine.archive(old, person).unwrap();
