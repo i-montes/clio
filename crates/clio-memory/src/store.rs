@@ -43,6 +43,10 @@ pub trait Store: VectorIndex + Send + Sync {
     fn bump_quota(&self, actor: ActorId, now: i64) -> Result<()>;
 
     fn find_active_by_hash(&self, scope: ScopeId, hash: &str) -> Result<Option<MemoryRow>>;
+    /// A candidate already waiting in quarantine with this content.
+    fn find_quarantined_by_hash(&self, scope: ScopeId, hash: &str) -> Result<Option<MemoryRow>>;
+    /// Candidates `actor` wrote that still wait in quarantine.
+    fn count_quarantined_by(&self, scope: ScopeId, actor: ActorId) -> Result<usize>;
     fn find_active_by_topic(
         &self,
         scope: ScopeId,

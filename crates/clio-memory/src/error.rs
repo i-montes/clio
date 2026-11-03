@@ -12,6 +12,8 @@ pub enum Error {
     TooLong,
     #[error("actor quota exceeded")]
     QuotaExceeded,
+    #[error("this actor already has the most candidates waiting for review; review them first")]
+    QuarantineFull,
     #[error(
         "content rejected, nothing saved: it looks like a key or token (a long id or URL path counts too); shorten or remove that part"
     )]

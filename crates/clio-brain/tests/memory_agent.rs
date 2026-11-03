@@ -611,3 +611,13 @@ fn text_is_cleaned_before_it_is_stored() {
         "a [2Jb c d e f"
     );
 }
+
+// S-27 (second audit): a refusal because the quarantine is full tells the person what to do.
+#[test]
+fn a_full_quarantine_is_explained_to_the_person() {
+    let text = clio_brain::memory_link::explain(&clio_memory::Error::QuarantineFull);
+    assert!(
+        text.contains("clio memory review") && text.starts_with("rechazado"),
+        "{text}"
+    );
+}
