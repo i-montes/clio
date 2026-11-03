@@ -28,7 +28,7 @@ Es la única extensión que Pi carga (`-e adapters/pi/extensions/clio-guard`). *
 - `session_start` informa (`clio-guard.tools`) qué herramientas hay activas y de dónde viene cada una, para la comprobación de arranque.
 - Sin red, sin `eval`; lee solo el archivo del prompt y habla solo con el socket de `CLIO_TOOLHOST_SOCKET`.
 
-**`--no-builtin-tools` se mantiene.** Comprobado: con la bandera y la extensión, las herramientas con nombre de incorporada que la extensión registra siguen activas y el modelo recibe exactamente las ocho; sin la extensión el modelo recibe cero herramientas (`pi_failclosed.rs`); y una extensión que no carga detiene a Pi.
+**`--no-builtin-tools` se mantiene.** Comprobado: con la bandera y la extensión, las herramientas con nombre de incorporada que la extensión registra siguen activas y el modelo recibe exactamente las nueve; sin la extensión el modelo recibe cero herramientas (`pi_failclosed.rs`); y una extensión que no carga detiene a Pi.
 
 **Qué NO hace**
 - No es un límite de seguridad: corre dentro del proceso de Pi, como la persona. Lo que protege la máquina es el servicio, la pasarela, el sandbox y la jaula (ver `docs/threat-model.md`).
@@ -36,7 +36,7 @@ Es la única extensión que Pi carga (`-e adapters/pi/extensions/clio-guard`). *
 - Registra tres herramientas de memoria (`memory_search`, `memory_get` de solo lectura y `memory_propose`, que solo deja un candidato en cuarentena) que atiende el servicio de herramientas; no escribe en la memoria por sí misma ni autentica al servicio más allá de los permisos del socket.
 - `edit` lee el archivo tal cual (sin limpiar) para poder escribirlo de vuelta sin dañarlo; su resultado sí se limpia al final.
 
-**Comprobación de arranque.** El RPC de Pi no tiene un comando que liste las herramientas. El lanzador lee la entrada `clio-guard.tools` (`get_entries`) y exige que las activas estén en su lista permitida (las ocho) y que su origen sea la extensión de Clio; sin extensión no hay entrada y la lista permitida exige cero herramientas. Es lo que la extensión dice de sí misma; lo independiente es la lista `tools` que recibe el modelo en su primera petición (las pruebas la comprueban). Implementación de referencia: `crates/clio-toolhost/tests/common/mod.rs` (`Pi::verify_tools`).
+**Comprobación de arranque.** El RPC de Pi no tiene un comando que liste las herramientas. El lanzador lee la entrada `clio-guard.tools` (`get_entries`) y exige que las activas estén en su lista permitida (las nueve) y que su origen sea la extensión de Clio; sin extensión no hay entrada y la lista permitida exige cero herramientas. Es lo que la extensión dice de sí misma; lo independiente es la lista `tools` que recibe el modelo en su primera petición (las pruebas la comprueban). Implementación de referencia: `crates/clio-toolhost/tests/common/mod.rs` (`Pi::verify_tools`).
 
 **Cómo se prueba**
 - `npm run check` (tsc sin emitir, TypeScript 5.9.3 fijado exacto) y `npm ci --ignore-scripts && npm audit --audit-level=high`.

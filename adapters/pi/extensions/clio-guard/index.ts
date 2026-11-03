@@ -244,7 +244,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 			createLsToolDefinition(cwd, { operations: lsOps(id, signal) }).execute(id, params, signal, onUpdate, ctx),
 	});
 
-	// The two memory tools are Clio's own (Pi has none like them). The host runs the call, cleans
+	// The three memory tools are Clio's own (Pi has none like them). The host runs the call, cleans
 	// the text and wraps it as data with source "memory"; here it only travels.
 	const memoryTool = (name: "memory_search" | "memory_get" | "memory_propose", description: string, properties: Record<string, unknown>, required: string[]) =>
 		register({

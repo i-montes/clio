@@ -973,3 +973,31 @@ fn the_log_has_the_id_of_a_proposal_never_its_text() {
     assert_eq!(row["tool"], "memory_propose");
     assert_eq!(row["ids"].as_array().unwrap().len(), 1);
 }
+
+// S-61: a secret with spaces in it is still a secret when the model swaps a space for a newline,
+// a tab, a no-break space or two spaces: the text is flattened before it is proposed, so the
+// vault must also look at the flattened text.
+#[test]
+fn a_secret_with_spaces_is_not_proposed_with_other_blanks_in_its_place() {
+    let value = "caballo correcto bateria grapa";
+    for typed in [
+        "la clave es caballo correcto bateria grapa",
+        "la clave es caballo\ncorrecto bateria grapa",
+        "la clave es caballo\tcorrecto bateria grapa",
+        "la clave es caballo\u{a0}correcto bateria grapa",
+        "la clave es caballo  correcto   bateria grapa",
+        "la clave es caballo\r\n correcto\u{2003}bateria grapa",
+    ] {
+        let scrubber = Scrubber::new(Arc::new(SystemClock));
+        scrubber.add("frase", value);
+        let port = FakePort::new(vec![], Mode::Items);
+        let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+        let r = propose(&e, "s1", typed, "semantic");
+        assert!(!r.ok, "{typed:?}: {r:?}");
+        assert_eq!(
+            port.proposals.lock().unwrap().len(),
+            0,
+            "{typed:?}: the secret reached the port"
+        );
+    }
+}

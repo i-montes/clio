@@ -367,20 +367,26 @@ impl ToolHost {
             _ => return self.memory_failed(req, out, "kind must be semantic or procedural"),
         };
         let typed = args.get("text").and_then(Value::as_str).unwrap_or_default();
-        // The vault's cleaner sees the whole text before anything is proposed, and a text that had
-        // a secret in it is not proposed at all: a memory with a hole where a secret was is
-        // useless, and the model had no business keeping it.
-        let Some(cleaned) = self.try_clean(typed) else {
+        // The vault's cleaner sees the text before anything is proposed, as typed AND as it will be
+        // proposed (flattened to one line): a secret with spaces in it must not get through by
+        // swapping a space for a newline, a tab or a no-break space, which flattening puts back.
+        // A text that had a secret in it is not proposed at all: a memory with a hole where a
+        // secret was is useless, and the model had no business keeping it.
+        let flat = one_line(typed);
+        let (Some(from_typed), Some(from_flat)) = (self.try_clean(typed), self.try_clean(&flat))
+        else {
             return self.memory_failed(req, out, "the vault could not filter the text");
         };
-        if count_masks(&cleaned) > count_masks(typed) {
+        if count_masks(&from_typed) > count_masks(typed)
+            || count_masks(&from_flat) > count_masks(&flat)
+        {
             return self.memory_failed(
                 req,
                 out,
                 "the text had a secret in it: nothing was proposed",
             );
         }
-        let text = one_line(&cleaned);
+        let text = one_line(&from_typed);
         let chars = text.chars().count();
         if chars == 0 || chars > MAX_PROPOSAL_CHARS {
             return self.memory_failed(
