@@ -1,7 +1,7 @@
 """Drives `clio` inside a real pseudo-terminal (stdlib only) and prints a JSON verdict.
 
 usage: python3 -I pty_driver.py SCENARIO CONFIG_JSON
-SCENARIO: quit | ctrl_c | panic | help_when_piped | live | cancel
+SCENARIO: quit | ctrl_c | panic | help_when_piped | live | cancel | views | debug_env
 The raw terminal stream is not parsed (a diff-based renderer repaints only changed cells), so the
 scenarios check what is robust: the alternate-screen and cursor sequences, the terminal modes,
 the exit status, and effects on the disk.
@@ -12,6 +12,7 @@ import json
 import os
 import pty
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -22,6 +23,26 @@ scenario = sys.argv[1]
 cfg = json.loads(sys.argv[2])
 buf = b""
 ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+CHILDREN = []
+
+
+def kill_children():
+    for child in CHILDREN:
+        try:
+            os.kill(child, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def on_alarm(*_):
+    # Never hang a test run: whatever went wrong, kill the children and say so.
+    kill_children()
+    print(json.dumps({"timeout": True}), flush=True)
+    os._exit(3)
+
+
+signal.signal(signal.SIGALRM, on_alarm)
+signal.alarm(110)
 
 
 def spawn(extra_env=None):
@@ -31,6 +52,7 @@ def spawn(extra_env=None):
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
         os.chdir(cfg["cwd"])
         os.execve(cfg["clio"], ["clio"], env)
+    CHILDREN.append(pid)
     return pid, fd
 
 
@@ -74,12 +96,39 @@ def wait_for(path_fn, timeout=25.0):
     return None
 
 
-def finish(pid, fd):
+# On a loaded CI runner a key can be lost in the terminal; a person would press `q` again, so the
+# driver does too (at most 3 times, every 5 s) and reports how many it needed. `ctrl_c` and `panic`
+# never retry: they must leave without help.
+RETRY_KEY = None if scenario in ("ctrl_c", "panic") else b"q"
+RETRIES = 0
+SCREEN_TAIL = ""
+
+
+def finish(pid, fd, timeout=20.0):
+    global RETRIES, SCREEN_TAIL
     drain(fd)
-    _, status = os.waitpid(pid, 0)
+    end = time.time() + timeout
+    next_retry = time.time() + 5.0
+    status = None
+    while time.time() < end:
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done:
+            status = st
+            break
+        drain(fd)
+        if RETRY_KEY and RETRIES < 3 and time.time() >= next_retry:
+            os.write(fd, RETRY_KEY)
+            RETRIES += 1
+            next_retry = time.time() + 5.0
+        time.sleep(0.05)
+    if status is None:
+        # The program did not exit: say what the screen last showed, kill it, and report it.
+        SCREEN_TAIL = "".join(c if c.isprintable() else "." for c in buf[-500:].decode("utf-8", "replace"))
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return "timeout"
     drain(fd)
-    code = os.waitstatus_to_exitcode(status)
-    return code
+    return os.waitstatus_to_exitcode(status)
 
 
 def type_text(fd, s):
@@ -108,8 +157,8 @@ out = {}
 if scenario in ("quit", "ctrl_c"):
     pid, fd = spawn()
     out["alt_on"] = pump(fd, lambda: ALT_ON in buf)
-    pump(fd, lambda: b"Inicio" in buf)
-    out["title_drawn"] = b"Inicio" in buf
+    pump(fd, lambda: b"recientes" in buf)
+    out["title_drawn"] = b"recientes" in buf
     out["during"] = modes(fd)
     os.write(fd, b"q" if scenario == "quit" else b"\x03")
     out["code"] = finish(pid, fd)
@@ -135,7 +184,7 @@ elif scenario == "help_when_piped":
     out["escapes"] = b"\x1b" in p.stdout
 elif scenario in ("live", "cancel"):
     pid, fd = spawn()
-    pump(fd, lambda: b"Inicio" in buf)
+    pump(fd, lambda: b"recientes" in buf)
     time.sleep(0.3)
     os.write(fd, b"n")
     time.sleep(0.3)
@@ -175,6 +224,67 @@ elif scenario in ("live", "cancel"):
         os.write(fd, b"q")
     out["code"] = finish(pid, fd)
     out["after"] = modes(fd)
+elif scenario in ("views", "debug_env"):
+    # The keys of the redesign, with a finished run on disk: debug (Ctrl-D), the context layers
+    # (c), the usage table (U), the help (?), redraw (Ctrl-L), and a clean exit. The terminal
+    # stream is a diff, so each step only looks at what was written after the key.
+    pid, fd = spawn({"CLIO_DEBUG": "1"} if scenario == "debug_env" else None)
+    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    if scenario == "debug_env":
+        out["debug_from_env"] = pump(fd, lambda: b"debug" in buf, 5)
+    else:
+        out["debug_before"] = b"debug" in buf
+        mark = len(buf)
+        os.write(fd, b"\x04")  # Ctrl-D
+        out["debug_on"] = pump(fd, lambda: b"debug" in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"c")
+        out["context"] = pump(fd, lambda: b"prompt de sistema" in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"U")
+        out["usage"] = pump(fd, lambda: b"acum." in buf[mark:], 8)
+        mark = len(buf)
+        os.write(fd, b"?")
+        out["help"] = pump(fd, lambda: b"atajos" in buf[mark:], 8)
+        os.write(fd, b"?")
+        time.sleep(0.2)
+        os.write(fd, b"\x1b")  # back to the home screen
+        time.sleep(0.2)
+        os.write(fd, b"\x0c")  # Ctrl-L: redraw
+        time.sleep(0.3)
+        os.write(fd, b"\x04")  # debug off
+        time.sleep(0.2)
+    os.write(fd, b"q")
+    out["code"] = finish(pid, fd)
+    out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
+    out["after"] = modes(fd)
+elif scenario == "memory":
+    # The Memory screen: m opens it, / searches, Esc clears and goes back, q leaves.
+    pid, fd = spawn()
+    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    mark = len(buf)
+    os.write(fd, b"m")
+    out["memory_screen"] = pump(fd, lambda: b"ZAFIRO" in buf[mark:], 10)
+    out["pending_section"] = b"pendientes" in buf[mark:]
+    mark = len(buf)
+    os.write(fd, b"/")
+    time.sleep(0.2)
+    type_text(fd, "zafiro")
+    out["search_counts"] = pump(fd, lambda: b"1 coinciden" in buf[mark:], 8)
+    os.write(fd, b"\r")  # leave the search box, keep the filter
+    time.sleep(0.2)
+    os.write(fd, b"\x1b")  # clears the filter
+    time.sleep(0.2)
+    mark = len(buf)
+    os.write(fd, b"\x1b")  # back to the home screen
+    out["back_home"] = pump(fd, lambda: b"recientes" in buf[mark:], 8)
+    os.write(fd, b"q")
+    out["code"] = finish(pid, fd)
+    out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
+    out["after"] = modes(fd)
 else:
     sys.exit("unknown scenario")
+out["q_retries"] = RETRIES
+if SCREEN_TAIL:
+    out["screen_tail"] = SCREEN_TAIL
 print(json.dumps(out))

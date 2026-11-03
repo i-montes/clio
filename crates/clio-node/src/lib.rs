@@ -3,14 +3,20 @@
 
 mod effects;
 mod exec;
+pub mod jail;
 mod lease;
+mod run_tests;
 mod sandbox;
+mod selftest;
 mod tools;
 
 pub use effects::EffectLog;
 pub use exec::{Action, Approval, Executor, Outcome};
+pub use jail::{Jail, JailOutput, Limits};
 pub use lease::{Lease, LeaseTable};
+pub use run_tests::{READ_ONLY, register_run_tests, run_tests_tool, valid_target};
 pub use sandbox::{Sandbox, Snapshot};
+pub use selftest::{CHECKS, SelfCheck, SelfTest};
 pub use tools::{Found, Registry, Tool, basic_tools};
 
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +33,8 @@ pub enum Error {
     PhaseLimit(String, clio_core::Effect),
     #[error("tool {0} is already registered")]
     Duplicate(String),
+    #[error("jail: {0}")]
+    Jail(String),
     #[error("unknown tool {0}")]
     UnknownTool(String),
     #[error("no valid approval for this action")]

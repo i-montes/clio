@@ -1,7 +1,8 @@
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,11 +18,14 @@ pub struct Sandbox {
     root: PathBuf,
     scratch: PathBuf,
     next: AtomicU64,
+    /// Snapshots copy every file instead of hard-linking it.
+    copy_snapshots: bool,
 }
 
 /// State of the folder at one moment: files are hard links (copies when the filesystem refuses).
-/// Shortcut: a process that edits a file in place (not through `Sandbox::write`, which replaces
-/// the file) also edits its snapshot; use copies if outside editors can touch the folder.
+/// A process that edits a file in place (not through `Sandbox::write`, which replaces the file)
+/// also edits a hard-linked snapshot: whoever lets programs run in the folder must call
+/// `Sandbox::set_copy_snapshots(true)` first.
 pub struct Snapshot {
     store: PathBuf,
     entries: Vec<(PathBuf, Kind)>,
@@ -46,9 +50,11 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, Kind)>) -> Result<()> {
         } else if t.is_dir() {
             out.push((rel, Kind::Dir));
             walk(base, &p, out)?;
-        } else {
+        } else if t.is_file() {
             out.push((rel, Kind::File));
         }
+        // A FIFO or a socket (a program of the jail can leave one) is not state to snapshot:
+        // copying a FIFO waits for a writer that never comes.
     }
     Ok(())
 }
@@ -74,7 +80,14 @@ impl Sandbox {
             root,
             scratch,
             next: AtomicU64::new(0),
+            copy_snapshots: false,
         })
+    }
+
+    /// Snapshots become real copies. Needed once a program can run in the folder (the jail): it
+    /// can edit a file in place, and with hard links that would change the snapshot too.
+    pub fn set_copy_snapshots(&mut self, on: bool) {
+        self.copy_snapshots = on;
     }
 
     pub fn root(&self) -> &Path {
@@ -115,8 +128,29 @@ impl Sandbox {
         Ok(cur)
     }
 
+    /// The one way a tool opens an existing file of the folder: it never waits and only a regular
+    /// file comes back. A program that ran in the jail can leave a FIFO in the folder; opening
+    /// one normally waits for a writer that never comes, and the host serves one call at a time,
+    /// so a single read would stop every tool. `O_NONBLOCK` makes the open return at once, and the
+    /// check is on the open file, so a swap after `resolve` cannot change what is checked.
+    pub fn open_regular(&self, rel: &str, write: bool) -> Result<fs::File> {
+        let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+        let f = fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .custom_flags(nonblock)
+            .open(self.resolve(rel)?)?;
+        if f.metadata()?.is_file() {
+            Ok(f)
+        } else {
+            Err(Error::BadArgs(format!("{rel} is not a regular file")))
+        }
+    }
+
     pub fn read(&self, rel: &str) -> Result<Vec<u8>> {
-        Ok(fs::read(self.resolve(rel)?)?)
+        let mut b = Vec::new();
+        self.open_regular(rel, false)?.read_to_end(&mut b)?;
+        Ok(b)
     }
 
     pub fn list(&self, rel: &str) -> Result<Vec<String>> {
@@ -163,7 +197,7 @@ impl Sandbox {
                     fs::create_dir_all(d)?;
                 }
                 let src = self.root.join(rel);
-                if fs::hard_link(&src, &dst).is_err() {
+                if self.copy_snapshots || fs::hard_link(&src, &dst).is_err() {
                     fs::copy(&src, &dst)?;
                 }
             }

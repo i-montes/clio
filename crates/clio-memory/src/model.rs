@@ -52,6 +52,31 @@ pub enum OpKind {
     Revert,
     /// A memory sent to quarantine for review because of repeated "wrong" feedback.
     Flag,
+    /// The content of a memory was erased everywhere, past operations included. It has no
+    /// `changes`; a tombstone is read from it.
+    Purge,
+}
+
+/// What is left of a purged memory: that it existed and who erased it, when and why. Never its
+/// content, and no hash of it (a hash of a short text can be guessed back).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub memory: MemoryId,
+    pub scope: ScopeId,
+    /// The PURGE operation.
+    pub op: OpId,
+    pub actor: ActorId,
+    pub at: i64,
+    pub reason: String,
+}
+
+/// Result of `Engine::purge`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeOutcome {
+    pub op: OpId,
+    /// False when a reader kept the write-ahead log from being emptied: old copies of the
+    /// purged pages may still sit in `<file>-wal` until the next checkpoint.
+    pub wal_truncated: bool,
 }
 
 /// A row of the projection; also the snapshot stored in the operation log.

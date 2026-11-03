@@ -6,30 +6,18 @@ Escrito durante la fase 1, con la persona desconectada. Aquí está lo que se de
 
 ### 1. Respaldos cifrados y Tailnet Lock en este PC · tareas 093, 094, 095
 Decidiste que no hay servidor por ahora, así que el PC es la base (ADR 0006) y `infra/local/check-host.sh` ya confirma lo esencial: disco LUKS, cortafuegos, SSH apagado, nada de Clio fuera de loopback, llave de Tailscale con vencimiento.
-- **Falta elegir:** una herramienta de respaldo (restic, borg o kopia; no hay ninguna instalada) y un destino fuera de este PC (un disco externo o un almacenamiento en la nube cifrado), y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
+- **Herramienta: restic (decidido el 2026-11-02),** instalado, con scripts en `infra/local/` (`docs/respaldos.md`). Lugar por defecto según el sistema (Linux y macOS, fuera de la carpeta de datos) y solo las 2 últimas copias (decidido el 2026-11-02). Ese lugar está en el mismo disco: **falta un destino fuera de este PC** (un disco externo o un almacenamiento en la nube cifrado), crear el repositorio y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
 - **Tailnet Lock** no está activado; es opcional y lo decides tú (095).
 - **Un VPS, si algún día quieres uno:** es opcional; el borrador está en `infra/vps/` y no bloquea nada.
 
-### 2. Adaptador de Pi · tareas 098 a 102
-Pi está fijado (0.73.1, MIT, sin scripts de instalación, lockfile, auditoría diaria) pero el adaptador no se escribió.
-- **Qué elegir:** si el adaptador es TypeScript dentro de `adapters/pi` o un proceso aparte que habla con el cerebro en Rust; y si se adopta Pi o se sigue con el bucle mínimo propio (`clio-brain::agent`), que ya cumple el mismo papel detrás de un trait.
-- **Dato nuevo:** la última publicación de Pi en npm es de mayo de 2026; si el proyecto se detuvo, conviene saberlo antes de depender de él.
-- **Si no decides:** se sigue con el bucle propio; no se pierde nada.
-
-### 1 bis. ¿Dejas activado Tailscale SSH?
-En este PC `tailscale debug prefs` dice `RunSSH = true`: se puede abrir una terminal por la tailnet sin `sshd` ni llaves (entra por tu identidad de Tailscale). Es cómodo si lo usas desde tus otros dispositivos; el riesgo es que quien controle esos dispositivos o tu cuenta de Tailscale tiene una terminal en este PC, donde corre el agente. Si no lo usas: `tailscale set --ssh=false`. Si lo usas, revisa las reglas `ssh` de tu ACL (mejor con `action: check`, que pide reautenticarse).
-
-### 2 bis. Usuarios separados y jaula para ejecutar comandos
-El vault ya corre como proceso aparte con dos sockets Unix 0600 (uno para la pasarela, otro para la persona), pero en un PC con un solo usuario la separación es una convención, no una pared. Dos opciones para endurecerla: usuarios del sistema distintos para el vault y el agente (necesita `sudo`), o una jaula `bwrap` para lo que el agente ejecute (`bwrap` ya está instalado). Hoy el agente no ejecuta comandos, así que no corre riesgo; decídelo antes de darle una herramienta que ejecute código. En producción hay que correr la pasarela y el vault con usuarios distintos y ajustar dueño y grupo del socket de la pasarela. Solo aplica si algún día hay un servidor; en este PC todo corre como tu usuario (ver el riesgo en `docs/threat-model.md`).
-
-### 2 ter. ¿Parar la tarea tras N negaciones seguidas de la pasarela?
-Hoy el cortacircuito solo frena lo que correría solo; lo que acaba el bucle es el tope de pasos. Añadir un `Stop::Denials` cortaría antes a un modelo que insiste con herramientas prohibidas. Es más estricto: ¿lo quieres? Por defecto no.
+### 2. Pi como arnés (decidido por ti el 2026-10-31, ADR 0007)
+Pi 1.4.0 (publicada el 2026-10-21, activa) es el arnés: bucle, proveedores, sesiones y compactación; Clio es el servicio, la guardia y la interfaz alrededor. Quedan por decidir cosas menores que tomé por defecto: el modelo diario (hoy `beam-free`, gratuito; tu Aria usa `mimo-v2.6-flash`, que sí consume la cuota de tu plan Go) y si se corre el propio Pi dentro de `bwrap` más adelante.
 
 ### 3. Topes de gasto en el panel de cada proveedor · tarea 281 (S-45)
 Se configura en la web del proveedor, no en código. Hoy se usa solo el modelo gratuito, así que el riesgo es nulo; hazlo antes de usar un modelo de pago.
 
 ### 4. Rotar la clave de OpenCode
-Se pegó en el chat de esta sesión. Rótala cuando termines de probar. Después: `gh secret set OPENCODE_API_KEY < ~/.config/clio/opencode-api-key` (actualizando antes el archivo).
+Se pegó en el chat de una sesión de la fase 1. **Decidido el 2026-11-02: no se rota por ahora.** Si se rota después: actualizar `~/.config/clio/opencode-api-key` y luego `gh secret set OPENCODE_API_KEY < ~/.config/clio/opencode-api-key`.
 
 ## Decididas por defecto (cámbialas si no te sirven)
 
@@ -51,3 +39,10 @@ Se pegó en el chat de esta sesión. Rótala cuando termines de probar. Después
 
 ## Cosas que quedan por hacer y no son decisiones
 Ver la lista maestra (`docs/lista-maestra.md`): tareas de la fase 1 aún abiertas, sobre todo mediciones con el agente completo, el proceso aparte y el socket del vault (233, 234), y el aislamiento de preproducción (055).
+
+## Pendiente de probar en un Mac
+El flujo interactivo de la TUI (lanzar un trabajo y cancelarlo desde la pantalla, pruebas `pty_*`) se atasca en el CI de macOS y no se pudo depurar sin un Mac, así que esas dos pruebas corren solo en Linux. En macOS sí pasan abrir, salir, la restauración tras un pánico y la ayuda por tubería. Tampoco corre en macOS la prueba de la secuencia de atajos (`Ctrl-D`, `c`, `U`, `?`, `Ctrl-L`, `q`): allí `q` no sale a tiempo, y hay que mirar con un Mac si es un fallo real de la TUI o del controlador de la prueba. Tu PC es Linux, así que no te afecta; solo importa si algún día usas Clio en un Mac.
+
+- **CI con Pi real:** los tests con Pi (`pi_real`, ataques 38–49) se saltan en CI porque el runner no trae Node ≥ 22.19. Para exigirlos hace falta `actions/setup-node` fijado por SHA (verificar el SHA antes de fijarlo) y `CLIO_REQUIRE_PI=1`. Localmente ya pasan todos.
+- **Presupuesto en el camino Pi (S-47):** cada prompt es una tarea con los topes de `config.json` (`limits`: pasos = llamadas a herramientas, segundos, costo) y el anti-bucle del `builtin` (la misma llamada más de 4 veces); el corte aborta Pi y, si no se detiene en 5 s, lo mata. Quedan dos huecos: (1) el aborto no es instantáneo, así que una llamada que Pi ya había empezado todavía corre (un contador dentro del toolhost lo cerraría); (2) el tope por día existe pero no tiene valor en la configuración y no se guarda entre ejecuciones, igual que en `builtin`. Prueba de extremo a extremo con un Pi y un modelo reales: pendiente.
+- **Cortacircuito de la guardia:** se abre a las 10 negadas seguidas y no se cierra solo; hoy solo sirve empezar otra sesión. ¿Quieres un diálogo para reanudarla?

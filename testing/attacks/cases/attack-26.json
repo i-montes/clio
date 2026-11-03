@@ -1,0 +1,9 @@
+{
+  "id": "attack-26",
+  "title": "Un comando ejecutado en la jaula escribe en /usr, en /etc, en la raíz o en el HOME real",
+  "rules": [
+    "S-03"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

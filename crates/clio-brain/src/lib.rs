@@ -2,6 +2,8 @@
 
 pub mod agent;
 pub mod control;
+pub mod memory_link;
 pub mod models;
+pub mod pi;
 pub mod vault_link;
 pub mod verify;

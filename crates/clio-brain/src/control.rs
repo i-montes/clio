@@ -17,6 +17,20 @@ pub enum Stop {
     Retries,
 }
 
+impl Stop {
+    /// Why, in words for the person (it reaches the screen).
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Steps => "tope de pasos de la tarea",
+            Self::Time => "tope de tiempo de la tarea",
+            Self::Cost => "tope de costo de la tarea",
+            Self::DayCost => "tope de costo del día",
+            Self::Repeats => "la misma acción se repitió demasiadas veces (posible bucle)",
+            Self::Retries => "tope de reintentos de la tarea",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
     pub max_steps: u32,

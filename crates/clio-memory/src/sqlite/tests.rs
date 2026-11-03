@@ -1179,3 +1179,43 @@ fn too_many_vectors_fall_back_to_the_scan_and_keep_nothing_in_memory() {
     );
     assert_eq!(cached_epoch(&s).0, 0);
 }
+
+// S-24: a PURGE drops the vector from the file and from the copy in memory (the epoch moves)
+#[test]
+fn s24_purge_drops_the_vector_from_the_file_and_the_copy_in_memory() {
+    let (_d, p, s, scope, actor) = setup();
+    for id in [1, 2] {
+        put(&s, scope, actor, &row(id, scope, actor, "texto", 10));
+    }
+    s.put_vectors(
+        "m",
+        8,
+        &[(MemoryId(1), unit(0, 8)), (MemoryId(2), unit(0, 8))],
+    )
+    .unwrap();
+    let opts = SearchOpts::default();
+    assert_eq!(near(&s, scope, "m", &unit(0, 8), &opts), [1, 2]);
+    let in_copy = |id: i64| {
+        s.vectors
+            .with(|r| r.caches.values().any(|c| c.vector(id).is_some()))
+            .unwrap()
+    };
+    assert!(in_copy(1), "the copy was not warmed");
+    let epoch = s.vector_epoch.load(Ordering::SeqCst);
+
+    let mut purge = op(scope, actor, OpKind::Purge, 20, Vec::new());
+    purge.memory = Some(MemoryId(1));
+    s.purge(purge).unwrap();
+
+    assert!(s.vector_epoch.load(Ordering::SeqCst) > epoch);
+    assert_eq!(near(&s, scope, "m", &unit(0, 8), &opts), [2]);
+    assert!(!in_copy(1), "the copy in memory still holds the vector");
+    assert!(in_copy(2));
+    let conn = Connection::open(&p).unwrap();
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vectors WHERE memory = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0);
+}

@@ -126,7 +126,7 @@ Todo lo que pide el artefacto «Clio · diseño del agente», de lo primero a lo
 
 ### Medir con un modelo real (movidas desde la fase 0)
 
-- [x] **067** Las 10 tareas reales del banco (D15), escritas por Claude por encargo de Iván: 3 de código normal y 7 de seguridad (inyección SQL, recorrido de rutas, inyección de comandos, secreto en el código, secreto en los logs, inyección de prompt en un README y en un issue). Cada una tiene comprobación oculta, solución y soluciones malas validadas por `verify_real_tasks.py` (corre en el CI). Se ejecutan cuando exista el agente; el formato admite añadir más. Ver `testing/bench/tasks/real/README.md`.
+- [x] **067** Las 10 tareas reales del banco (D15), escritas por Claude por encargo de Iván: 3 de código normal y 7 de seguridad (inyección SQL, recorrido de rutas, inyección de comandos, secreto en el código, secreto en los logs, inyección de prompt en un README y en un issue). Cada una tiene comprobación oculta, solución y soluciones malas validadas por `verify_real_tasks.py` (corre en el CI). Se ejecutan cuando exista el agente; el formato admite añadir más. Ver `testing/bench/tasks/real/README.md`. Nota 2026-10-31: como `beam-free` las resolvía 30 de 30, se añadieron 12 tareas más difíciles (real-11 a real-22, validadas por el mismo verificador); su medición es PARCIAL (la pasarela dio 429 en real-19 y real-20 y la repetición se cortó): ver `docs/mediciones/fase-1-agente-dificil.md`. 074 sigue abierta.
 - [x] **076** Cada noche: banco con modelo real, caos y fuzzing; bloquea si el éxito baja o el costo por tarea sube más del umbral. Probado en GitHub el 2026-10-31: el nightly corre el modelo real (`beam-free`, 60/60, 73 s) con el secreto `OPENCODE_API_KEY`. Pendiente aparte: un tope de gasto en el panel del proveedor (S-45) si algún día se usa un modelo de pago.
 - [ ] **074** Fijar los umbrales de la compuerta con las primeras mediciones reales (decidir); hoy hay valores provisionales en `testing/bench/thresholds.json`. Va después de 067 y 076.
 
@@ -149,11 +149,11 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### Adaptador de Pi (D16)
 
-- [x] **097** Fijar la versión de Pi, con lockfile e instalación sin scripts (S-42)
-- [ ] **098** Adaptador propio entre Pi y Clio, para poder cambiar Pi sin rehacer nada
-- [ ] **099** Que Pi corra sin sesiones propias: las guarda Clio
-- [ ] **100** Desactivar la carga y la escritura de extensiones, skills y servidores MCP por parte del agente (S-16)
-- [ ] **101** prueba: un intento de escribir en la carpeta de extensiones se bloquea (S-16)
+- [x] **097** Fijar la versión de Pi, con lockfile e instalación sin scripts (S-42): `@earendil-works/pi-coding-agent` 1.4.0, con correcciones forzadas de `undici` y `minimatch` (auditoría limpia)
+- [x] **098** Adaptador propio entre Pi y Clio (ADR 0007): el lado Rust que lanza `pi --mode rpc` con las banderas endurecidas, habla JSON por líneas, relaya los eventos y lista/abre las sesiones de Pi
+- [x] **099** Cambiado por decisión de la persona (ADR 0007): Pi guarda las sesiones, locales y remotas; Clio las lista, las abre y las reabre desde las suyas, no se construye un sistema de sesiones propio
+- [x] **100** Desactivar la carga y la escritura de extensiones, skills y servidores MCP por parte del agente (S-16): `--no-builtin-tools --no-extensions -e clio-guard --no-mcp --no-skills --no-prompt-templates --no-approve` y la pasarela niega escribir en `.pi`
+- [x] **101** prueba: un intento de escribir en la carpeta de extensiones se bloquea (S-16)
 - [ ] **102** Revisar cada actualización de Pi antes de adoptarla (S-42)
 - [x] **103** prueba: el CI falla si el lockfile de npm cambia sin revisión (S-42)
 - [x] **104** Prompts de sistema versionados en el repositorio: `prompts/system/<nombre>@<versión>.md`, con `MANIFEST.json` de sha256 y revisión del dueño (`CODEOWNERS`); una versión publicada no se edita
@@ -253,7 +253,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 - [x] **183** Orden de evaluación, paso 9: una política que cubra todas las dimensiones permite (se conecta en la fase 5)
 - [x] **184** Orden de evaluación, paso 10: si no, aprobación sobre el hash de la acción
 - [x] **185** Comandos: lista de binarios permitidos con argumentos separados (argv), nunca `sh -c` (S-12)
-- [ ] **186** Un shell libre solo dentro de un contenedor desechable, sin secretos y sin red por defecto (S-12)
+- [x] **186** Un shell libre solo dentro de un contenedor desechable, sin secretos y sin red por defecto (S-12)
 - [x] **187** prueba: argumentos con `;`, `|`, `$(...)` y comillas no escapan (S-12)
 - [x] **188** Rutas canonizadas antes de compararlas con la raíz permitida (S-13)
 - [x] **189** prueba: rutas con `..` y enlaces simbólicos hacia fuera se rechazan (S-13)
@@ -309,7 +309,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### Vault (spec: vault)
 
-- [x] **233** Vault como proceso aparte con su propio usuario (S-22)
+- [x] **233** Vault como proceso aparte (S-22). Con usuario propio no: corre con el de la persona (ADR 0006); eso es la 089
 - [x] **234** Hablar solo por un socket Unix con permisos, nunca por red
 - [x] **235** Modelo de un secreto: nombre-marcador, valor cifrado, tipo, destinos, ámbito, rotación y vencimiento, estado y uso
 - [x] **236** Marcadores `{{secreto:nombre}}`; el modelo solo ve marcadores
@@ -383,6 +383,8 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### Cierre de la fase 1
 
+Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a propósito y se explican en [`docs/fase-1-cierre.md`](fase-1-cierre.md). Ninguna se da por hecha.
+
 - [ ] **055** Preproducción aislada: sin acceso a dispositivos reales ni al vault real (prueba al final de la fase 1; movida desde la fase 0, porque aún no hay vault ni nodos que aislar)
 - [x] **298** Hay una línea base medida, sin memoria
 - [x] **299** Pasan los ataques de inyección, de secretos y de comandos
@@ -394,7 +396,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 ### Cerrar lo que quedó abierto de clio-memory v1
 
 - [ ] **300** Confirmar que el nombre `clio-memory` está libre en crates.io y en GitHub
-- [ ] **301** Documentar `remember` en el spec (§8) y en el README
+- [x] **301** Documentar `remember` en el spec (§8) y en el README
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
 - [ ] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones)
 - [ ] **304** Decidir API remota: HTTP + JSON o gRPC
@@ -402,7 +404,7 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 - [ ] **306** Verificar si model2vec-rs puede cargar a menor precisión y bajar la RAM
 - [ ] **307** Investigar los ~550 MB que quedan retenidos tras soltar el modelo y reportarlo a model2vec-rs
 - [ ] **308** Fuzzing del tokenizador y de los importadores de clio-memory (S-48)
-- [ ] **309** prueba: aislamiento de ámbitos, cuota por actor y detector de secretos en cada versión (S-27)
+- [x] **309** prueba: aislamiento de ámbitos, cuota por actor y detector de secretos en cada versión (S-27)
 
 ### Daemon y MCP
 
@@ -416,27 +418,27 @@ Decisión del 2026-10-31 ([ADR 0006](decisions/0006-local-first-vps-optional.md)
 
 ### PURGE y borrado real
 
-- [ ] **317** Operación PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida
-- [ ] **318** prueba: PURGE elimina el contenido de todas las operaciones y deja la lápida (prueba 11)
-- [ ] **319** PURGE también borra el vector (S-24); además debe sumar uno al contador `vector_epoch` del store, o la copia de vectores en memoria sigue viva hasta que cambie otra cosa (`crates/clio-memory/src/sqlite/mod.rs`, `Reader`)
-- [ ] **320** prueba: después de un PURGE no queda el vector (S-24), ni en el archivo ni en la copia en memoria
-- [ ] **321** Que la exportación respete las lápidas
+- [x] **317** Operación PURGE: elimina el contenido también de las operaciones pasadas y deja una lápida
+- [x] **318** prueba: PURGE elimina el contenido de todas las operaciones y deja la lápida (prueba 11)
+- [x] **319** PURGE también borra el vector (S-24); además debe sumar uno al contador `vector_epoch` del store, o la copia de vectores en memoria sigue viva hasta que cambie otra cosa (`crates/clio-memory/src/sqlite/mod.rs`, `Reader`)
+- [x] **320** prueba: después de un PURGE no queda el vector (S-24), ni en el archivo ni en la copia en memoria
+- [x] **321** Que la exportación respete las lápidas
 
 ### Gestor de memoria (conexión con el agente)
 
-- [ ] **322** Gestor de memoria como único escritor desde el agente
-- [ ] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento
-- [ ] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25)
-- [ ] **325** Distinguir un hecho de la persona de contenido externo
-- [ ] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26)
-- [ ] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26)
-- [ ] **328** ataque: una inyección que intenta guardar un procedimiento en la memoria
-- [ ] **329** Actores: agente, sesión, persona, importador, cada uno con su cuota
-- [ ] **330** ataque: una inundación de propuestas a la memoria desde un mismo actor
+- [x] **322** Gestor de memoria como único escritor desde el agente
+- [ ] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento — hecho el lote al cerrar; no hay memoria de trabajo inmediata porque el bucle no escribe nada
+- [x] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25)
+- [x] **325** Distinguir un hecho de la persona de contenido externo
+- [x] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26)
+- [x] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26)
+- [x] **328** ataque: una inyección que intenta guardar un procedimiento en la memoria
+- [x] **329** Actores: agente, sesión, persona, importador, cada uno con su cuota
+- [x] **330** ataque: una inundación de propuestas a la memoria desde un mismo actor
 - [ ] **331** Que el triaje y el enrutador lean la memoria
 - [ ] **332** Que las respuestas de la persona a una pregunta de ruteo queden como preferencia procedimental
-- [ ] **333** Conectar `context()` al arranque de cada sesión con presupuestos separados para bloques fijos y recall
-- [ ] **334** Conectar la retroalimentación útil/equivocado a las respuestas del agente
+- [x] **333** Conectar `context()` al arranque de cada sesión con presupuestos separados para bloques fijos y recall
+- [x] **334** Conectar la retroalimentación útil/equivocado a las respuestas del agente
 - [ ] **335** Conectar la memoria a Pi por MCP o por el adaptador
 
 ### Evaluación de la memoria

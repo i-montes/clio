@@ -5,22 +5,27 @@ mod cli;
 
 use std::io::IsTerminal;
 
+use cli::chat;
 use cli::home::Dirs;
-use cli::{Args, Res, apply, doctor, home, runs, tui, vault};
+use cli::{Args, Res, apply, debug, doctor, home, memory, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
-  clio                                        abre la interfaz (en una terminal)
+  clio [--debug] [--harness pi|builtin]       abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
+                                              con Pi instalado abre el selector de sesiones y el chat (CLIO_HARNESS=builtin lo apaga)
   clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
-  clio run [--workspace DIR] [--max-steps N] [--allow-broad] \"instrucción\"
+  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] \"instrucción\"
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
   clio runs [--all] [--json] | clio show <id> [--json]
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
+  clio memory search|list|show|remember|promote|archive|feedback|export|stats
+                                              lo que Clio recuerda (clio memory --help)
   clio doctor [--json]                        revisa permisos, clave, sockets y el equipo
+  clio pi doctor|install|sessions [--json]    Pi (el arnés del agente): estado, instalación, sesiones
 
-Sin color: NO_COLOR=1 o TERM=dumb. Más: docs/uso-local.md";
+Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
 
 fn id_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;
@@ -31,12 +36,27 @@ fn id_arg(args: Args) -> Res<String> {
 }
 
 fn dispatch(argv: Vec<String>) -> Res<i32> {
-    let mut it = argv.into_iter();
-    let Some(cmd) = it.next() else {
+    let mut it = argv.into_iter().peekable();
+    // `clio` alone, or with only its own flags, opens the interface.
+    if it
+        .peek()
+        .is_none_or(|a| matches!(a.as_str(), "--debug" | "--harness"))
+    {
+        let mut args = Args::new(it.collect());
+        let dbg = args.flag("--debug") || debug::env_enabled();
+        let harness = args.value("--harness")?;
+        if !args.rest()?.is_empty() {
+            return Err("--debug y --harness van solos (abren la interfaz) o después de un comando: clio run --debug \"...\"".into());
+        }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-            return tui::run(Dirs::from_env()?);
+            let dirs = Dirs::from_env()?;
+            let h = chat::resolve(harness.as_deref(), &dirs)?;
+            return tui::run(dirs, dbg, h);
         }
         println!("{USAGE}");
+        return Ok(0);
+    }
+    let Some(cmd) = it.next() else {
         return Ok(0);
     };
     let mut args = Args::new(it.collect());
@@ -46,10 +66,30 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     }
     if !matches!(
         cmd.as_str(),
-        "init" | "run" | "diff" | "apply" | "undo" | "runs" | "show" | "vault" | "doctor"
+        "init"
+            | "run"
+            | "diff"
+            | "apply"
+            | "undo"
+            | "runs"
+            | "show"
+            | "vault"
+            | "doctor"
+            | "memory"
+            | "pi"
+            | "toolhost"
+            | "pi-net"
     ) {
         eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
         return Ok(2);
+    }
+    // Internal: the tool host of a Pi session, started by `clio` from its own executable.
+    if cmd == "toolhost" {
+        return clio_toolhost::cli::run(args.into_raw()).map(|()| 0);
+    }
+    // Internal: inside Pi's jail, the forwarder to the egress proxy that starts Pi (ADR 0009).
+    if cmd == "pi-net" {
+        return clio_brain::pi::net::forward_main(args.into_raw());
     }
     let dirs = Dirs::from_env()?;
     match cmd.as_str() {
@@ -67,11 +107,18 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 .map(|n| n.parse::<u32>().map_err(|e| format!("--max-steps: {e}")))
                 .transpose()?;
             let allow_broad = args.flag("--allow-broad");
+            let dbg = args.flag("--debug") || debug::env_enabled();
+            // Pi when it is installed (the bench: 57/66 against 55/66 for the builtin loop, and no
+            // JSON-in-text protocol failures), the builtin loop otherwise or with --harness builtin.
+            let harness = args.value("--harness")?;
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(
                     "falta la instrucción: clio run [--workspace DIR] \"qué hacer\"".into(),
                 );
+            }
+            if chat::resolve(harness.as_deref(), &dirs)? == chat::Harness::Pi {
+                return chat::run::run(dirs, workspace, &instruction);
             }
             return runs::run(
                 &dirs,
@@ -81,6 +128,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                     allow_broad,
                     instruction,
                 },
+                dbg,
             );
         }
         "diff" => runs::diff(&dirs, &id_arg(args)?)?,
@@ -102,6 +150,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             runs::show(&dirs, &id_arg(args)?, json)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
+        "memory" => return memory::run(&dirs, args.into_raw()),
+        "pi" => return pi::run(&dirs, args.into_raw()),
         "doctor" => {
             let json = args.flag("--json");
             args.rest()?;

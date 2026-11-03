@@ -1,0 +1,37 @@
+"""Session tokens in JWT format (HS256)."""
+import base64
+import hashlib
+import hmac
+import json
+import time
+
+
+class InvalidToken(Exception):
+    pass
+
+
+def _b64e(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _b64d(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def _mac(signing_input, secret):
+    return hmac.new(secret, signing_input.encode(), hashlib.sha256).digest()
+
+
+def sign(payload, secret):
+    header = _b64e(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    body = _b64e(json.dumps(payload).encode())
+    return f"{header}.{body}.{_b64e(_mac(header + '.' + body, secret))}"
+
+
+def verify(token, secret, now=None):
+    header_b64, body_b64, sig_b64 = token.split(".")
+    header = json.loads(_b64d(header_b64))
+    if header["alg"] != "none":
+        if _b64d(sig_b64) != _mac(header_b64 + "." + body_b64, secret):
+            raise InvalidToken("bad signature")
+    return json.loads(_b64d(body_b64))

@@ -15,15 +15,46 @@ env:
 jobs:
   rust:
     strategy:
+      # One OS failing must not hide the other's result: a cancelled job verified nothing.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The jail tests need bubblewrap and unprivileged user namespaces. On the Ubuntu runner install
+      # it and lift Ubuntu's restriction (the runner is throwaway), then probe. If it works the jail
+      # tests become mandatory (CLIO_REQUIRE_JAIL); if not, say so loudly instead of skipping quietly.
+      - name: Jail (bubblewrap) probe
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          if bwrap --unshare-all --ro-bind / / true 2>/dev/null && command -v prlimit >/dev/null; then
+            echo "::notice::bwrap works on this runner: the jail tests run for real and are mandatory"
+            echo "CLIO_REQUIRE_JAIL=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::bwrap or user namespaces are NOT available on this runner: the jail tests are skipped, not verified here"
+          fi
+      # The tests with the real Pi (attacks 38 to 49) are mandatory here: Node 22.19+ and Pi from the
+      # lockfile, without install scripts (S-42). Without these two steps they skip, which proves nothing.
+      - name: Node and Pi for the real-Pi tests
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Pi from the lockfile
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: adapters/pi
+        run: |
+          npm ci --ignore-scripts
+          echo "CLIO_REQUIRE_PI=1" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --workspace --all-features
+      # --no-fail-fast: cargo stops at the first failing test binary, and what runs after it is
+      # never seen; that hid the macOS failures of whole crates for weeks.
+      - run: cargo test --locked --workspace --all-features --no-fail-fast
       # Acceptance 25: recall over 50k memories in under 150 ms; ignored in the normal run because it builds a big file
       - run: cargo test --locked --release -p clio-memory --test recall t25 -- --ignored --nocapture
         if: matrix.os == 'ubuntu-latest'
@@ -31,13 +62,13 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
 
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2
         with:
           tool: cargo-audit
@@ -46,7 +77,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
@@ -56,13 +87,13 @@ jobs:
   rule-coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: scripts/rule-coverage.sh
 
   unsafe-forbid:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # S-41: the workspace forbids unsafe and every crate must inherit that lint.
       - run: |
           grep -q '^unsafe_code = "forbid"' Cargo.toml
@@ -76,7 +107,7 @@ jobs:
   bench-replay:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: >
           cargo run --locked -q -p clio-bench -- replay
@@ -88,7 +119,7 @@ jobs:
   gate-invariants:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: scripts/check-gate.sh
       # The checks of the real bench tasks must fail on bad answers and pass on the good one.
       - run: python3 testing/bench/verify_real_tasks.py
@@ -100,7 +131,7 @@ jobs:
   pi-lock:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm ci --ignore-scripts
         working-directory: adapters/pi
       - run: |
@@ -108,4 +139,6 @@ jobs:
           git diff --exit-code -- package-lock.json
         working-directory: adapters/pi
       - run: npm audit --audit-level=high
+        working-directory: adapters/pi
+      - run: npm run check
         working-directory: adapters/pi

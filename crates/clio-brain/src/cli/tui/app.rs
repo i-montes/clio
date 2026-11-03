@@ -2,23 +2,33 @@
 //! It never touches the terminal, the disk or a thread: anything that must happen outside is
 //! returned as a `Cmd` for the runtime (`mod.rs`) to carry out, and its result comes back as an
 //! `Input::Bg`. That is what lets every screen be tested without a terminal.
+//!
+//! The frame is always the same: one header line, the screen, a line of feedback, one line of key
+//! hints and the status bar (use of the run and layer of context) on the very last line.
 
 use clio_brain::agent::Event;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
+use super::chat::Chat;
 use super::detail::Detail;
 use super::doctor::DoctorView;
 use super::home::{Header, Home};
+use super::keys::{self, Act, Ctx};
 use super::live::Live;
+use super::memory::{MemoryData, MemoryView};
 use super::new_run::{NewRun, Preview};
 use super::sanitize;
+use super::sessions::Sessions;
 use super::theme::Theme;
+use super::{meter, status};
+use crate::cli::chat::{Opened, Refresh, Row};
 use crate::cli::doctor::Report;
 use crate::cli::runs::{RunInfo, RunSummary};
+use crate::cli::usage::{DEFAULT_WINDOW, RunLimits, RunUsage, Snapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -28,6 +38,19 @@ pub enum Screen {
     Detail,
     Doctor,
     Help,
+    Context,
+    Usage,
+    Memory,
+    /// The Pi harness: the session selector and the chat.
+    Sessions,
+    Chat,
+}
+
+/// What to open in a Pi chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenTarget {
+    New { project: String },
+    Existing { reference: String },
 }
 
 /// Something to do outside of `update`.
@@ -35,18 +58,66 @@ pub enum Screen {
 pub enum Cmd {
     LoadHome,
     RunDoctor,
-    Check { dir: String, seq: u64 },
-    Start { dir: String, instruction: String },
+    Check {
+        dir: String,
+        seq: u64,
+    },
+    Start {
+        dir: String,
+        instruction: String,
+    },
     Cancel,
-    LoadDetail { id: String, diff: bool },
-    PlanApply { id: String },
-    Apply { id: String },
-    Undo { id: String },
+    LoadDetail {
+        id: String,
+        diff: bool,
+    },
+    PlanApply {
+        id: String,
+    },
+    Apply {
+        id: String,
+    },
+    Undo {
+        id: String,
+    },
+    LoadMemory,
+    MemoryPromote {
+        id: String,
+    },
+    MemoryArchive {
+        id: String,
+    },
+    /// Useful (true) or wrong (false) for one memory a run recalled.
+    MemoryFeedback {
+        id: i64,
+        useful: bool,
+    },
+    LoadSessions,
+    /// Open a Pi session; `seq` says which request the answer belongs to.
+    ChatOpen {
+        seq: u64,
+        target: OpenTarget,
+    },
+    ChatSend {
+        text: String,
+    },
+    /// A message to the run in progress.
+    ChatSteer {
+        text: String,
+    },
+    ChatAbort,
+    /// Leave the chat: stop its Pi and its toolhost.
+    ChatClose,
+    /// Debug was switched; the agent reads the switch at every call.
+    Debug(bool),
+    /// Clear the terminal and draw everything again.
+    Redraw,
 }
 
 /// What a worker thread reports back.
 pub enum Bg {
-    Home(Box<(Header, Vec<RunInfo>)>),
+    /// The header, the runs (newest first) and the usage saved for the newest one.
+    Home(Box<(Header, Vec<RunInfo>, RunUsage)>),
     Doctor(Report),
     Checked {
         seq: u64,
@@ -55,8 +126,9 @@ pub enum Bg {
     Started {
         id: String,
         files: usize,
-        max_steps: u32,
-        max_seconds: u64,
+        workspace: String,
+        /// Empty, with the limits and the window this run goes by.
+        usage: RunUsage,
     },
     Agent(Event),
     Finished(Result<Box<RunSummary>, String>),
@@ -65,7 +137,38 @@ pub enum Bg {
         diff: bool,
     },
     Planned(Result<Planned, String>),
+    Memory(Result<Box<MemoryData>, String>),
     Done(Result<String, String>),
+    Sessions(Vec<Row>),
+    ChatOpened {
+        seq: u64,
+        result: Result<Box<ChatInfo>, String>,
+    },
+    ChatEvent(clio_brain::pi::rpc::Event),
+    /// The run ended; `refresh` is Pi's own totals if it could still give them.
+    ChatSettled {
+        result: Result<clio_brain::pi::rpc::RunSummary, String>,
+        refresh: Option<Refresh>,
+    },
+}
+
+/// What the screen keeps of an opened session (the session itself stays with the runtime).
+pub struct ChatInfo {
+    pub id: String,
+    pub workspace: String,
+    pub history: Vec<serde_json::Value>,
+    pub refresh: Option<Refresh>,
+}
+
+impl From<&Opened> for ChatInfo {
+    fn from(o: &Opened) -> Self {
+        Self {
+            id: o.id.clone(),
+            workspace: o.workspace.clone(),
+            history: o.history.clone(),
+            refresh: o.refresh.clone(),
+        }
+    }
 }
 
 pub struct Planned {
@@ -74,6 +177,8 @@ pub struct Planned {
     pub workspace: String,
 }
 
+// One value per frame or event, moved once: boxing `Bg` would only add an allocation per agent event.
+#[allow(clippy::large_enum_variant)]
 pub enum Input {
     Key(KeyEvent),
     Paste(String),
@@ -85,6 +190,9 @@ pub enum Input {
 pub enum Action {
     Apply,
     Undo,
+    /// A memory: `Confirm::id` is its number and `Confirm::workspace` its text.
+    Promote,
+    Archive,
 }
 
 /// A question that needs a `y`.
@@ -100,20 +208,33 @@ pub struct App {
     pub screen: Screen,
     /// Where `?` came from.
     pub before_help: Screen,
+    /// Where the context and usage views came from: they show that run's data.
+    pub back: Screen,
     pub quit: bool,
     pub now_ms: u64,
     pub theme: Theme,
+    pub cwd: String,
+    pub debug: bool,
     pub home: Home,
     pub new_run: NewRun,
     pub live: Live,
     pub detail: Option<Detail>,
     pub doctor: DoctorView,
+    pub memory: MemoryView,
+    /// The Pi harness is on: the selector replaces the list of runs as the first screen.
+    pub pi: bool,
+    pub sessions: Sessions,
+    pub chat: Chat,
+    pub chat_seq: u64,
     pub confirm: Option<Confirm>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
     /// An error or a longer message in a box, closed by any key.
     pub notice: Option<String>,
     pub check_seq: u64,
+    /// Scroll of the context, usage and help views, and how far the last draw let it go.
+    pub view_scroll: usize,
+    pub view_max: std::cell::Cell<usize>,
 }
 
 impl App {
@@ -121,34 +242,154 @@ impl App {
         Self {
             screen: Screen::Home,
             before_help: Screen::Home,
+            back: Screen::Home,
             quit: false,
             now_ms: 0,
             theme,
+            cwd: cwd.to_owned(),
+            debug: false,
             home: Home::default(),
             new_run: NewRun::new(cwd),
             live: Live::default(),
             detail: None,
             doctor: DoctorView::default(),
+            memory: MemoryView::default(),
+            pi: false,
+            sessions: Sessions::default(),
+            chat: Chat::default(),
+            chat_seq: 0,
             confirm: None,
             flash: None,
             notice: None,
             check_seq: 0,
+            view_scroll: 0,
+            view_max: std::cell::Cell::new(0),
         }
     }
 
     /// The commands to run when the TUI opens.
-    pub fn start_cmds() -> Vec<Cmd> {
-        vec![Cmd::LoadHome, Cmd::RunDoctor]
+    pub fn start_cmds(&self) -> Vec<Cmd> {
+        let mut v = vec![Cmd::LoadHome, Cmd::RunDoctor];
+        if self.pi {
+            v.push(Cmd::LoadSessions);
+        }
+        v
+    }
+
+    /// Turns the Pi harness on: the selector is the first screen.
+    pub fn use_pi(&mut self) {
+        self.pi = true;
+        self.screen = Screen::Sessions;
+        self.sessions.loading = true;
     }
 
     pub fn go_home(&mut self) -> Vec<Cmd> {
+        if self.pi {
+            self.screen = Screen::Sessions;
+            return vec![Cmd::LoadHome, Cmd::LoadSessions];
+        }
         self.screen = Screen::Home;
         vec![Cmd::LoadHome]
     }
-}
 
-pub fn is_ctrl_c(k: &KeyEvent) -> bool {
-    k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c')
+    /// The screen as the key map sees it.
+    pub fn ctx(&self) -> Ctx {
+        self.ctx_of(self.screen)
+    }
+
+    pub fn ctx_of(&self, s: Screen) -> Ctx {
+        match s {
+            Screen::Home if self.home.filtering => Ctx::Filter,
+            Screen::Home => Ctx::Home,
+            Screen::NewRun => Ctx::NewRun,
+            Screen::Live if self.live.outcome.is_some() => Ctx::LiveDone,
+            Screen::Live => Ctx::LiveRun,
+            Screen::Detail if self.detail.as_ref().is_some_and(|d| d.in_diff) => Ctx::DetailDiff,
+            Screen::Detail => Ctx::DetailList,
+            Screen::Doctor => Ctx::Doctor,
+            Screen::Context => Ctx::Context,
+            Screen::Usage => Ctx::Usage,
+            Screen::Help => Ctx::Help,
+            Screen::Memory if self.memory.filtering => Ctx::MemoryFilter,
+            Screen::Memory => Ctx::Memory,
+            Screen::Sessions => Ctx::Sessions,
+            Screen::Chat if self.chat.running => Ctx::ChatRun,
+            Screen::Chat => Ctx::Chat,
+        }
+    }
+
+    /// The window, the limits and the name of the model Clio is set up with, for what a run did
+    /// not record.
+    fn fallback(&self) -> (u64, bool, RunLimits) {
+        self.home
+            .header
+            .as_ref()
+            .map_or((DEFAULT_WINDOW, false, RunLimits::default()), |h| {
+                (h.window, h.window_known, h.limits)
+            })
+    }
+
+    /// The screen whose run the views show: for the overlays, the one they were opened from.
+    pub fn data_screen(&self) -> Screen {
+        match self.screen {
+            Screen::Memory | Screen::Sessions => Screen::Home,
+            Screen::Context | Screen::Usage => self.back,
+            Screen::Help if matches!(self.before_help, Screen::Context | Screen::Usage) => {
+                self.back
+            }
+            Screen::Help if matches!(self.before_help, Screen::Memory | Screen::Sessions) => {
+                Screen::Home
+            }
+            Screen::Help => self.before_help,
+            s => s,
+        }
+    }
+
+    /// The numbers of the run on screen, and its per-call usage. `None` where no run is shown.
+    pub fn run_data(&self) -> Option<(Snapshot, &RunUsage)> {
+        let fb = self.fallback();
+        match self.data_screen() {
+            Screen::Live if self.live.id.is_some() || self.live.outcome.is_some() => {
+                Some((self.live.snapshot(self.now_ms, fb), &self.live.usage))
+            }
+            Screen::Detail => {
+                let d = self.detail.as_ref()?;
+                let s = d.info.summary.as_ref()?;
+                Some((Snapshot::of_summary(s, &d.usage, fb), &d.usage))
+            }
+            Screen::Home => {
+                let s = self.home.runs.first()?.summary.as_ref()?;
+                Some((
+                    Snapshot::of_summary(s, &self.home.last_usage, fb),
+                    &self.home.last_usage,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Opens the context or the usage view of the run on this screen.
+    pub fn open_view(&mut self, view: Screen) {
+        if self.run_data().is_none() {
+            self.flash = Some(if self.screen == Screen::Home {
+                "todavía no hay runs".into()
+            } else {
+                "este run no tiene datos de uso".into()
+            });
+            return;
+        }
+        if !matches!(self.screen, Screen::Context | Screen::Usage) {
+            self.back = self.screen;
+        }
+        self.screen = view;
+        self.view_scroll = 0;
+    }
+
+    pub fn open_help(&mut self) {
+        self.before_help = self.screen;
+        self.screen = Screen::Help;
+        self.view_scroll = 0;
+    }
 }
 
 pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
@@ -163,9 +404,14 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             vec![]
         }
         Input::Paste(text) => {
-            if app.screen == Screen::NewRun && app.confirm.is_none() && app.notice.is_none() {
+            if app.confirm.is_some() || app.notice.is_some() {
+                vec![]
+            } else if app.screen == Screen::NewRun {
                 super::new_run::paste(app, &text)
             } else {
+                if app.screen == Screen::Chat {
+                    super::chat::paste(app, &text);
+                }
                 vec![]
             }
         }
@@ -173,6 +419,21 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
             app.flash = None;
+            // The keys that work everywhere, even over a message.
+            match keys::lookup(app.ctx(), &k) {
+                Some(Act::Debug) => {
+                    app.debug = !app.debug;
+                    app.flash = Some(if app.debug {
+                        "debug activado (Tab en vivo; se escribe debug.log en la carpeta del run)"
+                            .into()
+                    } else {
+                        "debug desactivado".into()
+                    });
+                    return vec![Cmd::Debug(app.debug)];
+                }
+                Some(Act::Redraw) => return vec![Cmd::Redraw],
+                _ => {}
+            }
             if app.notice.take().is_some() {
                 return vec![];
             }
@@ -185,10 +446,10 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 Screen::Live => super::live::key(app, &k),
                 Screen::Detail => super::detail::key(app, &k),
                 Screen::Doctor => super::doctor::key(app, &k),
-                Screen::Help => {
-                    app.screen = app.before_help;
-                    vec![]
-                }
+                Screen::Memory => super::memory::key(app, &k),
+                Screen::Sessions => super::sessions::key(app, &k),
+                Screen::Chat => super::chat::key(app, &k),
+                Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
             }
         }
     }
@@ -206,16 +467,20 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     match c.action {
         Action::Apply => vec![Cmd::Apply { id: c.id }],
         Action::Undo => vec![Cmd::Undo { id: c.id }],
+        Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
+        Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
     }
 }
 
 fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
     match bg {
         Bg::Home(b) => {
-            let (header, runs) = *b;
+            let (header, runs, last) = *b;
             app.home.header = Some(header);
             app.home.runs = runs;
-            app.home.sel = app.home.sel.min(app.home.runs.len().saturating_sub(1));
+            app.home.last_usage = last;
+            let n = app.home.visible().len();
+            app.home.sel = app.home.sel.min(n.saturating_sub(1));
             vec![]
         }
         Bg::Doctor(r) => {
@@ -232,10 +497,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::Started {
             id,
             files,
-            max_steps,
-            max_seconds,
+            workspace,
+            usage,
         } => {
-            app.live.begin(id, files, max_steps, max_seconds);
+            app.live.begin(id, files, workspace, usage);
             vec![]
         }
         Bg::Agent(e) => {
@@ -278,9 +543,25 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.notice = Some(e);
             vec![]
         }
+        Bg::Memory(r) => {
+            app.memory.loading = false;
+            match r {
+                Ok(d) => {
+                    app.memory.error = None;
+                    app.memory.data = Some(*d);
+                    let n = app.memory.visible().len();
+                    app.memory.sel = app.memory.sel.min(n.saturating_sub(1));
+                }
+                Err(e) => app.memory.error = Some(e),
+            }
+            vec![]
+        }
         Bg::Done(Ok(msg)) => {
             app.flash = Some(msg);
             let mut cmds = vec![Cmd::LoadHome];
+            if app.screen == Screen::Memory {
+                cmds.push(Cmd::LoadMemory);
+            }
             if let (Screen::Detail, Some(d)) = (app.screen, &app.detail) {
                 cmds.push(Cmd::LoadDetail {
                     id: d.info.id.clone(),
@@ -291,6 +572,56 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::Done(Err(e)) => {
             app.notice = Some(e);
+            vec![]
+        }
+        Bg::Sessions(rows) => {
+            app.sessions.set(rows);
+            vec![]
+        }
+        Bg::ChatOpened { seq, result } => {
+            // An answer for a chat the person already left: the runtime has closed it.
+            if seq != app.chat.seq || app.screen != Screen::Chat {
+                return vec![];
+            }
+            match result {
+                Ok(info) => app.chat.opened(
+                    info.id,
+                    info.workspace,
+                    &info.history,
+                    info.refresh,
+                    app.now_ms,
+                ),
+                Err(e) => {
+                    app.chat.opening = false;
+                    app.chat.failed = Some(e);
+                }
+            }
+            vec![]
+        }
+        Bg::ChatEvent(e) => {
+            app.chat.on_event(&e);
+            vec![]
+        }
+        Bg::ChatSettled { result, refresh } => {
+            app.chat.running = false;
+            app.chat.aborting = false;
+            match result {
+                Err(e) => app.chat.items.push(super::chat::Item::Error(e)),
+                Ok(summary) => {
+                    if let Some(a) = &summary.assessment {
+                        app.chat.items.push(super::chat::Item::Note(format!(
+                            "pedido juzgado como {}",
+                            a.notice()
+                        )));
+                    }
+                    if let Some(notice) = summary.stop_notice() {
+                        app.chat.items.push(super::chat::Item::Error(notice));
+                    }
+                }
+            }
+            if let Some(r) = refresh {
+                app.chat.refresh(&r);
+            }
             vec![]
         }
     }
@@ -314,25 +645,131 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-/// One footer entry per key: `key` highlighted, then what it does.
-pub fn keys_line(theme: Theme, keys: &[(&str, &str)]) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (k, what) in keys {
-        spans.push(Span::styled((*k).to_owned(), theme.key()));
-        spans.push(Span::raw(format!(" {what}   ")));
-    }
-    Line::from(spans)
+/// A thin labeled line: `─ título ──────────`.
+pub fn section(t: Theme, title: &str, width: u16) -> Line<'static> {
+    let used = title.chars().count() + 3;
+    let tail = t.rule().repeat(usize::from(width).saturating_sub(used));
+    Line::from(vec![
+        Span::styled(format!("{} ", t.rule()), t.dim()),
+        Span::styled(title.to_owned(), t.bold()),
+        Span::styled(format!(" {tail}"), t.dim()),
+    ])
 }
 
-const MIN_W: u16 = 40;
-const MIN_H: u16 = 10;
+pub const MIN_W: u16 = 60;
+pub const MIN_H: u16 = 16;
+
+fn screen_name(app: &App) -> &'static str {
+    match app.screen {
+        Screen::Home => "inicio",
+        Screen::NewRun => "nuevo trabajo",
+        Screen::Live => "en vivo",
+        Screen::Detail => "detalle",
+        Screen::Doctor => "doctor",
+        Screen::Help => "ayuda",
+        Screen::Context => "contexto",
+        Screen::Usage => "uso",
+        Screen::Memory => "memoria",
+        Screen::Sessions => "sesiones",
+        Screen::Chat => "chat",
+    }
+}
+
+fn folder_name(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+/// `clio · carpeta · modelo`, and on the right the screen (and `debug` when it is on).
+fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme;
+    let folder = match app.screen {
+        Screen::Live if !app.live.workspace.is_empty() => folder_name(&app.live.workspace),
+        Screen::Detail => app
+            .detail
+            .as_ref()
+            .map_or_else(|| folder_name(&app.cwd), |d| folder_name(&d.info.workspace)),
+        _ => folder_name(&app.cwd),
+    };
+    let sep = format!(" {} ", t.dot());
+    let mut left = vec![
+        Span::styled("clio", t.bold()),
+        Span::styled(format!("{sep}{}", clean(&folder)), t.plain()),
+    ];
+    if let Some(h) = &app.home.header
+        && h.config_error.is_none()
+    {
+        left.push(Span::styled(format!("{sep}{}", clean(&h.model)), t.dim()));
+    }
+    let mut right = vec![Span::styled(screen_name(app), t.dim())];
+    if app.debug {
+        right.insert(0, Span::styled("debug ", t.warn()));
+    }
+    let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let r: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let pad = usize::from(area.width).saturating_sub(used + r + 1);
+    left.push(Span::raw(" ".repeat(pad)));
+    left.extend(right);
+    f.render_widget(Paragraph::new(Line::from(left)), area);
+}
+
+fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme;
+    let width = |h: &keys::Bind| h.shown.chars().count() + 1 + h.what.chars().count() + 3;
+    let hints = keys::hints(app.ctx());
+    // The help key is always the last and always shown: the others give way to it.
+    let (help, rest) = match hints.split_last() {
+        Some((h, rest)) if h.act == Act::Help => (Some(*h), rest),
+        _ => (None, hints.as_slice()),
+    };
+    let reserved = help.map_or(0, width);
+    let mut shown: Vec<&keys::Bind> = Vec::new();
+    let mut used = 0usize;
+    for h in rest {
+        if used + width(h) + reserved > usize::from(area.width) {
+            break;
+        }
+        used += width(h);
+        shown.push(h);
+    }
+    shown.extend(help);
+    let mut spans: Vec<Span> = Vec::new();
+    for h in shown {
+        spans.push(Span::styled(h.shown, t.key()));
+        spans.push(Span::styled(format!(" {}   ", h.what), t.dim()));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_status(f: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme;
+    let line = match app.run_data() {
+        _ if app.screen == Screen::Chat => status::line(
+            t,
+            &app.chat.snapshot(app.now_ms, app.fallback()),
+            usize::from(area.width),
+        ),
+        Some((snap, _)) => status::line(t, &snap, usize::from(area.width)),
+        None => Line::from(Span::styled(
+            if app.screen == Screen::NewRun || app.screen == Screen::Doctor {
+                ""
+            } else {
+                "sin uso todavía"
+            },
+            t.dim(),
+        )),
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     if area.width < MIN_W || area.height < MIN_H {
         f.render_widget(
             Paragraph::new(format!(
-                "Terminal muy pequeña: se necesita al menos {MIN_W}x{MIN_H}."
+                "Terminal muy pequeña: se necesita al menos {MIN_W}x{MIN_H} y esta es de {}x{}. Agrándala.",
+                area.width, area.height
             ))
             .wrap(Wrap { trim: true }),
             area,
@@ -340,93 +777,61 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
     let t = app.theme;
-    let [title, body, flash, footer] = Layout::vertical([
+    let [header, _, body, flash, hints, status] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(area);
-    let name = match app.screen {
-        Screen::Home => "Inicio",
-        Screen::NewRun => "Nuevo trabajo",
-        Screen::Live => "En vivo",
-        Screen::Detail => "Detalle del run",
-        Screen::Doctor => "Doctor",
-        Screen::Help => "Ayuda",
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" clio ", t.selected()),
-            Span::styled(format!(" {name}"), t.bold()),
-            Span::styled("  (el original nunca se toca sin tu permiso)", t.dim()),
-        ])),
-        title,
+    draw_header(f, header, app);
+    // One column of air on each side.
+    let body = Rect::new(
+        body.x + 1,
+        body.y,
+        body.width.saturating_sub(2),
+        body.height,
     );
-    let keys: Vec<(&str, &str)> = match app.screen {
-        Screen::Home => vec![
-            ("n", "nuevo"),
-            ("Enter", "abrir"),
-            ("d", "diff"),
-            ("a", "aplicar"),
-            ("u", "deshacer"),
-            ("r", "refrescar"),
-            ("D", "doctor"),
-            ("?", "ayuda"),
-            ("q", "salir"),
-        ],
-        Screen::NewRun => vec![
-            ("Tab", "cambiar campo"),
-            ("Enter", "lanzar"),
-            ("Alt+Enter", "línea nueva"),
-            ("Ctrl+U", "borrar campo"),
-            ("Esc", "volver"),
-        ],
-        Screen::Live => {
-            if app.live.outcome.is_some() {
-                vec![("Enter", "ver el run"), ("Esc", "inicio")]
-            } else {
-                vec![("Esc / Ctrl+C", "cancelar (termina el paso en curso)")]
-            }
-        }
-        Screen::Detail if app.detail.as_ref().is_some_and(|d| d.in_diff) => vec![
-            ("j/k", "desplazar"),
-            ("PgUp/PgDn", "página"),
-            ("[ ]", "otro archivo"),
-            ("a", "aplicar"),
-            ("u", "deshacer"),
-            ("Esc", "volver"),
-        ],
-        Screen::Detail => vec![
-            ("j/k", "mover"),
-            ("Enter", "ver diff"),
-            ("a", "aplicar"),
-            ("u", "deshacer"),
-            ("Esc", "volver"),
-            ("?", "ayuda"),
-        ],
-        Screen::Doctor => vec![("j/k", "desplazar"), ("r", "repetir"), ("Esc", "volver")],
-        Screen::Help => vec![("cualquier tecla", "volver")],
-    };
-    f.render_widget(
-        Paragraph::new(keys_line(t, &keys)).wrap(Wrap { trim: true }),
-        footer,
-    );
-    if let Some(msg) = &app.flash {
-        f.render_widget(Paragraph::new(Span::styled(clean(msg), t.ok())), flash);
-    }
     match app.screen {
         Screen::Home => super::home::draw(f, body, app),
         Screen::NewRun => super::new_run::draw(f, body, app),
         Screen::Live => super::live::draw(f, body, app),
         Screen::Detail => super::detail::draw(f, body, app),
         Screen::Doctor => super::doctor::draw(f, body, app),
-        Screen::Help => draw_help(f, body, t),
+        Screen::Context => meter::draw_context(f, body, app),
+        Screen::Usage => meter::draw_usage(f, body, app),
+        Screen::Memory => super::memory::draw(f, body, app),
+        Screen::Sessions => super::sessions::draw(f, body, app),
+        Screen::Chat => super::chat::draw(f, body, app),
+        Screen::Help => meter::draw_help(f, body, app),
     }
+    if let Some(msg) = &app.flash {
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {}", clean(msg)), t.ok())),
+            flash,
+        );
+    }
+    draw_hints(
+        f,
+        Rect::new(hints.x + 1, hints.y, hints.width.saturating_sub(1), 1),
+        app,
+    );
+    draw_status(
+        f,
+        Rect::new(status.x + 1, status.y, status.width.saturating_sub(1), 1),
+        app,
+    );
     if let Some(c) = &app.confirm {
         let verb = match c.action {
             Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
             Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
+            Action::Promote => format!(
+                "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
+                c.id
+            ),
+            Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
         };
         let lines = vec![
             Line::from(Span::styled(verb, t.bold())),
@@ -454,6 +859,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
+/// The only boxes of the interface: a question or a message that needs an answer.
 fn dialog(
     f: &mut Frame,
     area: Rect,
@@ -470,58 +876,15 @@ fn dialog(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::new()
                 .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
+                .border_type(if t.unicode {
+                    BorderType::Rounded
+                } else {
+                    BorderType::Plain
+                })
                 .border_style(border)
                 .title(Span::styled(title.to_owned(), t.bold())),
         ),
         r,
-    );
-}
-
-fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
-    let row = |k: &str, d: &str| {
-        Line::from(vec![
-            Span::styled(format!("  {k:<14}"), t.key()),
-            Span::raw(d.to_owned()),
-        ])
-    };
-    let head = |s: &str| Line::from(Span::styled(s.to_owned(), t.accent()));
-    let lines = vec![
-        head("Clio trabaja en una COPIA; tú decides qué vuelve al original (todo se deshace)"),
-        head("Inicio"),
-        row("j k, flechas", "elegir un run        (g/G: primero/último)"),
-        row("n", "nuevo trabajo      Enter: abrir el run"),
-        row("d  a  u", "ver el diff / aplicar / deshacer el run elegido"),
-        row("r  D", "refrescar la lista / abrir el doctor"),
-        row("q  Ctrl+C", "salir"),
-        Line::from(""),
-        head("Detalle del run"),
-        row(
-            "j k",
-            "elegir archivo (o desplazar el diff)   PgUp PgDn: página",
-        ),
-        row(
-            "Enter  Esc",
-            "abrir el diff / volver      [ ]: otro archivo",
-        ),
-        row("a  u", "aplicar / deshacer: pide una y de confirmación"),
-        Line::from(""),
-        head("Nuevo trabajo y en vivo"),
-        row("Tab", "cambiar entre carpeta e instrucción"),
-        row("Enter", "lanzar      Alt+Enter o Ctrl+J: línea nueva"),
-        row(
-            "Esc  Ctrl+C",
-            "en vivo: cancelar, termina tras el paso en curso",
-        ),
-    ];
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(Span::styled(" Teclas ", t.bold())),
-        ),
-        area,
     );
 }
 

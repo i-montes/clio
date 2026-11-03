@@ -96,7 +96,29 @@ pub fn run(cli: &Cli) -> Result<ExitCode, String> {
             return memories(cli, &rows);
         }
         Command::Get { id } => {
-            let m = engine.get(*id).map_err(fail)?;
+            let m = match engine.get(*id) {
+                Ok(m) => m,
+                Err(Error::NotFound) => {
+                    // a purged memory shows its tombstone and nothing of its content
+                    let Some(t) = engine.tombstone(*id).map_err(fail)? else {
+                        return Err(Error::NotFound.to_string());
+                    };
+                    if cli.json {
+                        return json(&t);
+                    }
+                    line(&format!("id: m{}", id.0));
+                    line("state: Purged");
+                    line(&format!(
+                        "purged: op {} · by {} · at {} · {}",
+                        t.op.0,
+                        clean(&actor_name(&engine, t.actor.0)),
+                        t.at,
+                        clean(&t.reason)
+                    ));
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Err(e) => return Err(fail(e)),
+            };
             if cli.json {
                 return json(&m);
             }

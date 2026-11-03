@@ -1,0 +1,17 @@
+{
+  "id": "real-14",
+  "input": "validators.py tiene dos validadores con expresiones regulares de retroceso catastrófico: `is_slug(\"a\" * 40 + \"!\")` o `is_number_list(\"1\" * 40 + \"x\")` tardan una eternidad y se pueden usar para colgar el servidor (ReDoS). Reescríbelos para que corran en tiempo lineal sin cambiar su significado: un slug son uno o más grupos de [a-z0-9] separados por UN solo guion, admitiendo un guion final opcional (\"abc\", \"a-b-c\", \"abc-\"; no \"-abc\", \"a--b\", \"ABC\", \"\"); una lista de números son enteros de dígitos separados por una coma con espacios opcionales detrás, o solo por espacios (\"1\", \"1,2\", \"1, 2  3\"), con una coma o espacios finales opcionales (\"1,\", \"1, \"); no \",1\", \"1,,2\", \"1 ,2\", \"\". Aquí «espacio» es cualquier carácter de blanco que reconoce `\\s`, incluidos tabuladores y saltos de línea, así que \"1\\n\" y \"1,\\n2\" son listas válidas. Las entradas válidas muy largas (decenas de miles de caracteres) deben aceptarse y deprisa. Una cadena con un salto de línea al final NO es un slug (hoy se acepta por culpa del `$` y también hay que corregirlo). No limites la longitud de la entrada: eso cambiaría el significado. test_validators.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 1200000,
+  "tags": [
+    "security",
+    "code",
+    "redos"
+  ]
+}

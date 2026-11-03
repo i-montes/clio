@@ -9,18 +9,21 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
-use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, Observer};
+use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, MemoryInput, Observer};
+use clio_brain::memory_link::{EmbedModel, MemoryLink, RunFacts};
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::debug::{self, DebugCtl, Tee};
 use super::diff::file_diff;
 use super::home::{Config, Dirs};
 use super::tui::sanitize;
 use super::ui::{self, Style, clip, pad};
+use super::usage::{self, RunLimits, RunUsage};
 use super::work::{self, Change, Kind, Scan};
 use super::{Res, io_err, mkdir_private, now_ms, stamp, write_private};
 
@@ -130,6 +133,23 @@ pub struct RunSummary {
     pub excluded_secrets: Vec<String>,
     pub final_message: Option<String>,
     pub pending: Vec<String>,
+    /// What the memory did in this run; `None` for a run from before the memory existed.
+    pub memory: Option<RunMemory>,
+}
+
+/// What the memory did in one run: what it recalled (ids, for feedback) and what it saved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunMemory {
+    pub recalled: Vec<i64>,
+    pub abstained: bool,
+    pub saved: Vec<i64>,
+    pub pending: usize,
+    pub rejected: Vec<String>,
+    /// The one discreet line for the closing panel.
+    pub line: String,
+    /// About the embedding model, when it is not in use.
+    pub note: Option<String>,
 }
 
 impl RunSummary {
@@ -306,9 +326,22 @@ pub struct Prepared {
     pub scan: Scan,
     pub max_steps: u32,
     pub max_seconds: u64,
+    pub max_cost_micro: u64,
+    /// The model's context window in tokens, and whether the catalog knew it.
+    pub window: u64,
+    pub window_known: bool,
+    /// Knows the model's API key.
+    scrubber: clio_vault::Scrubber,
     manifest: BTreeMap<String, String>,
     cfg: Config,
     prompt: String,
+    prompt_name: String,
+    /// `~/.local/share/clio` and the embedding model directory (when it is on disk).
+    data: PathBuf,
+    model: Arc<EmbedModel>,
+    /// The jail was proven: `run_tests` is offered.
+    pub jail: bool,
+    pub jail_note: String,
     program: String,
 }
 
@@ -322,7 +355,8 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         (cfg.workspace.max_files, cfg.workspace.max_bytes)
     };
     let scan = work::scan(&ws, mf, mb)?;
-    let prompt = cfg.prompt_text(dirs)?;
+    let jail = super::jail::status();
+    let (prompt_name, prompt) = cfg.prompt_text(dirs, jail.ready())?;
     let program = cfg
         .model
         .command
@@ -351,9 +385,14 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
             created_ms: started,
         },
     )?;
+    let (window, window_known) = usage::window_for(dirs, &cfg.model.provider, &cfg.model.model);
     Ok(Prepared {
         max_steps: o.max_steps.unwrap_or(cfg.limits.max_steps),
         max_seconds: cfg.limits.max_seconds,
+        max_cost_micro: cfg.limits.max_cost_micro_usd,
+        window,
+        window_known,
+        scrubber: debug::scrubber(dirs),
         id,
         path,
         ws,
@@ -361,21 +400,29 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         manifest,
         cfg,
         prompt,
+        prompt_name,
+        jail: jail.ready(),
+        jail_note: jail.summary(),
         program,
+        data: dirs.data.clone(),
+        model: EmbedModel::of_home(&dirs.home),
     })
 }
 
-/// Runs the agent in the copy and writes the files of the run. `observer` sees every step;
-/// `cancel` set to true ends the run after the step in progress (the run is kept as cancelled).
+/// Runs the agent in the copy and writes the files of the run. `observer` sees every step (its
+/// events are scrubbed first); `cancel` set to true ends the run after the step in progress (the
+/// run is kept as cancelled). `dbg` says whether to write `debug.log` (and print on stderr).
 pub fn execute(
     p: &Prepared,
     instruction: &str,
     observer: Box<dyn Observer>,
     cancel: Option<Arc<AtomicBool>>,
+    dbg: &DebugCtl,
 ) -> Res<RunSummary> {
     let (cfg, path, id) = (&p.cfg, &p.path, &p.id);
     let mut acfg = AgentConfig::new(id, &p.prompt, path);
-    acfg.prompt_version.clone_from(&cfg.model.prompt);
+    acfg.prompt_version.clone_from(&p.prompt_name);
+    acfg.run_tests = p.jail;
     acfg.budget.max_steps = p.max_steps;
     acfg.budget.max_ms =
         i64::try_from(cfg.limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
@@ -390,13 +437,84 @@ pub fn execute(
         &path.join("sandbox"),
         &path.join("scratch"),
     )?;
-    agent.scrubber = Some(clio_vault::Scrubber::default());
-    agent.observer = observer;
+    let scrubber = p.scrubber.clone();
+    agent.scrubber = Some(scrubber.clone());
+    let used = Arc::new(Mutex::new(RunUsage::new(
+        p.window,
+        p.window_known,
+        RunLimits {
+            max_steps: p.max_steps,
+            max_seconds: p.max_seconds,
+            max_cost_micro: p.max_cost_micro,
+        },
+    )));
+    agent.observer = Box::new(Tee::new(
+        observer,
+        used.clone(),
+        scrubber,
+        dbg.clone(),
+        path.join("debug.log"),
+    ));
+    agent.debug = Some(dbg.on.clone());
     agent.cancel = cancel;
+    // Memory, at the start: the fixed blocks and what is relevant, as data. A memory that cannot
+    // be opened never stops a run.
+    let mut run_memory = RunMemory::default();
+    // Nothing active, nothing to recall: the model is not even loaded then.
+    let anything = MemoryLink::open_read(&p.data, &EmbedModel::none())
+        .ok()
+        .flatten()
+        .is_some_and(|l| l.counts().is_ok_and(|c| c.0 > 0));
+    let recall_from = if anything {
+        MemoryLink::open_read(&p.data, &p.model)
+    } else {
+        Ok(None)
+    };
+    match recall_from {
+        Ok(Some(link)) => {
+            run_memory.note = link.note();
+            let r = link.recall_for(instruction, &p.scrubber);
+            run_memory.recalled.clone_from(&r.ids);
+            run_memory.abstained = r.abstained;
+            let mut lines = r.debug.clone();
+            lines.extend(link.note());
+            agent.observer.event(&Event::Memory {
+                title: format!("recordó {} recuerdo(s)", r.items),
+                lines,
+            });
+            if r.items > 0 {
+                agent.memory = Some(MemoryInput {
+                    text: r.text,
+                    items: r.items,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(e) => agent.observer.event(&Event::Memory {
+            title: "la memoria no se pudo abrir".into(),
+            lines: vec![p.scrubber.scrub(&e)],
+        }),
+    }
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
-    let outcome = agent.run(&mut model, instruction)?;
+    let mut outcome = agent.run(&mut model, instruction)?;
+    // What the model said can carry a secret it was shown or made up: scrub what is saved and shown.
+    let scrub = |t: &str| p.scrubber.scrub(t);
+    outcome.final_message = outcome.final_message.as_deref().map(scrub);
+    for m in &mut outcome.transcript {
+        m.content = scrub(&m.content);
+    }
+    for l in outcome
+        .report
+        .pending
+        .iter_mut()
+        .chain(&mut outcome.report.done)
+    {
+        *l = scrub(l);
+    }
 
     work::lock_down(path)?;
+    let usage = used.lock().map(|u| u.clone()).unwrap_or_default();
+    write_json(&path.join("usage.json"), &usage)?;
     write_json(&path.join("transcript.json"), &outcome.transcript)?;
     write_json(
         &path.join("report.json"),
@@ -413,6 +531,35 @@ pub fn execute(
             .map(|c| c.rel.clone())
             .collect()
     };
+    // Memory, at the close: one batch, after the loop. A failure here is a line, never an error.
+    let files: Vec<String> = ch.iter().map(|c| c.rel.clone()).collect();
+    match MemoryLink::open_write(&p.data, &p.model) {
+        Ok(link) => {
+            let facts = RunFacts {
+                run_id: id.clone(),
+                instruction: instruction.to_owned(),
+                finished: matches!(outcome.ending, clio_brain::agent::Ending::Final),
+                ending: ending_label(&format!("{:?}", outcome.ending)),
+                files,
+                final_message: outcome.final_message.clone(),
+                tainted: outcome.tainted,
+            };
+            let rep = link.close_run(&facts, &p.scrubber);
+            run_memory.saved = rep.saved.iter().map(|s| s.id).collect();
+            run_memory.pending = rep.pending();
+            run_memory.rejected.clone_from(&rep.rejected);
+            run_memory.line = rep.line();
+            run_memory.note = run_memory.note.or_else(|| link.note());
+            agent.observer.event(&Event::Memory {
+                title: "al cerrar propuso guardar".into(),
+                lines: rep.debug_lines(),
+            });
+        }
+        Err(e) => {
+            run_memory.line = format!("memoria: no se guardó nada ({})", p.scrubber.scrub(&e));
+            run_memory.rejected.push(run_memory.line.clone());
+        }
+    }
     let summary = RunSummary {
         id: id.clone(),
         workspace: p.ws.display().to_string(),
@@ -434,6 +581,7 @@ pub fn execute(
         excluded_secrets: p.scan.secrets.clone(),
         final_message: outcome.final_message,
         pending: outcome.report.pending,
+        memory: Some(run_memory),
     };
     write_json(&path.join("summary.json"), &summary)?;
     Ok(summary)
@@ -466,6 +614,13 @@ impl Observer for Progress {
                 clip(self.st, &sanitize::line(reason), 60)
             ),
             Event::Final => "el modelo dice que terminó".to_owned(),
+            Event::Context(_)
+            | Event::Usage(_)
+            | Event::Exchange(_)
+            | Event::Decision(_)
+            | Event::Memory { .. } => {
+                return;
+            }
             Event::Tool {
                 name,
                 target,
@@ -499,9 +654,15 @@ impl Observer for Progress {
     }
 }
 
-pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
+pub fn run(dirs: &Dirs, o: &RunOpts, debug: bool) -> Res<i32> {
     let st = Style::stdout();
     let p = prepare(dirs, o)?;
+    if debug {
+        eprintln!(
+            "[debug] depuración activa: el detalle va a stderr y a {}",
+            p.path.join("debug.log").display()
+        );
+    }
     println!(
         "{} {}: {} archivos copiados de {}",
         st.bold("run"),
@@ -536,6 +697,7 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
             list(&p.scan.symlinks)
         );
     }
+    println!("  {} {}", st.dim(st.bullet()), p.jail_note);
     println!(
         "trabajando en la copia (puede tardar unos minutos; hasta {} pasos o {} s)...",
         p.max_steps, p.max_seconds
@@ -546,7 +708,13 @@ pub fn run(dirs: &Dirs, o: &RunOpts) -> Res<i32> {
         step: 0,
         started: std::time::Instant::now(),
     };
-    let s = execute(&p, &o.instruction, Box::new(progress), None)?;
+    let s = execute(
+        &p,
+        &o.instruction,
+        Box::new(progress),
+        None,
+        &DebugCtl::new(debug, true),
+    )?;
     println!();
     print_panel(st, &s);
     Ok(exit_code(&s))
@@ -586,7 +754,7 @@ fn print_panel(st: Style, s: &RunSummary) {
         println!(
             "{}{}",
             label("nota:"),
-            st.yellow("leyó archivos del proyecto, así que su texto pudo influirlo; revisa el diff con cuidado")
+            st.yellow("externo: leyó archivos del proyecto; revisa el diff con cuidado")
         );
     }
     let msg = match &s.final_message {
@@ -613,6 +781,19 @@ fn print_panel(st: Style, s: &RunSummary) {
             "{}{}",
             " ".repeat(10),
             st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id))
+        );
+    }
+    if let Some(m) = s.memory.as_ref().filter(|m| !m.line.is_empty()) {
+        println!(
+            "{}{}",
+            label("memoria:"),
+            st.dim(&format!(
+                "{}{}",
+                sanitize::line(&m.line),
+                m.note
+                    .as_ref()
+                    .map_or(String::new(), |n| format!(" ({})", sanitize::line(n)))
+            ))
         );
     }
     println!();
@@ -654,11 +835,8 @@ pub fn print_diff(
 ) {
     for c in ch {
         let text = diff_text(ws, run, manifest, c);
-        let text = if st.tty {
-            sanitize::multiline(&text)
-        } else {
-            text
-        };
+        // Always, not only on a terminal: `clio diff | less -R` would draw the file's escapes.
+        let text = sanitize::multiline(&text);
         for l in text.lines() {
             let painted = if l.starts_with("+++") || l.starts_with("---") {
                 st.bold(l)

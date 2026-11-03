@@ -9,6 +9,8 @@ pub enum Source {
     Mcp,
     ToolResult,
     SubagentSummary,
+    /// What the memory brought back from earlier sessions: data, never instructions (S-25).
+    Memory,
 }
 
 impl Source {
@@ -20,6 +22,7 @@ impl Source {
             Source::Mcp => "mcp",
             Source::ToolResult => "tool-result",
             Source::SubagentSummary => "subagent-summary",
+            Source::Memory => "memory",
         }
     }
 }

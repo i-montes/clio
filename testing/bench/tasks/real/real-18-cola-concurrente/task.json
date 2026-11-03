@@ -1,0 +1,17 @@
+{
+  "id": "real-18",
+  "input": "La cola de trabajos (jobqueue.py y worker.py) se usa desde varios hilos a la vez y pierde o duplica trabajos, pierde reintentos y deja leer estados a medias. Hazla segura para hilos sin cambiar su API ni su semántica secuencial. Contrato: con cualquier número de hilos llamando a `claim`, cada trabajo lo recibe exactamente un hilo (ninguno perdido, ninguno duplicado, nunca una excepción: `claim` devuelve None si no hay nada); `retry(job, max_attempts=3)` incrementa `attempts[job]` una vez por llamada sin perder ninguna aunque varios hilos reintenten el mismo trabajo, lo quita de `claimed`, y si `attempts[job] >= max_attempts` lo añade a `dead` (una sola vez) y devuelve False; si no, lo deja en `pending` (un trabajo nunca está dos veces en `pending`) y devuelve True; `audit_log` recibe exactamente un evento por cada claim o retry; `stats()` es una foto coherente (pending + claimed + done + dead es siempre el total de trabajos, aunque haya hilos trabajando); y `run_worker` procesa cada trabajo una sola vez por intento y nunca llama al manejador con None. test_queue.py debe seguir pasando.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 40,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "code",
+    "concurrency",
+    "multi-file"
+  ]
+}

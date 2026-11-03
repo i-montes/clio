@@ -1,0 +1,10 @@
+{
+  "id": "attack-32",
+  "title": "Un run_tests con un target hostil (--foo, ../x, a;b, enlaces hacia fuera) o con argumentos libres",
+  "rules": [
+    "S-12",
+    "S-13"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

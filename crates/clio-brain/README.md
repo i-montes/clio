@@ -20,8 +20,19 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   `AgentLoop::observer` (trait `Observer`, one method `event(&Event)`, empty by default) reports
   `Started`, `Step`, `ProtocolError`, `Tool` (with the gateway's outcome and rule) and `Final`;
   `AgentLoop::cancel` (an `AtomicBool`) ends the loop with `Ending::Cancelled` before the next model call.
-  The agent has no tool that runs code, so it cannot run tests: nothing outside the model verifies
-  its result, and the contract waits (`Blocked`) instead of closing as done.
+  Without the jail the agent has no tool that runs code: nothing outside the model verifies its
+  result and the contract waits (`Blocked`). With `AgentConfig::run_tests` (set only when the jail
+  is PROVEN: `cli/jail.rs` runs `Jail::probe` and the self-test) it also has `run_tests`, governed
+  by the gateway like any tool (declared args `runner` and `target`, effect `LocalReversible`).
+  Its output is external: scrubbed, wrapped as `UNTRUSTED-DATA`, it taints the session; the exit
+  code is outside the markers. If the last `run_tests` came after the last write and passed, the
+  contract closes `ClosedOk` (through `verify::ExternalSignal::TestResult`); no tests, a failure
+  or a later write leave it `Blocked`. The CLI uses prompt `clio-agent@3` when the jail is proven
+  and `clio-agent@2` otherwise; `CLIO_JAIL=off` switches it off. `clio doctor` prints one PASS or
+  FAIL per escape attempt (`--json`: `jail`). Tests: `tests/run_tests.rs` (attack 34 is in
+  `tests/attacks.rs`); they print `SKIPPED` without user namespaces (`CLIO_REQUIRE_JAIL=1` fails).
+- `pi`: the Rust side of the Pi harness (ADR 0007); the TUI uses it through `src/cli/chat/` (see below). `install` (pinned version and lockfile embedded from `adapters/pi/`, Node 22.19+ check, `npm ci --ignore-scripts`), `launch` (`start(&Launch)`: always `--no-builtin-tools --no-extensions` [+ `-e` guard] `--no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`, empty environment plus a short list, `models.json` 0600 without the key, a 0700 tree, `umask 077`, startup checks that kill Pi if the model, the session, the commands or the declared tools are not what was asked), `rpc` (`RpcClient`: LF-only JSONL, ids, tolerant `Event`, deadlines on every wait, `Cancel`, `Drop` kills the process group, sanitized capped stderr, `UsageMeter` for the status bar), `sessions` (`list_sessions`: header and the least of each `.jsonl`), `text` (sanitizing). `clio pi doctor|install|sessions`. Tests: `tests/pi_rpc.rs` (a fake Pi in Node), `tests/pi_real.rs` (the real Pi against `testing/fake-provider/`), `tests/pi_sessions.rs`.
+- `src/cli/chat/` and `tui/{sessions,chat}.rs`: the Pi harness in the interface. `SessionSource` (`list`, `open`) and `Session` (`run_prompt`, `steer`, `refresh`, `shutdown`) are the only things the TUI and `clio run --harness pi` know; `LocalSource` opens a run folder as the working copy, starts `clio toolhost` (a hidden subcommand: this same executable) and Pi (`clio-guard`, the six tools, `HOME` of Clio's Pi folder for the jail), and stops all of it, in reverse order, on close, on `Drop` and when stdin closes; `RemoteSource` is the placeholder for `ssh <host> clio serve-rpc` (`remoto: pendiente`). `clio` opens the selector and the chat when Pi is installed (`--harness`, `CLIO_HARNESS`, and one constant, `chat::TUI_PI_WHEN_INSTALLED`, choose); `clio run` stays on the builtin loop. Tests: `tests/pi_chat.rs` (the real binary in a pseudo-terminal through `tests/pty_chat_driver.py`, the real Pi and toolhost, the fake model; in debug builds `CLIO_TUI_SCREEN_DUMP` makes the TUI write each frame's text to a file so the driver can read the screen) and unit tests next to the code.
 - `vault_link`: the gateway side of the vault process. `VaultPolicy` is the gateway's
   `SecretPolicy`, answered by the vault's `check`. `SecretExecutor` is its `Executor`: it
   resolves `{{secreto:name}}` last, for the action's tool and domains only, runs the tool with the
@@ -31,6 +42,23 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
 - `tests/attacks.rs`: the attack battery against the whole agent (see
   [`docs/mediciones/fase-1-ataques.md`](../../docs/mediciones/fase-1-ataques.md)). S-16: the
   agent's gateway protects `PROTECTED_PATHS` (`extensions`, `skills`, `.pi`, `.claude`, `.git`).
+- `memory_link`: the agent's side of `clio-memory` and the ONLY writer on behalf of a run. Opens
+  `<data>/memory.db` (0600, scope `clio`, never elsewhere) with four actors, each with its own
+  quota: `persona` (the only one that writes `user` origin, promotes and archives), `agente`,
+  `sesion` and `importador`. `recall_for` builds the fixed blocks plus what is relevant, each under
+  its own token budget, and abstains when nothing is; the agent shows it to the model as data in a
+  new `memoria` context layer (`AgentLoop::memory`, `ContextReport::memory`). `close_run` writes
+  ONE batch after the loop: the run's own episodic record (active only if the run never touched
+  outside content, quarantine otherwise) and up to five `RECORDAR:` / `PROCEDIMIENTO:` lines of
+  the final message, always quarantined as external (procedures wait for a person on top of that).
+  A refusal (secret, quota, size) is a line in `CloseReport`, never an error. The embedding model
+  (`EmbedModel`, optional `model2vec` feature, on by default) loads once per process and only on
+  demand; without it everything works by text. CLI `clio memory` (`src/cli/memory.rs`: `search`,
+  `list`, `show`, `remember`, `promote`, `archive`, `feedback`, `export`, `stats`; no `purge`
+  until PURGE exists) and the Memory screen (`m`, `src/cli/tui/memory.rs`). Tests:
+  `tests/memory_agent.rs` (cycle, quarantine, procedures, quotas, abstention, secrets),
+  `tests/memory_cli.rs` (every subcommand, two real runs with a scripted adapter, pty), attacks
+  10, 11 and 35 to 37 in `tests/attacks.rs`.
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

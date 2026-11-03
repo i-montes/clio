@@ -479,3 +479,234 @@ fn cancel_ends_the_run_after_the_step_in_progress() {
     );
     assert!(out.final_message.is_none());
 }
+
+// ---------------------------------------------------------------- context, usage and debug events
+
+fn events_of(
+    r: &Run,
+    debug: Option<bool>,
+    scrubber: Option<clio_vault::Scrubber>,
+    model: &mut dyn Model,
+) -> Vec<clio_brain::agent::Event> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut a = agent(r, clock(), |c| {
+        c.price_in_micro_per_mtok = 3_000_000;
+        c.price_out_micro_per_mtok = 15_000_000;
+        c.prompt_version = "clio-agent@3".into();
+    });
+    a.observer = Box::new(Recorder(seen.clone()));
+    a.debug = debug.map(|d| Arc::new(std::sync::atomic::AtomicBool::new(d)));
+    a.scrubber = scrubber;
+    a.run(model, "mira dates.py").unwrap();
+    let ev = seen.lock().unwrap();
+    ev.clone()
+}
+
+/// Answers a list in order and reports tokens, like a real adapter.
+struct Priced(Vec<String>, usize);
+
+impl Model for Priced {
+    fn complete(&mut self, _: &[Msg]) -> Result<Reply, String> {
+        let text = self.0[self.1.min(self.0.len() - 1)].clone();
+        self.1 += 1;
+        Ok(Reply {
+            text,
+            input_tokens: 1_000 * self.1 as u32,
+            output_tokens: 100,
+        })
+    }
+}
+
+fn read_then_final() -> Priced {
+    Priced(
+        vec![
+            call("read_file", json!({"path": "dates.py"})),
+            call("write_file", json!({"path": "notes.txt", "content": "x"})),
+            json!({"final": "done"}).to_string(),
+        ],
+        0,
+    )
+}
+
+#[test]
+fn context_layers_add_up_and_name_each_file_read() {
+    use clio_brain::agent::Event;
+    let r = setup("real-01");
+    let ev = events_of(&r, None, None, &mut read_then_final());
+    let ctx: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Context(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ctx.len(), 3, "one report before each model call");
+    assert_eq!(
+        ctx.iter().map(|c| c.call).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    let first = &ctx[0];
+    assert_eq!(first.prompt_version, "clio-agent@3");
+    assert!(first.system > 0 && first.objective > 0 && first.tools > 0);
+    assert_eq!(first.conversation, 0, "nothing said yet");
+    assert!(first.external.is_empty() && first.tool_outputs == 0);
+    assert_eq!(
+        first.total(),
+        first.system + first.objective + first.tools,
+        "the layers are the whole context"
+    );
+    let second = &ctx[1];
+    assert_eq!(second.turns, 1);
+    assert_eq!(second.external.len(), 1);
+    assert_eq!(second.external[0].name, "dates.py");
+    assert!(second.external[0].tokens > 0);
+    let third = &ctx[2];
+    assert_eq!(third.turns, 2);
+    assert!(third.tool_outputs > 0, "the write result is a tool output");
+    // The context only grows, and the fixed layers never change.
+    assert!(first.total() < second.total() && second.total() < third.total());
+    assert_eq!((first.system, first.tools), (third.system, third.tools));
+    assert_eq!(second.external, third.external);
+}
+
+#[test]
+fn the_sum_of_layers_matches_the_text_the_model_gets() {
+    use clio_brain::agent::{Event, approx_tokens};
+    let r = setup("real-01");
+    let mut sizes = Vec::new();
+    let mut inner = read_then_final();
+    let mut model = |m: &[Msg]| {
+        sizes.push(m.iter().map(|x| approx_tokens(&x.content)).sum::<u64>());
+        inner.complete(m).unwrap().text
+    };
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut a = agent(&r, clock(), |_| {});
+    a.observer = Box::new(Recorder(seen.clone()));
+    a.run(&mut model, "mira dates.py").unwrap();
+    let totals: Vec<u64> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Context(c) => Some(c.total()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(totals.len(), sizes.len());
+    for (reported, real) in totals.iter().zip(&sizes) {
+        // Per-message rounding up can differ by a few tokens from counting the whole text.
+        assert!(reported.abs_diff(*real) <= 6, "{reported} vs {real}");
+    }
+}
+
+#[test]
+fn usage_per_call_is_integer_micro_usd_and_adds_up_to_the_outcome() {
+    use clio_brain::agent::{CallUsage, Event};
+    let r = setup("real-01");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut a = agent(&r, clock(), |c| {
+        c.price_in_micro_per_mtok = 3_000_000;
+        c.price_out_micro_per_mtok = 15_000_000;
+    });
+    a.observer = Box::new(Recorder(seen.clone()));
+    let out = a.run(&mut read_then_final(), "mira dates.py").unwrap();
+    let calls: Vec<CallUsage> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Usage(u) => Some(*u),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 3);
+    // Call 1: 1000 in at 3 USD/Mtok + 100 out at 15 USD/Mtok = 3000 + 1500 micro-USD, exact.
+    assert_eq!(
+        (
+            calls[0].input_tokens,
+            calls[0].output_tokens,
+            calls[0].cost_micro
+        ),
+        (1_000, 100, 4_500)
+    );
+    assert_eq!(
+        calls.iter().map(|c| u64::from(c.input_tokens)).sum::<u64>(),
+        out.input_tokens
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|c| u64::from(c.output_tokens))
+            .sum::<u64>(),
+        out.output_tokens
+    );
+    // 4500 + (6000 + 1500) + (9000 + 1500)
+    assert_eq!(
+        calls.iter().map(|c| c.cost_micro).sum::<u64>(),
+        4_500 + 7_500 + 10_500
+    );
+    assert_eq!(out.cost_micro, 22_500);
+    assert!(calls.iter().all(|c| c.retries == 0));
+}
+
+#[test]
+fn debug_events_only_flow_while_the_switch_is_on_and_are_scrubbed() {
+    use clio_brain::agent::Event;
+    use clio_canaries::Canaries;
+    let canaries = Canaries::from_seed(7);
+    let decoy = canaries.value("notion").unwrap().to_owned();
+    let scrubber = clio_vault::Scrubber::default();
+    scrubber.add("notion", &decoy);
+    let is_debug = |e: &Event| matches!(e, Event::Exchange(_) | Event::Decision(_));
+    let script = || {
+        Priced(
+            vec![
+                format!(
+                    "{{\"tool\":\"read_file\",\"args\":{{\"path\":\"dates.py\"}},\"note\":\"{decoy}\"}}"
+                ),
+                call("read_file", json!({"path": "../outside.txt"})),
+                json!({"final": format!("done {decoy}")}).to_string(),
+            ],
+            0,
+        )
+    };
+    // Off, and no switch at all: no debug events.
+    let r = setup("real-01");
+    for debug in [None, Some(false)] {
+        let ev = events_of(&r, debug, Some(scrubber.clone()), &mut script());
+        assert!(!ev.iter().any(is_debug), "{debug:?}");
+    }
+    // On: one exchange per call, one decision per tool call, with the full reason.
+    let ev = events_of(&r, Some(true), Some(scrubber), &mut script());
+    let ex: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Exchange(x) => Some(x.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ex.len(), 3);
+    assert_eq!(ex[0].request.len(), 2, "first call: system + instruction");
+    assert_eq!(
+        ex[1].request.len(),
+        2,
+        "later calls: only what is new (the last answer and the tool result)"
+    );
+    assert_eq!(ex[1].request[0].role, "assistant");
+    assert!(ex[1].request[1].content.contains("Result of read_file"));
+    let dec: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Decision(d) => Some(d.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dec.len(), 2);
+    assert!(dec[1].outcome == clio_gateway::Outcome::Deny && !dec[1].reason.is_empty());
+    assert!(!dec[1].rule.is_empty());
+    // The decoy, plain or encoded, is in none of it.
+    for e in ev.iter().filter(|e| is_debug(e)) {
+        canaries.assert_clean("debug event", &format!("{e:?}"));
+    }
+    assert!(!ex[0].response.contains(&decoy), "{}", ex[0].response);
+}

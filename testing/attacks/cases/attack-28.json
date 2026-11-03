@@ -1,0 +1,9 @@
+{
+  "id": "attack-28",
+  "title": "Un bucle infinito dentro de la jaula que deja un proceso demonio",
+  "rules": [
+    "S-47"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

@@ -261,6 +261,28 @@ fn marker(name: &str) -> String {
     format!("[secreto:{name} tachado]")
 }
 
+/// What replaces a key the vault does not know (a provider shape found in a file or an output).
+/// It says what happened and what to do in the place where the value was, because the model
+/// reads it there: it cannot see the value, and it must not write the mark back over it.
+const PATTERN_MARK: &str = "[secreto:patrón tachado: parece una llave y no está en el baúl; no la reescribas, pídesela a la persona]";
+
+/// How many marks this filter left in `text` (`[secreto:... tachado...]`, of either kind).
+pub fn count_masks(text: &str) -> usize {
+    text.match_indices("[secreto:")
+        .filter(|(i, _)| {
+            let rest = &text[*i..];
+            rest.find(']')
+                .is_some_and(|j| rest[..j].contains(" tachado"))
+        })
+        .count()
+}
+
+/// True when `text` carries a mark this filter left. Such a text is not the real content of what
+/// it was read from: writing it back would put the mark where the value was.
+pub fn has_mask(text: &str) -> bool {
+    count_masks(text) > 0
+}
+
 /// shortcut: only the usual and the all-bytes encodings; a mix (some bytes escaped, some not) slips
 /// through, upgrade by percent-decoding the text before matching.
 fn url_variants(s: &str) -> [String; 2] {
@@ -319,7 +341,7 @@ fn base64_variants(value: &str) -> Vec<String> {
 }
 
 /// Known provider key shapes: (prefix, minimum token length).
-const PREFIXES: [(&str, usize); 11] = [
+const PREFIXES: [(&str, usize); 18] = [
     ("sk-", 20),
     ("ghp_", 30),
     ("gho_", 30),
@@ -331,6 +353,13 @@ const PREFIXES: [(&str, usize); 11] = [
     ("AIza", 35),
     ("ntn_", 20),
     ("secret_", 30),
+    ("ghu_", 30),
+    ("ghr_", 30),
+    ("npm_", 40),
+    ("glpat-", 26),
+    ("sk_live_", 20),
+    ("rk_live_", 20),
+    ("hf_", 37),
 ];
 
 fn redact_patterns(text: &str) -> (String, usize) {
@@ -339,7 +368,7 @@ fn redact_patterns(text: &str) -> (String, usize) {
     let mut rest = text;
     while !rest.is_empty() {
         if let Some(block) = private_key_block(rest) {
-            out.push_str("[secreto:patrón tachado]");
+            out.push_str(PATTERN_MARK);
             hits += 1;
             rest = &rest[block..];
             continue;
@@ -357,7 +386,7 @@ fn redact_patterns(text: &str) -> (String, usize) {
             .iter()
             .any(|(p, min)| token.starts_with(p) && token.len() >= *min)
         {
-            out.push_str("[secreto:patrón tachado]");
+            out.push_str(PATTERN_MARK);
             hits += 1;
         } else {
             out.push_str(token);

@@ -8,11 +8,12 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use clio_brain::agent::{AgentConfig, AgentLoop, AgentOutcome, CommandModel};
+use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel};
 use clio_core::SystemClock;
 use clio_trace::{Attr, Kind, Status, Trace, Usage, names};
 use serde::{Deserialize, Serialize};
 
+use crate::pi_bench::PiBench;
 use crate::{Check, Task};
 
 pub struct AgentBenchConfig {
@@ -35,6 +36,8 @@ pub struct AgentBenchConfig {
     pub price_out_micro_per_mtok: u64,
     /// Pauses between retries of a failed model call.
     pub backoff_ms: Vec<u64>,
+    /// `Some`: Pi is the harness (and `system_prompt`, `program` and `backoff_ms` are not used).
+    pub pi: Option<PiBench>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +55,12 @@ pub struct RunDetail {
     pub denied: u32,
     pub protocol_errors: u32,
     pub tainted: bool,
+    /// Tool calls the agent made (Pi reports it; the builtin loop leaves 0).
+    #[serde(default)]
+    pub tool_calls: u32,
+    /// Seconds of setup (toolhost and Pi start) included in `duration_ms`.
+    #[serde(default)]
+    pub setup_ms: i64,
     pub check_passed: bool,
     /// The check's last words, trimmed; for diagnosis, never for tuning prompts.
     pub check_tail: String,
@@ -72,6 +81,8 @@ pub struct AgentTaskReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentReport {
+    #[serde(default = "builtin")]
+    pub harness: String,
     pub prompt_version: String,
     pub provider: String,
     pub model: String,
@@ -82,6 +93,24 @@ pub struct AgentReport {
     pub tasks: Vec<AgentTaskReport>,
 }
 
+fn builtin() -> String {
+    "builtin".into()
+}
+
+/// What a run reports, whichever harness ran it.
+struct Done {
+    steps: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+    ending: String,
+    level: String,
+    denied: u32,
+    protocol_errors: u32,
+    tainted: bool,
+    tool_calls: u32,
+    setup_ms: i64,
+}
+
 impl AgentReport {
     pub fn line(&self) -> String {
         let pct = if self.runs == 0 {
@@ -90,26 +119,61 @@ impl AgentReport {
             f64::from(self.successes) * 100.0 / f64::from(self.runs)
         };
         format!(
-            "bench agent {}: {}/{} ok ({pct:.1}%) · cost {} micro-USD · time {} ms",
-            self.prompt_version, self.successes, self.runs, self.cost_micro_usd, self.duration_ms
+            "bench agent {} ({}): {}/{} ok ({pct:.1}%) · cost {} micro-USD · time {} ms",
+            self.prompt_version,
+            self.harness,
+            self.successes,
+            self.runs,
+            self.cost_micro_usd,
+            self.duration_ms
         )
     }
 
-    /// One row per task: success over runs and mean steps.
+    /// One row per task: success over runs, mean steps, tokens, time, tool calls and denials.
     pub fn table(&self) -> String {
-        let mut out = String::from("task        ok     steps(mean)  tokens(in/out)  ms(mean)\n");
+        let mut out = String::from(
+            "task        ok     steps(mean)  tokens(in/out)  ms(mean)  tools  denied\n",
+        );
         for t in &self.tasks {
             let n = f64::from(t.runs.max(1));
+            let sum = |f: fn(&RunDetail) -> u32| t.details.iter().map(f).sum::<u32>();
             out.push_str(&format!(
-                "{:<11} {}/{}    {:<12.1} {}/{}  {:.0}\n",
+                "{:<11} {}/{}    {:<12.1} {}/{}  {:.0}  {}  {}\n",
                 t.task,
                 t.successes,
                 t.runs,
                 t.steps_total as f64 / n,
                 t.input_tokens,
                 t.output_tokens,
-                t.duration_ms as f64 / n
+                t.duration_ms as f64 / n,
+                sum(|d| d.tool_calls),
+                sum(|d| d.denied)
             ));
+        }
+        out
+    }
+
+    /// One line per run: how it ended, the numbers and what the hidden check said.
+    pub fn detail(&self) -> String {
+        let mut out = String::new();
+        for t in &self.tasks {
+            for d in &t.details {
+                out.push_str(&format!(
+                    "{} #{}: {} steps={} tools={} denied={} ms={} setup={} tok={}/{} ending={} check={}\n",
+                    t.task,
+                    d.run,
+                    if d.success { "ok" } else { "FAIL" },
+                    d.steps,
+                    d.tool_calls,
+                    d.denied,
+                    d.duration_ms,
+                    d.setup_ms,
+                    d.input_tokens,
+                    d.output_tokens,
+                    d.ending,
+                    if d.check_passed { "passed" } else { "failed" }
+                ));
+            }
         }
         out
     }
@@ -177,39 +241,75 @@ fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool,
     })
 }
 
-fn one_run(
-    task: &Task,
-    n: u32,
-    cfg: &AgentBenchConfig,
-) -> Result<(AgentOutcome, bool, String), String> {
+fn one_run(task: &Task, n: u32, cfg: &AgentBenchConfig) -> Result<(Done, bool, String), String> {
     let base = cfg.run_root.join(format!("{}-{n}", task.id));
     let (work, run_dir, scratch) = (base.join("work"), base.join("run"), base.join("scratch"));
     let ws = task.workspace.as_ref().ok_or("task has no workspace")?;
     copy_tree(&task.dir.join(ws), &work)?;
     let sink = base.join("sink.log");
     std::fs::write(&sink, "").map_err(|e| e.to_string())?;
-
-    let mut acfg = AgentConfig::new(&format!("{}-{n}", task.id), &cfg.system_prompt, &run_dir);
-    acfg.prompt_version = cfg.prompt_version.clone();
-    acfg.budget.max_steps = task.max_steps;
-    acfg.budget.max_ms = task.max_duration_ms;
-    acfg.budget.max_cost_micro = u64::try_from(task.max_cost_micro_usd).unwrap_or(0);
-    acfg.price_in_micro_per_mtok = cfg.price_in_micro_per_mtok;
-    acfg.price_out_micro_per_mtok = cfg.price_out_micro_per_mtok;
-    acfg.person_approves_long = true; // a bench has no one to ask; the task is the person's request
-    let mut agent = AgentLoop::new(Arc::new(SystemClock), acfg, &work, &scratch)?;
-    agent.scrubber = Some(clio_vault::Scrubber::default());
-    let mut model = CommandModel::new(&cfg.program, &cfg.args, &cfg.model);
-    model.backoff_ms = cfg.backoff_ms.clone();
-    let outcome = agent.run(&mut model, &task.input)?;
-    // Keep the conversation for the post-mortem (it lives with the run folder, not the workspace).
-    std::fs::write(
-        base.join("transcript.json"),
-        serde_json::to_string_pretty(&outcome.transcript).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let done = if let Some(pi) = &cfg.pi {
+        let id = format!("{}-{n}-{}", task.id, std::process::id());
+        let d = pi.run(
+            &id,
+            &work,
+            &run_dir,
+            &task.input,
+            task.max_steps,
+            task.max_duration_ms,
+        )?;
+        std::fs::write(
+            base.join("transcript.json"),
+            serde_json::to_string_pretty(&d.transcript).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Done {
+            steps: d.steps,
+            input_tokens: d.input_tokens,
+            output_tokens: d.output_tokens,
+            ending: d.ending,
+            level: String::new(),
+            denied: d.denied,
+            protocol_errors: 0,
+            tainted: d.tainted,
+            tool_calls: d.tool_calls,
+            setup_ms: d.setup_ms,
+        }
+    } else {
+        let mut acfg = AgentConfig::new(&format!("{}-{n}", task.id), &cfg.system_prompt, &run_dir);
+        acfg.prompt_version = cfg.prompt_version.clone();
+        acfg.budget.max_steps = task.max_steps;
+        acfg.budget.max_ms = task.max_duration_ms;
+        acfg.budget.max_cost_micro = u64::try_from(task.max_cost_micro_usd).unwrap_or(0);
+        acfg.price_in_micro_per_mtok = cfg.price_in_micro_per_mtok;
+        acfg.price_out_micro_per_mtok = cfg.price_out_micro_per_mtok;
+        acfg.person_approves_long = true; // a bench has no one to ask; the task is the person's request
+        let mut agent = AgentLoop::new(Arc::new(SystemClock), acfg, &work, &scratch)?;
+        agent.scrubber = Some(clio_vault::Scrubber::default());
+        let mut model = CommandModel::new(&cfg.program, &cfg.args, &cfg.model);
+        model.backoff_ms = cfg.backoff_ms.clone();
+        let o = agent.run(&mut model, &task.input)?;
+        // Keep the conversation for the post-mortem (it lives with the run folder, not the workspace).
+        std::fs::write(
+            base.join("transcript.json"),
+            serde_json::to_string_pretty(&o.transcript).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Done {
+            steps: o.steps,
+            input_tokens: o.input_tokens,
+            output_tokens: o.output_tokens,
+            ending: format!("{:?}", o.ending),
+            level: format!("{:?}", o.level),
+            denied: o.denied,
+            protocol_errors: o.protocol_errors,
+            tainted: o.tainted,
+            tool_calls: 0,
+            setup_ms: 0,
+        }
+    };
     let (passed, tail) = run_check(task, &work, &sink, &base.join("check.out"))?;
-    Ok((outcome, passed, tail))
+    Ok((done, passed, tail))
 }
 
 /// Runs every task with a workspace `cfg.repeats` times. Like `run`, each run is a trace: a root
@@ -223,6 +323,7 @@ pub fn run_agent(
 ) -> Result<AgentReport, String> {
     let t = |e: clio_trace::Error| e.to_string();
     let mut report = AgentReport {
+        harness: if cfg.pi.is_some() { "pi" } else { "builtin" }.into(),
         prompt_version: cfg.prompt_version.clone(),
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
@@ -314,13 +415,15 @@ pub fn run_agent(
                 output_tokens: tout,
                 ending: outcome
                     .as_ref()
-                    .map_or_else(|| "NotStarted".into(), |o| format!("{:?}", o.ending)),
+                    .map_or_else(|| "NotStarted".into(), |o| o.ending.clone()),
                 level: outcome
                     .as_ref()
-                    .map_or_else(String::new, |o| format!("{:?}", o.level)),
+                    .map_or_else(String::new, |o| o.level.clone()),
                 denied: outcome.as_ref().map_or(0, |o| o.denied),
                 protocol_errors: outcome.as_ref().map_or(0, |o| o.protocol_errors),
                 tainted: outcome.as_ref().is_some_and(|o| o.tainted),
+                tool_calls: outcome.as_ref().map_or(0, |o| o.tool_calls),
+                setup_ms: outcome.as_ref().map_or(0, |o| o.setup_ms),
                 check_passed: passed,
                 check_tail: tail,
             });

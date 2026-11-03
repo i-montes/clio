@@ -15,10 +15,11 @@ use clio_trace::{FixedClock, SystemClock, Trace};
 const HELP: &str = "usage: clio-bench <replay|record|real|synthetic-tape|agent> --tasks DIR [--tape FILE] [--prices FILE] \
 [--repeats N] [--trace DB] [--provider P] [--model M] [--cmd PROGRAM [ARG...]] \
 [--baseline FILE --thresholds FILE] [--save-baseline FILE] \
-(agent: [--prompt FILE] [--tags A,B] [--only ID,ID] [--keep DIR]) \
+(agent: [--harness builtin|pi] [--prompt FILE] [--tags A,B] [--only ID,ID] [--keep DIR]) \
 (--cmd takes the rest of the line, so it goes last)";
 
-const FLAGS: [&str; 15] = [
+const FLAGS: [&str; 16] = [
+    "harness",
     "prompt",
     "tags",
     "only",
@@ -182,22 +183,42 @@ fn agent_mode(
             .map(|v| v.split(',').map(str::to_owned).collect())
             .unwrap_or_default()
     };
-    let cmd = flags
-        .get("cmd")
-        .filter(|v| !v.is_empty())
-        .ok_or("missing --cmd PROGRAM")?;
+    let harness = one("harness").unwrap_or_else(|| "builtin".into());
+    if !["builtin", "pi"].contains(&harness.as_str()) {
+        return Err(format!(
+            "--harness: {harness:?} is not valid (builtin or pi)"
+        ));
+    }
+    let pi_harness = harness == "pi";
+    // Pi talks to the provider itself: --cmd is the builtin loop's model adapter.
+    let no_cmd = Vec::new();
+    let cmd = flags.get("cmd").filter(|v| !v.is_empty());
+    let cmd = match (cmd, pi_harness) {
+        (Some(c), _) => c,
+        (None, true) => &no_cmd,
+        (None, false) => return Err("missing --cmd PROGRAM".into()),
+    };
     let provider = one("provider").unwrap_or_else(|| "opencode-go".into());
     let model = one("model").unwrap_or_else(|| "beam-free".into());
-    let prompt_path =
-        PathBuf::from(one("prompt").unwrap_or_else(|| "prompts/system/clio-agent@2.md".into()));
-    let system_prompt = std::fs::read_to_string(&prompt_path)
-        .map_err(|e| format!("{}: {e}", prompt_path.display()))?;
-    // The first line is `version: N`; the prompt name is the file name before the `@`.
-    let version = prompt_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("agent")
-        .to_owned();
+    // Pi runs with the prompt the guard checks (clio-agent@4); --prompt is the builtin loop's.
+    let (system_prompt, version) = if pi_harness {
+        (
+            String::new(),
+            clio_brain::pi::session::PROMPT_NAME.to_owned(),
+        )
+    } else {
+        let prompt_path =
+            PathBuf::from(one("prompt").unwrap_or_else(|| "prompts/system/clio-agent@2.md".into()));
+        let text = std::fs::read_to_string(&prompt_path)
+            .map_err(|e| format!("{}: {e}", prompt_path.display()))?;
+        // The prompt name is the file name (`clio-agent@2`).
+        let v = prompt_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("agent")
+            .to_owned();
+        (text, v)
+    };
     let prices: Vec<Price> =
         serde_json::from_str(&std::fs::read_to_string(need("prices")?).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -219,13 +240,14 @@ fn agent_mode(
     };
     let trace = Trace::open(&trace_path, SystemClock).map_err(|e| e.to_string())?;
     set_prices(&trace, &need("prices")?)?;
+    let (provider_name, model_name) = (provider.clone(), model.clone());
     let cfg = clio_bench::agent_bench::AgentBenchConfig {
         provider,
         model,
         system_prompt,
         prompt_version: version,
-        program: cmd[0].clone(),
-        args: cmd[1..].to_vec(),
+        program: cmd.first().cloned().unwrap_or_default(),
+        args: cmd.get(1..).unwrap_or_default().to_vec(),
         repeats: one("repeats").map_or(Ok(1), |n| n.parse::<u32>().map_err(|e| e.to_string()))?,
         tags: list("tags"),
         only: list("only"),
@@ -234,10 +256,20 @@ fn agent_mode(
         price_in_micro_per_mtok: price.input_per_mtok,
         price_out_micro_per_mtok: price.output_per_mtok,
         backoff_ms: vec![5_000, 20_000, 60_000],
+        pi: if pi_harness {
+            Some(clio_bench::pi_bench::PiBench::from_env(
+                &provider_name,
+                &model_name,
+                (price.input_per_mtok, price.output_per_mtok),
+            )?)
+        } else {
+            None
+        },
     };
     let report = clio_bench::agent_bench::run_agent(all, &cfg, &trace)?;
     println!("{}", report.line());
     print!("{}", report.table());
+    print!("{}", report.detail());
     if let Some(path) = one("save-baseline") {
         std::fs::write(
             &path,

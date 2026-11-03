@@ -1,10 +1,12 @@
-//! `clio doctor`: Clio's own checks, then the host script of `infra/local/check-host.sh`.
+//! `clio doctor`: Clio's own checks, then the host script of `infra/local/check-host.sh` (run in
+//! its embedded mode, which leaves out the checks Clio did itself: each appears once).
 //! `collect` gathers the checks as data; the plain command and the TUI both show them.
 
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use clio_vault::Scrubber;
 use serde_json::json;
 
 use super::home::{Config, Dirs, KeyStatus, key_status};
@@ -26,6 +28,8 @@ pub struct Report {
     pub checks: Vec<Check>,
     /// The host script that ran, if it was found.
     pub host_script: Option<String>,
+    /// The jail: whether `run_tests` can be offered, why not, and every self-test check.
+    pub jail: Option<serde_json::Value>,
 }
 
 impl Report {
@@ -139,24 +143,184 @@ fn public_listeners() -> Vec<String> {
     out
 }
 
+/// Folders inside the data folder that hold the person's own files, not what Clio wrote: the
+/// copy of a project, the originals `apply` saved, and what npm installed for Pi.
+const NOT_CLIO_OUTPUT: [&str; 4] = ["sandbox", "scratch", "backup", "node_modules"];
+/// A file bigger than this is not read.
+const AUDIT_MAX_BYTES: u64 = 32 << 20;
+
+fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<PathBuf>, usize)) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.filter_map(Result::ok) {
+        let p = e.path();
+        let Ok(t) = e.file_type() else { continue };
+        if t.is_dir() {
+            let skip = e
+                .file_name()
+                .to_str()
+                .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
+            if !skip && depth < 8 {
+                audit_walk(&p, depth + 1, f, out);
+            }
+        } else if t.is_file() {
+            if e.metadata().map_or(0, |m| m.len()) > AUDIT_MAX_BYTES {
+                out.2 += 1;
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else {
+                out.2 += 1;
+                continue;
+            };
+            out.0 += 1;
+            if !f.find(&String::from_utf8_lossy(&bytes)).is_empty() {
+                out.1.push(p);
+            }
+        }
+    }
+}
+
+/// S-18: nothing shaped like a key may sit in what Clio wrote (run logs, transcripts, Pi's
+/// sessions, the memory). Looks for the key shapes the output filter knows; the paths are shown,
+/// never the values. The vault's own values need its unlocked server: `clio-vault scan`.
+fn data_audit(o: &mut Report, data: &Path) {
+    let mut found = (0, Vec::new(), 0);
+    audit_walk(data, 0, &Scrubber::default(), &mut found);
+    let (read, mut hits, unread) = found;
+    hits.sort();
+    if hits.is_empty() {
+        o.say(
+            Level::Pass,
+            format!(
+                "nada con forma de llave en lo que Clio escribió ({read} archivos revisados, S-18)"
+            ),
+            None,
+        );
+    } else {
+        let list: Vec<String> = hits
+            .iter()
+            .take(8)
+            .map(|p| sanitize::line(&p.strip_prefix(data).unwrap_or(p).display().to_string()))
+            .collect();
+        let more = hits.len().saturating_sub(list.len());
+        o.say(
+            Level::Fail,
+            format!(
+                "{} archivo(s) de Clio tienen algo con forma de llave (S-18): {}{}",
+                hits.len(),
+                list.join(", "),
+                if more > 0 { format!(" y {more} más") } else { String::new() }
+            ),
+            Some(
+                "Dentro de ~/.local/share/clio. Si es el log de efectos de un run de una versión anterior, borra ese archivo; si no, borra el run (`clio runs`). Para valores del baúl: `clio-vault scan`.".into(),
+            ),
+        );
+    }
+    if unread > 0 {
+        o.say(
+            Level::Warn,
+            format!(
+                "{unread} archivo(s) de Clio no se pudieron revisar (muy grandes o sin permiso)"
+            ),
+            None,
+        );
+    }
+}
+
+/// The jail's self-test, one line per check. A FAIL here closes `run_tests`.
+fn jail_lines(o: &mut Report) {
+    use super::jail::{Status, describe};
+    let st = super::jail::check_fresh();
+    let (bwrap, test) = match &st {
+        Status::Unavailable(why) => {
+            o.say(
+                Level::Warn,
+                format!("jaula: run_tests desactivada, {why}"),
+                Some(
+                    "Hace falta Linux, bubblewrap (bwrap), prlimit (util-linux), python3 y espacios de nombres de usuario sin privilegios; ver docs/uso-local.md.".into(),
+                ),
+            );
+            o.jail = Some(json!({"available": false, "reason": why, "checks": []}));
+            return;
+        }
+        Status::Ready { bwrap, test } | Status::Failed { bwrap, test } => (bwrap, test),
+    };
+    o.say(
+        Level::Pass,
+        format!("jaula: bwrap {bwrap} arranca con espacios de nombres sin privilegios"),
+        None,
+    );
+    for c in &test.checks {
+        if c.passed {
+            o.say(Level::Pass, format!("jaula: {}", describe(c)), None);
+        } else {
+            o.say(
+                Level::Fail,
+                format!("jaula: FALLÓ, {} ({})", describe(c), c.detail),
+                Some("run_tests queda desactivada hasta que esto pase; no uses la jaula.".into()),
+            );
+        }
+    }
+    o.say(
+        if st.ready() { Level::Pass } else { Level::Fail },
+        if st.ready() {
+            "jaula: autoprueba completa, run_tests disponible para el agente".into()
+        } else {
+            "jaula: la autoprueba falló, run_tests NO se ofrece al agente".into()
+        },
+        None,
+    );
+    let checks: Vec<_> = test
+        .checks
+        .iter()
+        .map(|c| json!({"name": c.name, "passed": c.passed, "detail": c.detail}))
+        .collect();
+    o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
+}
+
+/// Pi's own jail (ADR 0009): on Linux Pi starts only inside it.
+fn pi_jail_line(o: &mut Report) {
+    use clio_brain::pi::jail::{Status, status};
+    match status() {
+        Status::Ready(v) => o.say(
+            Level::Pass,
+            format!("jaula de Pi: bwrap {v} arranca; Pi corre sin ver el baúl ni tus archivos y solo alcanza al proveedor del modelo, y la autoprueba corre en cada arranque (ADR 0009)"),
+            None,
+        ),
+        Status::Off => o.say(
+            Level::Fail,
+            "jaula de Pi: CLIO_PI_JAIL=off, Pi corre con tus mismos permisos y puede ver el baúl y tus archivos".into(),
+            Some("Quita CLIO_PI_JAIL=off del entorno.".into()),
+        ),
+        Status::Unsupported => o.say(
+            Level::Warn,
+            "jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap), Pi corre con tus mismos permisos".into(),
+            None,
+        ),
+        Status::Unavailable(why) => o.say(
+            Level::Fail,
+            format!("jaula de Pi: no puede arrancar aquí, Pi NO arrancará ({why})"),
+            Some("Hace falta bubblewrap (bwrap), prlimit (util-linux) y espacios de nombres de usuario sin privilegios; ver docs/decisions/0009-pi-runs-inside-a-jail.md.".into()),
+        ),
+    }
+}
+
 fn find_host_check() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CLIO_HOST_CHECK") {
         return Some(PathBuf::from(p));
     }
-    let rel = Path::new("infra/local/check-host.sh");
-    let mut starts: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        starts.extend(exe.parent().map(Path::to_path_buf));
-    }
-    starts.extend(std::env::current_dir().ok());
-    starts
-        .iter()
-        .flat_map(|s| s.ancestors().map(|d| d.join(rel)).collect::<Vec<_>>())
-        .find(|c| c.is_file())
+    // Only next to the executable, never in the working directory: the script runs outside the jail.
+    super::find_above_exe(Path::new("infra/local/check-host.sh"))
 }
 
 fn host_lines(o: &mut Report, script: &Path) {
-    let out = match Command::new("bash").arg(script).output() {
+    // The script skips what `collect` already checked itself, so nothing appears twice.
+    let out = match Command::new("bash")
+        .arg(script)
+        .env("CLIO_DOCTOR_EMBEDDED", "1")
+        .output()
+    {
         Ok(out) => out,
         Err(e) => {
             o.say(
@@ -226,6 +390,7 @@ pub fn collect(dirs: &Dirs) -> Report {
             Some("Entra por una sesión normal (login) para que exista.".into()),
         );
     }
+    data_audit(&mut o, &dirs.data);
     match Config::load(dirs) {
         Ok(c) => {
             o.say(
@@ -313,6 +478,11 @@ pub fn collect(dirs: &Dirs) -> Report {
             Some("Detén ese proceso: Clio no debe escuchar en una dirección pública.".into()),
         );
     }
+    for (level, msg, hint) in super::pi::checks(dirs) {
+        o.say(level, msg, hint);
+    }
+    jail_lines(&mut o);
+    pi_jail_line(&mut o);
     match find_host_check() {
         Some(script) => {
             o.host_script = Some(script.display().to_string());
@@ -351,6 +521,7 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
             "warn": r.count(Level::Warn),
             "fail": r.count(Level::Fail),
             "host_script": r.host_script,
+            "jail": r.jail,
             "checks": checks,
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());

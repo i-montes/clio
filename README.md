@@ -4,7 +4,9 @@ Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules 
 
 ## Architecture
 
-![Clio architecture](docs/clio-architecture.svg)
+![Clio architecture, design v2](docs/clio-architecture.svg)
+
+Design v2, aligned with [ADR 0006](docs/decisions/0006-local-first-vps-optional.md) (the host is this PC; a VPS is optional) and [ADR 0007](docs/decisions/0007-pi-is-the-agent-harness.md) (Pi keeps its sessions; Clio lists and opens them).
 
 ## Setup
 

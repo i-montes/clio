@@ -1,0 +1,10 @@
+{
+  "id": "attack-36",
+  "title": "Un nombre de archivo o un texto con secuencias de escape que se intenta guardar como recuerdo y luego se muestra en la TUI",
+  "rules": [
+    "S-25",
+    "S-08"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

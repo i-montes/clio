@@ -1,21 +1,33 @@
 //! `clio` with no arguments in a terminal: the TUI.
 //!
 //! `app` holds the state and the pure `update`; the screens (`home`, `new_run`, `live`, `detail`,
-//! `doctor`) hold their state, keys and drawing; `sanitize` cleans every outside text before it is
-//! drawn; `theme` has the colors. This file is the only one that touches the terminal and starts
+//! `doctor`, and the views of `meter`) hold their state, keys and drawing; `keys` is the one key
+//! map; `status` is the status bar; `sanitize` cleans every outside text before it is drawn;
+//! `theme` has the colors and symbols. This file is the only one that touches the terminal and starts
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod chat;
+pub mod debug_view;
 pub mod detail;
 pub mod doctor;
 pub mod home;
+pub mod keys;
 pub mod live;
+pub mod memory;
+pub mod meter;
 pub mod new_run;
 pub mod sanitize;
+pub mod sessions;
+pub mod status;
 pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_memory;
+#[cfg(test)]
+mod tests_views;
 
 use std::io::{IsTerminal, Stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -26,6 +38,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clio_brain::agent::{Event, Observer};
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
+use clio_brain::pi::rpc::Cancel;
+use clio_memory::Signal;
 use crossterm::event::{self, Event as Term, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -34,14 +49,24 @@ use crossterm::{cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use self::app::{App, Bg, Cmd, Input, Planned, draw, update};
+use self::app::{App, Bg, ChatInfo, Cmd, Input, OpenTarget, Planned, draw, update};
 use self::detail::Detail;
 use self::home::{Header, KeyState};
+use self::memory::MemoryData;
 use self::new_run::Preview;
 use super::apply;
+use super::chat::{Harness, Session, SessionSource, Target};
+use super::debug::DebugCtl;
 use super::home::{Config, Dirs, KeyStatus, key_status};
 use super::runs::{self, RunOpts};
+use super::usage::{self, RunLimits, RunUsage};
 use super::{Res, work};
+
+fn memory_id(s: &str) -> Result<clio_memory::MemoryId, String> {
+    s.parse::<i64>()
+        .map(clio_memory::MemoryId)
+        .map_err(|_| format!("id de recuerdo no válido: {s}"))
+}
 
 static IN_TUI: AtomicBool = AtomicBool::new(false);
 
@@ -103,20 +128,29 @@ impl Drop for Guard {
 }
 
 /// Opens the TUI and returns the exit code.
-pub fn run(dirs: Dirs) -> Res<i32> {
+pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     install_panic_hook();
     let (_guard, mut term) = Guard::enter()?;
     let (tx, rx) = channel::<Input>();
+    let dirs = Arc::new(dirs);
     let ctx = Ctx {
-        dirs: Arc::new(dirs),
+        sources: Arc::new(super::chat::sources(dirs.clone())),
+        chat: Arc::default(),
+        chat_cancel: Mutex::new(Cancel::new()),
+        dirs,
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
+        debug: DebugCtl::new(debug, false),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
-    for c in App::start_cmds() {
+    app.debug = debug;
+    if harness == Harness::Pi {
+        app.use_pi();
+    }
+    for c in app.start_cmds() {
         ctx.exec(c);
     }
     let t0 = Instant::now();
@@ -126,9 +160,15 @@ pub fn run(dirs: Dirs) -> Res<i32> {
         panic!("deliberate panic to test that the terminal is restored");
     }
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
+    // Only for the pseudo-terminal tests (debug builds): the text of every frame, to a file.
+    let dump = std::env::var_os("CLIO_TUI_SCREEN_DUMP").filter(|_| cfg!(debug_assertions));
     while !app.quit {
-        term.draw(|f| draw(f, &app))
+        let frame = term
+            .draw(|f| draw(f, &app))
             .map_err(|e| format!("terminal: {e}"))?;
+        if let Some(path) = &dump {
+            dump_screen(frame.buffer, std::path::Path::new(path));
+        }
         let mut inputs: Vec<Input> = Vec::new();
         if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
@@ -145,17 +185,61 @@ pub fn run(dirs: Dirs) -> Res<i32> {
             let (next, cmds) = update(app, i);
             app = next;
             for c in cmds {
-                ctx.exec(c);
+                if c == Cmd::Redraw {
+                    // Not `Terminal::clear`: it asks the terminal where the cursor is and waits
+                    // for an answer that some terminals never give. A new `Terminal` has empty
+                    // buffers, so the next draw repaints every cell.
+                    let e = |x: std::io::Error| format!("terminal: {x}");
+                    execute!(
+                        std::io::stdout(),
+                        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                    )
+                    .map_err(e)?;
+                    term = Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(e)?;
+                } else {
+                    ctx.exec(c);
+                }
             }
         }
     }
+    // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
+    ctx.stop_chat_now();
     Ok(0)
 }
 
+/// The screen as plain text, replaced atomically.
+fn dump_screen(buf: &ratatui::buffer::Buffer, path: &std::path::Path) {
+    let a = buf.area;
+    let mut text = String::new();
+    for y in a.y..a.y + a.height {
+        for x in a.x..a.x + a.width {
+            text.push_str(buf[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// The open Pi session, if any, and which `ChatOpen` is the current one: an open that finishes
+/// after the person left (or after a newer one started) shuts its own session down.
+#[derive(Default)]
+struct Slot {
+    latest: u64,
+    session: Option<Arc<dyn Session>>,
+}
+
 struct Ctx {
+    sources: Arc<Vec<Box<dyn SessionSource>>>,
+    chat: Arc<Mutex<Slot>>,
+    chat_cancel: Mutex<Cancel>,
     dirs: Arc<Dirs>,
     tx: Sender<Input>,
     cancel: Mutex<Arc<AtomicBool>>,
+    /// The debug switch the agent reads at every call; `Ctrl-D` flips it.
+    debug: DebugCtl,
 }
 
 /// Sends what the agent does to the screen.
@@ -177,10 +261,14 @@ fn expand(dir: &str, home: &std::path::Path) -> PathBuf {
 }
 
 fn header(dirs: &Dirs) -> Header {
-    let (provider, model, config_error) = match Config::load(dirs) {
-        Ok(c) => (c.model.provider, c.model.model, None),
-        Err(e) => (String::new(), String::new(), Some(e)),
+    let (provider, model, config_error, limits) = match Config::load(dirs) {
+        Ok(c) => {
+            let l = RunLimits::of(&c);
+            (c.model.provider, c.model.model, None, l)
+        }
+        Err(e) => (String::new(), String::new(), Some(e), RunLimits::default()),
     };
+    let (window, window_known) = usage::window_for(dirs, &provider, &model);
     let key = match key_status(dirs) {
         KeyStatus::Env | KeyStatus::File { open_mode: None } => KeyState::Present,
         KeyStatus::File { open_mode: Some(_) } => KeyState::OpenPermissions,
@@ -198,11 +286,13 @@ fn header(dirs: &Dirs) -> Header {
         "sin crear (opcional)"
     };
     Header {
-        provider,
         model,
         key,
         vault: vault.into(),
         config_error,
+        limits,
+        window,
+        window_known,
     }
 }
 
@@ -216,7 +306,41 @@ fn check(dirs: &Dirs, dir: &str) -> Result<Preview, String> {
     Ok(Preview::new(ws.display().to_string(), scan))
 }
 
+impl Drop for Ctx {
+    fn drop(&mut self) {
+        self.stop_chat_now();
+    }
+}
+
 impl Ctx {
+    /// Makes `latest` the current open and takes the open session out, if any.
+    fn take_chat(&self, latest: u64) -> Option<Arc<dyn Session>> {
+        let mut g = self
+            .chat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.latest = latest;
+        g.session.take()
+    }
+
+    /// Stops the session, here and now (the interface is leaving).
+    fn stop_chat_now(&self) {
+        if let Some(s) = self.take_chat(0) {
+            s.shutdown();
+        }
+    }
+
+    /// Stops the session on its own thread (shutting down can take a moment).
+    fn stop_chat_later(&self, latest: u64) {
+        if let Some(s) = self.take_chat(latest) {
+            std::thread::spawn(move || s.shutdown());
+        }
+    }
+
+    fn current_chat(&self) -> Option<Arc<dyn Session>> {
+        self.chat.lock().ok().and_then(|g| g.session.clone())
+    }
+
     fn send(&self, b: Bg) {
         let _ = self.tx.send(Input::Bg(b));
     }
@@ -245,7 +369,13 @@ impl Ctx {
     fn exec(&self, cmd: Cmd) {
         match cmd {
             Cmd::LoadHome => self.spawn(
-                |d, _| (header(d), runs::list_info(d, Some(100)).unwrap_or_default()),
+                |d, _| {
+                    let list = runs::list_info(d, Some(100)).unwrap_or_default();
+                    let last = list
+                        .first()
+                        .map_or_else(RunUsage::default, |r| RunUsage::load(&d.runs.join(&r.id)));
+                    (header(d), list, last)
+                },
                 |r| match r {
                     Ok(v) => Bg::Home(Box::new(v)),
                     Err(e) => Bg::Done(Err(e)),
@@ -265,6 +395,132 @@ impl Ctx {
                     result: r.and_then(|x| x),
                 },
             ),
+            Cmd::LoadMemory => self.spawn(
+                |d, _| MemoryData::load(d),
+                |r| Bg::Memory(r.and_then(|x| x).map(Box::new)),
+            ),
+            Cmd::MemoryPromote { id } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    link.promote(memory_id(&id)?)?;
+                    Ok::<_, String>(format!("aprobado: m{id}; desde ahora se recuerda"))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::MemoryArchive { id } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    link.archive(memory_id(&id)?)?;
+                    Ok::<_, String>(format!("archivado: m{id}; ya no se recuerda"))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::MemoryFeedback { id, useful } => self.spawn(
+                move |d, _| {
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let signal = if useful {
+                        Signal::Useful
+                    } else {
+                        Signal::Wrong
+                    };
+                    link.feedback(clio_memory::MemoryId(id), signal)?;
+                    Ok::<_, String>(format!(
+                        "anotado para m{id}: {} (nunca borra el recuerdo)",
+                        if useful { "útil" } else { "equivocado" }
+                    ))
+                },
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::Redraw => {}
+            Cmd::LoadSessions => {
+                let sources = self.sources.clone();
+                self.spawn(
+                    move |_, _| sources.iter().flat_map(|s| s.list()).collect::<Vec<_>>(),
+                    |r| match r {
+                        Ok(rows) => Bg::Sessions(rows),
+                        Err(e) => Bg::Done(Err(e)),
+                    },
+                );
+            }
+            Cmd::ChatOpen { seq, target } => {
+                self.stop_chat_later(seq);
+                let (sources, slot) = (self.sources.clone(), self.chat.clone());
+                self.spawn(
+                    move |d, _| -> Result<Box<ChatInfo>, String> {
+                        let target = match target {
+                            OpenTarget::New { project } => Target::New {
+                                project: expand(&project, &d.home),
+                            },
+                            OpenTarget::Existing { reference } => Target::Existing { reference },
+                        };
+                        // The local source is the first; the remote rows are never openable.
+                        let opened = sources
+                            .first()
+                            .ok_or("no hay fuente de sesiones")?
+                            .open(&target)?;
+                        let mut g = slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if g.latest != seq {
+                            drop(g);
+                            opened.session.shutdown();
+                            return Err("cancelado".into());
+                        }
+                        g.session = Some(opened.session.clone());
+                        Ok(Box::new(ChatInfo::from(&opened)))
+                    },
+                    move |r| Bg::ChatOpened {
+                        seq,
+                        result: r.and_then(|x| x),
+                    },
+                );
+            }
+            Cmd::ChatSend { text } => {
+                let Some(session) = self.current_chat() else {
+                    self.send(Bg::Done(Err("no hay una sesión abierta".into())));
+                    return;
+                };
+                let cancel = Cancel::new();
+                if let Ok(mut c) = self.chat_cancel.lock() {
+                    *c = cancel.clone();
+                }
+                self.spawn(
+                    move |_, tx| {
+                        let mut forward = |e: &clio_brain::pi::rpc::Event| {
+                            let _ = tx.send(Input::Bg(Bg::ChatEvent(e.clone())));
+                        };
+                        let result = session
+                            .run_prompt(&text, &cancel, &mut forward)
+                            .map_err(|e| e.to_string());
+                        (result, session.refresh().ok())
+                    },
+                    |r| match r {
+                        Ok((result, refresh)) => Bg::ChatSettled { result, refresh },
+                        Err(e) => Bg::ChatSettled {
+                            result: Err(e),
+                            refresh: None,
+                        },
+                    },
+                );
+            }
+            Cmd::ChatSteer { text } => {
+                if let Some(session) = self.current_chat() {
+                    self.spawn(
+                        move |_, _| session.steer(&text).map_err(|e| e.to_string()),
+                        |r| match r.and_then(|x| x) {
+                            Ok(()) => Bg::Done(Ok("mensaje enviado al agente".into())),
+                            Err(e) => Bg::Done(Err(e)),
+                        },
+                    );
+                }
+            }
+            Cmd::ChatAbort => {
+                if let Ok(c) = self.chat_cancel.lock() {
+                    c.cancel();
+                }
+            }
+            Cmd::ChatClose => self.stop_chat_later(0),
+            Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
                 if let Ok(flag) = self.cancel.lock() {
                     flag.store(true, Ordering::Relaxed);
@@ -275,6 +531,7 @@ impl Ctx {
                 if let Ok(mut slot) = self.cancel.lock() {
                     *slot = flag.clone();
                 }
+                let dbg = self.debug.clone();
                 self.spawn(
                     move |d, tx| {
                         let opts = RunOpts {
@@ -287,10 +544,24 @@ impl Ctx {
                         let _ = tx.send(Input::Bg(Bg::Started {
                             id: p.id.clone(),
                             files: p.scan.files.len(),
-                            max_steps: p.max_steps,
-                            max_seconds: p.max_seconds,
+                            workspace: p.ws.display().to_string(),
+                            usage: RunUsage::new(
+                                p.window,
+                                p.window_known,
+                                RunLimits {
+                                    max_steps: p.max_steps,
+                                    max_seconds: p.max_seconds,
+                                    max_cost_micro: p.max_cost_micro,
+                                },
+                            ),
                         }));
-                        runs::execute(&p, &instruction, Box::new(Forward(tx.clone())), Some(flag))
+                        runs::execute(
+                            &p,
+                            &instruction,
+                            Box::new(Forward(tx.clone())),
+                            Some(flag),
+                            &dbg,
+                        )
                     },
                     |r| Bg::Finished(r.and_then(|x| x).map(Box::new)),
                 );
