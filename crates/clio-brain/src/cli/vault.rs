@@ -183,7 +183,7 @@ fn stop(dirs: &Dirs) -> Res<()> {
 pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
     if args.is_empty() {
         return Err(
-            "usage: clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME"
+            "usage: clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME|upgrade-kdf"
                 .into(),
         );
     }
@@ -191,7 +191,7 @@ pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
     match sub.as_str() {
         "start" => start(dirs),
         "stop" => stop(dirs),
-        "status" | "list" | "revoke" | "put" => {
+        "status" | "list" | "revoke" | "put" | "upgrade-kdf" => {
             let p = paths(dirs)?;
             if running(&p).is_none() {
                 return Err("the vault is not running (clio vault start)".into());
@@ -203,7 +203,11 @@ pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
             ];
             full.extend(args);
             // For `put` the value is read here (echo off) so the child never touches the terminal.
-            let value = (sub == "put").then(|| read_secret("value")).transpose()?;
+            let value = match sub.as_str() {
+                "put" => Some(read_secret("value")?),
+                "upgrade-kdf" => Some(read_secret("vault passphrase")?),
+                _ => None,
+            };
             call(&full, value.as_deref())
         }
         other => Err(format!("unknown vault command {other:?}")),

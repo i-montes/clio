@@ -8,6 +8,7 @@
 #[cfg(unix)]
 mod client;
 mod crypto;
+mod kdf;
 pub mod proto;
 mod scrub;
 #[cfg(unix)]
@@ -23,6 +24,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+pub use kdf::Kdf;
 
 const FILE_CHECK: &[u8] = b"clio-vault:v1";
 /// A token is short-lived (S-21): an hour at most, and at least a millisecond.
@@ -270,6 +273,9 @@ struct Stored {
 
 #[derive(Serialize, Deserialize)]
 struct FileData {
+    /// Missing in a file written before the cost was stored: those used `Kdf::LEGACY`.
+    #[serde(default)]
+    kdf: Option<Kdf>,
     salt: Vec<u8>,
     check: Vec<u8>,
     secrets: Vec<Stored>,
@@ -283,6 +289,7 @@ struct TokenRec {
 
 struct Inner {
     key: Option<[u8; crypto::KEY_LEN]>,
+    kdf: Kdf,
     salt: Vec<u8>,
     check: Vec<u8>,
     secrets: BTreeMap<String, Stored>,
@@ -338,12 +345,28 @@ impl Vault {
         passphrase: &str,
         clock: Arc<dyn Clock>,
     ) -> Result<(Self, PersonCap)> {
+        Self::init_with(path, passphrase, clock, Kdf::CURRENT)
+    }
+
+    /// `init` with a chosen cost. Only the tests ask for the old one, to make a legacy file.
+    pub(crate) fn init_with(
+        path: Option<&Path>,
+        passphrase: &str,
+        clock: Arc<dyn Clock>,
+        kdf: Kdf,
+    ) -> Result<(Self, PersonCap)> {
         if path.is_some_and(Path::exists) {
             return Err(VaultError::Io("vault file already exists".into()));
         }
         let salt = crypto::random::<16>()?.to_vec();
-        let key = crypto::derive(passphrase, &salt)?;
-        let v = Self::build(path, clock, salt, crypto::seal(&key, b"check", FILE_CHECK)?);
+        let key = crypto::derive(passphrase, &salt, kdf)?;
+        let v = Self::build(
+            path,
+            clock,
+            kdf,
+            salt,
+            crypto::seal(&key, b"check", FILE_CHECK)?,
+        );
         {
             let mut i = v.inner();
             i.key = Some(key);
@@ -357,7 +380,8 @@ impl Vault {
     pub fn open(path: &Path, clock: Arc<dyn Clock>) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(|e| VaultError::Io(e.to_string()))?;
         let data: FileData = serde_json::from_slice(&bytes).map_err(|_| VaultError::Format)?;
-        let v = Self::build(Some(path), clock, data.salt, data.check);
+        let kdf = data.kdf.unwrap_or(Kdf::LEGACY).check()?;
+        let v = Self::build(Some(path), clock, kdf, data.salt, data.check);
         v.inner().secrets = data
             .secrets
             .into_iter()
@@ -366,7 +390,13 @@ impl Vault {
         Ok(v)
     }
 
-    fn build(path: Option<&Path>, clock: Arc<dyn Clock>, salt: Vec<u8>, check: Vec<u8>) -> Self {
+    fn build(
+        path: Option<&Path>,
+        clock: Arc<dyn Clock>,
+        kdf: Kdf,
+        salt: Vec<u8>,
+        check: Vec<u8>,
+    ) -> Self {
         let now = clock.now_ms();
         Self {
             scrubber: Scrubber::new(clock.clone()),
@@ -374,6 +404,7 @@ impl Vault {
             path: path.map(Path::to_path_buf),
             inner: Mutex::new(Inner {
                 key: None,
+                kdf,
                 salt,
                 check,
                 secrets: BTreeMap::new(),
@@ -413,7 +444,7 @@ impl Vault {
 
     fn unlock_with(&self, passphrase: &str, eager: Option<&[&str]>) -> Result<PersonCap> {
         let mut i = self.inner();
-        let key = crypto::derive(passphrase, &i.salt)?;
+        let key = crypto::derive(passphrase, &i.salt, i.kdf)?;
         if crypto::open(&key, b"check", &i.check).as_deref() != Some(FILE_CHECK) {
             return Err(VaultError::BadPassphrase);
         }
@@ -460,14 +491,24 @@ impl Vault {
 
     /// Writes the encrypted file: temp file with mode 0600, synced, then renamed, then the folder synced.
     fn save(&self, i: &Inner) -> Result<()> {
+        self.write_state(i.kdf, &i.salt, &i.check, &i.secrets)
+    }
+
+    fn write_state(
+        &self,
+        kdf: Kdf,
+        salt: &[u8],
+        check: &[u8],
+        secrets: &BTreeMap<String, Stored>,
+    ) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         let data = FileData {
-            salt: i.salt.clone(),
-            check: i.check.clone(),
-            secrets: i
-                .secrets
+            kdf: Some(kdf),
+            salt: salt.to_vec(),
+            check: check.to_vec(),
+            secrets: secrets
                 .values()
                 .map(|s| Stored {
                     meta: s.meta.clone(),
@@ -489,6 +530,66 @@ impl Vault {
                 .map_err(io)?;
         }
         Ok(())
+    }
+
+    /// The cost the passphrase is stretched with (see `Kdf`).
+    pub fn kdf(&self) -> Kdf {
+        self.inner().kdf
+    }
+
+    /// Raises the cost of the passphrase to `Kdf::CURRENT` on a vault made with a lower one: a new
+    /// salt, a new key, every sealed value opened with the old key and sealed again. Only the
+    /// person, with the passphrase (it is the only way to a new key). All or nothing: the new file
+    /// replaces the old by a rename, after the old one was copied next to it as `*.pre-argon2`
+    /// (same permissions: it still holds every secret, sealed with the old cost; delete it when
+    /// the vault has been checked), and a value that cannot be opened stops the whole thing before
+    /// anything is written. Returns `false` when there was nothing to do. A vault that was
+    /// unlocked stays unlocked; one that was locked stays locked.
+    pub fn upgrade_kdf(&self, _cap: &PersonCap, passphrase: &str) -> Result<bool> {
+        let mut i = self.inner();
+        let old = crypto::derive(passphrase, &i.salt, i.kdf)?;
+        if crypto::open(&old, b"check", &i.check).as_deref() != Some(FILE_CHECK) {
+            return Err(VaultError::BadPassphrase);
+        }
+        if i.kdf == Kdf::CURRENT {
+            return Ok(false);
+        }
+        let salt = crypto::random::<16>()?.to_vec();
+        let key = crypto::derive(passphrase, &salt, Kdf::CURRENT)?;
+        let check = crypto::seal(&key, b"check", FILE_CHECK)?;
+        let mut secrets = BTreeMap::new();
+        for (name, s) in &i.secrets {
+            let value = crypto::open(&old, name.as_bytes(), &s.blob).ok_or(VaultError::Format)?;
+            let prints = if s.prints.is_empty() {
+                Vec::new()
+            } else {
+                let p =
+                    crypto::open(&old, &prints_aad(name), &s.prints).ok_or(VaultError::Format)?;
+                crypto::seal(&key, &prints_aad(name), &p)?
+            };
+            secrets.insert(
+                name.clone(),
+                Stored {
+                    meta: s.meta.clone(),
+                    blob: crypto::seal(&key, name.as_bytes(), &value)?,
+                    prints,
+                },
+            );
+        }
+        if let Some(path) = &self.path {
+            let copy = path.with_extension("pre-argon2");
+            let bytes = std::fs::read(path).map_err(|e| VaultError::Io(e.to_string()))?;
+            write_private(&copy, &bytes).map_err(|e| VaultError::Io(e.to_string()))?;
+        }
+        self.write_state(Kdf::CURRENT, &salt, &check, &secrets)?;
+        i.kdf = Kdf::CURRENT;
+        i.salt = salt;
+        i.check = check;
+        i.secrets = secrets;
+        if i.key.is_some() {
+            i.key = Some(key);
+        }
+        Ok(true)
     }
 
     /// Stores or replaces a secret (only the person).

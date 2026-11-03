@@ -13,3 +13,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+# The password hash is deliberately expensive; unoptimized it makes every test that makes a vault
+# take seconds. Only the hash is optimized, so debugging the rest is unchanged.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

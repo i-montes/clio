@@ -281,6 +281,17 @@ fn jail_lines(o: &mut Report) {
     o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
 }
 
+/// A vault made before the cost of the passphrase was raised still opens, but its passphrase is
+/// cheaper to guess for whoever gets the file.
+fn kdf_warning(status: &serde_json::Value) -> Option<String> {
+    (status["kdf_current"] == false).then(|| {
+        format!(
+            "baúl: la frase del baúl se estira con un coste antiguo ({})",
+            sanitize::line(status["kdf"].as_str().unwrap_or("?"))
+        )
+    })
+}
+
 /// The vault's own values (S-18, S-58): the key patterns cannot know a value the vault holds that
 /// looks like nothing in particular, so the running vault is asked whether any of its values is in
 /// what Clio wrote. The vault answers file, secret name and form, never a value. A vault that is not
@@ -307,6 +318,13 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         }
         return;
     };
+    if let Some(line) = kdf_warning(&status) {
+        o.say(
+            Level::Warn,
+            line,
+            Some("`clio vault upgrade-kdf` (pide tu frase; deja una copia del archivo anterior que puedes borrar cuando compruebes el baúl).".into()),
+        );
+    }
     if status["locked"] == true {
         o.say(
             Level::Warn,
@@ -659,4 +677,17 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
         }
     );
     r.ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_vault_cost_is_warned_about_and_a_current_one_is_not() {
+        let old = serde_json::json!({"kdf_current": false, "kdf": "argon2id m=19 MiB t=2 p=1"});
+        assert!(kdf_warning(&old).unwrap().contains("m=19 MiB"));
+        assert!(kdf_warning(&serde_json::json!({"kdf_current": true})).is_none());
+        assert!(kdf_warning(&serde_json::json!({"locked": false})).is_none());
+    }
 }

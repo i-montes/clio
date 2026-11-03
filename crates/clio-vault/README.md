@@ -62,7 +62,7 @@ Real limits:
   convention, not a wall. There is no peer-credential check (needs `unsafe`/libc).
 - Between bind and chmod the socket follows the umask: keep its parent directory 0700.
 - No limit on wrong `unlock` attempts (Argon2 is the only brake). The terminal prompt echoes.
-- Argon2id parameters are fixed in code (OWASP minimum); raising them needs them stored in the vault file and a migration.
+- The Argon2id cost is stored in the vault file (`Kdf`: memory, passes, lanes). A new vault gets 64 MiB and 3 passes (RFC 9106, second choice, one lane); a file with no cost was made with the old 19 MiB and 2 passes and is read with those. `clio vault upgrade-kdf` (the `upgrade_kdf` request, person socket only) raises it: with the passphrase, a new salt and key, every sealed value (and its digests) opened and sealed again, the old file copied next to it as `vault.pre-argon2` (0600; it holds every secret under the old cost, so delete it once the vault is checked), the new file written by a rename, and nothing written if a value cannot be opened. The cost read from a file must be within 19 to 256 MiB, 2 to 10 passes and 1 to 4 lanes, or the file is refused. `status` and `clio doctor` say which cost a vault has.
 - Each socket serves at most 64 connections at once; `VaultClient` gives up after 60 s (`with_timeout`). `save` is durable: it fsyncs and rolls the memory back if the write fails. `scan_dir` takes a `skip` list of paths to leave out.
 - `clio vault start` finds `clio-vault` next to `clio` or at the absolute path in `CLIO_VAULT_BIN`, never in the `PATH` (it receives the passphrase).
 

@@ -531,8 +531,11 @@ clio vault put github --dest http_fetch:api.github.com   # el valor se lee sin e
 clio vault list
 clio vault revoke github
 clio vault status
+clio vault upgrade-kdf   # sube el coste de tu frase (ver abajo); con la bóveda en marcha
 clio vault stop
 ```
+
+**El coste de la frase.** La bóveda estira tu frase con Argon2id y guarda ese coste en su archivo. Las bóvedas nuevas usan 64 MiB y 3 pasadas; la que hiciste antes usa 19 MiB y 2 y sigue abriendo igual, pero `clio doctor` te avisa de que su coste es antiguo (para quien consiga el archivo, adivinar la frase es más barato). `clio vault upgrade-kdf` la migra sin cambiar tu frase ni tus secretos: te la pide, vuelve a sellar todo con una sal y una clave nuevas y deja una copia del archivo anterior como `vault.pre-argon2` (permisos 0600, y guarda todos tus secretos con el coste viejo: bórrala cuando compruebes que `clio vault start` abre bien). Si algo no se puede abrir, no escribe nada.
 
 Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en la ruta absoluta de `CLIO_VAULT_BIN`; nunca en el `PATH`, porque recibe tu frase maestra). Los dos sockets quedan en `$XDG_RUNTIME_DIR/clio/` con permisos 0600; el archivo de la bóveda en `~/.local/share/clio/vault.bin`.
 
