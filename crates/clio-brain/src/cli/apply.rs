@@ -546,6 +546,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let ws = t.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
+        // The real workspace is canonical (`workspace()`); a temp dir on macOS is a symlink.
+        let ws = ws.canonicalize().unwrap();
         std::fs::write(ws.join("a.txt"), "a medias").unwrap(); // neither the old text nor the new
         std::fs::write(ws.join("b.txt"), "cambiado despues").unwrap();
         let entry = |path: &str, complete: bool| Entry {
