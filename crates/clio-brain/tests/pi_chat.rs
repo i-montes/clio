@@ -259,6 +259,33 @@ fn aborting_a_turn_with_esc_leaves_the_session_usable() {
     assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
 }
 
+// S-18 S-36: the person supervises from the chat. When the host strikes keys out of what Pi read,
+// the chat says how many, once, as a quiet note, and the keys are not on the screen.
+#[test]
+fn the_chat_says_when_values_were_struck_out_of_what_pi_read() {
+    if can_run("masked", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"tool_calls":[{"name":"read","arguments":{"reason":"leer","path":"keys.txt"}}]},{"text":"leído sin ver los valores","usage":[80,6]}]"#,
+    );
+    std::fs::write(
+        w.root().join("proj/keys.txt"),
+        concat!(
+            "a=ghp_",
+            "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+            "\nb=AKIA",
+            "ABCDEFGHIJKLMNOP",
+            "\n"
+        ),
+    )
+    .unwrap();
+    let v = w.pty("masked");
+    ok(&v, &["opened", "final", "note", "keys_not_shown"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+}
+
 // S-05 S-16: the interface shows the session as having read outside content, and a write into .git is refused
 #[test]
 fn steering_a_running_turn_and_a_tool_line_with_its_duration() {

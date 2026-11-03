@@ -150,12 +150,26 @@ fn the_hardened_launch_has_no_tools_no_extensions_and_a_clean_environment() {
         "OPENCODE_API_KEY",
         "AI_AGENT",
         "PI_CODING_AGENT",
+        // The jail's way out (ADR 0009): everything Pi sends goes to the forwarder, none exempt.
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
     ]
     .into();
     assert!(
         names.is_subset(&expected),
         "unexpected variables: {:?}",
         names.difference(&expected).collect::<Vec<_>>()
+    );
+    let var = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+    assert_eq!(var("HTTPS_PROXY"), Some("http://127.0.0.1:18080"));
+    assert_eq!(
+        var("NO_PROXY"),
+        Some(""),
+        "no destination is exempt from the proxy"
     );
     for bad in [
         "SSH_AUTH_SOCK",

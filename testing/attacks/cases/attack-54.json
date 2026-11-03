@@ -1,0 +1,10 @@
+{
+  "id": "attack-54",
+  "title": "Un proceso lanzado como Pi (mismo usuario) no alcanza los sockets del vault",
+  "rules": [
+    "S-22",
+    "S-03"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

@@ -64,7 +64,7 @@ Pi corre el bucle del agente, los proveedores y las sesiones; Clio no reconstruy
 
 **Límites honestos de esta pila:**
 
-- El **proceso de Pi y la extensión corren como la persona**, con sus archivos y su red; solo las herramientas están confinadas. Pi lee su `models.json` y la llave del proveedor, y habla con el proveedor por la red. Una vulnerabilidad en Pi o en una de sus ~120 dependencias de Node no la detiene nada de esto.
+- El **proceso de Pi y la extensión corren como la persona, pero dentro de una jaula `bwrap`** (ADR 0009): no ven el vault ni tus archivos, la copia de trabajo les es de solo lectura (todo cambio pasa por el servicio de herramientas) y su red es propia: solo alcanzan la dirección del proveedor del modelo, a través de un proxy del anfitrión que niega todo lo demás, y no alcanzan el loopback ni los sockets abstractos del anfitrión. Lo que queda: Pi conserva la llave del proveedor y puede enviar lo que leyó a esa única dirección (que ya recibe todo el contexto del modelo). Si la jaula o el proxy no arrancan, o la autoprueba falla, Pi no arranca. Lo que niega la jaula se muestra en el chat.
 - **La regla `S-12/bash` no lee el comando**: lo que un comando puede hacer lo limita la jaula, no una lista de palabras. Una denegación `S-12/bash` no cuenta para el cortacircuito (no pasa por la cuenta de la pasarela).
 - **La contaminación no cierra aún ninguna salida**: ninguna herramienta tiene red, así que S-06 todavía no se ejercita; la marca existe, persiste y se informa, para cuando haya herramientas con salida.
 - **El aviso de contaminación en el prompt de sistema** se arma al empezar cada ejecución, no entre turnos de una misma ejecución; dentro de una, lo que protege es el envoltorio de datos en cada resultado.
@@ -73,7 +73,7 @@ Pi corre el bucle del agente, los proveedores y las sesiones; Clio no reconstruy
 - El enlace entre la extensión y el servicio no está autenticado más allá de los permisos del socket (carpeta 0700, socket 0600, mismo usuario).
 - `grep` queda fuera mientras Pi no permita confinar su búsqueda; `bash grep` dentro de la jaula lo reemplaza.
 
-**Trabajo futuro:** correr Pi mismo dentro de `bwrap`, con red limitada al proveedor del modelo y solo la copia, el socket del servicio y su carpeta de datos visibles; es lo que cambia el límite de «solo las herramientas» a «todo el proceso».
+**Hecho (ADR 0009):** Pi corre dentro de `bwrap` con el sistema de archivos mínimo (fase 3a) y red propia con el proveedor como único destino (fase 3b).
 
 ### La memoria como superficie (persistencia de inyecciones)
 

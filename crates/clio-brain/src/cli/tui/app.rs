@@ -166,7 +166,7 @@ impl From<&Opened> for ChatInfo {
             id: o.id.clone(),
             workspace: o.workspace.clone(),
             history: o.history.clone(),
-            refresh: o.refresh,
+            refresh: o.refresh.clone(),
         }
     }
 }

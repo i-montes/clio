@@ -222,6 +222,19 @@ elif scenario == "steer":
     send(fd, b"q")
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = len(pi_procs())
+elif scenario == "masked":
+    # The model reads a file that holds two keys: the chat says they were struck out.
+    out["opened"] = open_new_chat(fd)
+    type_text(fd, "lee las llaves")
+    send(fd, ENTER)
+    out["final"] = wait_screen(fd, "sin ver los valores", 60) and wait_screen(fd, "listo", 30)
+    out["note"] = wait_screen(fd, "tachó 2 valores", 15)
+    out["keys_not_shown"] = "ghp_" not in screen() and "AKIA" not in screen()
+    send(fd, ESC)
+    time.sleep(0.5)
+    send(fd, b"q")
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = len(pi_procs())
 elif scenario == "reopen":
     out["opened"] = open_new_chat(fd)
     out["answered"] = ask(fd, "primera pregunta", "first answer")

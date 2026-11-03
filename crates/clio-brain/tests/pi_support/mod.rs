@@ -145,6 +145,7 @@ impl Rig {
             guard: None,
             guard_tools: vec![],
             extra_env: vec![],
+            helper: PathBuf::from(env!("CARGO_BIN_EXE_clio")),
         }
     }
 }

@@ -73,6 +73,10 @@ pub struct Chat {
     pub turns: u32,
     pub started_ms: u64,
     pub tainted: bool,
+    /// How many of the jail's refused connections the chat has already said.
+    egress_seen: usize,
+    /// The total of struck-out values the chat has already said.
+    masked_seen: u32,
     pub raw: VecDeque<String>,
     /// Lines scrolled up from the newest.
     pub scroll: usize,
@@ -104,6 +108,8 @@ impl Chat {
             turns: 0,
             started_ms: now_ms,
             tainted: false,
+            egress_seen: 0,
+            masked_seen: 0,
             raw: VecDeque::new(),
             scroll: 0,
             view_h: Cell::new(0),
@@ -174,6 +180,34 @@ impl Chat {
         self.meter.refresh(&r.stats);
         // No chat line: the `externo` mark in the status bar is enough.
         self.tainted |= r.tainted;
+        self.egress(&r.egress_denied);
+        self.masked(r.masked);
+    }
+
+    /// The host struck values out of what Pi read (S-18): say how many are new, quietly. The
+    /// person supervises here; `total` is the whole session's count so far.
+    pub fn masked(&mut self, total: u32) {
+        if total > self.masked_seen {
+            let n = total - self.masked_seen;
+            let (one, many) = ("valor", "valores");
+            self.items.push(Item::Note(format!(
+                "Clio tachó {n} {} con forma de llave en lo que leyó Pi: el modelo no los ve",
+                if n == 1 { one } else { many }
+            )));
+        }
+        self.masked_seen = self.masked_seen.max(total);
+    }
+
+    /// Pi's jail refused a connection (ADR 0009): say it once, as a quiet note. The person
+    /// supervises here, and a refused destination is exactly what is worth seeing. `denied` is
+    /// the whole list so far; only what is new since the last call is added.
+    pub fn egress(&mut self, denied: &[String]) {
+        for d in denied.iter().skip(self.egress_seen) {
+            self.items.push(Item::Note(format!(
+                "la jaula negó una conexión de Pi a {d}"
+            )));
+        }
+        self.egress_seen = denied.len();
     }
 
     fn last_live(&mut self) -> Option<&mut String> {
@@ -853,6 +887,61 @@ mod tests {
                 (ToolState::Failed, "nope".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn values_struck_out_are_a_quiet_note_when_the_total_grows() {
+        let mut c = chat();
+        let notes = |c: &Chat| -> Vec<String> {
+            c.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Note(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        c.masked(0);
+        assert!(notes(&c).is_empty());
+        c.masked(2);
+        c.masked(2); // the same total after the next turn: nothing new to say
+        assert_eq!(notes(&c).len(), 1, "{:?}", notes(&c));
+        assert!(notes(&c)[0].contains("2 valores") && notes(&c)[0].contains("tachó"));
+        c.masked(3);
+        assert_eq!(notes(&c).len(), 2);
+        assert!(
+            notes(&c)[1].contains("1 valor ") || notes(&c)[1].contains("1 valor"),
+            "{:?}",
+            notes(&c)
+        );
+    }
+
+    #[test]
+    fn a_connection_the_jail_refused_is_a_quiet_note_once() {
+        let mut c = chat();
+        let notes = |c: &Chat| -> Vec<String> {
+            c.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Note(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        c.egress(&[]);
+        assert!(notes(&c).is_empty());
+        let first = vec!["example.com:443".to_owned()];
+        c.egress(&first);
+        c.egress(&first); // the same list again, after the next turn: nothing new to say
+        assert_eq!(notes(&c).len(), 1, "{:?}", notes(&c));
+        assert!(notes(&c)[0].contains("example.com:443") && notes(&c)[0].contains("jaula"));
+        let more = vec![
+            "example.com:443".to_owned(),
+            "GET (no es CONNECT)".to_owned(),
+        ];
+        c.egress(&more);
+        assert_eq!(notes(&c).len(), 2, "only the new one is added");
+        assert!(notes(&c)[1].contains("GET"));
     }
 
     #[test]
