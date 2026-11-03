@@ -358,11 +358,7 @@ fn apply_needs_a_plan_then_a_y() {
     // The checks passed: the dialog repeats how many files and where.
     let (a, _) = feed(
         a,
-        vec![Input::Bg(Bg::Planned(Ok(Planned {
-            id: ID1.into(),
-            files: 2,
-            workspace: "/home/ivan/proyecto".into(),
-        })))],
+        vec![Input::Bg(Bg::Planned(Ok(planned(ID1, Some(false)))))],
     );
     let c = a.confirm.clone().unwrap();
     assert_eq!((c.action, c.files), (Action::Apply, 2));
@@ -376,6 +372,102 @@ fn apply_needs_a_plan_then_a_y() {
     assert!(cmds.is_empty() && b.confirm.is_none());
     let (_, cmds) = feed(a, vec![ch('y')]);
     assert_eq!(cmds, vec![Cmd::Apply { id: ID1.into() }]);
+}
+
+fn planned(id: &str, tainted: Option<bool>) -> Planned {
+    Planned {
+        id: id.into(),
+        files: 2,
+        workspace: "/home/ivan/proyecto".into(),
+        names: vec!["M src/dates.py".into(), "+ notas\u{1b}[2J.md".into()],
+        tainted,
+    }
+}
+
+fn alt(c: char) -> Input {
+    Input::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+}
+
+// S-36 (second audit, finding 3a): the answer is a plain `y`. Ctrl-S (save, by habit), Ctrl-Y and
+// Alt-S are not a yes.
+#[test]
+fn only_a_plain_y_or_s_confirms_an_apply() {
+    let (asked, _) = feed(
+        with_runs(),
+        vec![
+            ch('a'),
+            Input::Bg(Bg::Planned(Ok(planned(ID1, Some(false))))),
+        ],
+    );
+    for no in [ctrl('s'), ctrl('y'), alt('s'), alt('y')] {
+        let (b, cmds) = feed(asked.clone_for_test(), vec![no]);
+        assert!(cmds.is_empty() && b.confirm.is_none(), "{cmds:?}");
+    }
+    for yes in [ch('y'), ch('Y'), ch('s'), ch('S')] {
+        let (_, cmds) = feed(asked.clone_for_test(), vec![yes]);
+        assert_eq!(cmds, vec![Cmd::Apply { id: ID1.into() }]);
+    }
+}
+
+// S-36 (finding 3b): the plan takes seconds; the dialog must not pop up over whatever the person
+// is doing by then, where the next `s` they type (the commonest letter in Spanish) would apply.
+#[test]
+fn a_plan_that_arrives_after_the_person_moved_on_does_not_ask() {
+    // They left for a new run and are typing the instruction.
+    let (a, _) = feed(with_runs(), vec![ch('a'), ch('n')]);
+    let (a, cmds) = feed(
+        a,
+        vec![
+            Input::Bg(Bg::Planned(Ok(planned(ID1, Some(false))))),
+            ch('s'),
+        ],
+    );
+    assert!(a.confirm.is_none(), "the dialog opened over the new run");
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(
+        a.new_run.instruction, "s",
+        "the key was text, not an answer"
+    );
+    // Still on the list, but the plan is for another run than the selected one.
+    let (a, cmds) = feed(
+        with_runs(),
+        vec![
+            Input::Bg(Bg::Planned(Ok(planned(ID2, Some(false))))),
+            ch('y'),
+        ],
+    );
+    assert!(a.confirm.is_none() && cmds.is_empty(), "{cmds:?}");
+}
+
+// S-36 (finding 3c): what is about to be written is named, not only counted, and the dialog says
+// when the agent read outside content (or that nothing says so).
+#[test]
+fn the_apply_dialog_names_the_files_and_the_taint() {
+    for (tainted, note) in [
+        (Some(true), "leyó contenido de fuera"),
+        (None, "Sin registro"),
+    ] {
+        let (a, _) = feed(
+            with_runs(),
+            vec![Input::Bg(Bg::Planned(Ok(planned(ID1, tainted))))],
+        );
+        let text = screen_text(&a, 90, 24);
+        assert!(
+            text.contains("src/dates.py") && text.contains("notas"),
+            "{text}"
+        );
+        assert!(text.contains(note), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+    }
+    let (a, _) = feed(
+        with_runs(),
+        vec![Input::Bg(Bg::Planned(Ok(planned(ID1, Some(false)))))],
+    );
+    let text = screen_text(&a, 90, 24);
+    assert!(
+        !text.contains("leyó contenido de fuera") && !text.contains("Sin registro"),
+        "{text}"
+    );
 }
 
 #[test]

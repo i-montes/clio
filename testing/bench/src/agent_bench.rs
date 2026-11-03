@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel};
 use clio_core::SystemClock;
+use clio_node::jail::{Jail, Job};
 use clio_trace::{Attr, Kind, Status, Trace, Usage, names};
 use serde::{Deserialize, Serialize};
 
@@ -197,6 +198,12 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// Runs the task's check with no shell. Returns (passed, last lines of its output).
+///
+/// The check imports and runs what the model wrote in the workspace, after the model read the
+/// injection bait of the hostile tasks: that code must not run as the person, with their keys and
+/// the network. It runs in the same `bwrap` jail as the agent's own commands (no network, none of
+/// the person's files or environment, `/work` its working folder). Without a jail it does not run,
+/// unless `CLIO_BENCH_CHECK_JAIL=off` (for a throwaway CI runner), and then with an empty environment.
 fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool, String), String> {
     let Check::Command(line) = &task.check else {
         return Err(format!(
@@ -205,6 +212,80 @@ fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool,
         ));
     };
     let dir = task.dir.canonicalize().map_err(|e| e.to_string())?;
+    match Jail::detect().and_then(|j| j.probe().map(|()| j)) {
+        Ok(jail) => run_check_jailed(&jail, line, &dir, work, sink, out),
+        Err(why) if std::env::var("CLIO_BENCH_CHECK_JAIL").is_ok_and(|v| v == "off") => {
+            eprintln!(
+                "warning: the check of {} runs WITHOUT a jail ({why})",
+                task.id
+            );
+            run_check_bare(line, &dir, work, sink, out)
+        }
+        Err(why) => Err(format!(
+            "the check of {} runs code the model wrote and needs the jail ({why}); \
+             CLIO_BENCH_CHECK_JAIL=off runs it without one, on a machine with nothing of yours",
+            task.id
+        )),
+    }
+}
+
+fn run_check_jailed(
+    jail: &Jail,
+    line: &str,
+    task_dir: &Path,
+    work: &Path,
+    sink: &Path,
+    out: &Path,
+) -> Result<(bool, String), String> {
+    let line = line.replace("{task_dir}", "/task");
+    let mut parts = line.split_whitespace();
+    let program = parts.next().ok_or("empty check command")?;
+    // `argv[0]` is a path inside the jail, whose programs are the system's.
+    let program = ["/usr/bin", "/bin"]
+        .iter()
+        .map(|d| Path::new(d).join(program))
+        .find(|p| p.is_file())
+        .ok_or_else(|| format!("{program}: not found in /usr/bin"))?;
+    let job = Job {
+        work: work.to_path_buf(),
+        argv: std::iter::once(program.to_string_lossy().into_owned())
+            .chain(parts.map(str::to_owned))
+            .collect(),
+        env: vec![
+            ("TASK_DIR".into(), "/task".into()),
+            ("SINK_LOG".into(), "/sink.log".into()),
+        ],
+        mounts: vec![
+            (task_dir.to_path_buf(), "/task".into()),
+            (sink.to_path_buf(), "/sink.log".into()),
+        ],
+        ..Job::default()
+    };
+    let o = jail.run(&job)?;
+    let text = format!("{}{}", o.stdout, o.stderr);
+    std::fs::write(out, &text).map_err(|e| e.to_string())?;
+    Ok(if o.timed_out {
+        (false, "the check timed out".into())
+    } else {
+        (o.success(), tail_of(&text))
+    })
+}
+
+/// The last lines of the output, on one line.
+fn tail_of(text: &str) -> String {
+    let tail: Vec<&str> = text.lines().rev().take(6).collect();
+    let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    tail.chars().take(400).collect()
+}
+
+/// The check without a jail: only an empty environment (no keys, no `HOME`).
+fn run_check_bare(
+    line: &str,
+    dir: &Path,
+    work: &Path,
+    sink: &Path,
+    out: &Path,
+) -> Result<(bool, String), String> {
     let line = line.replace("{task_dir}", &dir.to_string_lossy());
     let mut parts = line.split_whitespace();
     let program = parts.next().ok_or("empty check command")?;
@@ -212,7 +293,9 @@ fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool,
     let mut child = Command::new(program)
         .args(parts)
         .current_dir(work)
-        .env("TASK_DIR", &dir)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("TASK_DIR", dir)
         .env("SINK_LOG", sink)
         .stdout(Stdio::from(file.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::from(file))
@@ -231,10 +314,7 @@ fn run_check(task: &Task, work: &Path, sink: &Path, out: &Path) -> Result<(bool,
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let text = std::fs::read_to_string(out).unwrap_or_default();
-    let tail: Vec<&str> = text.lines().rev().take(6).collect();
-    let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
-    let tail: String = tail.chars().take(400).collect();
+    let tail = tail_of(&std::fs::read_to_string(out).unwrap_or_default());
     Ok(match status {
         Some(s) => (s.success(), tail),
         None => (false, "the check timed out".into()),
@@ -445,4 +525,128 @@ pub fn run_agent(
         report.tasks.push(tr);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // The check runs code the model wrote (an injected model may have planted anything in the
+    // workspace) so it must run with what a hostile program should have: none of the person's
+    // environment or files, and no network. This `check.py` PASSES only if all of that holds.
+    const PROBE: &str = r#"import os, socket, sys
+home, port = sys.argv[1], int(sys.argv[2])
+bad = []
+if os.environ.get("HOME") == home: bad.append("sees the person's HOME variable")
+if os.environ.get("PATH_FROM_TEST_MARK"): bad.append("sees the test's environment")
+if os.path.exists(home): bad.append("sees the person's home folder")
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=2).close()
+    bad.append("reached the network")
+except OSError:
+    pass
+print("; ".join(bad) or "isolated")
+sys.exit(1 if bad else 0)
+"#;
+
+    fn task(dir: &Path, line: String) -> Task {
+        Task {
+            id: "probe".into(),
+            input: String::new(),
+            check: Check::Command(line),
+            max_steps: 1,
+            max_cost_micro_usd: 1,
+            max_duration_ms: 1,
+            workspace: None,
+            tags: vec![],
+            dir: dir.to_path_buf(),
+        }
+    }
+
+    /// `workspace/` with a folder laid over it; a `.delete` file in the folder lists paths to remove
+    /// (the same rule as `verify_real_tasks.py`).
+    fn attempt(task: &Task, over: Option<&Path>, root: &Path) -> (bool, String) {
+        let work = root.join("work");
+        copy_tree(&task.dir.join(task.workspace.as_ref().unwrap()), &work).unwrap();
+        if let Some(o) = over {
+            copy_tree(o, &work).unwrap();
+            let _ = std::fs::remove_file(work.join(".delete"));
+            for p in std::fs::read_to_string(o.join(".delete"))
+                .unwrap_or_default()
+                .lines()
+            {
+                let _ = std::fs::remove_file(work.join(p.trim()));
+            }
+        }
+        let sink = root.join("sink.log");
+        std::fs::write(&sink, "").unwrap();
+        run_check(task, &work, &sink, &root.join("out")).unwrap()
+    }
+
+    // Moving the checks into the jail must not change what they decide: each of the real tasks'
+    // checks accepts its reference solution and rejects each bad one, as `verify_real_tasks.py`
+    // says without the jail.
+    #[test]
+    fn the_real_checks_decide_the_same_inside_the_jail() {
+        if Jail::detect().and_then(|j| j.probe()).is_err() {
+            assert!(std::env::var_os("CLIO_REQUIRE_JAIL").is_none());
+            eprintln!("SKIPPED (no jail on this machine, nothing was tested)");
+            return;
+        }
+        let tasks =
+            crate::load_tasks(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks/real")).unwrap();
+        let mut problems = Vec::new();
+        let mut n = 0;
+        for t in tasks.iter().filter(|t| t.dir.join("solution").is_dir()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let (ok, tail) = attempt(t, Some(&t.dir.join("solution")), tmp.path());
+            n += 1;
+            if !ok {
+                problems.push(format!("{}: refuses its own solution: {tail}", t.id));
+            }
+            let bad_root = t.dir.join("bad_solutions");
+            for bad in std::fs::read_dir(&bad_root).into_iter().flatten().flatten() {
+                let tmp = tempfile::tempdir().unwrap();
+                if attempt(t, Some(&bad.path()), tmp.path()).0 {
+                    problems.push(format!("{}: accepts {:?}", t.id, bad.file_name()));
+                }
+            }
+        }
+        assert!(n >= 20, "only {n} tasks have a solution");
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    // S-03 S-18 (second audit): the bench's check does not run unjailed with the person's keys.
+    #[test]
+    fn the_check_runs_without_the_persons_environment_files_or_network() {
+        if clio_node::jail::Jail::detect()
+            .and_then(|j| j.probe())
+            .is_err()
+        {
+            assert!(
+                std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+                "CLIO_REQUIRE_JAIL is set and the jail cannot run here"
+            );
+            eprintln!("SKIPPED (no jail on this machine, nothing was tested)");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (task_dir, work) = (tmp.path().join("task"), tmp.path().join("work"));
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(task_dir.join("check.py"), PROBE).unwrap();
+        let sink = tmp.path().join("sink.log");
+        std::fs::write(&sink, "").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let home = std::env::var("HOME").unwrap();
+        let t = task(
+            &task_dir,
+            format!("python3 {{task_dir}}/check.py {home} {port}"),
+        );
+        let (passed, tail) = run_check(&t, &work, &sink, &tmp.path().join("out")).unwrap();
+        assert!(passed, "the check saw the outside: {tail}");
+        assert!(tail.contains("isolated"), "{tail}");
+    }
 }

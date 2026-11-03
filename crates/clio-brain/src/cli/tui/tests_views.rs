@@ -921,6 +921,8 @@ fn print_screens() {
                 id: ID1.into(),
                 files: 2,
                 workspace: "/home/ivan/proyecto".into(),
+                names: vec!["M dates.py".into(), "+ notas.md".into()],
+                tainted: Some(false),
             }))),
         ],
     );

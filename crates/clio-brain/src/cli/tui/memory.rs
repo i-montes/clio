@@ -215,19 +215,31 @@ fn ask(app: &mut App, act: Act) -> Vec<Cmd> {
         app.flash = Some("solo lo pendiente de revisión se aprueba; ese ya está activo".into());
         return vec![];
     }
-    let confirm = Confirm {
-        action: if act == Act::Promote {
+    let total = r.content.chars().count();
+    let mut confirm = Confirm::new(
+        if act == Act::Promote {
             Action::Promote
         } else {
             Action::Archive
         },
-        id: r.id.to_string(),
-        files: 0,
-        workspace: r.content.chars().take(200).collect(),
-    };
+        r.id.to_string(),
+        0,
+        r.content.chars().take(SHOWN_CHARS).collect(),
+    );
+    // Approving decides what comes back into every future run: never on a text that was cut
+    // without saying so (the instruction may be after the harmless part).
+    if total > SHOWN_CHARS {
+        confirm.note = Some(format!(
+            "El texto sigue: se ven {SHOWN_CHARS} de {total} caracteres. Léelo entero (clio memory show m{}) antes de aprobar.",
+            r.id
+        ));
+    }
     app.confirm = Some(confirm);
     vec![]
 }
+
+/// How much of a memory the confirmation shows.
+const SHOWN_CHARS: usize = 300;
 
 /// `m12  cuarentena  episódico    externo   text…`
 fn row_line(app: &App, r: &MRow, pending: bool, selected: bool, width: usize) -> Line<'static> {

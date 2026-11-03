@@ -580,6 +580,23 @@ impl Ctx {
                         id: p.run.id.clone(),
                         files: p.changes.len(),
                         workspace: p.ws.display().to_string(),
+                        names: p
+                            .changes
+                            .iter()
+                            .map(|c| {
+                                let mark = match c.kind {
+                                    work::Kind::Modified => 'M',
+                                    work::Kind::Created => '+',
+                                    work::Kind::Deleted => '-',
+                                };
+                                format!("{mark} {}", c.rel)
+                            })
+                            .collect(),
+                        tainted: runs::read_json::<runs::RunSummary>(
+                            &p.run.path.join("summary.json"),
+                        )
+                        .ok()
+                        .map(|s| s.tainted),
                     })
                 },
                 |r| Bg::Planned(r.and_then(|x| x)),

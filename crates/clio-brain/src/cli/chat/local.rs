@@ -25,7 +25,9 @@ use clio_brain::control::{Budget, DayBudget};
 use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
-use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, read_api_key, start};
+use clio_brain::pi::launch::{
+    Launch, PiProcess, Provider, SessionTarget, read_api_key, start, valid_id,
+};
 use clio_brain::pi::level::{Assessor, run_assessed};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
@@ -67,11 +69,22 @@ impl LocalSource {
         self.dirs.runs.join(id).join("sandbox")
     }
 
+    /// The id comes from the header of a file Pi can write: it must be one plain name, and the
+    /// copy it names must sit inside `runs/` (`Path::join` with an absolute id, or one with `..`,
+    /// would point anywhere).
     fn is_ours(&self, s: &SessionInfo) -> bool {
-        let want = self.copy_of(&s.id);
-        match (&s.cwd_path, want.canonicalize()) {
-            (Some(have), Ok(want)) => have.canonicalize().is_ok_and(|h| h == want),
-            _ => false,
+        if !valid_id(&s.id) {
+            return false;
+        }
+        let (Ok(runs), Ok(want)) = (
+            self.dirs.runs.canonicalize(),
+            self.copy_of(&s.id).canonicalize(),
+        ) else {
+            return false;
+        };
+        match &s.cwd_path {
+            Some(have) => want.starts_with(&runs) && have.canonicalize().is_ok_and(|h| h == want),
+            None => false,
         }
     }
 }
@@ -316,6 +329,79 @@ mod tests {
         assert_eq!(
             (b.max_steps, b.max_ms, b.max_cost_micro, b.max_repeats),
             (40, 600_000, 100_000, 4)
+        );
+    }
+
+    // S-16, S-22 (second audit, finding 1): a session file is written by Pi, which is jailed but
+    // not trusted. Its header id must not turn into a path outside `runs/`.
+    fn local_source(home: &Path) -> (LocalSource, PathBuf) {
+        let data = home.join("data");
+        let dirs = Dirs {
+            config: home.join("config"),
+            runs: data.join("runs"),
+            data: data.clone(),
+            runtime: None,
+            home: home.to_path_buf(),
+        };
+        let sessions = crate::cli::pi::paths(&dirs).sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&dirs.runs).unwrap();
+        (LocalSource::new(Arc::new(dirs)), sessions)
+    }
+
+    fn plant(sessions: &Path, file: &str, id: &str, cwd: &Path) {
+        let header = json!({"type":"session","version":3,"id":id,
+            "timestamp":"2026-10-31T12:00:00.000Z","cwd":cwd});
+        std::fs::write(sessions.join(file), format!("{header}\n")).unwrap();
+    }
+
+    fn availability(src: &LocalSource) -> Vec<bool> {
+        src.list().iter().map(|r| r.unavailable.is_none()).collect()
+    }
+
+    #[test]
+    fn a_session_whose_id_is_a_path_is_not_a_working_copy_of_clio() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let (src, sessions) = local_source(&home);
+        // Control: a real run folder with a valid id is ours.
+        let run = home.join("data/runs/20261031-aaaa");
+        std::fs::create_dir_all(run.join("sandbox")).unwrap();
+        plant(
+            &sessions,
+            "t_good.jsonl",
+            "20261031-aaaa",
+            &run.join("sandbox"),
+        );
+        assert_eq!(availability(&src), [true], "the control must be openable");
+        // A folder of the person's that happens to end in `sandbox`.
+        let proj = home.join("proj");
+        std::fs::create_dir_all(proj.join("sandbox")).unwrap();
+        // An absolute id replaces the whole path in `Path::join`.
+        plant(
+            &sessions,
+            "t_abs.jsonl",
+            proj.to_str().unwrap(),
+            &proj.join("sandbox"),
+        );
+        // `..` climbs out of `runs/`.
+        plant(
+            &sessions,
+            "t_dots.jsonl",
+            "../../../proj",
+            &proj.join("sandbox"),
+        );
+        let rows = src.list();
+        let bad: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.reference.ends_with("t_abs.jsonl") || r.reference.ends_with("t_dots.jsonl")
+            })
+            .collect();
+        assert_eq!(bad.len(), 2);
+        assert!(
+            bad.iter().all(|r| r.unavailable.is_some()),
+            "a forged id made a folder of the person's look like a working copy"
         );
     }
 

@@ -831,9 +831,28 @@ fn print_panel(st: Style, s: &RunSummary) {
 /// The diff of one change against what is in the original now, with a note when the original
 /// changed after the copy.
 pub fn diff_text(ws: &Path, run: &Run, manifest: &BTreeMap<String, String>, c: &Change) -> String {
-    let orig = std::fs::read(ws.join(&c.rel)).ok();
-    let new = std::fs::read(run.sandbox().join(&c.rel)).ok();
     let mut out = String::new();
+    // Both sides are read like `apply` reads them: no link in the way (the original is the
+    // person's folder and a link inside it can lead anywhere), nothing but regular files, and a
+    // size cap. A side that exists but cannot be read is said, not shown as "absent".
+    let mut side = |path: PathBuf, checked: Option<&str>| {
+        if let Some(rel) = checked
+            && let Err(why) = super::apply::symlink_check(ws, rel)
+        {
+            out += &format!("# no se lee {}: {why}\n", c.rel);
+            return None;
+        }
+        match work::read_regular(&path) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                out += &format!("# no se lee {}: {e}\n", c.rel);
+                None
+            }
+        }
+    };
+    let orig = side(ws.join(&c.rel), Some(&c.rel));
+    let new = side(run.sandbox().join(&c.rel), None);
     if let (Some(o), Some(h)) = (&orig, manifest.get(&c.rel))
         && super::sha_hex(o) != *h
     {
@@ -1029,6 +1048,30 @@ mod tests {
             suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_hexdigit()),
             "{id}"
         );
+    }
+
+    // S-13 (second audit, finding 6): the original is the person's folder, and a link inside it can
+    // lead anywhere. The diff must not read through one.
+    #[test]
+    fn the_diff_does_not_read_the_original_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let (ws, outside) = (d.path().join("ws"), d.path().join("outside"));
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("notes.txt"), "LO-DE-FUERA\n").unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        let run = Run {
+            id: "r".into(),
+            path: d.path().join("run"),
+        };
+        std::fs::create_dir_all(run.sandbox().join("link")).unwrap();
+        std::fs::write(run.sandbox().join("link/notes.txt"), "nuevo\n").unwrap();
+        let c = Change {
+            rel: "link/notes.txt".into(),
+            kind: Kind::Modified,
+        };
+        let text = diff_text(&ws, &run, &BTreeMap::new(), &c);
+        assert!(!text.contains("LO-DE-FUERA"), "read through a link: {text}");
     }
 
     #[test]

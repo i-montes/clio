@@ -177,12 +177,12 @@ fn on_selected(app: &mut App, act: Act) -> Vec<Cmd> {
                 app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
                 return vec![];
             }
-            app.confirm = Some(Confirm {
-                action: Action::Undo,
-                files: run.files(),
-                workspace: run.workspace.clone(),
+            app.confirm = Some(Confirm::new(
+                Action::Undo,
                 id,
-            });
+                run.files(),
+                run.workspace.clone(),
+            ));
             vec![]
         }
         Act::Apply => vec![Cmd::PlanApply { id }],
