@@ -1,0 +1,10 @@
+{
+  "id": "attack-53",
+  "title": "Una redirección del proveedor hacia otro host no recibe la llave del modelo, y http hacia un host que no es local se rechaza antes de pedir nada",
+  "rules": [
+    "S-19",
+    "S-44"
+  ],
+  "status": "active",
+  "expect": "refused"
+}
