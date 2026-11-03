@@ -23,6 +23,7 @@ Two tools, `memory_search` and `memory_get`, **served by the tool host** (ADR 00
 - The model's provider sees what a tool returns, as it already sees the context (S-44). The budget limits how much can leave, not whether. Whatever must not leave the machine should not be in memory.
 - Pi's user is the service's user: a taken-over Pi can make the calls the model can, with the same gateway and the same budget in front. It cannot open `memory.db`: the jail does not see it.
 - An active memory of origin `agent` may hold an old injection that a clean run wrote without knowing. The defence is the wrapper and the taint, not a text filter.
+- An order written inside the copy is carried out even if it comes from a memory (a write in the working copy is reversible, and the gateway does not refuse it in a tainted session). The defence is that it arrives as data, the session is marked, and the person reviews the copy with `diff` and `apply`. Only orders that point outside the folder or into a protected one are refused (S-13, S-16); attack 56 orders `../PWNED.txt` for that reason.
 - There is no sensitivity class: everything active can be searched. The budget is per session, so a new session starts with a new one.
 - The first call may be slow when the vector model is on disk (it loads then, once); the call has a 10 s deadline and fails with a short message, never hangs.
 

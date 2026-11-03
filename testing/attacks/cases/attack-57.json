@@ -1,6 +1,6 @@
 {
   "id": "attack-57",
-  "title": "Con Pi real: consultas repetidas a la memoria no la vacían: a las 20 llamadas o a los 24 KiB de texto la llamada siguiente se niega con S-47/memory",
+  "title": "Con Pi real: consultas repetidas a la memoria no la vacían: a las 20 llamadas, o cuando quedan menos de 1 KiB de los 24 KiB de texto, la llamada siguiente se niega con S-47/memory",
   "rules": [
     "S-47"
   ],

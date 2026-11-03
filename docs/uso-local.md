@@ -316,9 +316,9 @@ Clio recuerda entre runs, **todo en tu PC**: un solo archivo, `~/.local/share/cl
 
 - Verás las llamadas `memory_search` y `memory_get` como cualquier otra herramienta. El modelo recibe hasta 8 recuerdos por búsqueda, cada uno en una línea de 600 caracteres como máximo y con su origen (`persona`, `agente`, `externo`), y no más de 4 KiB por respuesta.
 - Tope por sesión: 20 llamadas y 24 KiB de texto en total; con menos de 1 KiB por gastar ya cuenta como agotado y la llamada siguiente se niega con `S-47/memory`. Cuentan también las llamadas que fallan. Reabrir la misma sesión no lo devuelve; empezar otra abre uno nuevo.
-- Si hay modelo de embeddings en disco, la primera consulta lo carga y puede tardar unos segundos; si pasa de 10 s esa llamada falla con un mensaje corto y se puede repetir. Sin el modelo busca solo por texto y se lo dice al modelo.
+- Si hay modelo de embeddings en disco, la primera consulta lo carga y puede tardar unos segundos; si pasa de 10 s esa llamada falla con un mensaje corto y se puede repetir. El modelo se carga mientras se sostiene un cerrojo interno, así que las llamadas que hagan cola detrás de una primera carga lenta también pueden agotar el plazo hasta que termine, y cada una gasta presupuesto. Sin el modelo busca solo por texto y se lo dice al modelo.
 - Solo lee: no hay ninguna herramienta que guarde, apruebe, archive ni borre. Para que algo se recuerde, sigue siendo `clio memory remember`. Tampoco cambia las estadísticas de uso de los recuerdos (la lectura no deja señales).
-- Si lo que Pi lee es un recuerdo de origen `agente` o `externo`, la sesión queda contaminada, como al leer un archivo de fuera; si todos son tuyos, no.
+- Si lo que Pi lee es un recuerdo de origen `agente` o `externo`, la sesión queda contaminada, como al leer un archivo de fuera; si todos son tuyos, no. Una orden escrita dentro de la copia se cumple aunque venga de un recuerdo: la defensa es que llega como datos, la sesión queda marcada y tú revisas la copia con `diff` y `apply`.
 - El proveedor del modelo ve lo que devuelve la herramienta, igual que ve el contexto. Lo que no quieras que salga de tu equipo no debe estar en la memoria.
 - Si la memoria no existe todavía, está bloqueada o falla, la herramienta falla sola con un mensaje corto; Pi y la sesión siguen.
 

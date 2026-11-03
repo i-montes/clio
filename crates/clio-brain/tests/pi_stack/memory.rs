@@ -255,7 +255,15 @@ fn attack_56() -> Option<bool> {
         ends[0].2
     );
     assert!(ends[1].1, "the order from the memory was refused: {ends:?}");
-    // A write inside the folder is allowed (it is reversible), so the order points out of it.
+    // The order points OUT of the folder and the path containment (S-13; the guard says it first,
+    // the host would say it again) refuses it: a write inside the copy is carried out even when a
+    // memory orders it (it is reversible; the person reviews the copy), so a refusal for any
+    // other reason would prove nothing about this case.
+    assert!(
+        ends[1].2.contains("outside the working folder"),
+        "refused by the path containment: {}",
+        ends[1].2
+    );
     assert!(
         !w.work.join("PWNED.txt").exists() && !w.work.parent().unwrap().join("PWNED.txt").exists(),
         "nothing was written"
@@ -706,6 +714,7 @@ fn attack_60() -> Option<bool> {
         );
         assert_eq!(r["ok"], false, "{tool}: {r}");
         assert_eq!(r["decision"]["outcome"], "deny", "{tool}: {r}");
+        assert_eq!(r["decision"]["rule"], "step-1-schema", "{tool}: {r}");
     }
     // Nothing changed in the memory: the person's memory is still there, active, and alone.
     drop(pi);

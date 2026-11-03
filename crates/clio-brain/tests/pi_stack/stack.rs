@@ -123,6 +123,8 @@ fn jail_host(w: &World, scrub: Option<(&str, &str)>) -> Option<Toolhost> {
 
 pub(crate) fn ask_host(socket: &Path, req: Value) -> Value {
     let mut s = UnixStream::connect(socket).unwrap();
+    // A silent service fails the test instead of hanging it.
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     writeln!(s, "{req}").unwrap();
     let mut out = String::new();
     BufReader::new(s).read_line(&mut out).unwrap();
