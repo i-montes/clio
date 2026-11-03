@@ -495,7 +495,7 @@ El agente no puede ejecutar nada por su cuenta. Lo único que puede ejecutar es 
 Qué comprueba `apply` antes de escribir nada (todo o nada: si una ruta falla, no se aplica ningún archivo):
 
 - La ruta debe ser relativa y simple (sin `..`, sin ruta absoluta).
-- Nunca escribe en `.git`, `.claude`, `.pi`, `.agents` (a cualquier profundidad, sin distinguir mayúsculas), ni en `extensions` y `skills` de la raíz (rutas protegidas), ni en archivos con nombre de secreto, ni en `node_modules`, `target`, `.venv` o `__pycache__` (la copia los deja fuera: lo que el agente genere ahí no vuelve al original y no aparece como cambio). `--force` NO levanta esto.
+- Nunca escribe en `.git`, `.claude`, `.pi`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer` (a cualquier profundidad, sin distinguir mayúsculas; son carpetas que una herramienta carga y ejecuta sola al abrir, compilar o confirmar un proyecto), ni en `extensions` y `skills` de la raíz (rutas protegidas), ni en archivos con nombre de secreto, ni en `node_modules`, `target`, `.venv` o `__pycache__` (la copia los deja fuera: lo que el agente genere ahí no vuelve al original y no aparece como cambio). `--force` NO levanta esto.
 - Si un cambio no se puede mostrar completo (un archivo binario o una diferencia demasiado grande para el diff línea a línea), se niega: ábrelo a mano en `runs/<id>/sandbox/` y, si está bien, repite con `--force`.
 - Lo que se escribe es exactamente lo que se revisó: si la copia cambió entre la revisión y la escritura, se niega y no toca nada.
 - Si hay un enlace simbólico en el camino (por ejemplo, `docs` convertido en enlace a otra carpeta), se niega. `--force` NO levanta esto.

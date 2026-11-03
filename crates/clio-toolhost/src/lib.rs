@@ -54,7 +54,7 @@ pub const OPS: [&str; 7] = [
 /// Folders under the working copy that load code or settings by themselves (S-16): Pi
 /// extensions, skills, hooks, git. Nothing here may write them. Mandatory: a rules file can add
 /// to this list, never remove from it. `.agents` is where Pi looks for project skills.
-pub const PROTECTED_PATHS: [&str; 6] = clio_node::READ_ONLY;
+pub const PROTECTED_PATHS: [&str; 11] = clio_node::READ_ONLY;
 
 /// A request line longer than this is refused and the connection closed.
 pub const MAX_REQUEST_BYTES: usize = 4 << 20;

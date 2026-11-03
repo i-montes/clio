@@ -448,6 +448,15 @@ mod tests {
             "a/__pycache__/m.pyc",
             ".venv/lib/sitecustomize.py",
             "target/debug/build.rs",
+            // Folders a tool loads and RUNS when the project is opened or built (S-16).
+            ".vscode/tasks.json",
+            ".VSCode/settings.json",
+            "pkg/.vscode/tasks.json",
+            ".husky/pre-commit",
+            ".githooks/pre-push",
+            ".cargo/config.toml",
+            "crates/x/.cargo/config.toml",
+            ".devcontainer/devcontainer.json",
         ] {
             assert!(hard_refusal(r).is_some(), "{r}");
         }
@@ -458,6 +467,9 @@ mod tests {
         for r in [
             "src/skills/mod.rs",
             "docs/extensions/guide.md",
+            "docs/vscode/guide.md",
+            "src/cargo/mod.rs",
+            "src/husky.rs",
             "src/main.rs",
             "README.md",
             ".github/workflows/ci.yml",
