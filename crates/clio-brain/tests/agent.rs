@@ -393,6 +393,29 @@ print(json.dumps({"content": "{\"final\": \"ok\"}", "input_tokens": 3, "output_t
     assert!(bad.complete(&[]).unwrap_err().contains("exit"));
 }
 
+// S-47 (second audit, finding 5): the time cap is useless if a call to the model program can wait
+// for ever. A hung adapter is killed at the call's own deadline and the call fails.
+#[test]
+fn a_hung_model_program_is_killed_at_its_deadline() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut m = CommandModel::new("sh", &["-c".into(), "sleep 1000".into()], "m");
+        m.backoff_ms = vec![];
+        m.timeout = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let r = m.complete(&[Msg {
+            role: "user".into(),
+            content: "x".repeat(1 << 20),
+        }]);
+        let _ = tx.send((r, started.elapsed()));
+    });
+    let (r, took) = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the call to the model program never ended");
+    assert!(r.unwrap_err().contains("timed out"));
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+}
+
 #[test]
 fn empty_answers_are_protocol_errors_bounded_by_the_step_budget() {
     let r = setup("real-01");

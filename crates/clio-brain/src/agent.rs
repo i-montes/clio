@@ -5,7 +5,7 @@
 //! Turn protocol (plain text, so any chat model can speak it): the model answers with ONE JSON
 //! object per turn, `{"tool": "...", "args": {...}}` or `{"final": "..."}`.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -99,9 +99,16 @@ pub struct CommandModel {
     pub model: String,
     pub max_tokens: u32,
     pub backoff_ms: Vec<u64>,
+    /// How long one call may take before the program is killed: the time cap of a task (S-47) is
+    /// only checked between calls, so a program that hangs would otherwise hang the task.
+    pub timeout: std::time::Duration,
     /// Retries done by the last `complete`.
     pub last_retries: u32,
 }
+
+/// Most a model program may print: an answer is a few kilobytes, and a program that floods its
+/// output must not take the memory.
+const MAX_REPLY_BYTES: u64 = 8 << 20;
 
 impl CommandModel {
     pub fn new(program: &str, args: &[String], model: &str) -> Self {
@@ -111,6 +118,7 @@ impl CommandModel {
             model: model.into(),
             max_tokens: 4096,
             backoff_ms: vec![5_000, 20_000, 60_000],
+            timeout: std::time::Duration::from_secs(180),
             last_retries: 0,
         }
     }
@@ -131,22 +139,51 @@ impl CommandModel {
             max_tokens: Some(self.max_tokens),
         })
         .map_err(|e| fail(e.to_string()))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| fail("no stdin".into()))?
-            .write_all(&body)
-            .map_err(|e| fail(e.to_string()))?;
-        let out = child.wait_with_output().map_err(|e| fail(e.to_string()))?;
-        if !out.status.success() {
-            let err: String = String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .take(300)
-                .collect();
-            return Err(fail(format!("exit {}: {}", out.status, err.trim())));
+        // The program is fed and read on threads of their own and waited for with a deadline: one
+        // that never reads its input or never ends must not hold this call (or the task) for ever.
+        let (Some(mut stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            return Err(fail("no pipes".into()));
+        };
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&body);
+        });
+        let read = |r: Box<dyn std::io::Read + Send>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut b = Vec::new();
+                let _ = r.take(MAX_REPLY_BYTES).read_to_end(&mut b);
+                let _ = tx.send(b);
+            });
+            rx
+        };
+        let (out_rx, err_rx) = (read(Box::new(stdout)), read(Box::new(stderr)));
+        let deadline = std::time::Instant::now() + self.timeout;
+        let status = loop {
+            match child.try_wait().map_err(|e| fail(e.to_string()))? {
+                Some(s) => break s,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(fail(format!(
+                        "timed out after {} s",
+                        self.timeout.as_secs()
+                    )));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        };
+        // The program ended; its pipes are closed unless it left a child holding them: do not wait for ever.
+        let grace = std::time::Duration::from_secs(5);
+        let stdout = out_rx.recv_timeout(grace).unwrap_or_default();
+        let stderr = err_rx.recv_timeout(grace).unwrap_or_default();
+        if !status.success() {
+            let err: String = String::from_utf8_lossy(&stderr).chars().take(300).collect();
+            return Err(fail(format!("exit {status}: {}", err.trim())));
         }
         let r: WireResponse =
-            serde_json::from_slice(&out.stdout).map_err(|e| fail(format!("bad answer: {e}")))?;
+            serde_json::from_slice(&stdout).map_err(|e| fail(format!("bad answer: {e}")))?;
         Ok(Reply {
             text: r.content,
             input_tokens: r.input_tokens,

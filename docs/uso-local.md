@@ -497,7 +497,8 @@ Qué comprueba `apply` antes de escribir nada (todo o nada: si una ruta falla, n
 
 - La ruta debe ser relativa y simple (sin `..`, sin ruta absoluta).
 - Nunca escribe en `.git`, `.claude`, `.pi`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer` (a cualquier profundidad, sin distinguir mayúsculas; son carpetas que una herramienta carga y ejecuta sola al abrir, compilar o confirmar un proyecto), ni en `extensions` y `skills` de la raíz (rutas protegidas), ni en archivos con nombre de secreto, ni en `node_modules`, `target`, `.venv` o `__pycache__` (la copia los deja fuera: lo que el agente genere ahí no vuelve al original y no aparece como cambio). `--force` NO levanta esto.
-- Si un cambio no se puede mostrar completo (un archivo binario o una diferencia demasiado grande para el diff línea a línea), se niega: ábrelo a mano en `runs/<id>/sandbox/` y, si está bien, repite con `--force`.
+- El diff muestra también un cambio solo de fin de línea (`␍` marca un retorno de carro: un `#!/bin/sh` con CRLF no se ejecuta) o del salto de línea final (`\ No newline at end of file`).
+- Si un cambio no se puede mostrar completo (un archivo binario, uno de más de 8 MiB o una diferencia demasiado grande para el diff línea a línea), se niega: ábrelo a mano en `runs/<id>/sandbox/` y, si está bien, repite con `--force`.
 - Lo que se escribe es exactamente lo que se revisó: si la copia cambió entre la revisión y la escritura, se niega y no toca nada.
 - Si hay un enlace simbólico en el camino (por ejemplo, `docs` convertido en enlace a otra carpeta), se niega. `--force` NO levanta esto.
 - Si un archivo del original cambió desde la copia (su hash ya no coincide), se niega a pisarlo: se lo señala. Con `--force` lo pisa, y el respaldo guarda TU versión para poder deshacer.

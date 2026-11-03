@@ -4,6 +4,9 @@
 
 const CONTEXT: usize = 3;
 const MAX_CELLS: usize = 4_000_000;
+/// Bytes of a side that are split into lines at all. The line count (and so the table) is checked
+/// only after splitting, and a file of line breaks has one line per byte.
+const MAX_BYTES: usize = 8 << 20;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -14,6 +17,23 @@ enum Op {
 
 fn is_text(b: &[u8]) -> bool {
     !b.contains(&0) && std::str::from_utf8(b).is_ok()
+}
+
+/// The lines of a text WITH their line endings: a file that differs only in `\r\n` against `\n`,
+/// or in the final newline, must differ here (`str::lines` hides both).
+fn lines_of(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
+/// A line as shown: no line break, a visible mark for a carriage return, and git's note when the
+/// last line has no newline.
+fn shown(line: &str) -> String {
+    let body = line.strip_suffix('\n');
+    let text = body.unwrap_or(line).replace('\r', "\u{240d}");
+    match body {
+        Some(_) => text,
+        None => format!("{text}\n\\ No newline at end of file"),
+    }
 }
 
 fn ops(a: &[&str], b: &[&str]) -> Option<Vec<Op>> {
@@ -64,9 +84,12 @@ pub fn fully_shown(old: Option<&[u8]>, new: Option<&[u8]>) -> bool {
     if old.is_some_and(|b| !is_text(b)) || new.is_some_and(|b| !is_text(b)) {
         return false;
     }
+    if old.is_some_and(|b| b.len() > MAX_BYTES) || new.is_some_and(|b| b.len() > MAX_BYTES) {
+        return false;
+    }
     let text = |b: Option<&[u8]>| String::from_utf8_lossy(b.unwrap_or_default()).into_owned();
     let (ot, nt) = (text(old), text(new));
-    let (a, b): (Vec<&str>, Vec<&str>) = (ot.lines().collect(), nt.lines().collect());
+    let (a, b) = (lines_of(&ot), lines_of(&nt));
     ops(&a, &b).is_some()
 }
 
@@ -82,9 +105,16 @@ pub fn file_diff(rel: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
     if old.is_some_and(|b| !is_text(b)) || new.is_some_and(|b| !is_text(b)) {
         return format!("{head}binary file: changed\n");
     }
+    if old.is_some_and(|b| b.len() > MAX_BYTES) || new.is_some_and(|b| b.len() > MAX_BYTES) {
+        return format!(
+            "{head}too large to show line by line: {} -> {} bytes\n",
+            old.map_or(0, <[u8]>::len),
+            new.map_or(0, <[u8]>::len)
+        );
+    }
     let text = |b: Option<&[u8]>| String::from_utf8_lossy(b.unwrap_or_default()).into_owned();
     let (ot, nt) = (text(old), text(new));
-    let (a, b): (Vec<&str>, Vec<&str>) = (ot.lines().collect(), nt.lines().collect());
+    let (a, b) = (lines_of(&ot), lines_of(&nt));
     let Some(ops) = ops(&a, &b) else {
         return format!(
             "{head}too large to show line by line: {} -> {} lines\n",
@@ -128,9 +158,9 @@ pub fn file_diff(rel: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
         for m in start..end {
             let (pa, pb) = pos[m];
             match ops[m] {
-                Op::Same => out += &format!(" {}\n", a[pa]),
-                Op::Del => out += &format!("-{}\n", a[pa]),
-                Op::Add => out += &format!("+{}\n", b[pb]),
+                Op::Same => out += &format!(" {}\n", shown(a[pa])),
+                Op::Del => out += &format!("-{}\n", shown(a[pa])),
+                Op::Add => out += &format!("+{}\n", shown(b[pb])),
             }
         }
     }
@@ -162,6 +192,45 @@ mod tests {
         assert!(
             file_diff("mi carpeta/ñandú.txt", None, Some(b"1\n"))
                 .contains("+++ b/mi carpeta/ñandú.txt\n")
+        );
+    }
+
+    // Second audit, finding 10: a change of line endings or of the final newline is a change the
+    // person must see (a shebang line `#!/bin/sh\r` does not run). `lines()` hid both, and the file
+    // counted as fully shown.
+    #[test]
+    fn a_change_of_line_ending_or_final_newline_is_shown() {
+        let crlf = file_diff(
+            "f.sh",
+            Some(b"#!/bin/sh\r\necho\r\n"),
+            Some(b"#!/bin/sh\necho\n"),
+        );
+        assert!(crlf.contains("@@") && crlf.contains('\u{240d}'), "{crlf}");
+        let eof = file_diff("f", Some(b"a\n"), Some(b"a"));
+        assert!(
+            eof.contains("@@") && eof.contains("No newline at end of file"),
+            "{eof}"
+        );
+        let same = file_diff("f", Some(b"a\r\nb\n"), Some(b"a\r\nb\n"));
+        assert!(!same.contains("@@"), "{same}");
+        assert!(fully_shown(Some(b"a\r\n"), Some(b"a\n")));
+        // An ordinary edit is as before.
+        assert!(file_diff("f", Some(b"a\nb\n"), Some(b"a\nB\n")).contains("-b\n+B\n"));
+    }
+
+    // Second audit, finding 11: the lines were all collected before the size cap was checked, so a
+    // file of 64 MB of line breaks asked for about a gigabyte just to be refused.
+    #[test]
+    fn a_huge_file_is_refused_before_it_is_split_into_lines() {
+        let big = vec![b'\n'; 40 << 20];
+        let t = std::time::Instant::now();
+        let d = file_diff("f", Some(&big), Some(b"x\n"));
+        assert!(d.contains("too large to show line by line"), "{d}");
+        assert!(!fully_shown(Some(&big), Some(b"x\n")));
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            t.elapsed()
         );
     }
 
