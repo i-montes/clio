@@ -224,18 +224,48 @@ fn walk_files(dir: &Path, rel: &str, out: &mut Vec<String>) -> Res<()> {
 
 /// Reads a regular file that is not reached through a symbolic link. The opened file and the path
 /// must be the same inode, so a link swapped in after the listing is refused, not followed.
+///
+/// The open never waits (`O_NONBLOCK`): the model can leave a FIFO in the copy, and opening one for
+/// reading would block `clio diff` until somebody writes to it. Nothing larger than `READ_CAP` is
+/// read: a file the model made huge is not something a person can review, and must not take all
+/// the memory either.
 pub fn read_regular(p: &Path) -> std::io::Result<Vec<u8>> {
+    read_regular_capped(p, READ_CAP)
+}
+
+/// More than the copy itself may hold (200 MB by default), so no legitimate file is refused.
+const READ_CAP: u64 = 256 * 1024 * 1024;
+
+fn read_regular_capped(p: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
-    let mut f = std::fs::File::open(p)?;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblock)
+        .open(p)?;
     let (open, path) = (f.metadata()?, std::fs::symlink_metadata(p)?);
-    if !path.file_type().is_file() || (open.dev(), open.ino()) != (path.dev(), path.ino()) {
+    if !open.is_file()
+        || !path.file_type().is_file()
+        || (open.dev(), open.ino()) != (path.dev(), path.ino())
+    {
         return Err(std::io::Error::other(
             "no es un archivo normal (enlace o cambió)",
         ));
     }
+    let too_big = || {
+        std::io::Error::other(format!(
+            "demasiado grande para revisarlo aquí (más de {max} bytes)"
+        ))
+    };
+    if open.len() > max {
+        return Err(too_big());
+    }
     let mut b = Vec::new();
-    f.read_to_end(&mut b)?;
+    f.take(max + 1).read_to_end(&mut b)?;
+    if b.len() as u64 > max {
+        return Err(too_big());
+    }
     Ok(b)
 }
 
@@ -245,7 +275,7 @@ pub fn changes(sandbox: &Path, manifest: &BTreeMap<String, String>) -> Res<Vec<C
     walk_files(sandbox, "", &mut now)?;
     let mut out = Vec::new();
     for rel in &now {
-        let bytes = std::fs::read(sandbox.join(rel)).map_err(|e| io_err(&sandbox.join(rel), &e))?;
+        let bytes = read_regular(&sandbox.join(rel)).map_err(|e| io_err(&sandbox.join(rel), &e))?;
         match manifest.get(rel) {
             None => out.push(Change {
                 rel: rel.clone(),
@@ -336,6 +366,34 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_eq!(read_regular(&real).unwrap(), b"ok");
         assert!(read_regular(&link).is_err());
+    }
+
+    // S-13 (second audit, finding 6): a FIFO the model left in the copy must not stop `clio diff`
+    // (opening one for reading waits for a writer), and a file that is too big is refused, not read.
+    #[test]
+    fn read_regular_does_not_wait_on_a_fifo_and_refuses_what_is_too_big() {
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let f = fifo.clone();
+        std::thread::spawn(move || tx.send(read_regular(&f).is_err()));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(true),
+            "reading a FIFO must fail at once, not wait"
+        );
+        let big = d.path().join("big");
+        std::fs::write(&big, vec![b'x'; 100]).unwrap();
+        assert!(read_regular_capped(&big, 100).is_ok());
+        let e = read_regular_capped(&big, 99).unwrap_err().to_string();
+        assert!(e.contains("demasiado grande"), "{e}");
     }
 
     #[test]

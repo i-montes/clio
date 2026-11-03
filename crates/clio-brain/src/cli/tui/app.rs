@@ -7,7 +7,7 @@
 //! hints and the status bar (use of the run and layer of context) on the very last line.
 
 use clio_brain::agent::Event;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -171,10 +171,17 @@ impl From<&Opened> for ChatInfo {
     }
 }
 
+/// Files an apply dialog names before it says "and N more".
+const CONFIRM_FILES: usize = 8;
+
 pub struct Planned {
     pub id: String,
     pub files: usize,
     pub workspace: String,
+    /// One line per file about to be written: a mark (`M` changed, `+` new, `-` deleted) and the path.
+    pub names: Vec<String>,
+    /// Whether the agent read outside content; `None` when the run kept no record of it.
+    pub tainted: Option<bool>,
 }
 
 // One value per frame or event, moved once: boxing `Bg` would only add an allocation per agent event.
@@ -202,6 +209,23 @@ pub struct Confirm {
     pub id: String,
     pub files: usize,
     pub workspace: String,
+    /// What an apply is about to write, one line each (empty for the other actions).
+    pub names: Vec<String>,
+    /// A warning to read before answering.
+    pub note: Option<String>,
+}
+
+impl Confirm {
+    pub fn new(action: Action, id: String, files: usize, workspace: String) -> Self {
+        Self {
+            action,
+            id,
+            files,
+            workspace,
+            names: vec![],
+            note: None,
+        }
+    }
 }
 
 pub struct App {
@@ -460,7 +484,9 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let Some(c) = app.confirm.take() else {
         return vec![];
     };
-    if !matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S')) {
+    // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
+    let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
+    if !plain || !matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S')) {
         app.flash = Some("cancelado: no se cambió nada".into());
         return vec![];
     }
@@ -469,6 +495,15 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Action::Undo => vec![Cmd::Undo { id: c.id }],
         Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
+    }
+}
+
+/// The run on screen: the selected one on the list, or the one open in the detail.
+fn looking_at(app: &App, id: &str) -> bool {
+    match app.screen {
+        Screen::Home => app.home.selected().is_some_and(|r| r.id == id),
+        Screen::Detail => app.detail.as_ref().is_some_and(|d| d.info.id == id),
+        _ => false,
     }
 }
 
@@ -531,12 +566,25 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
         },
         Bg::Planned(Ok(p)) => {
-            app.confirm = Some(Confirm {
-                action: Action::Apply,
-                id: p.id,
-                files: p.files,
-                workspace: p.workspace,
-            });
+            // The plan takes a while. If the person is no longer looking at that run, a dialog
+            // popping up now would turn the next key they type into an answer.
+            if !looking_at(app, &p.id) {
+                app.flash = Some(format!(
+                    "el plan de {} quedó listo, pero cambiaste de pantalla: pídelo otra vez",
+                    p.id
+                ));
+                return vec![];
+            }
+            let mut c = Confirm::new(Action::Apply, p.id, p.files, p.workspace);
+            c.names = p.names;
+            c.note = match p.tainted {
+                Some(true) => {
+                    Some("El agente leyó contenido de fuera: revisa el diff con cuidado.".into())
+                }
+                None => Some("Sin registro de lo que leyó el agente: revisa el diff.".into()),
+                Some(false) => None,
+            };
+            app.confirm = Some(c);
             vec![]
         }
         Bg::Planned(Err(e)) => {
@@ -833,9 +881,23 @@ pub fn draw(f: &mut Frame, app: &App) {
             ),
             Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
         };
-        let lines = vec![
+        let mut lines = vec![
             Line::from(Span::styled(verb, t.bold())),
             Line::from(clean(&c.workspace)),
+        ];
+        for n in c.names.iter().take(CONFIRM_FILES) {
+            lines.push(Line::from(format!("  {}", clean(n))));
+        }
+        if c.names.len() > CONFIRM_FILES {
+            lines.push(Line::from(Span::styled(
+                format!("  … y {} más", c.names.len() - CONFIRM_FILES),
+                t.dim(),
+            )));
+        }
+        if let Some(n) = &c.note {
+            lines.push(Line::from(Span::styled(clean(n), t.warn())));
+        }
+        lines.extend([
             Line::from(""),
             Line::from(vec![
                 Span::styled("y", t.key()),
@@ -843,7 +905,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Span::styled("cualquier otra tecla", t.key()),
                 Span::raw(" cancela"),
             ]),
-        ];
+        ]);
         dialog(f, area, t, " Confirmar ", lines, t.warn());
     } else if let Some(n) = &app.notice {
         let mut lines: Vec<Line> = sanitize::multiline(n)
@@ -869,7 +931,11 @@ fn dialog(
     border: ratatui::style::Style,
 ) {
     let w = area.width.saturating_sub(6).clamp(30, 76);
-    let h = (u16::try_from(lines.len()).unwrap_or(u16::MAX) + 3).min(area.height);
+    // A line longer than the box wraps onto more rows: counting one row per line hid the last
+    // lines (the warning is the last one) behind the border.
+    let inner = usize::from(w.saturating_sub(2)).max(1);
+    let rows: usize = lines.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
+    let h = (u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(3)).min(area.height);
     let r = centered(area, w, h.max(5));
     f.render_widget(Clear, r);
     f.render_widget(

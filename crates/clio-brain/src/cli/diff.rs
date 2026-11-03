@@ -72,6 +72,8 @@ pub fn fully_shown(old: Option<&[u8]>, new: Option<&[u8]>) -> bool {
 
 /// The diff of one file; `None` on a side means the file does not exist there.
 pub fn file_diff(rel: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
+    // A line break in a name would start a line of its own and could pass for a header or a hunk.
+    let rel = &rel.replace(['\n', '\r'], "\u{23ce}");
     let head = format!(
         "--- {}\n+++ {}\n",
         old.map_or("/dev/null".to_owned(), |_| format!("a/{rel}")),
@@ -139,6 +141,29 @@ pub fn file_diff(rel: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // S-36 (second audit, finding 7): a file name is the model's. A newline in it must not forge
+    // headers of the diff the person reviews.
+    #[test]
+    fn a_newline_in_a_file_name_cannot_forge_diff_headers() {
+        let d = file_diff("a\n+++ b/README.md\n@@ -1 +1 @@\n+ok", None, Some(b"1\n"));
+        assert_eq!(
+            d.lines().filter(|l| l.starts_with("+++ ")).count(),
+            1,
+            "{d}"
+        );
+        assert_eq!(
+            d.lines().filter(|l| l.starts_with("--- ")).count(),
+            1,
+            "{d}"
+        );
+        assert!(d.contains("b/a"), "the name is still recognisable: {d}");
+        // An ordinary name, with spaces and accents, is untouched.
+        assert!(
+            file_diff("mi carpeta/ñandú.txt", None, Some(b"1\n"))
+                .contains("+++ b/mi carpeta/ñandú.txt\n")
+        );
+    }
 
     #[test]
     fn modified_line_shows_both_sides() {

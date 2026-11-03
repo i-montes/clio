@@ -10,6 +10,7 @@ publish = false
 clio-brain = { path = "../../crates/clio-brain" }
 clio-core = { path = "../../crates/clio-core" }
 clio-fake-llm = { path = "../fake-llm" }
+clio-node = { path = "../../crates/clio-node" }
 clio-trace = { path = "../../crates/clio-trace" }
 clio-vault = { path = "../../crates/clio-vault" }
 serde = { version = "1.0.229", features = ["derive"] }

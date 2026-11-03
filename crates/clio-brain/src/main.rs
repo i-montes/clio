@@ -166,8 +166,38 @@ fn main() {
     match dispatch(std::env::args().skip(1).collect()) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("clio: {e}");
+            eprintln!("{}", error_line(&e));
             std::process::exit(1);
         }
+    }
+}
+
+/// What the person sees when a command fails. An error can carry a file name, and the names in a
+/// working copy are whatever the model (or a hostile project) made them: an escape sequence in one
+/// would otherwise reach the terminal (write the clipboard, clear the screen).
+fn error_line(e: &str) -> String {
+    format!("clio: {}", cli::tui::sanitize::multiline(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_line;
+
+    // S-36 (second audit, finding 2): an error that names a file never carries terminal control.
+    #[test]
+    fn an_error_with_a_hostile_file_name_reaches_the_terminal_without_escapes() {
+        let hostile = "no se pudo leer a\u{1b}]52;c;ZXZpbA==\u{7}\u{1b}[2J.txt: permiso denegado";
+        let shown = error_line(hostile);
+        assert!(
+            !shown.chars().any(|c| c.is_control() && c != '\n'),
+            "{shown:?}"
+        );
+        assert!(shown.starts_with("clio: no se pudo leer a"), "{shown:?}");
+        assert!(shown.ends_with("permiso denegado"), "{shown:?}");
+        // A plain error is untouched, and a second line stays a second line.
+        assert_eq!(
+            error_line("falta el id\ncon ayuda"),
+            "clio: falta el id\ncon ayuda"
+        );
     }
 }

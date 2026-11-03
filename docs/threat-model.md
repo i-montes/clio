@@ -49,6 +49,7 @@ Pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe 
 - **El adaptador del modelo y `clio` mismo** no están en la jaula: corren como tu usuario. En el camino `run` (bucle propio) solo `run_tests` está enjaulado; en el chat, Pi sí corre enjaulado (ADR 0009, sección siguiente).
 - **Un `kill -9` a `clio` durante `doctor`** puede dejar un archivo señuelo inofensivo en tu HOME.
 - **`cargo test`** no se ofrece: haría falta montar parte de tu HOME.
+- **El banco de pruebas (`clio-bench`)** ejecuta el `check` de cada tarea sobre lo que escribió el modelo: ese `check` corre en esta misma jaula (sin red, sin tu HOME ni tu entorno). Sin jaula no corre, salvo `CLIO_BENCH_CHECK_JAIL=off`.
 
 ### La pila con Pi: Pi + `clio-guard` + `clio-toolhost` (ADR 0007)
 

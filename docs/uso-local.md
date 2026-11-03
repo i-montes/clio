@@ -152,7 +152,7 @@ clio · proyecto · beam-free                                                 us
  ↑12,4k ↓3,1k · $0 · 8/40 pasos · 21 s/10 min   ctx ▕█░░░░░▏ 31 %  externo
 ```
 
-**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter` o `d`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` atenuado. `a` aplica y `u` deshace (pide una `y` de confirmación; es el mismo código que `clio apply` y `clio undo`).
+**Detalle del run**: resumen, mensaje final del agente (con ajuste de línea), archivos cambiados (`M` modificado, `A` nuevo, `D` borrado) y, con `Enter` o `d`, el diff del archivo elegido: `+` en verde, `-` en rojo, `@@` atenuado. `a` aplica y `u` deshace. Antes de aplicar, el recuadro de confirmación lista los archivos que se van a escribir (`M` cambiado, `+` nuevo, `-` borrado) y avisa si el agente leyó contenido de fuera o si el run no guardó registro de eso; el diff completo está en esta pantalla (`Enter` o `d`). Solo una `y` o `s` sola confirma (Ctrl-S o Alt-Y no cuentan), y si el plan tarda y ya cambiaste de pantalla, el recuadro no aparece: se te avisa y lo pides otra vez. Es el mismo código que `clio apply` y `clio undo`.
 
 ```
 clio · proyecto · beam-free                                             detalle
@@ -337,7 +337,7 @@ clio memory export [archivo]                JSON Lines sin cifrar; con archivo, 
 clio memory stats [--json]                  conteos y tamaño
 ```
 
-**La pantalla Memoria** (`m` desde el inicio): lo pendiente de revisión arriba y lo reciente abajo, sin recuadros, con la barra de uso y contexto de siempre en la última línea. `/` busca (filtra la lista), `Enter` muestra el recuerdo completo con su origen, `p` aprueba y `a` archiva (los dos preguntan antes y solo `y` sigue), `r` refresca, `?` ayuda, `Esc` vuelve.
+**La pantalla Memoria** (`m` desde el inicio): lo pendiente de revisión arriba y lo reciente abajo, sin recuadros, con la barra de uso y contexto de siempre en la última línea. `/` busca (filtra la lista), `Enter` muestra el recuerdo completo con su origen, `p` aprueba y `a` archiva (los dos preguntan antes y solo `y` sigue; si el texto del recuerdo no cabe en el recuadro, lo dice y te manda a `clio memory show`, para que no apruebes sin haberlo leído entero), `r` refresca, `?` ayuda, `Esc` vuelve.
 
 ```
 clio · proyecto · beam-free                                                                 memoria

@@ -182,12 +182,12 @@ fn ask_undo(app: &mut App) {
         return;
     };
     if d.info.status == Status::Applied {
-        app.confirm = Some(Confirm {
-            action: Action::Undo,
-            id: d.info.id.clone(),
-            files: d.info.files(),
-            workspace: d.info.workspace.clone(),
-        });
+        app.confirm = Some(Confirm::new(
+            Action::Undo,
+            d.info.id.clone(),
+            d.info.files(),
+            d.info.workspace.clone(),
+        ));
     } else {
         app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
     }

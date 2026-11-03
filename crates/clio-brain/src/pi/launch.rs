@@ -155,7 +155,8 @@ pub struct Launch {
     pub helper: PathBuf,
 }
 
-fn valid_id(id: &str) -> bool {
+/// A session or run id that is safe to use as one path component.
+pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id

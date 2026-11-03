@@ -42,6 +42,11 @@ fn a_run_copies_the_workspace_runs_the_hidden_check_and_is_traced() {
         only: vec!["real-01".into()],
         run_root: tmp.path().join("runs"),
         cleanup: false,
+        // The flow is what this test is about: where there is no jail (macOS, a CI runner) the
+        // check runs with an empty environment. `the_check_runs_without...` covers the jail.
+        unjailed_checks: clio_node::jail::Jail::detect()
+            .and_then(|j| j.probe())
+            .is_err(),
         price_in_micro_per_mtok: 0,
         price_out_micro_per_mtok: 0,
         backoff_ms: vec![],

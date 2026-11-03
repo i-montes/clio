@@ -70,7 +70,7 @@ fn hard_refusal(rel: &str) -> Option<String> {
 }
 
 /// Walks `rel` under `ws` and refuses if any existing step is a symbolic link or leaves `ws`.
-fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
+pub(super) fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
     let mut cur = ws.to_path_buf();
     for c in rel.split('/') {
         cur.push(c);
