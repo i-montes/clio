@@ -454,7 +454,7 @@ impl Vault {
         self.inner().key.is_none()
     }
 
-    /// Writes the encrypted file: temp file with mode 0600, then rename.
+    /// Writes the encrypted file: temp file with mode 0600, synced, then renamed, then the folder synced.
     fn save(&self, i: &Inner) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -473,9 +473,18 @@ impl Vault {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&data).map_err(|e| VaultError::Io(e.to_string()))?;
+        let io = |e: std::io::Error| VaultError::Io(e.to_string());
         let tmp = path.with_extension("tmp");
-        write_private(&tmp, &bytes).map_err(|e| VaultError::Io(e.to_string()))?;
-        std::fs::rename(&tmp, path).map_err(|e| VaultError::Io(e.to_string()))
+        write_private(&tmp, &bytes).map_err(io)?;
+        std::fs::rename(&tmp, path).map_err(io)?;
+        // The rename itself must reach the disk too, or a power cut can bring the old file back.
+        #[cfg(unix)]
+        if let Some(dir) = path.parent() {
+            std::fs::File::open(dir)
+                .and_then(|d| d.sync_all())
+                .map_err(io)?;
+        }
+        Ok(())
     }
 
     /// Stores or replaces a secret (only the person).
@@ -504,8 +513,20 @@ impl Vault {
             state: State::Active,
             last_used_ms: None,
         };
-        i.secrets.insert(spec.name, Stored { meta, blob, prints });
-        self.save(&i)
+        let name = spec.name;
+        let before = i
+            .secrets
+            .insert(name.clone(), Stored { meta, blob, prints });
+        // A secret that could not reach the disk is not kept: the person is told it failed, and a
+        // restart would lose it. The scrubber keeps the value anyway (a leak is a leak).
+        if let Err(e) = self.save(&i) {
+            match before {
+                Some(old) => i.secrets.insert(name, old),
+                None => i.secrets.remove(&name),
+            };
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Replaces the value of an existing secret and restarts its rotation clock. The old value
@@ -868,7 +889,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    f.write_all(bytes)
+    f.write_all(bytes)?;
+    // To the disk before the rename: without it a power cut can leave an empty `vault.bin`, and
+    // it is the only copy of every secret.
+    f.sync_all()
 }
 
 #[cfg(not(unix))]
