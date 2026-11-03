@@ -383,7 +383,7 @@ siguiente: clio doctor, y luego clio
 
 `init` es idempotente: no pisa lo que ya existe (si cambias `config.json`, queda como lo dejaste). Deja las carpetas en 0700, nunca imprime la clave y avisa si el archivo de la clave tiene permisos abiertos.
 
-**La clave del modelo.** Está en la variable `OPENCODE_API_KEY` o en `~/.config/clio/opencode-api-key` (`chmod 600`). La lee solo el adaptador del modelo; Clio no la imprime ni la guarda en ningún run.
+**La clave del modelo.** Está en la variable `OPENCODE_API_KEY` o en `~/.config/clio/opencode-api-key` (`chmod 600`: si otra persona del equipo puede leer el archivo, el chat se niega a arrancar y te dice que la cambies). La lee el adaptador del modelo (`clio run`) o Clio, que se la da a Pi dentro de su jaula (chat); Clio no la imprime ni la guarda en ningún run.
 
 **Configuración** (`~/.config/clio/config.json`): proveedor `opencode-go`, modelo `beam-free` (gratuito), el comando del adaptador (`python3 .../adapters/models/openai_compat.py`), el prompt `clio-agent@2` (con la jaula probada se usa `clio-agent@3`, que explica `run_tests`), y los límites: 40 pasos, 600 segundos, 0,10 USD por tarea, y para la copia 5000 archivos y 200 MB. Si `init` no encuentra `adapters/models/openai_compat.py` junto al ejecutable o en el directorio actual, instala una copia en `~/.local/share/clio/adapters/`. Ojo: la ruta del adaptador queda escrita en el config; si mueves o borras el repositorio, edita `model.command`.
 
@@ -521,7 +521,7 @@ clio vault status
 clio vault stop
 ```
 
-Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en `CLIO_VAULT_BIN`/`PATH`). Los dos sockets quedan en `$XDG_RUNTIME_DIR/clio/` con permisos 0600; el archivo de la bóveda en `~/.local/share/clio/vault.bin`.
+Es un envoltorio del binario `clio-vault` (lo busca junto a `clio`, o en la ruta absoluta de `CLIO_VAULT_BIN`; nunca en el `PATH`, porque recibe tu frase maestra). Los dos sockets quedan en `$XDG_RUNTIME_DIR/clio/` con permisos 0600; el archivo de la bóveda en `~/.local/share/clio/vault.bin`.
 
 ## Pi, el arnés del agente
 

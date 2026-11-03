@@ -25,7 +25,8 @@ already approved action without being able to hurt anything outside a folder.
   `cargo_test` is not offered (a rustup `cargo` lives in the person's home).
 - `Sandbox::set_copy_snapshots(true)`: snapshots copy files instead of hard-linking them. Required
   once programs run in the folder: an in-place edit would change a hard-linked snapshot too.
-- `EffectLog`: JSON-lines log that makes an action (by id) apply its effect once.
+- `Sandbox::open_regular`: the one way a tool opens an existing file; `O_NONBLOCK` and a regular-file check on the open file, so a FIFO left by a jailed program cannot stop the host. `Sandbox::write` replaces the file atomically and keeps the permissions of the one it replaces.
+- `EffectLog`: JSON-lines log that makes an action (by id) apply its effect once. It records facts, never content (`{"bytes": n}` for a string): command output does not reach the disk (S-18).
 - `LeaseTable`: leases on a resource (repo, path) with an injectable `Clock`.
 - `Registry` and the basic tools: no tool without a declared `Effect`; only `Read` and
   `LocalReversible` in this phase; few visible tools, the rest found by `search`.

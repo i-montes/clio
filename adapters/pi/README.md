@@ -7,7 +7,7 @@ Pi is the agent harness of Clio (ADR 0007). This folder pins it and, in `extensi
 - `overrides` forces patched versions of two transitive dependencies that `npm audit` flags in 1.4.0: `undici` (high, a memory issue in an EventSource parser Clio does not use) and `minimatch` (moderate, glob matching). Remove an override when Pi ships the fix. Checked: Pi 1.4.0 runs normally with them.
 - The CI installs only from the lockfile (`npm ci`), fails if it would change, and runs `npm audit`; the nightly audits again. `CODEOWNERS` makes the owner review every change here.
 
-**How Clio launches Pi** (the Rust side does it; here for reference): `pi --mode rpc --no-builtin-tools --no-extensions -e <clio-guard> --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`, with `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_OFFLINE=1`, `PI_TELEMETRY=0` and `PI_SKIP_VERSION_CHECK=1`, a clean environment, and the working folder set to the session's copy of the project.
+**How Clio launches Pi** (the Rust side does it; here for reference): `pi --mode rpc --no-builtin-tools --no-extensions -e <clio-guard> --no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve --offline`, with `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_OFFLINE=1`, `PI_TELEMETRY=0` and `PI_SKIP_VERSION_CHECK=1`, a clean environment, and the working folder set to the session's copy of the project. Since ADR 0009 this command runs inside a `bwrap` jail (copy read-only, own network namespace, only the provider reachable through a host proxy, the key in the jail's environment and not in argv); Pi does not start if the jail fails its self-test.
 
 ## La guardia: `extensions/clio-guard`
 

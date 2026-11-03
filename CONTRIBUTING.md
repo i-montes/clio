@@ -18,4 +18,4 @@ Ninguna dependencia nueva sin pasar `cargo-deny`. Nada que parezca un secreto en
 
 Si algo salió mal en producción o en un reporte, el mismo PR que lo corrige agrega el caso en `testing/attacks/cases/` y una línea en la «Batería de ataques» de `docs/security.md`. Una prueba falla si las dos listas no coinciden.
 
-> La rama `main` está protegida: un cambio de otra persona entra por PR, con los checks del CI en verde y la revisión de los dueños del código (`.github/CODEOWNERS`). El dueño del repositorio queda exento y puede subir directo a `main`; esa excepción es solo suya.
+> La rama `main` está protegida: todo cambio entra por PR, con los 10 checks del CI en verde y una revisión de los dueños del código (`.github/CODEOWNERS`). Se trabaja siempre en una rama y un PR. La protección no se aplica a administradores, así que el dueño puede fusionar con `gh pr merge --admin` una vez el CI está en verde; subir directo a `main` salta la protección y no se hace.
