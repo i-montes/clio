@@ -14,7 +14,7 @@ clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--
 - Imprime `READY <ruta del socket>` y corre hasta que se cierra su stdin (así no sobrevive a quien lo lanzó).
 - Necesita `HOME`: la autoprueba de la jaula planta ahí su señuelo y comprueba que no se ve.
 - `--jail auto` ofrece `exec` (el `bash` de Pi) solo si `bwrap` arranca y la autoprueba de la jaula pasa; si no, `exec` no está declarada y la pasarela la niega (S-02): `bash` falla cerrado. `--jail off` no la ofrece.
-- `--rules` es un JSON de reglas de la pasarela: solo se toman de ahí el umbral del cortacircuito y rutas protegidas extra. La carpeta de trabajo, las herramientas declaradas y las rutas protegidas obligatorias (`extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`) son siempre las del servicio.
+- `--rules` es un JSON de reglas de la pasarela: solo se toman de ahí el umbral del cortacircuito y rutas protegidas extra. La carpeta de trabajo, las herramientas declaradas y las rutas protegidas obligatorias (`extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer`) son siempre las del servicio.
 - `CLIO_TOOLHOST_SCRUB_JSON='{"nombre":"valor"}'` enseña valores al limpiador; `--vault-socket` añade el filtro del vault (si no contesta, la salida se retiene). El enlace real con el vault de la sesión está por hacer.
 
 ## Protocolo

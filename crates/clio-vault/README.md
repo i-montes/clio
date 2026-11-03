@@ -8,7 +8,7 @@ Secret vault (S-18 to S-22, S-44). The model only sees `{{secreto:name}}` marker
   in memory only, and fails and raises an alert if the destination is not allowed.
 - `put`, `rotate`, `revoke`, `list`, `audit` and `backup` need a `PersonCap`, which `init` and
   `unlock` hand out. `list` never returns values.
-- `issue_token`: short-lived token bound to one secret, one tool and one node.
+- `issue_token`: short-lived token bound to one secret, one tool and one node. Its life is 1 ms to 1 h (S-21); expired tokens are forgotten when a new one is issued and at most 1024 are alive (S-47).
 - `Scrubber` (`vault.scrubber()`): the single output filter for the gateway, LLM and Jev
   payloads, clio-trace and clio-memory. Removes known values (plain, base64 at any alignment,
   URL-encoded) and provider key patterns, and logs every redaction.
@@ -62,5 +62,8 @@ Real limits:
   convention, not a wall. There is no peer-credential check (needs `unsafe`/libc).
 - Between bind and chmod the socket follows the umask: keep its parent directory 0700.
 - No limit on wrong `unlock` attempts (Argon2 is the only brake). The terminal prompt echoes.
+- Argon2id parameters are fixed in code (OWASP minimum); raising them needs them stored in the vault file and a migration.
+- Each socket serves at most 64 connections at once; `VaultClient` gives up after 60 s (`with_timeout`). `save` is durable: it fsyncs and rolls the memory back if the write fails. `scan_dir` takes a `skip` list of paths to leave out.
+- `clio vault start` finds `clio-vault` next to `clio` or at the absolute path in `CLIO_VAULT_BIN`, never in the `PATH` (it receives the passphrase).
 
 Spec: [`docs/specs/clio-vault-spec-v0.1.md`](../../docs/specs/clio-vault-spec-v0.1.md).

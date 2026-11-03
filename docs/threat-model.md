@@ -46,7 +46,7 @@ Pertenecer al grupo `docker` equivale a ser administrador, así que Docker debe 
 - **Lo que está dentro de `/work`.** Es la copia: el código jaulado puede leerla entera y modificarla. Lo que no quieras que lea, no debe estar en la copia (la copia ya excluye lo que parece secreto). Lo que cambia sigue pasando por tu `diff` y tu `apply`, que rechaza rutas protegidas y enlaces simbólicos.
 - **Lo que imprime.** La salida es contenido externo: se limpia, se envuelve como datos y marca la sesión, pero un modelo débil puede dejarse influir por ella; la defensa es la pasarela, no el prompt.
 - **`/usr` es legible** (versiones de programas, qué paquetes hay instalados) y `/proc` muestra datos del equipo (CPU, memoria, núcleo).
-- **El adaptador del modelo y `clio` mismo** no están en la jaula: corren como tu usuario, solo `run_tests` está enjaulado.
+- **El adaptador del modelo y `clio` mismo** no están en la jaula: corren como tu usuario. En el camino `run` (bucle propio) solo `run_tests` está enjaulado; en el chat, Pi sí corre enjaulado (ADR 0009, sección siguiente).
 - **Un `kill -9` a `clio` durante `doctor`** puede dejar un archivo señuelo inofensivo en tu HOME.
 - **`cargo test`** no se ofrece: haría falta montar parte de tu HOME.
 

@@ -12,4 +12,4 @@ Respondemos al aviso en privado y corregimos antes de publicar nada. Cada vulner
 
 ## Qué cubre
 
-Clio, clio-memory, clio-network y clio-trace. El modelo de amenazas (qué se protege y de qué) está en [`docs/threat-model.md`](docs/threat-model.md) y las reglas obligatorias en [`docs/security.md`](docs/security.md).
+Clio (cerebro, vault, pasarela, nodo y servicio de herramientas), clio-memory y clio-trace. `clio-network` y la PWA siguen siendo marcadores de posición. El modelo de amenazas (qué se protege y de qué) está en [`docs/threat-model.md`](docs/threat-model.md) y las reglas obligatorias en [`docs/security.md`](docs/security.md).
