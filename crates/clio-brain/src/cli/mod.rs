@@ -22,7 +22,7 @@ pub mod work;
 use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -41,6 +41,19 @@ pub fn sha_hex(bytes: &[u8]) -> String {
 
 pub fn mode(path: &Path) -> Option<u32> {
     std::fs::metadata(path).ok().map(|m| m.mode() & 0o777)
+}
+
+/// Looks for `rel` in the folders above the running executable: the tree it was built or
+/// installed from. Never the working directory: that is whatever folder the person happens to be
+/// in, and a cloned repository can ship the same path, so running what is found there would run a
+/// stranger's code outside the jail (S-03).
+pub(crate) fn find_above_exe(rel: &Path) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    find_above(exe.parent()?, rel)
+}
+
+fn find_above(start: &Path, rel: &Path) -> Option<PathBuf> {
+    start.ancestors().map(|d| d.join(rel)).find(|c| c.is_file())
 }
 
 pub fn set_mode(path: &Path, mode: u32) -> Res<()> {
@@ -146,6 +159,21 @@ mod tests {
     fn stamp_known_dates() {
         assert_eq!(stamp(0), "19700101-000000");
         assert_eq!(stamp(1_782_864_000_000 + 3_661_000), "20260701-010101");
+    }
+
+    #[test]
+    fn find_above_looks_only_up_the_given_start() {
+        let root = tempfile::tempdir().unwrap();
+        let rel = Path::new("infra/local/check-host.sh");
+        let script = root.path().join(rel);
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        let inside = root.path().join("target/release");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert_eq!(find_above(&inside, rel), Some(script));
+        // A folder that is not under that tree (a stranger's clone) finds nothing.
+        let stranger = tempfile::tempdir().unwrap();
+        assert_eq!(find_above(stranger.path(), rel), None);
     }
 
     #[test]

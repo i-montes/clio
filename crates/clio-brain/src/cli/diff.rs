@@ -58,6 +58,18 @@ fn ops(a: &[&str], b: &[&str]) -> Option<Vec<Op>> {
     Some(out)
 }
 
+/// Whether `file_diff` shows every changed line: false for a binary file and for a difference too
+/// large to show line by line. What cannot be shown cannot be reviewed.
+pub fn fully_shown(old: Option<&[u8]>, new: Option<&[u8]>) -> bool {
+    if old.is_some_and(|b| !is_text(b)) || new.is_some_and(|b| !is_text(b)) {
+        return false;
+    }
+    let text = |b: Option<&[u8]>| String::from_utf8_lossy(b.unwrap_or_default()).into_owned();
+    let (ot, nt) = (text(old), text(new));
+    let (a, b): (Vec<&str>, Vec<&str>) = (ot.lines().collect(), nt.lines().collect());
+    ops(&a, &b).is_some()
+}
+
 /// The diff of one file; `None` on a side means the file does not exist there.
 pub fn file_diff(rel: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> String {
     let head = format!(
@@ -145,6 +157,18 @@ mod tests {
             file_diff("n", Some(b"x\n"), None).contains("+++ /dev/null\n@@ -1,1 +0,0 @@\n-x\n")
         );
         assert!(file_diff("n", Some(&[0, 1]), Some(&[0, 2])).contains("binary file: changed"));
+    }
+
+    #[test]
+    fn what_cannot_be_shown_is_not_fully_shown() {
+        assert!(fully_shown(Some(b"a\n"), Some(b"b\n")));
+        assert!(fully_shown(None, Some(b"new\n")));
+        assert!(!fully_shown(Some(b"a\n"), Some(&[0xff, 0xfe])));
+        // Changing only the first and last line of a big file leaves a middle too big to diff.
+        let big =
+            |edge: &str, mid: &str| format!("{edge}\n{}{edge}\n", format!("{mid}\n").repeat(2500));
+        let (a, b) = (big("a", "x"), big("b", "y"));
+        assert!(!fully_shown(Some(a.as_bytes()), Some(b.as_bytes())));
     }
 
     #[test]
