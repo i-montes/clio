@@ -168,6 +168,17 @@ pub struct Toolhost {
 
 impl Toolhost {
     pub fn start(w: &World, jail: bool, scrub: Option<(&str, &str)>) -> Self {
+        Self::start_with_memory(w, jail, scrub, None)
+    }
+
+    /// With `memory`, the service offers `memory_search` and `memory_get` over that data folder
+    /// (text-only search: no embedding model). The writer that seeded it must be dropped first.
+    pub fn start_with_memory(
+        w: &World,
+        jail: bool,
+        scrub: Option<(&str, &str)>,
+        memory: Option<&Path>,
+    ) -> Self {
         let _ = std::fs::remove_file(w.sock_dir.join("toolhost.sock")); // a killed one leaves it
         // The product starts the service as `clio toolhost` (the same code as `clio-toolhost`).
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio"));
@@ -177,6 +188,9 @@ impl Toolhost {
         cmd.args(["--scratch"]).arg(&w.scratch);
         cmd.args(["--run-dir"]).arg(&w.run_dir);
         cmd.args(["--jail", if jail { "auto" } else { "off" }]);
+        if let Some(data) = memory {
+            cmd.args(["--memory-data"]).arg(data);
+        }
         // HOME matters: the jail's self-test plants its decoy there and checks it is invisible.
         cmd.env_clear().env("HOME", &w.home);
         if let Some((n, v)) = scrub {

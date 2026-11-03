@@ -4,4 +4,5 @@
 mod common;
 mod failclosed;
 mod latency;
+mod memory;
 mod stack;

@@ -20,9 +20,18 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 6] = ["read", "write", "edit", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@4";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@4.md");
+pub const GUARD_TOOLS: [&str; 8] = [
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "find",
+    "ls",
+    "memory_search",
+    "memory_get",
+];
+pub const PROMPT_NAME: &str = "clio-agent@5";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@5.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -249,7 +258,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guard_tools_are_the_six_the_extension_registers() {
+    fn the_guard_tools_are_the_eight_the_extension_registers() {
         // Same list as TOOL_NAMES in adapters/pi/extensions/clio-guard/index.ts.
         let (_, index) = GUARD_FILES[0];
         let line = index
@@ -264,6 +273,6 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_one_the_guard_checks() {
-        assert!(PROMPT.starts_with("version: 4"));
+        assert!(PROMPT.starts_with("version: 5"));
     }
 }

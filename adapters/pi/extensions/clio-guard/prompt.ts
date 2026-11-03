@@ -8,7 +8,7 @@ import { basename } from "node:path";
 const NAME = /^([a-z0-9-]+)@([0-9]+)\.md$/;
 
 export interface ClioPrompt {
-	/** `clio-agent@4`. */
+	/** `clio-agent@5`. */
 	version: string;
 	text: string;
 }
