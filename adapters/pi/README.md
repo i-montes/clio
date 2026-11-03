@@ -33,7 +33,7 @@ Es la única extensión que Pi carga (`-e adapters/pi/extensions/clio-guard`). *
 **Qué NO hace**
 - No es un límite de seguridad: corre dentro del proceso de Pi, como la persona. Lo que protege la máquina es el servicio, la pasarela, el sandbox y la jaula (ver `docs/threat-model.md`).
 - No pregunta nada a la persona (no hay diálogos en esta fase): un «preguntar» de la pasarela es un no.
-- No implementa la memoria ni autentica al servicio más allá de los permisos del socket.
+- Registra dos herramientas de memoria de solo lectura (`memory_search`, `memory_get`) que atiende el servicio de herramientas; no escribe en la memoria ni autentica al servicio más allá de los permisos del socket.
 - `edit` lee el archivo tal cual (sin limpiar) para poder escribirlo de vuelta sin dañarlo; su resultado sí se limpia al final.
 
 **Comprobación de arranque.** El RPC de Pi no tiene un comando que liste las herramientas. El lanzador lee la entrada `clio-guard.tools` (`get_entries`) y exige que las activas estén en su lista permitida (las ocho) y que su origen sea la extensión de Clio; sin extensión no hay entrada y la lista permitida exige cero herramientas. Es lo que la extensión dice de sí misma; lo independiente es la lista `tools` que recibe el modelo en su primera petición (las pruebas la comprueban). Implementación de referencia: `crates/clio-toolhost/tests/common/mod.rs` (`Pi::verify_tools`).
