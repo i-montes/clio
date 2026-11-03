@@ -37,11 +37,14 @@ JSON por línea, varias peticiones por conexión, tope de 4 MiB por línea y 30 
 | `fs_write` | `path`, `content` | reemplazo atómico, crea las carpetas |
 | `fs_mkdir` | `path` | |
 | `exec` | `command`, `timeout?` (s, tope 120) | `content` = salida (stdout y stderr), `data.exit_code`, `data.signal`, `data.timed_out`; siempre en la jaula, solo si la autoprueba pasó |
+| `memory_search` | `query` (hasta 200 caracteres), `limit?` (1 a 8, por defecto 5) | `content` = una línea por recuerdo activo, `[m{id}] {tipo} · {persona\|agente\|externo} · {fecha}: {texto}`, envuelta como dato (`UNTRUSTED-DATA memory`); `data.ids`, `data.count`, `data.masked`. Solo si el servicio recibió un `MemoryPort` |
+| `memory_get` | `id` (entero > 0) | lo mismo para un recuerdo activo. Sin `MemoryPort` las dos se niegan (S-02) |
 | `filter` | `items: [{text, wrap?: "file"\|"tool-result"}]` | `data.items`: cada texto saneado, limpiado y, si pide `wrap`, envuelto como dato externo. Sin efectos: no pasa por la pasarela |
 
 Las rutas son relativas a la copia de trabajo. Cada operación (menos `filter`) pasa por: `Gateway::decide_or_deny` (reglas propias, negar por defecto, falla cerrada) → regla `S-12/bash` para `exec` (no vacío, sin NUL, hasta 8 KiB) → `clio_node::Executor` en la copia (rutas canonizadas, enlaces hacia fuera rechazados, rutas protegidas) o la jaula para `exec` → saneado y limpiador del vault.
 
 - **Contaminación (S-05)**: por sesión, solo sube. La marca la pone leer un archivo, listar, buscar o ejecutar un comando; `tainted` en la petición la sube (no la baja); `tainted` va en toda respuesta.
+- **Memoria (S-60)**: solo lectura, por el `MemoryPort` de `Config`. Sale limpia (el limpiador antes del corte), en una línea por recuerdo (600 caracteres como máximo) y de 4 KiB como máximo en total, envuelta como dato y `external`; pero marca la sesión solo si algún recuerdo no es de la persona, a diferencia de archivos y comandos, que marcan siempre. El puerto corre en otro hilo con plazo de 10 s y red contra pánicos; un fallo es un error corto de esa llamada.
 - **«Preguntar»** de la pasarela se niega (`NobodyHome`); `with_asker` permite poner otro. A las 10 negadas seguidas de una sesión, lo que iba a pasar «pregunta» y por tanto se niega.
 - **`exec` y las carpetas protegidas**: las que no existen se crean vacías durante el comando (la jaula las monta de solo lectura) y se quitan después.
 - Archivos de más de 8 MiB no se leen; salidas de más de 2 MiB se retienen enteras (no se cortan antes de limpiar).
