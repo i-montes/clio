@@ -58,7 +58,7 @@ fn run(j: &PiJail, l: &Launch, argv: &[&str]) -> String {
     String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).into_owned()
 }
 
-// S-22 S-03, finding 5 (attack-54): the vault tells its two sockets apart by which one a request came in on,
+// S-22 S-03, S-59, finding 5 (attack-54): the vault tells its two sockets apart by which one a request came in on,
 // and both are 0600 sockets of the same user. Pi's process must not be able to see them.
 #[test]
 fn a_process_in_pis_jail_cannot_reach_the_vault_sockets_but_reaches_the_toolhost() {
@@ -113,7 +113,7 @@ fn a_process_in_pis_jail_cannot_reach_the_vault_sockets_but_reaches_the_toolhost
     assert!(out.contains("CONNECTED toolhost.sock"), "{out}");
 }
 
-// S-16 S-03: a compromised Pi must not write in the copy itself and skip the toolhost's rules
+// S-16 S-03, S-59: a compromised Pi must not write in the copy itself and skip the toolhost's rules
 // (`.git/hooks`, `skills/`). Its own folders stay writable: the sessions are Pi's.
 #[test]
 fn the_working_copy_is_read_only_inside_pis_jail_and_pis_own_folders_are_not() {
@@ -147,7 +147,7 @@ fn the_working_copy_is_read_only_inside_pis_jail_and_pis_own_folders_are_not() {
     assert!(!rig.proj.join("new").exists());
 }
 
-// S-01 S-02: fail closed. If the jail cannot be built, Pi does not start, and the person is told why.
+// S-01 S-02, S-59: fail closed. If the jail cannot be built, Pi does not start, and the person is told why.
 #[test]
 fn pi_does_not_start_when_its_jail_cannot_be_built() {
     let Some(node) = pi_support::need("pi jail: fails closed", false) else {
@@ -164,7 +164,7 @@ fn pi_does_not_start_when_its_jail_cannot_be_built() {
     assert!(err.contains("jaula"), "{err}");
 }
 
-// S-06 S-03, attack-55 (phase 3b): the jail has a network of its own. Inside, a host's abstract
+// S-06 S-03, S-59, attack-55 (phase 3b): the jail has a network of its own. Inside, a host's abstract
 // socket, a loopback port of the host and the internet are out of reach; the provider's address
 // is reached only through the proxy, and any other `CONNECT` is refused.
 #[test]

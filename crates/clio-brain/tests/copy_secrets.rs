@@ -7,9 +7,8 @@ mod common;
 use clio_attacks::{Case, Observed, Status, Target, load_cases, run};
 use common::{Env, put};
 
-// S-18, S-44: files that exist to hold a credential never enter the copy, whatever tool wrote
-// them. The list today stops at `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.ssh`,
-// `.aws` and `credentials*`.
+// S-18, S-44, S-57: files that exist to hold a credential never enter the copy, whatever tool wrote
+// them (the names are in `is_secret_name`, `crates/clio-brain/src/cli/work.rs`).
 #[test]
 fn credential_files_are_not_copied_for_the_agent() {
     let e = Env::new();
@@ -35,7 +34,7 @@ fn credential_files_are_not_copied_for_the_agent() {
     assert_eq!(e.copied(), ["app.py"], "only the plain file may be copied");
 }
 
-// S-18, S-36: a value the filter masked is not the file's content. A copy of the masked text
+// S-18, S-36, S-57: a value the filter masked is not the file's content. A copy of the masked text
 // must never travel back into the person's project through `apply` and replace the real value.
 #[test]
 fn apply_refuses_a_file_that_carries_a_masked_value() {

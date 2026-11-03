@@ -48,6 +48,7 @@ fn ask(p: &EgressProxy, request: &[u8]) -> (String, UnixStream) {
     (String::from_utf8_lossy(&got).trim().to_owned(), s)
 }
 
+// S-59
 #[test]
 fn it_tunnels_to_the_one_destination_it_was_given() {
     let (p, port, _d) = rig();
@@ -66,6 +67,7 @@ fn it_tunnels_to_the_one_destination_it_was_given() {
     assert!(p.denied().is_empty());
 }
 
+// S-59
 #[test]
 fn it_refuses_everything_else_and_remembers_what_was_asked() {
     let (p, port, _d) = rig();
