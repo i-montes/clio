@@ -407,12 +407,19 @@ impl Engine {
         let mut stored = 0;
         for batch in pending.chunks(EMBED_BATCH) {
             let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-            let vectors = embedder.embed(&texts)?;
-            if vectors.len() != batch.len() {
-                return Err(Error::BadVector);
-            }
+            // `None`: this text makes the model fail by itself, so it is skipped like one that
+            // has no vector, instead of stopping the ones behind it for ever.
+            let vectors: Vec<Option<Vec<f32>>> = match embedder.embed(&texts) {
+                Ok(v) if v.len() == batch.len() => v.into_iter().map(Some).collect(),
+                Ok(_) => return Err(Error::BadVector),
+                Err(e) => self.embed_each(embedder.as_ref(), &texts, e)?,
+            };
             let (mut good, mut skipped) = (Vec::new(), Vec::new());
             for ((id, _), v) in batch.iter().zip(vectors) {
+                let Some(v) = v else {
+                    skipped.push(*id);
+                    continue;
+                };
                 if v.len() != dim {
                     return Err(Error::BadVector);
                 }
@@ -929,6 +936,42 @@ impl Engine {
     }
 
     /// True if the embedder gives a usable vector for an ordinary text.
+    /// After a batch failed: each text alone, twice (a hiccup is not the text's fault). One that
+    /// fails both times while the canary works is the text's fault (`None`); if the canary fails
+    /// too the model is broken, and the batch's own error is the answer. A batch of one has
+    /// nothing behind it to block: its error stands, and the job retries it.
+    fn embed_each(
+        &self,
+        embedder: &dyn Embedder,
+        texts: &[&str],
+        batch_error: Error,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        if texts.len() == 1 {
+            return Err(batch_error);
+        }
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            let mut vector = None;
+            let mut answered = false;
+            for _ in 0..2 {
+                match embedder.embed(&[t]) {
+                    Ok(mut v) if v.len() == 1 => {
+                        vector = v.pop();
+                        answered = true;
+                        break;
+                    }
+                    Ok(_) => return Err(Error::BadVector),
+                    Err(_) => {}
+                }
+            }
+            if !answered && !self.embedder_works(embedder).unwrap_or(false) {
+                return Err(batch_error);
+            }
+            out.push(vector);
+        }
+        Ok(out)
+    }
+
     fn embedder_works(&self, embedder: &dyn Embedder) -> Result<bool> {
         let probe = embedder.embed(&["a"])?;
         Ok(probe.len() == 1

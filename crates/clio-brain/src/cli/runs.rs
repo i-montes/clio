@@ -13,7 +13,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, MemoryInput, Observer};
+use clio_brain::control::OutputFilter;
 use clio_brain::memory_link::{EmbedModel, MemoryLink, RunFacts};
+use clio_brain::pi::text;
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -459,6 +461,7 @@ pub fn execute(
     )?;
     let scrubber = p.scrubber.clone();
     agent.scrubber = Some(scrubber.clone());
+    agent.filter = Some(Box::new(Plain));
     let used = Arc::new(Mutex::new(RunUsage::new(
         p.window,
         p.window_known,
@@ -518,7 +521,8 @@ pub fn execute(
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
     let mut outcome = agent.run(&mut model, instruction)?;
     // What the model said can carry a secret it was shown or made up: scrub what is saved and shown.
-    let scrub = |t: &str| p.scrubber.scrub(t);
+    // ...and what it said is shown on a terminal: no escape sequences or hidden characters either.
+    let scrub = |t: &str| text::data(&p.scrubber.scrub(t));
     outcome.final_message = outcome.final_message.as_deref().map(scrub);
     for m in &mut outcome.transcript {
         m.content = scrub(&m.content);
@@ -610,6 +614,17 @@ pub fn execute(
 /// How a run ended, as `summary.json` keeps it: the `Debug` form (`Final`, `Stopped(Steps)`...) with
 /// the values the vault knows struck out. A model error carries what the adapter printed, and a
 /// provider's error can echo the key (S-58).
+/// What the model is shown of a tool result, and what is saved of it: plain text, no escape
+/// sequences, no control or hidden characters (a file can carry them; the model reads them as
+/// text and would repeat them on a terminal).
+struct Plain;
+
+impl OutputFilter for Plain {
+    fn filter(&self, output: &str) -> Result<String, String> {
+        Ok(text::data(output))
+    }
+}
+
 fn ending_text(e: &clio_brain::agent::Ending, scrubber: &clio_vault::Scrubber) -> String {
     scrubber.scrub(&format!("{e:?}"))
 }

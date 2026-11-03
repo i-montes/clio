@@ -10,7 +10,7 @@
 //! The TUI calls the same functions (`plan`, `commit`, `undo_run`): the checks live only here.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use clio_brain::agent::PROTECTED_PATHS;
@@ -104,6 +104,11 @@ fn workspace(meta_ws: &str) -> Res<PathBuf> {
 }
 
 pub(super) fn confirm(q: &str) -> bool {
+    // What was typed or pasted before the question (a pasted block ending in a newline, a key held
+    // down) must not answer it: only what comes after the question counts.
+    if std::io::stdin().is_terminal() {
+        let _ = rustix::termios::tcflush(std::io::stdin(), rustix::termios::QueueSelector::IFlush);
+    }
     print!("{q} [s/N] ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();

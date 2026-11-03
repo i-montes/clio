@@ -32,7 +32,7 @@ mod tests_views;
 use std::io::{IsTerminal, Stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -130,6 +130,13 @@ impl Drop for Guard {
 /// Opens the TUI and returns the exit code.
 pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     install_panic_hook();
+    // SIGTERM and SIGHUP (the window closes, `kill`) leave through the normal way out, so the
+    // guard gives the terminal back; a handler cannot do that itself, it only sets this.
+    let ended = Arc::new(AtomicUsize::new(0));
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register_usize(sig, ended.clone(), sig as usize)
+            .map_err(|e| format!("señales: {e}"))?;
+    }
     let (_guard, mut term) = Guard::enter()?;
     let (tx, rx) = channel::<Input>();
     let dirs = Arc::new(dirs);
@@ -162,7 +169,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
     // Only for the pseudo-terminal tests (debug builds): the text of every frame, to a file.
     let dump = std::env::var_os("CLIO_TUI_SCREEN_DUMP").filter(|_| cfg!(debug_assertions));
-    while !app.quit {
+    while !app.quit && ended.load(Ordering::SeqCst) == 0 {
         let frame = term
             .draw(|f| draw(f, &app))
             .map_err(|e| format!("terminal: {e}"))?;
@@ -204,7 +211,11 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     }
     // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
     ctx.stop_chat_now();
-    Ok(0)
+    // The shell convention for a process ended by a signal.
+    Ok(match ended.load(Ordering::SeqCst) {
+        0 => 0,
+        sig => 128 + sig as i32,
+    })
 }
 
 /// The screen as plain text, replaced atomically.

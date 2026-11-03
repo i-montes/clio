@@ -204,6 +204,59 @@ fn a_batch_of_only_unrepresentable_memories_is_skipped_not_an_error() {
     );
 }
 
+/// Fails the whole call when any text has `word` (a text the model chokes on), else `HashEmbedder`.
+/// An empty `word` fails every call: a broken model.
+struct Chokes {
+    inner: HashEmbedder,
+    word: String,
+}
+
+impl Embedder for Chokes {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if texts.iter().any(|t| t.contains(&self.word)) {
+            return Err(Error::Embedding("the model failed on this text".into()));
+        }
+        self.inner.embed(texts)
+    }
+}
+
+fn chokes(word: &str) -> Arc<dyn Embedder> {
+    Arc::new(Chokes {
+        inner: HashEmbedder::new("m", 64),
+        word: word.into(),
+    })
+}
+
+// Second audit, batch D: one text that makes the model fail (not just return nothing) must not
+// stop the vectors of every memory after it.
+#[test]
+fn a_text_that_makes_the_model_fail_does_not_block_the_others() {
+    let f = fixture_with(chokes("veneno"));
+    for c in ["vive en Medellín", "veneno", "tiene un coche rojo"] {
+        f.engine.propose(prop(f.scope, f.person, c)).unwrap();
+    }
+    assert_eq!(f.engine.embed_pending(100).unwrap(), 2);
+    assert_eq!(
+        f.engine.embed_pending(100).unwrap(),
+        0,
+        "the one that fails is not retried forever"
+    );
+}
+
+// ...but a model that fails on everything is broken, and says so instead of skipping the lot.
+#[test]
+fn a_model_that_fails_on_everything_is_an_error_not_a_skip() {
+    let f = fixture_with(chokes(""));
+    propose_three(&f);
+    assert!(f.engine.embed_pending(100).is_err());
+}
+
 #[test]
 fn read_only_engine_does_not_embed() {
     let f = fixture();
