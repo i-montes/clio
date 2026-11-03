@@ -27,15 +27,34 @@ enum Mode {
 struct FakePort {
     items: Vec<MemoryItem>,
     mode: Mode,
+    /// What `search` says besides the items: its note and whether it abstained (by default it
+    /// abstains exactly when it has no items).
+    note: Option<String>,
+    abstained: Option<bool>,
     calls: AtomicUsize,
     last_search: Mutex<Option<(String, usize)>>,
 }
 
 impl FakePort {
     fn new(items: Vec<MemoryItem>, mode: Mode) -> Arc<Self> {
+        Self::build(items, mode, None, None)
+    }
+
+    fn saying(items: Vec<MemoryItem>, note: Option<&str>, abstained: Option<bool>) -> Arc<Self> {
+        Self::build(items, Mode::Items, note, abstained)
+    }
+
+    fn build(
+        items: Vec<MemoryItem>,
+        mode: Mode,
+        note: Option<&str>,
+        abstained: Option<bool>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             items,
             mode,
+            note: note.map(str::to_owned),
+            abstained,
             calls: AtomicUsize::new(0),
             last_search: Mutex::new(None),
         })
@@ -64,9 +83,9 @@ impl MemoryPort for FakePort {
         *self.last_search.lock().unwrap() = Some((query.to_owned(), limit));
         self.behave()?;
         Ok(Found {
-            abstained: self.items.is_empty(),
+            abstained: self.abstained.unwrap_or(self.items.is_empty()),
             items: self.items.clone(),
-            note: None,
+            note: self.note.clone(),
         })
     }
 
@@ -525,6 +544,29 @@ fn the_budget_runs_out_at_20_calls_or_24_kib() {
 
 // S-47
 #[test]
+fn a_note_that_does_not_fit_in_the_last_kib_never_breaks_the_cap() {
+    // 200 four-byte characters: a note of about 800 bytes, with exactly 1 KiB of budget left (the
+    // floor). The room for the items must not underflow (a panic in debug, a lifted cap in release).
+    let port = FakePort::saying(
+        vec![item(1, Origin::Person, "x")],
+        Some(&"😀".repeat(200)),
+        None,
+    );
+    let e = env(&port);
+    let left = 1024;
+    std::fs::write(
+        run_dir(&e).join("memory-budget.json"),
+        format!(r#"{{"calls":1,"bytes":{}}}"#, 24 * 1024 - left),
+    )
+    .unwrap();
+    let r = search(&e, "s1", "q");
+    assert!(r.ok, "{r:?}");
+    assert!(r.content.len() <= left, "{} bytes: {r:?}", r.content.len());
+    assert!(!r.content.contains("[note]"), "the note is dropped: {r:?}");
+}
+
+// S-47
+#[test]
 fn rejected_and_failed_calls_spend_the_budget() {
     // Calls the gateway denied do not spend it (five, so the breaker is not reached).
     let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
@@ -560,6 +602,20 @@ fn rejected_and_failed_calls_spend_the_budget() {
     }
     assert!(denied_by_budget(&search(&e, "s1", "q")));
     assert_eq!(port.calls(), 20);
+}
+
+#[test]
+fn an_abstaining_memory_that_still_returns_items_says_so() {
+    let port = FakePort::saying(vec![item(1, Origin::Person, "x")], None, Some(true));
+    let e = env(&port);
+    let r = search(&e, "s1", "q");
+    assert!(r.ok, "{r:?}");
+    assert_eq!(r.data["ids"], json!([1]), "{r:?}");
+    assert!(body(&r).iter().any(|l| l.contains("was unsure")), "{r:?}");
+    // A memory that did not abstain says nothing of the kind.
+    let port = FakePort::saying(vec![item(1, Origin::Person, "x")], None, Some(false));
+    let r = search(&env(&port), "s1", "q");
+    assert!(!r.content.contains("unsure"), "{r:?}");
 }
 
 // S-47

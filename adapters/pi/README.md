@@ -13,7 +13,7 @@ Pi is the agent harness of Clio (ADR 0007). This folder pins it and, in `extensi
 
 Es la única extensión que Pi carga (`-e adapters/pi/extensions/clio-guard`). **Clio no construye las herramientas que Pi ya trae**: `read`, `write`, `edit`, `bash`, `find` y `ls` son las de Pi (truncado, diff del `edit`, resolución de rutas, renderizado), construidas con `createReadToolDefinition(cwd, { operations })` y compañía y registradas con los mismos nombres. Solo cambia dónde corre la operación primitiva: leer un archivo, escribirlo, comprobar acceso, crear una carpeta, listar, buscar con un patrón, ejecutar un comando. Cada una es una petición al servicio `clio-toolhost` (`crates/clio-toolhost`) por un socket Unix.
 
-**Lista exacta de herramientas registradas** (la que el lanzador debe usar en `guard_tools`): `read`, `write`, `edit`, `bash`, `find`, `ls`.
+**Lista exacta de herramientas registradas** (la que el lanzador debe usar en `guard_tools`): `read`, `write`, `edit`, `bash`, `find`, `ls`, `memory_search`, `memory_get` (ocho).
 
 **`grep` no se ofrece.** El `grep` de Pi siempre arranca `ripgrep` en la máquina (sus `operations` solo cubren leer las líneas de contexto), así que no se puede confinar con `operations`: podría leer lo que la persona puede leer. El modelo usa `bash grep` (dentro de la jaula) o `find`. Tampoco hay `powershell`, `codemode`, `tool_search` ni MCP.
 

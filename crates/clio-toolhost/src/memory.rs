@@ -385,10 +385,27 @@ impl ToolHost {
             };
         }
 
-        let room = cap
-            - wrap_untrusted(Source::Memory, "").len()
-            - OMITTED_ROOM
-            - note.as_ref().map_or(0, |n| n.len() + 8);
+        // Saturating all the way: `cap` can be the 1 KiB floor and a port's note can be longer than
+        // that, and a wrapped `room` would lift the hard cap.
+        let mut room = cap
+            .saturating_sub(wrap_untrusted(Source::Memory, "").len())
+            .saturating_sub(OMITTED_ROOM);
+        // The lines after the memories are kept only while they fit in what is left of the cap;
+        // a note that does not fit is dropped, whole, never cut.
+        let mut tail = Vec::new();
+        if found.abstained {
+            tail.push("[the memory was unsure: these results may not be relevant]".to_owned());
+        }
+        if let Some(n) = note.filter(|n| !n.is_empty()) {
+            tail.push(format!("[note] {n}"));
+        }
+        tail.retain(|l| match room.checked_sub(l.len() + 1) {
+            Some(r) => {
+                room = r;
+                true
+            }
+            None => false,
+        });
         let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
         for it in &found.items {
             let (kind, date) = (self.tidy(&it.kind, 32), self.tidy(&it.date, 32));
@@ -415,9 +432,7 @@ impl ToolHost {
                 "[+{left} more memories left out: the answer is limited to {cap} bytes]"
             ));
         }
-        if let Some(n) = note.filter(|n| !n.is_empty()) {
-            lines.push(format!("[note] {n}"));
-        }
+        lines.extend(tail);
         Response {
             id: req.id.clone(),
             ok: true,
