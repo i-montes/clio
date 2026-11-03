@@ -34,7 +34,9 @@ fn rig() -> (EgressProxy, u16, tempfile::TempDir) {
 fn ask(p: &EgressProxy, request: &[u8]) -> (String, UnixStream) {
     let mut s = UnixStream::connect(p.socket()).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    s.write_all(request).unwrap();
+    // The proxy may refuse and close before it has read everything: a failed write is not a
+    // failed test, what it answered is what is checked.
+    let _ = s.write_all(request);
     let mut got = Vec::new();
     let mut b = [0u8; 1];
     while !got.ends_with(b"\r\n") {
