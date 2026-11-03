@@ -32,7 +32,7 @@ Hoy el chat con Pi, que es el camino principal, **no usa la memoria**: la guardi
 
 ## Alcance de este diseño
 
-**El plan que sale de este documento es la etapa 1 solamente: lectura.** `memory_propose`, la regla de escritura, el caso de ataque de escritura, el método `propose` del trait `MemoryPort`, la reescritura de S-27 y la herramienta número 9 de la guardia pertenecen a la etapa 2, que necesita su propio diseño corto después de que exista el tope de la cuarentena. Aparecen aquí para que se vea hacia dónde crece la interfaz y por qué la etapa 1 no deja puertas abiertas, pero **no se declaran, no se registran y no existen en el código de la etapa 1**: sin entrada en la pasarela, la operación se niega (S-02). El tope de la cuarentena es una tarea aparte (en `clio-memory`), no parte de este plan.
+**Hecho (2026-11-03): la etapa 2 (`memory_propose`) está construida; el diseño corto y sus decisiones están en el ADR 0010.** El plan que salió de este documento fue primero la etapa 1 solamente: lectura. `memory_propose`, la regla de escritura, el caso de ataque de escritura, el método `propose` del trait `MemoryPort`, la reescritura de S-27 y la herramienta número 9 de la guardia pertenecen a la etapa 2, que necesita su propio diseño corto después de que exista el tope de la cuarentena. Aparecen aquí para que se vea hacia dónde crece la interfaz y por qué la etapa 1 no deja puertas abiertas, pero **no se declaran, no se registran y no existen en el código de la etapa 1**: sin entrada en la pasarela, la operación se niega (S-02). El tope de la cuarentena es una tarea aparte (en `clio-memory`), no parte de este plan.
 
 ## Decisiones de la persona
 

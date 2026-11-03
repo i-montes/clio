@@ -1,13 +1,16 @@
-//! The tool host's window into the person's memory: read only, active memories of the scope
-//! `clio`, nothing else (S-60). The tool host process runs this; it opens the database with
-//! [`MemoryLink::open_read`], which never creates or changes a file and never takes the writer
-//! lock, so the person's `clio memory remember` is not blocked while the agent reads.
+//! The tool host's window into the person's memory: it reads the active memories of the scope
+//! `clio` and proposes candidates into quarantine, nothing else (S-60, S-61). The tool host
+//! process runs this. Reading opens the database with [`MemoryLink::open_read`], which never
+//! creates or changes a file and never takes the writer lock, so the person's `clio memory
+//! remember` is not blocked while the agent reads. A proposal opens it for writing for that one
+//! call and closes it: the writer lock is held for as long as the engine lives, and holding it
+//! between calls would lock the person out.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use clio_memory::{MemoryId, MemoryRow, Origin as Written, State};
-use clio_toolhost::{Found, MemoryItem, MemoryPort, Origin};
+use clio_memory::{MemoryId, MemoryRow, MemoryType, Origin as Written, State};
+use clio_toolhost::{Found, MemoryItem, MemoryPort, Origin, ProposalKind};
 
 use crate::memory_link::{EmbedModel, MemoryLink, Res, kind_label};
 
@@ -54,6 +57,20 @@ impl LinkPort {
 }
 
 impl MemoryPort for LinkPort {
+    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
+        // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
+        let link = MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
+            // The detail names a path of the person's: the service's log, not the model.
+            eprintln!("clio-toolhost: memory: {why}");
+            "la memoria no se puede abrir para escribir ahora".to_owned()
+        })?;
+        let kind = match kind {
+            ProposalKind::Semantic => MemoryType::Semantic,
+            ProposalKind::Procedural => MemoryType::Procedural,
+        };
+        link.propose_as_agent(text, kind, session).map(|id| id.0)
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
         self.with_link(|link| {
             // The engine's own message may repeat the query; the model gets a fixed one.

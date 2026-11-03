@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::memory_port::LinkPort;
-use clio_memory::{MemoryType, Origin as MOrigin, Proposal, ScopeId};
-use clio_toolhost::{MemoryPort, Origin};
+use clio_memory::{MemoryType, Origin as MOrigin, Proposal, ScopeId, State};
+use clio_toolhost::{MemoryPort, Origin, ProposalKind};
 use serde_json::{Value, json};
 
 const CLIO: &str = env!("CARGO_BIN_EXE_clio");
@@ -438,4 +438,147 @@ fn the_real_service_serves_the_memory_only_when_it_was_given_one() {
     let r = h.call("memory_search", json!({ "query": WORD }));
     assert_eq!(r["ok"], false, "{r}");
     assert_eq!(r["decision"]["outcome"], "deny", "{r}");
+}
+
+// ---- proposals (stage 2) ----
+
+// S-61
+#[test]
+fn a_proposal_lands_in_quarantine_as_the_agents_and_from_outside() {
+    let w = world();
+    seed(&w);
+    let p = port(&w);
+    let mut ids = Vec::new();
+    for (text, kind, want) in [
+        (
+            "a la persona le gusta el té verde",
+            ProposalKind::Semantic,
+            MemoryType::Semantic,
+        ),
+        (
+            "para desplegar corre primero las pruebas",
+            ProposalKind::Procedural,
+            MemoryType::Procedural,
+        ),
+    ] {
+        let id = p.propose(text, kind, "sess-1").unwrap();
+        let link = open(&w);
+        let row = link.get(clio_memory::MemoryId(id)).unwrap();
+        assert_eq!(row.state, State::Quarantine, "{text}");
+        assert_eq!(row.origin, MOrigin::External, "{text}");
+        assert_eq!(row.kind, want, "{text}");
+        assert_eq!(row.actor, link.actors().agente, "{text}");
+        assert_eq!(row.scope, link.scope(), "{text}");
+        assert_eq!(row.source.as_deref(), Some("pi:sess-1"), "{text}");
+        ids.push(id);
+    }
+    // What was proposed is not memory: it is not found and cannot be read until the person promotes.
+    assert!(p.search("té verde", 5).unwrap().items.is_empty());
+    assert!(p.get(ids[0]).is_err());
+    let link = open(&w);
+    assert!(link.pending().unwrap().iter().any(|r| r.id.0 == ids[0]));
+    // Only the person promotes; then it is readable.
+    link.promote(clio_memory::MemoryId(ids[0])).unwrap();
+    assert!(!p.search("té verde", 5).unwrap().items.is_empty());
+}
+
+// S-61
+#[test]
+fn a_proposal_cleans_what_is_recorded_about_the_session() {
+    let w = world();
+    let p = port(&w);
+    let id = p
+        .propose("un dato", ProposalKind::Semantic, "s\u{1b}[31m1\nfalso")
+        .unwrap();
+    let row = open(&w).get(clio_memory::MemoryId(id)).unwrap();
+    for field in [row.session.as_deref(), row.source.as_deref()] {
+        let f = field.unwrap();
+        assert!(!f.contains(['\u{1b}', '\n']), "{f:?}");
+    }
+}
+
+// S-61
+#[test]
+fn a_proposal_does_not_keep_the_writer_lock() {
+    let w = world();
+    let p = port(&w);
+    p.propose("un dato", ProposalKind::Semantic, "s").unwrap();
+    // `open_write` waits two seconds for a held lock and then fails: it must not wait at all.
+    let data = w.data.clone();
+    let t = Instant::now();
+    within(10, move || {
+        MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
+    });
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+}
+
+// S-61
+#[test]
+fn the_person_and_the_agent_can_both_write() {
+    let w = world();
+    seed(&w);
+    let p = Arc::new(port(&w));
+    let start = Arc::new(Barrier::new(2));
+    let (data, b) = (w.data.clone(), Arc::clone(&start));
+    let person = std::thread::spawn(move || {
+        b.wait();
+        for i in 0..15 {
+            let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
+            link.remember(&format!("dato número {i} de la persona"), None)
+                .unwrap();
+        }
+    });
+    start.wait();
+    for i in 0..15 {
+        p.propose(
+            &format!("propuesta número {i} del agente"),
+            ProposalKind::Semantic,
+            "s",
+        )
+        .unwrap();
+    }
+    person.join().unwrap();
+    let link = open(&w);
+    assert_eq!(
+        link.pending().unwrap().len(),
+        15 + 1,
+        "the seeded quarantine one too"
+    );
+}
+
+// S-27, S-61
+#[test]
+fn the_engines_quota_and_secret_check_still_apply_with_fixed_messages() {
+    let w = world();
+    let p = port(&w);
+    for i in 0..20 {
+        p.propose(&format!("dato distinto {i}"), ProposalKind::Semantic, "s")
+            .unwrap();
+    }
+    let marker = "frase-del-modelo-4714";
+    let why = p.propose(marker, ProposalKind::Semantic, "s").unwrap_err();
+    assert!(why.contains("cuota"), "{why}");
+    assert!(!why.contains(marker), "{why}");
+
+    let w = world();
+    let p = port(&w);
+    let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
+    let why = p
+        .propose(&format!("la clave es {key}"), ProposalKind::Semantic, "s")
+        .unwrap_err();
+    assert!(!why.contains(key), "{why}");
+    assert!(open(&w).pending().unwrap().is_empty());
+}
+
+// S-61
+#[test]
+fn a_proposal_that_cannot_open_the_memory_is_a_short_error() {
+    let w = world();
+    std::fs::create_dir_all(&w.data).unwrap();
+    std::fs::write(w.data.join("memory.db"), "no es una base de datos").unwrap();
+    let p = port(&w);
+    let why = p
+        .propose("un dato", ProposalKind::Semantic, "s")
+        .unwrap_err();
+    assert!(!why.contains(w.root.to_str().unwrap()), "{why}");
 }

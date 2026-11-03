@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
 use clio_toolhost::{
-    Config, Found, JailMode, MemoryItem, MemoryPort, Origin, Request, Response, ToolHost,
+    Config, Found, JailMode, MemoryItem, MemoryPort, Origin, ProposalKind, Request, Response,
+    ToolHost,
 };
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
@@ -33,6 +34,8 @@ struct FakePort {
     abstained: Option<bool>,
     calls: AtomicUsize,
     last_search: Mutex<Option<(String, usize)>>,
+    /// What `propose` was asked: the text, the kind and the session.
+    proposals: Mutex<Vec<(String, ProposalKind, String)>>,
 }
 
 impl FakePort {
@@ -57,6 +60,7 @@ impl FakePort {
             abstained,
             calls: AtomicUsize::new(0),
             last_search: Mutex::new(None),
+            proposals: Mutex::new(Vec::new()),
         })
     }
 
@@ -79,6 +83,15 @@ impl FakePort {
 }
 
 impl MemoryPort for FakePort {
+    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
+        self.proposals
+            .lock()
+            .unwrap()
+            .push((text.to_owned(), kind, session.to_owned()));
+        self.behave()?;
+        Ok(900 + self.calls() as i64)
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
         *self.last_search.lock().unwrap() = Some((query.to_owned(), limit));
         self.behave()?;
@@ -429,6 +442,7 @@ fn without_a_port_the_operations_are_denied() {
     for (tool, args) in [
         ("memory_search", json!({ "query": "q" })),
         ("memory_get", json!({ "id": 1 })),
+        ("memory_propose", json!({ "text": "x", "kind": "semantic" })),
     ] {
         let r = call(&e, "s1", tool, args);
         assert!(!r.ok && !r.external, "{tool}: {r:?}");
@@ -446,6 +460,22 @@ fn extra_arguments_are_refused() {
         ("memory_search", json!({"query": "x", "origin": "user"})),
         ("memory_search", json!({"query": "x", "scope": "all"})),
         ("memory_get", json!({"id": 1, "state": "quarantine"})),
+        (
+            "memory_propose",
+            json!({"text": "x", "kind": "semantic", "origin": "user"}),
+        ),
+        (
+            "memory_propose",
+            json!({"text": "x", "kind": "semantic", "scope": "all"}),
+        ),
+        (
+            "memory_propose",
+            json!({"text": "x", "kind": "semantic", "actor": "persona"}),
+        ),
+        (
+            "memory_propose",
+            json!({"text": "x", "kind": "semantic", "state": "active"}),
+        ),
     ] {
         let r = call(&e, "s1", tool, args);
         assert!(!r.ok, "{tool}: {r:?}");
@@ -778,4 +808,168 @@ fn if_the_vault_cannot_filter_the_query_the_call_fails() {
     assert!(!r.ok && !r.external, "{r:?}");
     assert_eq!(port.calls(), 0, "the port was asked with the withheld text");
     assert!(r.content.contains("vault"), "{r:?}");
+}
+
+// ---- memory_propose (stage 2) ----
+
+fn propose(e: &Env, session: &str, text: &str, kind: &str) -> Response {
+    call(
+        e,
+        session,
+        "memory_propose",
+        json!({ "text": text, "kind": kind }),
+    )
+}
+
+// S-61
+#[test]
+fn a_proposal_reaches_the_port_clean_and_in_one_line_without_marking_the_session() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = propose(
+        &e,
+        "s1",
+        "a la persona  le gusta\nel té\u{1b}[31m verde",
+        "semantic",
+    );
+    assert!(r.ok && !r.external, "{r:?}");
+    assert!(r.content.starts_with("proposed"), "{r:?}");
+    assert!(!r.tainted, "a proposal does not mark the session: {r:?}");
+    let seen = port.proposals.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "a la persona le gusta el té verde");
+    assert_eq!(seen[0].1, ProposalKind::Semantic);
+    assert_eq!(seen[0].2, "s1");
+    let r = propose(&e, "s1", "se hace así", "procedural");
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        port.proposals.lock().unwrap()[1].1,
+        ProposalKind::Procedural
+    );
+}
+
+// S-61
+#[test]
+fn a_tainted_session_may_still_propose_and_stays_tainted() {
+    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
+    let e = env(&port);
+    assert!(search(&e, "s1", "q").tainted);
+    let r = propose(&e, "s1", "algo", "semantic");
+    assert!(r.ok && r.tainted, "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap().len(), 1);
+}
+
+// S-61
+#[test]
+fn a_bad_kind_or_text_is_refused_before_the_port() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let long = "x".repeat(401);
+    // Five refusals, because a refused call spends one of the session's five proposals too.
+    for (text, kind) in [
+        ("algo", "episodic"),
+        ("algo", ""),
+        ("algo", "Semantic"),
+        ("", "semantic"),
+        (long.as_str(), "semantic"),
+    ] {
+        let r = propose(&e, "s1", text, kind);
+        assert!(!r.ok && !r.external, "{text:?}/{kind}: {r:?}");
+    }
+    assert_eq!(port.proposals.lock().unwrap().len(), 0);
+    // Exactly 400 is fine, and a text of only blanks is empty.
+    let e = env(&port);
+    assert!(propose(&e, "s2", &"y".repeat(400), "semantic").ok);
+    assert!(!propose(&e, "s2", "  \n\t ", "semantic").ok);
+    assert_eq!(port.proposals.lock().unwrap().len(), 1);
+}
+
+// S-61
+#[test]
+fn a_text_with_a_secret_is_not_proposed_at_all() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+    let r = propose(&e, "s1", &format!("la llave es {value}"), "semantic");
+    assert!(!r.ok, "{r:?}");
+    assert!(!r.content.contains(value), "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap().len(), 0);
+}
+
+// S-61
+#[test]
+fn if_the_vault_cannot_filter_the_proposal_nothing_is_proposed() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env_with(Some(&port), |c| {
+        c.vault = Some(VaultClient::new(Path::new("/nonexistent/vault.sock")));
+    });
+    let r = propose(&e, "s1", "algo", "semantic");
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap().len(), 0);
+}
+
+// S-47, S-61
+#[test]
+fn a_session_makes_five_proposals_and_failed_ones_count() {
+    let port = FakePort::new(vec![], Mode::Fail("la memoria está llena".into()));
+    let e = env(&port);
+    for n in 0..5 {
+        let r = propose(&e, "s1", &format!("p{n}"), "semantic");
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
+    }
+    let r = propose(&e, "s1", "p5", "semantic");
+    assert!(denied_by_budget(&r), "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap().len(), 5);
+    // The proposals have their own count: reading is not spent.
+    assert!(!search(&e, "s1", "q").content.contains("S-47"));
+}
+
+// S-47, S-61
+#[test]
+fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for n in 0..5 {
+        assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok);
+    }
+    let again = restarted(&e, &port);
+    let r = again.handle(Request {
+        id: "i2".into(),
+        tool: "memory_propose".into(),
+        args: json!({"text": "otra", "kind": "semantic"}),
+        session: "s1".into(),
+        call_id: "c2".into(),
+        tainted: false,
+    });
+    assert!(denied_by_budget(&r), "{r:?}");
+
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    std::fs::write(run_dir(&e).join("memory-proposals.json"), "no es json").unwrap();
+    let r = propose(&e, "s1", "algo", "semantic");
+    assert!(denied_by_budget(&r), "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap().len(), 0);
+}
+
+// S-61
+#[test]
+fn the_log_has_the_id_of_a_proposal_never_its_text() {
+    let marker = "propuesta-distintiva-4713";
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    assert!(propose(&e, "s1", marker, "semantic").ok);
+    let run = run_dir(&e);
+    for entry in std::fs::read_dir(&run).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(!text.contains(marker), "{path:?}");
+        }
+    }
+    let log = std::fs::read_to_string(run.join("memory.jsonl")).unwrap();
+    let row: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(row["tool"], "memory_propose");
+    assert_eq!(row["ids"].as_array().unwrap().len(), 1);
 }

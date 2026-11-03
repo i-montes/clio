@@ -1440,12 +1440,13 @@ const PI_STACK_CASES: [&str; 12] = [
 ];
 
 /// Run by `tests/pi_stack/memory.rs`: the memory tools through Pi, its guard and the tool host.
-const MEMORY_CASES: [&str; 5] = [
+const MEMORY_CASES: [&str; 6] = [
     "attack-56",
     "attack-57",
     "attack-58",
     "attack-59",
     "attack-60",
+    "attack-61",
 ];
 
 /// Run where their scenarios live: 50 and 51 (and half of 52) by `clio-toolhost/tests/hardening.rs`,

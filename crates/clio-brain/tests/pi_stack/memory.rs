@@ -1,5 +1,5 @@
 //! The memory tools through the whole Pi stack: the real Pi, the guard and the real tool host
-//! over a real memory file. A smoke test, and attacks 56 to 60 of the battery: each one checks
+//! over a real memory file. A smoke test, and attacks 56 to 61 of the battery: each one checks
 //! the real effect and also that the attack was really attempted (a call that was never made
 //! proves nothing).
 #![allow(clippy::unwrap_used)]
@@ -65,7 +65,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists eight tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists nine tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -95,7 +95,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        8,
+        9,
         "{:?}",
         declared_tools(&model)
     );
@@ -118,7 +118,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_eight_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_nine_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -129,7 +129,7 @@ fn a_memory_the_agent_wrote_marks_the_pi_session() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The attack battery, 56 to 60
+// The attack battery, 56 to 61
 // ---------------------------------------------------------------------------------------------
 
 const REASON: &str = "Probar la memoria";
@@ -621,10 +621,6 @@ fn attack_60() -> Option<bool> {
             json!({"id":person,"state":"quarantine","reason":REASON}),
         ),
         calls(&[
-            (
-                "memory_propose",
-                json!({"text":"x","kind":"semantic","reason":REASON}),
-            ),
             ("memory_promote", json!({"id":person,"reason":REASON})),
             ("memory_purge", json!({"id":person,"reason":REASON})),
             ("memory_archive", json!({"id":person,"reason":REASON})),
@@ -635,29 +631,26 @@ fn attack_60() -> Option<bool> {
     let mut pi = Pi::start(&node, &w, &model, Some(&host.socket), &Opts::default());
     let ev = pi.prompt("write to your memory");
     let ends = tool_ends(&ev);
-    assert_eq!(ends.len(), 8, "every attempt was made: {ends:?}");
+    assert_eq!(ends.len(), 7, "every attempt was made: {ends:?}");
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        8,
+        9,
         "{:?}",
         declared_tools(&model)
     );
-    for name in [
-        "memory_propose",
-        "memory_promote",
-        "memory_purge",
-        "memory_archive",
-    ] {
+    for name in ["memory_promote", "memory_purge", "memory_archive"] {
         assert!(
             !declared_tools(&model).contains(&name.to_owned()),
             "{name} exists"
         );
     }
-    // The arguments the model is told about: the two it may use, the reason, nothing else.
+    // The arguments the model is told about: the ones it may use, the reason, nothing else. The
+    // actor, the origin and the scope of a proposal are not among them.
     for (name, own) in [
         ("memory_search", vec!["limit", "query"]),
         ("memory_get", vec!["id"]),
+        ("memory_propose", vec!["kind", "text"]),
     ] {
         let schema = schema_of(&model, name);
         let mut keys: Vec<String> = schema["properties"]
@@ -685,12 +678,7 @@ fn attack_60() -> Option<bool> {
     }
     // Asked on the service's own socket (a Pi that was taken over could do it): an operation
     // nobody declared is denied by default (S-02), and a made-up argument is refused too.
-    for tool in [
-        "memory_propose",
-        "memory_promote",
-        "memory_purge",
-        "memory_archive",
-    ] {
+    for tool in ["memory_promote", "memory_purge", "memory_archive"] {
         let r = ask_host(
             &host.socket,
             json!({"id":"p","tool":tool,"args":{"id":person,"text":"x","kind":"semantic"},"session":"s","call_id":"c","tainted":false}),
@@ -699,15 +687,18 @@ fn attack_60() -> Option<bool> {
         assert_eq!(r["decision"]["outcome"], "deny", "{tool}: {r}");
         assert_eq!(r["decision"]["rule"], "S-02", "{tool}: {r}");
     }
-    for args in [
-        json!({"query":"x","origin":"user"}),
-        json!({"id":person,"scope":"otro"}),
+    for (tool, args) in [
+        ("memory_search", json!({"query":"x","origin":"user"})),
+        ("memory_get", json!({"id":person,"scope":"otro"})),
+        (
+            "memory_propose",
+            json!({"text":"x","kind":"semantic","origin":"user"}),
+        ),
+        (
+            "memory_propose",
+            json!({"text":"x","kind":"semantic","actor":"persona"}),
+        ),
     ] {
-        let tool = if args.get("id").is_some() {
-            "memory_get"
-        } else {
-            "memory_search"
-        };
         let r = ask_host(
             &host.socket,
             json!({"id":"p","tool":tool,"args":args,"session":"s","call_id":"c","tainted":false}),
@@ -725,14 +716,103 @@ fn attack_60() -> Option<bool> {
     Some(true)
 }
 
+// 61: what the model proposes always lands in quarantine, as the agent's and from outside; it is
+// never active nor readable by the model; a secret is not proposed; the session has five
+
+fn attack_61() -> Option<bool> {
+    let node = pi_available()?;
+    let w = world();
+    let data = data_dir(&w);
+    // An active memory of the agent in the file: reading it marks the session, so the proposals
+    // below are made from a tainted session.
+    seed(&data, true);
+    let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
+    let propose_turn = |text: &str, kind: &str| {
+        call(
+            "memory_propose",
+            json!({"text": text, "kind": kind, "reason": REASON}),
+        )
+    };
+    let model = FakeModel::scripted(vec![
+        search(WORD, 5),
+        propose_turn("a la persona le gusta el té verde", "semantic"),
+        propose_turn("para desplegar corre primero las pruebas", "procedural"),
+        propose_turn(&format!("la clave de la persona es {key}"), "semantic"),
+        propose_turn(&format!("el {WORD} es de caoba"), "semantic"),
+        propose_turn("la persona vive en Tolú", "semantic"),
+        propose_turn("una sexta propuesta", "semantic"),
+        search(WORD, 5),
+        Turn::Text("done".into()),
+    ]);
+    let host = Toolhost::start_with_memory(&w, false, None, Some(&data));
+    let mut pi = Pi::start(&node, &w, &model, Some(&host.socket), &Opts::default());
+    let ev = pi.prompt("remember what I like");
+    let ends = tool_ends(&ev);
+    assert_eq!(ends.len(), 8, "every attempt was made: {ends:?}");
+    let ok: Vec<bool> = ends.iter().map(|e| !e.1).collect();
+    assert_eq!(
+        ok,
+        [true, true, true, false, true, true, false, true],
+        "{ends:?}"
+    );
+    assert!(ends[1].2.contains("proposed"), "{ends:?}");
+    assert!(
+        ends[6].2.contains("S-47"),
+        "the sixth was refused by the budget: {ends:?}"
+    );
+    // The key was never proposed, and no answer to the model repeats it (the model's own call
+    // does carry it: that is what it wrote).
+    assert!(
+        ends.iter().all(|e| !e.2.contains(key)),
+        "an answer repeated the key: {ends:?}"
+    );
+    // What was proposed is not memory: the second search finds only what was active.
+    assert!(!ends[7].2.contains("caoba"), "{ends:?}");
+    // The session was marked by the memory it read, and proposing did not clear that.
+    let taint = std::fs::read_to_string(w.run_dir.join("tainted.json")).unwrap_or_default();
+    assert!(taint.contains("memory"), "{taint}");
+    let used: Value = serde_json::from_str(
+        &std::fs::read_to_string(w.run_dir.join("memory-proposals.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(used["calls"], 5, "{used}");
+    drop(pi);
+    drop(host);
+    let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
+    assert_eq!(link.counts().unwrap(), (2, 4, 0), "{:?}", link.counts());
+    let pending = link.pending().unwrap();
+    assert_eq!(pending.len(), 4);
+    for row in &pending {
+        assert_eq!(row.origin, MOrigin::External, "{row:?}");
+        assert_eq!(row.actor, link.actors().agente, "{row:?}");
+        assert_eq!(row.state, clio_memory::State::Quarantine, "{row:?}");
+        assert!(!row.content.contains(key), "{row:?}");
+    }
+    assert_eq!(
+        pending
+            .iter()
+            .filter(|r| r.kind == MemoryType::Procedural)
+            .count(),
+        1
+    );
+    // Nothing the model proposed is active.
+    for row in link.list(clio_memory::State::Active).unwrap() {
+        assert_ne!(row.actor, link.actors().agente, "{row:?}");
+    }
+    // The log has facts, not text.
+    let log = std::fs::read_to_string(w.run_dir.join("memory.jsonl")).unwrap();
+    assert!(!log.contains("caoba") && !log.contains(key), "{log}");
+    Some(true)
+}
 // ---------------------------------------------------------------------------------------------
 
-const OURS: [&str; 5] = [
+const OURS: [&str; 6] = [
     "attack-56",
     "attack-57",
     "attack-58",
     "attack-59",
     "attack-60",
+    "attack-61",
 ];
 
 struct MemoryTarget {
@@ -747,6 +827,7 @@ impl Target for MemoryTarget {
             "attack-58" => attack_58(),
             "attack-59" => attack_59(),
             "attack-60" => attack_60(),
+            "attack-61" => attack_61(),
             other => panic!("{other} is active but the memory battery has no scenario for it"),
         };
         if r.is_none() {
@@ -800,7 +881,7 @@ scenario!(attack_58_a_vault_value_in_a_memory_is_struck_out, attack_58);
 scenario!(attack_59_hidden_memories_stay_hidden, attack_59);
 // S-02 S-25
 scenario!(
-    attack_60_nothing_writes_and_nothing_extra_is_accepted,
+    attack_60_nothing_promotes_archives_or_purges_and_nothing_extra_is_accepted,
     attack_60
 );
 
@@ -821,3 +902,8 @@ fn the_memory_battery_passes_through_the_gate() {
     assert!(report.ok(), "{}", report.line());
     eprintln!("{} (skipped: {:?})", report.line(), target.skipped.borrow());
 }
+// S-26 S-27 S-47 S-61
+scenario!(
+    attack_61_what_the_model_proposes_waits_in_quarantine,
+    attack_61
+);

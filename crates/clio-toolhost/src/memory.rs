@@ -1,6 +1,7 @@
-//! The memory tools (`memory_search`, `memory_get`): the agent reads the person's active memories,
-//! read only. The memory itself sits behind [`MemoryPort`] (the real one lives in `clio-brain`),
-//! so this crate never opens a database.
+//! The memory tools: `memory_search` and `memory_get` read the person's active memories;
+//! `memory_propose` suggests one, and a suggestion only ever lands in quarantine, where the person
+//! decides (S-61). The memory itself sits behind [`MemoryPort`] (the real one lives in
+//! `clio-brain`), so this crate never opens a database.
 //!
 //! What comes back is text somebody wrote, maybe long ago, maybe hostile. It is cleaned first,
 //! cut after cleaning (so a secret is never split by the cut), kept to one line per memory (a
@@ -28,10 +29,17 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 2] = ["memory_search", "memory_get"];
+pub(crate) const MEMORY_OPS: [&str; 3] = ["memory_search", "memory_get", "memory_propose"];
 
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
+const PROPOSE_DESCRIPTION: &str =
+    "Propose a memory for the person to review (it is never active until they accept it)";
+
+/// Longest proposal, in characters, after cleaning.
+const MAX_PROPOSAL_CHARS: usize = 400;
+/// Proposals a session may make (S-47, S-61). The same number as the close of a run.
+pub(crate) const MAX_PROPOSALS: u32 = 5;
 
 const MAX_QUERY_CHARS: usize = 200;
 const DEFAULT_LIMIT: usize = 5;
@@ -89,9 +97,21 @@ pub struct Found {
     pub note: Option<String>,
 }
 
-/// What the tool host needs from the memory: active memories of the person's scope, read only.
-/// There is no way to write, promote, archive or purge through it (S-60).
+/// What kind of memory is proposed. There is no third kind a model can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalKind {
+    Semantic,
+    Procedural,
+}
+
+/// What the tool host needs from the memory: active memories of the person's scope to read, and
+/// one way to write: a proposal that waits for the person. There is no way to promote, archive,
+/// revert or purge through it, and nothing here says who the writer is or how far to trust it:
+/// the port decides that (S-60, S-61).
 pub trait MemoryPort: Send + Sync {
+    /// Queues `text` for the person's review, as the agent's, from outside content. `session` is
+    /// only for the record. Returns the id of the candidate.
+    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String>;
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
     /// it is must not leak.
@@ -109,6 +129,10 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("query", ArgKind::Text, true),
             a("limit", ArgKind::Int, false),
         ],
+        "memory_propose" => vec![
+            a("text", ArgKind::Text, true),
+            a("kind", ArgKind::Text, true),
+        ],
         _ => vec![a("id", ArgKind::Int, true)],
     }
 }
@@ -118,12 +142,18 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
     [
         ("memory_search", SEARCH_DESCRIPTION),
         ("memory_get", GET_DESCRIPTION),
+        ("memory_propose", PROPOSE_DESCRIPTION),
     ]
     .into_iter()
     .map(|(name, description)| ToolDecl {
         name: name.into(),
         version: "1".into(),
-        effect: Effect::Read,
+        // A proposal changes the memory file, but only by adding a candidate nobody trusts.
+        effect: if name == "memory_propose" {
+            Effect::LocalReversible
+        } else {
+            Effect::Read
+        },
         egress: Egress::None,
         description_hash: digest_hex(description),
         args: arg_specs(name),
@@ -258,6 +288,9 @@ impl ToolHost {
         args: &Map<String, Value>,
         out: DecisionOut,
     ) -> Response {
+        if req.tool == "memory_propose" {
+            return self.propose_call(req, args, out);
+        }
         let path = self.run_dir.join("memory-budget.json");
         let mut budget = match Budget::load(&path) {
             Ok(b) => b,
@@ -287,6 +320,90 @@ impl ToolHost {
         match logged {
             Ok(()) => resp,
             Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
+        }
+    }
+
+    /// `memory_propose`, after the gateway let the call through: the proposals a session may make
+    /// (S-47) are counted in a file before the port is asked, as the reads are, and the log has to
+    /// be kept or the call is denied. A proposal never marks the session: it carries what the
+    /// model decided to say, not what a memory said.
+    fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
+        let path = self.run_dir.join("memory-proposals.json");
+        let mut budget = match Budget::load(&path) {
+            Ok(b) => b,
+            Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
+        };
+        if budget.calls >= MAX_PROPOSALS {
+            return self.budget_denied(
+                req,
+                "this session made its memory proposals (5); the person reviews what is there",
+            );
+        }
+        budget.calls += 1;
+        if let Err(why) = budget.save(&path) {
+            return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
+        }
+        let mut facts = Facts::default();
+        let resp = self.propose_answer(req, args, out, &mut facts);
+        match self.log_facts(req, &facts, 0) {
+            Ok(()) => resp,
+            Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
+        }
+    }
+
+    fn propose_answer(
+        &self,
+        req: &Request,
+        args: &Map<String, Value>,
+        out: DecisionOut,
+        facts: &mut Facts,
+    ) -> Response {
+        let Some(port) = self.memory.clone() else {
+            return self.memory_failed(req, out, "there is no memory");
+        };
+        let kind = match args.get("kind").and_then(Value::as_str) {
+            Some("semantic") => ProposalKind::Semantic,
+            Some("procedural") => ProposalKind::Procedural,
+            _ => return self.memory_failed(req, out, "kind must be semantic or procedural"),
+        };
+        let typed = args.get("text").and_then(Value::as_str).unwrap_or_default();
+        // The vault's cleaner sees the whole text before anything is proposed, and a text that had
+        // a secret in it is not proposed at all: a memory with a hole where a secret was is
+        // useless, and the model had no business keeping it.
+        let Some(cleaned) = self.try_clean(typed) else {
+            return self.memory_failed(req, out, "the vault could not filter the text");
+        };
+        if count_masks(&cleaned) > count_masks(typed) {
+            return self.memory_failed(
+                req,
+                out,
+                "the text had a secret in it: nothing was proposed",
+            );
+        }
+        let text = one_line(&cleaned);
+        let chars = text.chars().count();
+        if chars == 0 || chars > MAX_PROPOSAL_CHARS {
+            return self.memory_failed(
+                req,
+                out,
+                &format!("the text must have 1 to {MAX_PROPOSAL_CHARS} characters"),
+            );
+        }
+        let session = req.session.clone();
+        match self.ask_port(&port, move |p| p.propose(&text, kind, &session)) {
+            Ok(id) => {
+                facts.ids.push(id);
+                Response {
+                    id: req.id.clone(),
+                    ok: true,
+                    content: "proposed: it waits for the person's review and is not memory until they accept it".into(),
+                    data: json!({ "proposed": true }),
+                    decision: out,
+                    tainted: self.is_tainted(&req.session),
+                    external: false,
+                }
+            }
+            Err(why) => self.memory_failed(req, out, &why),
         }
     }
 

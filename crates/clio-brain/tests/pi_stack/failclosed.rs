@@ -82,14 +82,14 @@ fn broken_prompt(label: &str, name: &str, body: &str) {
 
 #[test]
 fn a_missing_prompt_file_fails_closed_with_a_clear_error() {
-    broken_prompt("missing", "clio-agent@5.md", "");
+    broken_prompt("missing", "clio-agent@6.md", "");
 }
 
 #[test]
 fn a_prompt_with_the_wrong_version_line_fails_closed() {
     broken_prompt(
         "wrong version line",
-        "clio-agent@5.md",
+        "clio-agent@6.md",
         "version: 3\n\nYou are Clio.\n",
     );
 }

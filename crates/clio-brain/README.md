@@ -59,17 +59,18 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   `tests/memory_agent.rs` (cycle, quarantine, procedures, quotas, abstention, secrets),
   `tests/memory_cli.rs` (every subcommand, two real runs with a scripted adapter, pty), attacks
   10, 11 and 35 to 37 in `tests/attacks.rs`.
-- `memory_port`: `LinkPort`, the tool host's `MemoryPort` over `MemoryLink::open_read` (the
-  agent reads, never writes). `clio toolhost --memory-data DIR [--memory-model DIR]` builds it
+- `memory_port`: `LinkPort`, the tool host's `MemoryPort`: it reads over `MemoryLink::open_read`
+  and proposes with `MemoryLink::propose_as_agent` (always quarantine, actor `agente`, origin
+  external; opened for writing only for that call and dropped, so the writer lock is not held). `clio toolhost --memory-data DIR [--memory-model DIR]` builds it
   (`clio_toolhost::cli::run_with`; the loose `clio-toolhost` binary has no memory, so
-  `memory_search` and `memory_get` are denied there); `Toolhost::start` passes both flags, and
+  `memory_search`, `memory_get` and `memory_propose` are denied there); `Toolhost::start` passes both flags, and
   the model folder comes from the parent because the service runs with Pi's `HOME`. Only active
   memories of the scope `clio` come back, and `get` gives one error text for "missing",
   "quarantined", "archived" and "another scope's". It opens read only and never takes the writer
   lock, so `clio memory remember` is not blocked; a failed open is not remembered (the person may
   create the memory while a session runs). Tests: `tests/memory_port.rs` (real database, the real
   service over its socket) and `tests/pi_stack/memory.rs` (the real Pi in its jail: a smoke test and
-  attacks 56 to 60, which `tests/attacks.rs` leaves out through `MEMORY_CASES`; ADR 0010).
+  attacks 56 to 61, which `tests/attacks.rs` leaves out through `MEMORY_CASES`; ADR 0010).
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

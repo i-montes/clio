@@ -617,6 +617,33 @@ impl MemoryLink {
         }
     }
 
+    /// What the agent proposes during a session (the `memory_propose` tool): always the agent's
+    /// and always from outside content, so it always lands in quarantine, and a procedure also
+    /// waits for approval whatever its origin (S-26). There is no argument for the actor, the
+    /// origin or the scope: they are not the caller's to say (S-61). The engine's quota for the
+    /// agent and the cap on the quarantine (S-27) still apply; the message says which one
+    /// refused. Returns the id of the candidate.
+    pub fn propose_as_agent(&self, text: &str, kind: MemoryType, session: &str) -> Res<MemoryId> {
+        self.need_write()?;
+        let session = clip(&clean_text(session), 200);
+        self.engine
+            .propose(Proposal {
+                scope: self.scope,
+                actor: self.actors.agente,
+                kind,
+                content: clip(&clean_text(text), 400),
+                topic_key: None,
+                origin: Origin::External,
+                session: Some(session.clone()),
+                episode: None,
+                source: Some(format!("pi:{session}")),
+                valid_from: None,
+                valid_to: None,
+            })
+            .map(|o| o.memory)
+            .map_err(|e| explain(&e))
+    }
+
     // ---------------------------------------------------------------- the person
 
     /// A fact the person typed: origin `user`, active at once. Optionally in a fixed block.
