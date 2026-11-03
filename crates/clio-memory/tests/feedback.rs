@@ -26,6 +26,34 @@ fn wrong(f: &Fixture, m: MemoryId, actor: ActorId) {
     f.engine.feedback(m, Signal::Wrong, actor).unwrap();
 }
 
+// S-25 (second audit): a signal is anyone's opinion, but one actor repeating it is still one
+// opinion. A single agent must not be able to send a person's memory to review by itself.
+#[test]
+fn one_actor_repeating_wrong_cannot_flag_a_memory_alone() {
+    let f = fixture();
+    let m = fact(&f);
+    for _ in 0..5 {
+        wrong(&f, m, f.agent);
+    }
+    assert_eq!(
+        state(&f, m),
+        State::Active,
+        "five signals, but from one actor"
+    );
+    // Two more actors make three different opinions.
+    wrong(&f, m, f.person);
+    assert_eq!(state(&f, m), State::Active);
+    wrong(&f, m, third(&f));
+    assert_eq!(state(&f, m), State::Quarantine);
+    // A person's own review is theirs to repeat: three signals of a person flag by themselves.
+    let g = fixture();
+    let m2 = fact(&g);
+    for _ in 0..3 {
+        wrong(&g, m2, g.person);
+    }
+    assert_eq!(state(&g, m2), State::Quarantine);
+}
+
 #[test]
 fn t19_three_wrong_signals_send_a_memory_to_review() {
     let f = fixture();
@@ -112,9 +140,9 @@ fn promote_spends_wrong_signals() {
         "a person vindicated it"
     );
     wrong(&f, m, f.agent);
-    wrong(&f, m, f.agent);
+    wrong(&f, m, f.person);
     assert_eq!(state(&f, m), State::Active, "two new signals do not flag");
-    wrong(&f, m, f.agent);
+    wrong(&f, m, t);
     assert_eq!(state(&f, m), State::Quarantine, "three new ones do");
 }
 
@@ -122,16 +150,17 @@ fn promote_spends_wrong_signals() {
 fn a_reverted_flag_needs_three_new_signals_to_flag_again() {
     let f = fixture();
     let m = fact(&f);
-    for _ in 0..3 {
-        wrong(&f, m, f.agent);
+    let t = third(&f);
+    for who in [f.agent, f.person, t] {
+        wrong(&f, m, who);
     }
     let flag = f.engine.history(m).unwrap().last().unwrap().id;
     f.engine.revert(flag, f.person).unwrap();
     assert_eq!(state(&f, m), State::Active);
     wrong(&f, m, f.agent);
     assert_eq!(state(&f, m), State::Active, "the first three were spent");
-    wrong(&f, m, f.agent);
-    wrong(&f, m, f.agent);
+    wrong(&f, m, f.person);
+    wrong(&f, m, t);
     assert_eq!(state(&f, m), State::Quarantine);
 }
 

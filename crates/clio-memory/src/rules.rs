@@ -35,8 +35,12 @@ pub fn decide(kind: MemoryType, effective: Origin, existing: Existing) -> Verdic
     if let Some(dup) = existing.by_hash {
         return Verdict::Noop(dup.id);
     }
+    // What a person wrote is replaced only by the person (or by a candidate they promote).
+    let replaces_a_persons =
+        effective != Origin::User && existing.by_topic.is_some_and(|r| r.origin == Origin::User);
     let untrusted = effective == Origin::External
-        || (kind == MemoryType::Procedural && effective != Origin::User);
+        || (kind == MemoryType::Procedural && effective != Origin::User)
+        || replaces_a_persons;
     if untrusted {
         return Verdict::Add {
             state: State::Quarantine,
@@ -134,6 +138,39 @@ mod tests {
                 state: State::Quarantine,
                 supersedes: Some(MemoryId(3))
             }
+        );
+    }
+
+    // S-25 (second audit): "untrusted content can never replace trusted content directly" held for
+    // `External` only. An agent's candidate with the topic of a memory the PERSON wrote must wait
+    // for the person too: otherwise it becomes the active fact and the person's one is `Replaced`.
+    #[test]
+    fn a_non_person_candidate_cannot_replace_a_persons_memory_by_topic() {
+        let persons = row(3); // origin User
+        let e = Existing {
+            by_hash: None,
+            by_topic: Some(&persons),
+        };
+        let waits = Verdict::Add {
+            state: State::Quarantine,
+            supersedes: Some(MemoryId(3)),
+        };
+        assert_eq!(decide(MemoryType::Semantic, Origin::Agent, e), waits);
+        assert_eq!(decide(MemoryType::Semantic, Origin::External, e), waits);
+        // The person updating their own memory, and an agent updating an agent's, still go through.
+        assert_eq!(
+            decide(MemoryType::Semantic, Origin::User, e),
+            Verdict::Update { old: MemoryId(3) }
+        );
+        let mut agents = row(4);
+        agents.origin = Origin::Agent;
+        let e = Existing {
+            by_hash: None,
+            by_topic: Some(&agents),
+        };
+        assert_eq!(
+            decide(MemoryType::Semantic, Origin::Agent, e),
+            Verdict::Update { old: MemoryId(4) }
         );
     }
 

@@ -17,9 +17,10 @@ use crate::idle::{DEFAULT_IDLE, IdleCache};
 use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Change, Check, DecisionRecord, ExportSummary,
     Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow, MemoryType, NewOperation, OpId, OpKind,
-    OpenMode, Operation, QueueStats, Quota, ScopeId, ScopeInfo, ScopeStats, SearchOpts, Signal,
-    State, Stats, Tombstone,
+    OpenMode, Operation, Origin, QueueStats, Quota, ScopeId, ScopeInfo, ScopeStats, SearchOpts,
+    Signal, State, Stats, Tombstone,
 };
+use crate::normalize::{content_hash, normalize};
 use crate::platform::{self, WriterLock};
 use crate::secrets::find_secret;
 use crate::stem::fts_query;
@@ -353,6 +354,42 @@ fn check_purged_clean(tx: &Connection, memory: MemoryId) -> Result<()> {
     Ok(())
 }
 
+/// Ids a restore accepts. `next_memory_id` is `max + 1`, and a file with an id at the top of the
+/// range would make it wrap in a release build (`INSERT OR REPLACE` would then overwrite a row).
+const MAX_RESTORED_ID: i64 = i64::MAX / 2;
+
+/// What `propose` guarantees about a stored memory and a restore must not take on trust: its id is
+/// in range, its content is the normalized text its hash says (a blank pair is a purged memory) and
+/// user origin was never written by an actor that cannot vouch for it (`effective_origin`).
+fn check_restored_row(tx: &Connection, m: &MemoryRow) -> Result<()> {
+    let bad = |m: &str| Err(Error::BadImport(m.into()));
+    if m.id.0 <= 0 || m.id.0 >= MAX_RESTORED_ID {
+        return bad("a memory id is out of range");
+    }
+    let purged = m.content.is_empty() && m.content_hash.is_empty();
+    if !purged && (normalize(&m.content) != m.content || content_hash(&m.content) != m.content_hash)
+    {
+        return bad("a memory's content is not normalized or does not match its hash");
+    }
+    if m.origin == Origin::User {
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM actors WHERE id = ?1", [m.actor.0], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        // An actor the file does not have is reported when the projection is rebuilt.
+        if let Some(kind) = kind
+            && !matches!(
+                dec::<ActorKind>(&kind)?,
+                ActorKind::Person | ActorKind::Importer
+            )
+        {
+            return bad("a memory claims user origin but its actor cannot vouch for it");
+        }
+    }
+    Ok(())
+}
+
 fn restore_record(
     tx: &Connection,
     record: &ExportRecord,
@@ -424,6 +461,12 @@ fn restore_record(
             }
             if op.trace_id.as_deref().is_some_and(|t| !acceptable(t)) {
                 return bad("an operation has a trace id that is not a plain identifier");
+            }
+            for c in &op.changes {
+                check_restored_row(tx, &c.after)?;
+                if let Some(b) = &c.before {
+                    check_restored_row(tx, b)?;
+                }
             }
             tx.execute(
                 "INSERT INTO operations(id, scope, kind, memory, changes, actor, reason, at, reverts, trace_id)
@@ -1179,9 +1222,15 @@ impl Store for SqliteStore {
         )?;
         let mut flagged = None;
         if signal == Signal::Wrong {
+            // Each signal of a person counts (it is their review); anyone else counts once, however
+            // many times it repeats itself: one agent must not flag a memory by itself.
             let unspent: u32 = tx.query_row(
-                "SELECT COUNT(*) FROM feedback WHERE memory = ?1 AND signal = 'Wrong' AND spent = 0",
-                [memory.0],
+                "SELECT
+                   (SELECT COUNT(*) FROM feedback f JOIN actors a ON a.id = f.actor
+                     WHERE f.memory = ?1 AND f.signal = 'Wrong' AND f.spent = 0 AND a.kind = ?2)
+                 + (SELECT COUNT(DISTINCT f.actor) FROM feedback f JOIN actors a ON a.id = f.actor
+                     WHERE f.memory = ?1 AND f.signal = 'Wrong' AND f.spent = 0 AND a.kind <> ?2)",
+                params![memory.0, enc(&ActorKind::Person)],
                 |r| r.get(0),
             )?;
             if unspent >= threshold {
@@ -1500,6 +1549,10 @@ impl Store for SqliteStore {
                     [memory.0],
                 )?;
             }
+            // A failed job keeps the error it got, and an embedder's error can quote the texts it
+            // was given. The queue does not say which memory an error is about, so they all go;
+            // what a job did and when stays.
+            tx.execute("UPDATE jobs SET error = NULL WHERE error IS NOT NULL", [])?;
             let id = append_in(&tx, op, &[], &[])?;
             // the text index keeps deleted entries in old segments until they are merged
             tx.execute(
