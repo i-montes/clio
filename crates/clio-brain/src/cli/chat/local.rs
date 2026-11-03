@@ -22,6 +22,7 @@ use clio_core::SystemClock;
 
 use clio_brain::agent::AgentConfig;
 use clio_brain::control::{Budget, DayBudget};
+use clio_brain::memory_link::MemoryLink;
 use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
@@ -152,7 +153,21 @@ impl SessionSource for LocalSource {
         let work = self.copy_of(&id);
         // 2. the toolhost
         let exe = std::env::current_exe().map_err(text)?;
-        let toolhost = Toolhost::start(&exe, d.need_runtime()?, &paths, &run_dir, &work, &key)?;
+        // The service has Pi's HOME, so it cannot find the vector model by itself.
+        let model = MemoryLink::model_dir(&d.home);
+        let memory = Some((
+            d.data.as_path(),
+            Some(model.as_path()).filter(|m| m.is_dir()),
+        ));
+        let toolhost = Toolhost::start(
+            &exe,
+            d.need_runtime()?,
+            &paths,
+            &run_dir,
+            &work,
+            &key,
+            memory,
+        )?;
         // 3. Pi
         let launch = Launch {
             guard: Some(ensure_guard(&install)?),

@@ -5,7 +5,7 @@ Pi trae `read`, `write`, `edit`, `bash`, `find`, `ls`; Clio solo cambia dónde c
 toca la máquina: la extensión `clio-guard` de Pi solo le manda peticiones.
 
 ```
-clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off] [--vault-socket P]
+clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off] [--vault-socket P] [--memory-data D [--memory-model M]]
 ```
 
 - `clio toolhost ...` (hidden subcommand of the `clio` binary) takes the same arguments and is what the interface starts for a Pi session: no second binary to install.
@@ -15,6 +15,7 @@ clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--
 - Necesita `HOME`: la autoprueba de la jaula planta ahí su señuelo y comprueba que no se ve.
 - `--jail auto` ofrece `exec` (el `bash` de Pi) solo si `bwrap` arranca y la autoprueba de la jaula pasa; si no, `exec` no está declarada y la pasarela la niega (S-02): `bash` falla cerrado. `--jail off` no la ofrece.
 - `--rules` es un JSON de reglas de la pasarela: solo se toman de ahí el umbral del cortacircuito y rutas protegidas extra. La carpeta de trabajo, las herramientas declaradas y las rutas protegidas obligatorias (`extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer`) son siempre las del servicio.
+- `--memory-data D [--memory-model M]` ofrece `memory_search`/`memory_get` sobre lo que la fábrica del binario (`cli::run_with`) haga de las dos carpetas; `clio toolhost` crea el `LinkPort` de `clio-brain` (solo lectura). `clio-toolhost` suelto no tiene memoria y rechaza `--memory-data`. `M` (el modelo de vectores) lo pasa el padre: este proceso corre con otro `HOME`.
 - `CLIO_TOOLHOST_SCRUB_JSON='{"nombre":"valor"}'` enseña valores al limpiador; `--vault-socket` añade el filtro del vault (si no contesta, la salida se retiene). El enlace real con el vault de la sesión está por hacer.
 
 ## Protocolo

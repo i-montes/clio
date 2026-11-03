@@ -59,6 +59,16 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   `tests/memory_agent.rs` (cycle, quarantine, procedures, quotas, abstention, secrets),
   `tests/memory_cli.rs` (every subcommand, two real runs with a scripted adapter, pty), attacks
   10, 11 and 35 to 37 in `tests/attacks.rs`.
+- `memory_port`: `LinkPort`, the tool host's `MemoryPort` over `MemoryLink::open_read` (the
+  agent reads, never writes). `clio toolhost --memory-data DIR [--memory-model DIR]` builds it
+  (`clio_toolhost::cli::run_with`; the loose `clio-toolhost` binary has no memory, so
+  `memory_search` and `memory_get` are denied there); `Toolhost::start` passes both flags, and
+  the model folder comes from the parent because the service runs with Pi's `HOME`. Only active
+  memories of the scope `clio` come back, and `get` gives one error text for "missing",
+  "quarantined", "archived" and "another scope's". It opens read only and never takes the writer
+  lock, so `clio memory remember` is not blocked; a failed open is not remembered (the person may
+  create the memory while a session runs). Tests: `tests/memory_port.rs` (real database, the real
+  service over its socket).
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

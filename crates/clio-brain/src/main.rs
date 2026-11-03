@@ -85,7 +85,12 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     }
     // Internal: the tool host of a Pi session, started by `clio` from its own executable.
     if cmd == "toolhost" {
-        return clio_toolhost::cli::run(args.into_raw()).map(|()| 0);
+        // The memory tools exist only here: the loose `clio-toolhost` binary has no memory.
+        let memory = |data: &std::path::Path, model: Option<&std::path::Path>| {
+            let port = clio_brain::memory_port::LinkPort::new(data, model);
+            Ok(std::sync::Arc::new(port) as std::sync::Arc<dyn clio_toolhost::MemoryPort>)
+        };
+        return clio_toolhost::cli::run_with(args.into_raw(), &memory).map(|()| 0);
     }
     // Internal: inside Pi's jail, the forwarder to the egress proxy that starts Pi (ADR 0009).
     if cmd == "pi-net" {

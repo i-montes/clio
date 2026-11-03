@@ -122,6 +122,7 @@ impl PiBench {
             run_dir,
             work,
             &self.key,
+            None, // the bench uses no memory
         )?;
         let launch = Launch {
             guard: Some(ensure_guard(&self.install)?),

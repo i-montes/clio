@@ -110,7 +110,9 @@ static TOOLHOSTS: AtomicU32 = AtomicU32::new(0);
 impl Toolhost {
     /// `exe` is a `clio` binary; `runtime` the folder for the 0700 socket folder (kept short:
     /// Unix sockets cannot be longer than about 100 bytes); `run_dir` holds `scratch/`,
-    /// `toolhost/` and `toolhost.log`; `HOME` is Clio's own Pi home.
+    /// `toolhost/` and `toolhost.log`; `HOME` is Clio's own Pi home. `memory` is the person's
+    /// data folder and, if there is one, the vector model's: the service reads the memory (read
+    /// only) and is told where the model is because its `HOME` is not the person's.
     pub fn start(
         exe: &Path,
         runtime: &Path,
@@ -118,6 +120,7 @@ impl Toolhost {
         run_dir: &Path,
         work: &Path,
         key: &Secret,
+        memory: Option<(&Path, Option<&Path>)>,
     ) -> Result<Self, String> {
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
@@ -149,8 +152,15 @@ impl Toolhost {
         } else {
             "auto"
         };
-        let mut child = Command::new(exe)
-            .arg("toolhost")
+        let mut cmd = Command::new(exe);
+        cmd.arg("toolhost");
+        if let Some((data, model)) = memory {
+            cmd.arg("--memory-data").arg(data);
+            if let Some(model) = model {
+                cmd.arg("--memory-model").arg(model);
+            }
+        }
+        let mut child = cmd
             .arg("--socket-dir")
             .arg(&sock_dir)
             .arg("--work")
