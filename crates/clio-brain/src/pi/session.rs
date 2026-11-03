@@ -20,9 +20,18 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 6] = ["read", "write", "edit", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@4";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@4.md");
+pub const GUARD_TOOLS: [&str; 8] = [
+    "read",
+    "write",
+    "edit",
+    "bash",
+    "find",
+    "ls",
+    "memory_search",
+    "memory_get",
+];
+pub const PROMPT_NAME: &str = "clio-agent@5";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@5.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -110,7 +119,9 @@ static TOOLHOSTS: AtomicU32 = AtomicU32::new(0);
 impl Toolhost {
     /// `exe` is a `clio` binary; `runtime` the folder for the 0700 socket folder (kept short:
     /// Unix sockets cannot be longer than about 100 bytes); `run_dir` holds `scratch/`,
-    /// `toolhost/` and `toolhost.log`; `HOME` is Clio's own Pi home.
+    /// `toolhost/` and `toolhost.log`; `HOME` is Clio's own Pi home. `memory` is the person's
+    /// data folder and, if there is one, the vector model's: the service reads the memory (read
+    /// only) and is told where the model is because its `HOME` is not the person's.
     pub fn start(
         exe: &Path,
         runtime: &Path,
@@ -118,6 +129,7 @@ impl Toolhost {
         run_dir: &Path,
         work: &Path,
         key: &Secret,
+        memory: Option<(&Path, Option<&Path>)>,
     ) -> Result<Self, String> {
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
@@ -149,8 +161,15 @@ impl Toolhost {
         } else {
             "auto"
         };
-        let mut child = Command::new(exe)
-            .arg("toolhost")
+        let mut cmd = Command::new(exe);
+        cmd.arg("toolhost");
+        if let Some((data, model)) = memory {
+            cmd.arg("--memory-data").arg(data);
+            if let Some(model) = model {
+                cmd.arg("--memory-model").arg(model);
+            }
+        }
+        let mut child = cmd
             .arg("--socket-dir")
             .arg(&sock_dir)
             .arg("--work")
@@ -239,7 +258,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guard_tools_are_the_six_the_extension_registers() {
+    fn the_guard_tools_are_the_eight_the_extension_registers() {
         // Same list as TOOL_NAMES in adapters/pi/extensions/clio-guard/index.ts.
         let (_, index) = GUARD_FILES[0];
         let line = index
@@ -254,6 +273,6 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_one_the_guard_checks() {
-        assert!(PROMPT.starts_with("version: 4"));
+        assert!(PROMPT.starts_with("version: 5"));
     }
 }

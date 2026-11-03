@@ -1,0 +1,446 @@
+//! The memory tools (`memory_search`, `memory_get`): the agent reads the person's active memories,
+//! read only. The memory itself sits behind [`MemoryPort`] (the real one lives in `clio-brain`),
+//! so this crate never opens a database.
+//!
+//! What comes back is text somebody wrote, maybe long ago, maybe hostile. It is cleaned first,
+//! cut after cleaning (so a secret is never split by the cut), kept to one line per memory (a
+//! memory cannot forge the line of another one) and wrapped as data (S-08, S-60). The session is
+//! marked as tainted only when a memory is not the person's own (S-05): marking on every read
+//! would tire the person and be ignored, never marking would make S-05 mean nothing.
+//!
+//! A session may spend 20 calls and 24 KiB of returned text (S-47). The count lives in a file of the
+//! run folder, so a restarted service does not give a fresh budget, and what is logged are facts
+//! (ids, counts, a short hash of the query), never the text of a query or of a memory.
+
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use clio_core::Effect;
+use clio_gateway::{ArgKind, ArgSpec, Egress, Source, ToolDecl, wrap_untrusted};
+use clio_vault::count_masks;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
+
+pub(crate) const MEMORY_OPS: [&str; 2] = ["memory_search", "memory_get"];
+
+const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
+const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
+
+const MAX_QUERY_CHARS: usize = 200;
+const DEFAULT_LIMIT: usize = 5;
+const MAX_LIMIT: usize = 8;
+/// A whole memory line, `[m1] kind · origin · date: text` included.
+const MAX_LINE_CHARS: usize = 600;
+/// A whole answer, delimiters included.
+const MAX_ANSWER_BYTES: usize = 4096;
+/// Room kept for the line that says how many memories did not fit (the note is counted apart).
+const OMITTED_ROOM: usize = 96;
+const MAX_CALLS: u32 = 20;
+const MAX_BUDGET_BYTES: u64 = 24 * 1024;
+/// With less than this left the budget counts as spent: an answer needs room for its delimiters
+/// and its notes, and the cap on returned text is hard.
+const MIN_ROOM: u64 = 1024;
+const MAX_ERROR_CHARS: usize = 300;
+const MAX_NOTE_CHARS: usize = 200;
+/// How long the memory has to answer before the call fails.
+pub(crate) const MEMORY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Who wrote a memory. Only `Person` is what the person said; the other two can carry text that
+/// came from outside, so reading them taints the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Person,
+    Agent,
+    External,
+}
+
+impl Origin {
+    fn label(self) -> &'static str {
+        match self {
+            Origin::Person => "persona",
+            Origin::Agent => "agente",
+            Origin::External => "externo",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryItem {
+    pub id: i64,
+    pub kind: String,
+    pub origin: Origin,
+    pub date: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub items: Vec<MemoryItem>,
+    /// The memory judged that nothing was relevant enough.
+    pub abstained: bool,
+    /// Something the model should know about how the search went (e.g. text only, no vectors).
+    pub note: Option<String>,
+}
+
+/// What the tool host needs from the memory: active memories of the person's scope, read only.
+/// There is no way to write, promote, archive or purge through it (S-60).
+pub trait MemoryPort: Send + Sync {
+    fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
+    /// The same error for "does not exist", "is not active" and "is another scope's": which one
+    /// it is must not leak.
+    fn get(&self, id: i64) -> Result<MemoryItem, String>;
+}
+
+pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
+    let a = |name: &str, kind, required| ArgSpec {
+        name: name.into(),
+        kind,
+        required,
+    };
+    match tool {
+        "memory_search" => vec![
+            a("query", ArgKind::Text, true),
+            a("limit", ArgKind::Int, false),
+        ],
+        _ => vec![a("id", ArgKind::Int, true)],
+    }
+}
+
+/// The declarations for the gateway, and each one's description hash (S-15).
+pub(crate) fn decls() -> Vec<ToolDecl> {
+    [
+        ("memory_search", SEARCH_DESCRIPTION),
+        ("memory_get", GET_DESCRIPTION),
+    ]
+    .into_iter()
+    .map(|(name, description)| ToolDecl {
+        name: name.into(),
+        version: "1".into(),
+        effect: Effect::Read,
+        egress: Egress::None,
+        description_hash: digest_hex(description),
+        args: arg_specs(name),
+    })
+    .collect()
+}
+
+/// Whitespace of any kind becomes one space and what is left of the control characters goes: one
+/// line, nothing a terminal or the model's framing could take as structure.
+fn one_line(s: &str) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| c.is_whitespace() || !c.is_control())
+        .collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// What a session has spent of the memory budget. A hard cap (S-47): the file is read before
+/// every call and written before the port is asked, so a call is counted even if the host dies
+/// in the middle of it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Budget {
+    calls: u32,
+    bytes: u64,
+}
+
+impl Budget {
+    /// No file is a fresh budget; a file that cannot be read or understood is an error, never a
+    /// fresh budget.
+    fn load(path: &Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("it is not valid: {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Whole or not at all: a temp file, then `rename`. `create_new`, so a planted link is not
+    /// followed.
+    fn save(&self, path: &Path) -> Result<(), String> {
+        let tmp = path.with_extension("json.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let text = serde_json::to_string(self).map_err(|e| e.to_string())?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        f.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    }
+}
+
+/// What one call leaves in `memory.jsonl`. No text of the query or of a memory, ever.
+#[derive(Default)]
+struct Facts {
+    ids: Vec<i64>,
+    /// This call marked the session (a memory that is not the person's).
+    marked: bool,
+    query_hash: Option<String>,
+}
+
+impl ToolHost {
+    /// Cleaning first (the scrubber must see the whole text), then one line, then the cut.
+    fn tidy(&self, s: &str, max: usize) -> String {
+        cut(&one_line(&self.clean(s)), max)
+    }
+
+    fn memory_failed(&self, req: &Request, out: DecisionOut, why: &str) -> Response {
+        let content = cut(
+            &format!("{} failed: {}", req.tool, one_line(&self.clean(why))),
+            MAX_ERROR_CHARS,
+        );
+        Response {
+            id: req.id.clone(),
+            ok: false,
+            content,
+            data: Value::Null,
+            decision: out,
+            tainted: self.is_tainted(&req.session),
+            external: false,
+        }
+    }
+
+    /// Runs the port off this thread, with a deadline and a net for panics: a memory that hangs
+    /// or blows up is an error of this one call, never of the host.
+    // shortcut: a port that never returns leaves its thread behind (the call itself fails on
+    // time); a port that can hang for good needs a process of its own.
+    fn ask_port<T: Send + 'static>(
+        &self,
+        port: &Arc<dyn MemoryPort>,
+        f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let (tx, rx) = mpsc::channel();
+        let port = Arc::clone(port);
+        std::thread::spawn(move || {
+            let ran = catch_unwind(AssertUnwindSafe(|| f(port.as_ref())));
+            let _ = tx.send(ran.unwrap_or_else(|_| Err("the memory tool panicked".into())));
+        });
+        rx.recv_timeout(self.memory_timeout)
+            .unwrap_or_else(|_| Err("the memory did not answer in time".into()))
+    }
+
+    fn budget_denied(&self, req: &Request, why: &str) -> Response {
+        // Not through the gateway: this is not a policy denial, so the breaker does not count it.
+        self.refuse(
+            &req.id,
+            "S-47/memory",
+            why.to_owned(),
+            self.is_tainted(&req.session),
+        )
+    }
+
+    /// `memory_search` / `memory_get`, after the gateway let the call through: the budget first
+    /// (S-47), then the call, then the facts. Anything that goes wrong with the budget or the log
+    /// denies the call: no read goes uncounted or unlogged.
+    pub(crate) fn memory_call(
+        &self,
+        req: &Request,
+        args: &Map<String, Value>,
+        out: DecisionOut,
+    ) -> Response {
+        let path = self.run_dir.join("memory-budget.json");
+        let mut budget = match Budget::load(&path) {
+            Ok(b) => b,
+            Err(why) => return self.budget_denied(req, &format!("the memory budget: {why}")),
+        };
+        let left = MAX_BUDGET_BYTES.saturating_sub(budget.bytes);
+        if budget.calls >= MAX_CALLS || left < MIN_ROOM {
+            return self.budget_denied(
+                req,
+                "this session spent its memory budget (20 calls or 24 KiB of text)",
+            );
+        }
+        // Counted before the port is asked: failed and rejected calls spend it too.
+        budget.calls += 1;
+        if let Err(why) = budget.save(&path) {
+            return self.budget_denied(req, &format!("the memory budget cannot be kept: {why}"));
+        }
+        let cap = usize::try_from(left).map_or(MAX_ANSWER_BYTES, |l| l.min(MAX_ANSWER_BYTES));
+        let mut facts = Facts::default();
+        let resp = self.memory_answer(req, args, out, cap, &mut facts);
+        // Only what a memory said counts: an error or a refusal is not text of the memory.
+        let bytes = if resp.ok { resp.content.len() } else { 0 };
+        budget.bytes += bytes as u64;
+        let logged = budget
+            .save(&path)
+            .and_then(|()| self.log_facts(req, &facts, bytes));
+        match logged {
+            Ok(()) => resp,
+            Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
+        }
+    }
+
+    fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let row = json!({
+            "at": at,
+            "tool": req.tool,
+            "results": facts.ids.len(),
+            "ids": facts.ids,
+            "bytes": bytes,
+            "tainted": facts.marked,
+            "query_hash": facts.query_hash,
+        });
+        let path = self.run_dir.join("memory.jsonl");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        let mut line = row.to_string();
+        line.push('\n');
+        f.write_all(line.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    /// The call itself, with its answer cut to `cap` bytes.
+    fn memory_answer(
+        &self,
+        req: &Request,
+        args: &Map<String, Value>,
+        out: DecisionOut,
+        cap: usize,
+        facts: &mut Facts,
+    ) -> Response {
+        let Some(port) = self.memory.clone() else {
+            return self.memory_failed(req, out, "there is no memory");
+        };
+        let found = if req.tool == "memory_search" {
+            let typed = args
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            // Not `tidy`: the port gets the query cut as it is, with no ellipsis, and a withheld
+            // stand-in text must never be taken for a query.
+            let Some(cleaned) = self.try_clean(typed) else {
+                return self.memory_failed(req, out, "the vault could not filter the query");
+            };
+            let query: String = one_line(&cleaned).chars().take(MAX_QUERY_CHARS).collect();
+            if query.is_empty() {
+                return self.memory_failed(req, out, "the query is empty");
+            }
+            facts.query_hash = Some(digest_hex(&query)[..8].to_owned());
+            let limit = args.get("limit").map_or(DEFAULT_LIMIT, |v| {
+                let n = v.as_i64().unwrap_or(i64::MAX);
+                usize::try_from(n.clamp(1, MAX_LIMIT as i64)).unwrap_or(MAX_LIMIT)
+            });
+            self.ask_port(&port, move |p| p.search(&query, limit))
+        } else {
+            // The gateway checked it is an integer; a u64 past i64::MAX is not an id.
+            let Some(id) = args.get("id").and_then(Value::as_i64).filter(|id| *id > 0) else {
+                return self.memory_failed(req, out, "the id must be a positive integer");
+            };
+            self.ask_port(&port, move |p| p.get(id)).map(|item| Found {
+                items: vec![item],
+                abstained: false,
+                note: None,
+            })
+        };
+        let found = match found {
+            Ok(f) => f,
+            Err(why) => return self.memory_failed(req, out, &why),
+        };
+
+        // The session is marked for what the memory returned, shown or not.
+        if found.items.iter().any(|i| i.origin != Origin::Person) {
+            self.mark(&req.session, "memory");
+            facts.marked = true;
+        }
+        let note = found.note.as_deref().map(|n| self.tidy(n, MAX_NOTE_CHARS));
+        if found.items.is_empty() {
+            let mut content = String::from("nothing relevant in memory");
+            if let Some(n) = note.filter(|n| !n.is_empty()) {
+                content = format!("{content} ({n})");
+            }
+            return Response {
+                id: req.id.clone(),
+                ok: true,
+                content,
+                data: json!({ "ids": [], "count": 0, "masked": 0 }),
+                decision: out,
+                tainted: self.is_tainted(&req.session),
+                external: false,
+            };
+        }
+
+        // Saturating all the way: `cap` can be the 1 KiB floor and a port's note can be longer than
+        // that, and a wrapped `room` would lift the hard cap.
+        let mut room = cap
+            .saturating_sub(wrap_untrusted(Source::Memory, "").len())
+            .saturating_sub(OMITTED_ROOM);
+        // The lines after the memories are kept only while they fit in what is left of the cap;
+        // a note that does not fit is dropped, whole, never cut.
+        let mut tail = Vec::new();
+        if found.abstained {
+            tail.push("[the memory was unsure: these results may not be relevant]".to_owned());
+        }
+        if let Some(n) = note.filter(|n| !n.is_empty()) {
+            tail.push(format!("[note] {n}"));
+        }
+        tail.retain(|l| match room.checked_sub(l.len() + 1) {
+            Some(r) => {
+                room = r;
+                true
+            }
+            None => false,
+        });
+        let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
+        for it in &found.items {
+            let (kind, date) = (self.tidy(&it.kind, 32), self.tidy(&it.date, 32));
+            let cleaned = self.clean(&it.text);
+            let head = format!("[m{}] {kind} · {} · {date}: ", it.id, it.origin.label());
+            let text = cut(
+                &one_line(&cleaned),
+                MAX_LINE_CHARS.saturating_sub(head.chars().count()),
+            );
+            let line = format!("{head}{text}");
+            if used + line.len() + 1 > room {
+                break;
+            }
+            used += line.len() + 1;
+            // Only memories that are shown: one left out was never in front of the model.
+            masked += count_masks(&cleaned).saturating_sub(count_masks(&it.text));
+            ids.push(it.id);
+            lines.push(line);
+        }
+        let left = found.items.len() - ids.len();
+        facts.ids.clone_from(&ids);
+        if left > 0 {
+            lines.push(format!(
+                "[+{left} more memories left out: the answer is limited to {cap} bytes]"
+            ));
+        }
+        lines.extend(tail);
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: wrap_untrusted(Source::Memory, &lines.join("\n")),
+            data: json!({ "ids": ids, "count": ids.len(), "masked": masked }),
+            decision: out,
+            tainted: self.is_tainted(&req.session),
+            external: true,
+        }
+    }
+}

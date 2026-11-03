@@ -20,6 +20,7 @@
 //! Nothing in this crate talks to the network. See `README.md` for the protocol.
 
 pub mod cli;
+mod memory;
 mod ops;
 mod sanitize;
 mod server;
@@ -28,7 +29,7 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use clio_core::{Level, SystemClock};
@@ -42,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+pub use memory::{Found, MemoryItem, MemoryPort, Origin};
 pub use sanitize::sanitize;
 pub use server::Server;
 
@@ -146,6 +148,9 @@ pub struct Config {
     /// Extra rules (breaker threshold, more protected paths, ...). The working folder, the tool
     /// declarations and the mandatory protected paths are always the host's own.
     pub rules: Option<Rules>,
+    /// The person's memory, read only. Without it `memory_search` and `memory_get` are not
+    /// declared and the gateway denies them (S-02): the loose `clio-toolhost` binary has none.
+    pub memory: Option<Arc<dyn MemoryPort>>,
 }
 
 impl Config {
@@ -158,6 +163,7 @@ impl Config {
             scrubber: None,
             vault: None,
             rules: None,
+            memory: None,
         }
     }
 }
@@ -188,6 +194,10 @@ pub struct ToolHost {
     busy: Mutex<()>,
     counter: AtomicU64,
     exec_status: Result<(), String>,
+    memory: Option<Arc<dyn MemoryPort>>,
+    memory_timeout: Duration,
+    /// Where the memory tools keep their budget and their log.
+    run_dir: PathBuf,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -263,6 +273,12 @@ impl ToolHost {
             });
             descriptions.insert(name.to_owned(), hash);
         }
+        if cfg.memory.is_some() {
+            for decl in memory::decls() {
+                descriptions.insert(decl.name.clone(), decl.description_hash.clone());
+                tools.push(decl);
+            }
+        }
         let extra = cfg.rules.unwrap_or(Rules {
             sandbox_root: cfg.work.clone(),
             allowed_binaries: vec![],
@@ -307,14 +323,25 @@ impl ToolHost {
             descriptions,
             scrubber: cfg
                 .scrubber
-                .unwrap_or_else(|| Scrubber::new(std::sync::Arc::new(SystemClock))),
+                .unwrap_or_else(|| Scrubber::new(Arc::new(SystemClock))),
             vault: cfg.vault,
             asker: Box::new(NobodyHome),
             sessions: Mutex::new(HashMap::new()),
             busy: Mutex::new(()),
             counter: AtomicU64::new(0),
             exec_status,
+            memory: cfg.memory,
+            memory_timeout: memory::MEMORY_TIMEOUT,
+            run_dir: cfg.run_dir,
         })
+    }
+
+    /// For tests: how long the memory has to answer (10 s by default).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_memory_timeout(mut self, d: Duration) -> Self {
+        self.memory_timeout = d;
+        self
     }
 
     #[must_use]
@@ -353,13 +380,18 @@ impl ToolHost {
     }
 
     fn clean(&self, text: &str) -> String {
+        self.try_clean(text)
+            .unwrap_or_else(|| "[withheld: the vault could not filter this text]".into())
+    }
+
+    /// `clean`, but `None` when the vault could not filter: for text that is an input to
+    /// something else (a query), where the stand-in text for a withheld output would be wrong.
+    fn try_clean(&self, text: &str) -> Option<String> {
         // In this order: a hidden character inside a value must not stop the scrubber.
         let t = self.scrubber.scrub(&sanitize(text));
         match &self.vault {
-            None => t,
-            Some(v) => v
-                .scrub(&t)
-                .unwrap_or_else(|_| "[withheld: the vault could not filter this text]".into()),
+            None => Some(t),
+            Some(v) => v.scrub(&t).ok(),
         }
     }
 
@@ -518,6 +550,11 @@ impl ToolHost {
                 tainted: self.is_tainted(&req.session),
                 external: false,
             };
+        }
+        // Memory is not an executor action: it has its own presentation, and it taints the session
+        // by the origin of what it returns, not by being external (files and commands always do).
+        if memory::MEMORY_OPS.contains(&req.tool.as_str()) {
+            return self.memory_call(&req, &map, out);
         }
         let action = Action {
             id: format!(

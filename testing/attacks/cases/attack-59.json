@@ -1,0 +1,10 @@
+{
+  "id": "attack-59",
+  "title": "Con Pi real: un recuerdo en cuarentena, uno archivado y uno de otro ámbito no se leen ni con memory_search ni con memory_get, y los errores de memory_get son idénticos byte a byte",
+  "rules": [
+    "S-25",
+    "S-27"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

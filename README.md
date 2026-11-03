@@ -1,6 +1,6 @@
 # Clio
 
-Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-59): [`docs/security.md`](docs/security.md); threat model: [`docs/threat-model.md`](docs/threat-model.md); reporting: [`SECURITY.md`](SECURITY.md). Decisions: [`docs/decisions/`](docs/decisions/). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-60): [`docs/security.md`](docs/security.md); threat model: [`docs/threat-model.md`](docs/threat-model.md); reporting: [`SECURITY.md`](SECURITY.md). Decisions: [`docs/decisions/`](docs/decisions/). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Architecture
 

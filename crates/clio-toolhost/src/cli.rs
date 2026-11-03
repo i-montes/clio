@@ -2,25 +2,36 @@
 //! (the same process, started by the TUI from its own executable).
 //!
 //! `--socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off]
-//! [--vault-socket P]`. Prints `READY <socket path>` on stdout once it listens, then runs until
+//! [--vault-socket P] [--memory-data D [--memory-model M]]`. Prints `READY <socket path>` on stdout once it listens, then runs until
 //! its stdin closes (the process that started it is gone or asked it to stop), so it can not
 //! outlive its parent. `CLIO_TOOLHOST_SCRUB_JSON` (`{"name":"value"}`) teaches the output filter
-//! extra values.
+//! extra values. With `--memory-data` the memory tools are offered, over what the binary's
+//! [`MemoryFactory`] makes of the two folders (the loose `clio-toolhost` has none). The vector
+//! model's folder comes from the parent: this process runs with another `HOME`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clio_core::SystemClock;
 use clio_vault::{Scrubber, VaultClient};
 
-use crate::{Config, JailMode, Server, ToolHost};
+use crate::{Config, JailMode, MemoryPort, Server, ToolHost};
+
+/// Builds the memory from its data folder and, if there is one, the vector model's folder.
+pub type MemoryFactory<'a> =
+    &'a dyn Fn(&Path, Option<&Path>) -> Result<Arc<dyn MemoryPort>, String>;
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
+    run_with(args, &|_, _| Err("this binary has no memory".into()))
+}
+
+pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), String> {
     let mut args = args.into_iter();
     let (mut dir, mut work, mut scratch, mut run_dir) = (None, None, None, None);
     let (mut rules, mut vault, mut jail) = (None, None, JailMode::Auto);
+    let (mut memory_data, mut memory_model) = (None, None);
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -30,6 +41,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             "--run-dir" => run_dir = Some(PathBuf::from(value()?)),
             "--rules" => rules = Some(PathBuf::from(value()?)),
             "--vault-socket" => vault = Some(PathBuf::from(value()?)),
+            "--memory-data" => memory_data = Some(PathBuf::from(value()?)),
+            "--memory-model" => memory_model = Some(PathBuf::from(value()?)),
             "--jail" => {
                 jail = match value()?.as_str() {
                     "auto" => JailMode::Auto,
@@ -49,6 +62,11 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     );
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));
+    match (memory_data, memory_model) {
+        (Some(data), model) => cfg.memory = Some(memory(&data, model.as_deref())?),
+        (None, Some(_)) => return Err("--memory-model needs --memory-data".into()),
+        (None, None) => {}
+    }
     if let Some(p) = rules {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         cfg.rules = Some(serde_json::from_str(&text).map_err(|e| format!("rules: {e}"))?);

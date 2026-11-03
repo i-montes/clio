@@ -1,7 +1,7 @@
 //! The bench with Pi as the harness (`clio-bench agent --harness pi`): the same lifecycle as
 //! `clio run --harness pi` (`clio toolhost` on the working copy, hardened Pi with the guard, the
-//! six tools, `--thinking low`), driven to `agent_settled` under the task's limits. The task's
-//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@4`).
+//! eight tools, `--thinking low`), driven to `agent_settled` under the task's limits. The task's
+//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@5`).
 //! The API key comes only from `OPENCODE_API_KEY` or `~/.config/clio/opencode-api-key`; it is
 //! handed to Pi and the toolhost through their environment and never printed or written.
 
@@ -122,6 +122,7 @@ impl PiBench {
             run_dir,
             work,
             &self.key,
+            None, // the bench uses no memory
         )?;
         let launch = Launch {
             guard: Some(ensure_guard(&self.install)?),

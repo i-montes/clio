@@ -1439,6 +1439,15 @@ const PI_STACK_CASES: [&str; 12] = [
     "attack-49",
 ];
 
+/// Run by `tests/pi_stack/memory.rs`: the memory tools through Pi, its guard and the tool host.
+const MEMORY_CASES: [&str; 5] = [
+    "attack-56",
+    "attack-57",
+    "attack-58",
+    "attack-59",
+    "attack-60",
+];
+
 /// Run where their scenarios live: 50 and 51 (and half of 52) by `clio-toolhost/tests/hardening.rs`,
 /// the other half of 52 by `copy_secrets.rs`, 53 by `adapter_egress.rs`, 54 and 55 by `pi_jail.rs`.
 const HARDENING_CASES: [&str; 6] = [
@@ -1511,6 +1520,7 @@ fn the_active_cases_are_refused_by_the_whole_agent() {
         // tests/pi_stack/stack.rs.
         .filter(|c| !PI_STACK_CASES.contains(&c.id.as_str()))
         .filter(|c| !HARDENING_CASES.contains(&c.id.as_str()))
+        .filter(|c| !MEMORY_CASES.contains(&c.id.as_str()))
         .filter(|c| c.id != "attack-34" || jail)
         .collect();
     let report = run(&cases, &AgentTarget);
