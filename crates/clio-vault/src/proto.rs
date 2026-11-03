@@ -75,9 +75,13 @@ pub enum Request {
     Alerts,
     /// Names due for rotation now.
     Due,
-    /// Task 257: files under `path` (on the server's disk) that hold a vault value.
+    /// Task 257: files under `path` (on the server's disk) that hold a vault value. `skip` names
+    /// folders not to enter at any depth (`clio doctor` skips the copies of projects and installs,
+    /// which are not what Clio wrote); a request without it walks everything.
     ScanDir {
         path: String,
+        #[serde(default)]
+        skip: Vec<String>,
     },
 }
 
@@ -113,7 +117,7 @@ impl Request {
             Self::Audit => "audit".into(),
             Self::Alerts => "alerts".into(),
             Self::Due => "due".into(),
-            Self::ScanDir { path } => format!("scan_dir {path}"),
+            Self::ScanDir { path, .. } => format!("scan_dir {path}"),
         }
     }
 }

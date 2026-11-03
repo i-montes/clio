@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use super::home::Dirs;
 use super::{Res, io_err, mkdir_private, write_private};
 
+/// The person's socket, inside `$XDG_RUNTIME_DIR/clio/` (`clio doctor` asks the vault through it).
+pub(super) const PERSON_SOCK: &str = "vault-person.sock";
+
 fn vault_bin() -> PathBuf {
     if let Some(p) = std::env::var_os("CLIO_VAULT_BIN") {
         return PathBuf::from(p);
@@ -52,7 +55,7 @@ fn paths(dirs: &Dirs) -> Res<Paths> {
     Ok(Paths {
         vault: dirs.data.join("vault.bin"),
         gateway: dir.join("vault-gateway.sock"),
-        person: dir.join("vault-person.sock"),
+        person: dir.join(PERSON_SOCK),
         pid: dir.join("vault.pid"),
         dir,
     })

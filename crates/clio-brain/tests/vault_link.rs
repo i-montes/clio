@@ -340,6 +340,7 @@ fn a_session_leaves_no_secret_in_any_file() {
             .person()
             .call(&Request::ScanDir {
                 path: dir.display().to_string(),
+                skip: Vec::new(),
             })
             .unwrap();
         r.data.unwrap().as_array().unwrap().len()
