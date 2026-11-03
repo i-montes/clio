@@ -130,6 +130,9 @@ pub struct Launch {
     /// Extra variables for the guard (`CLIO_GUARD_PROMPT_*`, `CLIO_TOOLHOST_SOCKET`). Empty
     /// without a guard.
     pub extra_env: Vec<(String, String)>,
+    /// The `clio` binary: inside Pi's jail it runs `clio pi-net`, the forwarder to the egress
+    /// proxy (ADR 0009). It must be a binary that has that command.
+    pub helper: PathBuf,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -296,6 +299,8 @@ pub struct PiProcess {
     pub client: RpcClient,
     pub session_id: String,
     pub state: State,
+    /// Pi's jail, with the egress proxy. After `client` on purpose: Pi is stopped first.
+    pub jail: Option<super::jail::PiJail>,
 }
 
 /// Starts Pi hardened and verifies it. On any failure the process is killed and nothing is left.
@@ -322,18 +327,28 @@ pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
             .unwrap_or_default()
             .as_bytes(),
     )?;
+    // The jail first (ADR 0009): if it cannot be built or fails its self-test, Pi does not start.
+    let jail = super::jail::prepare(l)?;
     // `umask 077` so the session files Pi creates are born 0600; `exec` keeps the pid; `env -u`
     // drops the variables the shell itself adds (PWD, SHLVL, _).
-    let mut cmd = Command::new("/bin/sh");
-    cmd.args([
-        "-c",
-        "umask 077; exec env -u PWD -u OLDPWD -u SHLVL -u _ \"$0\" \"$@\"",
-    ])
-    .arg(&l.install.bin)
-    .args(hardened_args(l, &r.args))
-    .env_clear()
-    .envs(hardened_env(l, &r.session_id))
-    .current_dir(&l.cwd);
+    let mut inner: Vec<OsString> = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        "umask 077; exec env -u PWD -u OLDPWD -u SHLVL -u _ \"$0\" \"$@\"".into(),
+        l.install.bin.clone().into_os_string(),
+    ];
+    inner.extend(hardened_args(l, &r.args));
+    let mut cmd = match &jail {
+        Some(j) => j.command(l, &r.session_id, &inner),
+        None => {
+            let mut c = Command::new(&inner[0]);
+            c.args(&inner[1..])
+                .env_clear()
+                .envs(hardened_env(l, &r.session_id))
+                .current_dir(&l.cwd);
+            c
+        }
+    };
     let client = RpcClient::spawn(&mut cmd)?;
     client.set_allowed_tools(
         l.guard_tools.clone(),
@@ -347,6 +362,7 @@ pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
         client,
         session_id: r.session_id,
         state,
+        jail,
     })
 }
 
@@ -446,6 +462,7 @@ mod tests {
             guard: guard.map(Into::into),
             guard_tools: vec![],
             extra_env: vec![],
+            helper: "/p/clio".into(),
         }
     }
 

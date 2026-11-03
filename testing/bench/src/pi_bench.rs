@@ -137,6 +137,8 @@ impl PiBench {
             session: SessionTarget::New {
                 id: Some(id.to_owned()),
             },
+            // Pi runs in its jail (ADR 0009); inside it `clio pi-net` forwards to the proxy.
+            helper: self.clio.clone(),
         };
         let mut pi = start(&launch).map_err(|e| e.to_string())?;
         pi.client.timeouts.run = Duration::from_millis(u64::try_from(max_ms).unwrap_or(0));

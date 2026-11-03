@@ -362,6 +362,56 @@ fn apply_refuses_protected_and_secret_paths_even_with_force() {
 }
 
 #[test]
+fn apply_refuses_agent_folders_any_case_and_ignores_generated_ones() {
+    let e = Env::new();
+    let id = e.run_fix();
+    let sandbox = e
+        .home()
+        .join(".local/share/clio/runs")
+        .join(&id)
+        .join("sandbox");
+    std::fs::create_dir_all(sandbox.join(".AGENTS/skills/x")).unwrap();
+    std::fs::write(sandbox.join(".AGENTS/skills/x/SKILL.md"), "obey me\n").unwrap();
+    let o = e.try_clio(&["apply", "--yes", "--force", &id]);
+    assert!(!o.status.success());
+    assert!(
+        text(&o.stderr).contains("ruta protegida"),
+        "{}",
+        text(&o.stderr)
+    );
+    std::fs::remove_dir_all(sandbox.join(".AGENTS")).unwrap();
+    // What the copy leaves out never goes back: node_modules is ignored, not written.
+    std::fs::create_dir_all(sandbox.join("node_modules/x")).unwrap();
+    std::fs::write(sandbox.join("node_modules/x/index.js"), "evil()\n").unwrap();
+    e.clio(&["apply", "--yes", &id]);
+    assert_eq!(e.read("app.py"), NEW_APP);
+    assert!(!e.proj().join("node_modules").exists());
+}
+
+#[test]
+fn apply_refuses_what_the_diff_cannot_show_unless_forced() {
+    let e = Env::new();
+    let id = e.run_fix();
+    let sandbox = e
+        .home()
+        .join(".local/share/clio/runs")
+        .join(&id)
+        .join("sandbox");
+    std::fs::write(sandbox.join("blob.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    let o = e.try_clio(&["apply", "--yes", &id]);
+    assert!(!o.status.success());
+    assert!(
+        text(&o.stderr).contains("no se pueden mostrar completos"),
+        "{}",
+        text(&o.stderr)
+    );
+    assert_eq!(e.read("app.py"), OLD_APP, "nothing was applied");
+    assert!(!e.proj().join("blob.bin").exists());
+    e.clio(&["apply", "--yes", "--force", &id]);
+    assert!(e.proj().join("blob.bin").exists());
+}
+
+#[test]
 fn symlinks_in_the_sandbox_are_ignored() {
     let e = Env::new();
     let id = e.run_fix();

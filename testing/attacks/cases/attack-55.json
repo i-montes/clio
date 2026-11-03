@@ -1,0 +1,10 @@
+{
+  "id": "attack-55",
+  "title": "Desde dentro de la jaula de Pi, un socket abstracto del anfitrión, un puerto TCP del loopback y un host que no es el del proveedor no se alcanzan",
+  "rules": [
+    "S-06",
+    "S-03"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

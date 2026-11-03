@@ -18,9 +18,23 @@ struct Line {
 
 type State = (File, HashMap<String, (String, Value)>);
 
-/// Remembers, per action id, that its effect was applied and what it returned. One JSON line per
-/// action, appended and synced. Shortcut: a crash between the effect and its line applies the
-/// effect again on retry; close that window with an intent line when an effect is not repeatable.
+/// What the log keeps of a result: facts, never text. Booleans, numbers and null stay; every
+/// string becomes `{"bytes": n}`. The log is written to disk and backed up, and a result can
+/// carry anything a command printed or a file held: since text cannot be written here, no
+/// scrubber has to remember to run first (S-18, S-20), and a tool added later is safe too.
+fn facts(v: &Value) -> Value {
+    match v {
+        Value::String(s) => serde_json::json!({ "bytes": s.len() }),
+        Value::Array(a) => Value::Array(a.iter().map(facts).collect()),
+        Value::Object(m) => Value::Object(m.iter().map(|(k, x)| (k.clone(), facts(x))).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Remembers, per action id, that its effect was applied and the facts of what it returned (see
+/// `facts`). One JSON line per action, appended and synced. Shortcut: a crash between the effect
+/// and its line applies the effect again on retry; close that window with an intent line when an
+/// effect is not repeatable.
 pub struct EffectLog {
     state: Mutex<State>,
 }
@@ -72,16 +86,17 @@ impl EffectLog {
             };
         }
         let result = effect()?;
+        let recorded = facts(&result);
         let mut line = serde_json::to_string(&Line {
             id: id.into(),
             hash: hash.into(),
-            result: result.clone(),
+            result: recorded.clone(),
         })
         .map_err(|e| Error::BadArgs(e.to_string()))?;
         line.push('\n');
         g.0.write_all(line.as_bytes())?;
         g.0.sync_data()?;
-        g.1.insert(id.into(), (hash.into(), result.clone()));
+        g.1.insert(id.into(), (hash.into(), recorded));
         Ok((result, true))
     }
 }

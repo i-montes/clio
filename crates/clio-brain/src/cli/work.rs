@@ -8,19 +8,49 @@ use std::path::{Component, Path, PathBuf};
 use super::home::Dirs;
 use super::{Res, io_err, mkdir_private, set_mode, sha_hex, write_private};
 
-const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", ".venv", "__pycache__"];
+/// Folders the copy leaves out, at any depth. What the agent builds or installs there never goes
+/// back to the original (`changes` ignores them; `apply` refuses them by name).
+pub const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", ".venv", "__pycache__"];
+
+/// Names of files and folders that exist to hold a credential: the copy leaves them out whole,
+/// because what the agent reads goes to the model's provider. A token inside any other file is
+/// not left out: the filter masks it when the agent reads it (`clio_vault::has_mask`).
+const SECRET_PREFIXES: [&str; 6] = [
+    ".env",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "credentials",
+];
+const SECRET_SUFFIXES: [&str; 8] = [
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".kdbx",
+    ".tfstate",
+    ".tfstate.backup",
+    ".keystore",
+];
+const SECRET_NAMES: [&str; 9] = [
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".netrc",
+    ".pgpass",
+    ".npmrc", // a legacy token here is a bare UUID, which no key pattern can recognise
+    ".git-credentials",
+];
 
 /// A name that looks like it holds a secret.
 pub fn is_secret_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.starts_with(".env")
-        || n.ends_with(".pem")
-        || n.ends_with(".key")
-        || n.starts_with("id_rsa")
-        || n.starts_with("id_ed25519")
-        || n == ".ssh"
-        || n == ".aws"
-        || n.starts_with("credentials")
+    SECRET_PREFIXES.iter().any(|p| n.starts_with(p))
+        || SECRET_SUFFIXES.iter().any(|s| n.ends_with(s))
+        || SECRET_NAMES.contains(&n.as_str())
 }
 
 #[derive(Debug, Default)]
@@ -174,18 +204,39 @@ fn walk_files(dir: &Path, rel: &str, out: &mut Vec<String>) -> Res<()> {
         let e = e.map_err(|x| io_err(dir, &x))?;
         let name = e.file_name().to_string_lossy().into_owned();
         let r = if rel.is_empty() {
-            name
+            name.clone()
         } else {
             format!("{rel}/{name}")
         };
         let kind = e.file_type().map_err(|x| io_err(&e.path(), &x))?;
         if kind.is_dir() {
+            // `.git` is not skipped: the agent writing one is a change `apply` must refuse out loud.
+            if name != ".git" && SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
             walk_files(&e.path(), &r, out)?;
         } else if kind.is_file() {
             out.push(r);
         }
     }
     Ok(())
+}
+
+/// Reads a regular file that is not reached through a symbolic link. The opened file and the path
+/// must be the same inode, so a link swapped in after the listing is refused, not followed.
+pub fn read_regular(p: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let mut f = std::fs::File::open(p)?;
+    let (open, path) = (f.metadata()?, std::fs::symlink_metadata(p)?);
+    if !path.file_type().is_file() || (open.dev(), open.ino()) != (path.dev(), path.ino()) {
+        return Err(std::io::Error::other(
+            "no es un archivo normal (enlace o cambió)",
+        ));
+    }
+    let mut b = Vec::new();
+    f.read_to_end(&mut b)?;
+    Ok(b)
 }
 
 /// The sandbox against the manifest taken at copy time. Sorted by path.
@@ -253,6 +304,38 @@ mod tests {
         for n in ["main.rs", "environment.md", "key.txt", "README"] {
             assert!(!is_secret_name(n), "{n}");
         }
+    }
+
+    #[test]
+    fn changes_ignore_what_the_copy_leaves_out_but_not_git() {
+        let sb = tempfile::tempdir().unwrap();
+        for f in [
+            "src/a.rs",
+            "node_modules/x/i.js",
+            "a/__pycache__/m.pyc",
+            "target/debug/b",
+            ".git/hooks/pre-commit",
+        ] {
+            let p = sb.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        let got: Vec<String> = changes(sb.path(), &BTreeMap::new())
+            .unwrap()
+            .into_iter()
+            .map(|c| c.rel)
+            .collect();
+        assert_eq!(got, [".git/hooks/pre-commit", "src/a.rs"]);
+    }
+
+    #[test]
+    fn read_regular_refuses_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let (real, link) = (d.path().join("real"), d.path().join("link"));
+        std::fs::write(&real, "ok").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read_regular(&real).unwrap(), b"ok");
+        assert!(read_regular(&link).is_err());
     }
 
     #[test]

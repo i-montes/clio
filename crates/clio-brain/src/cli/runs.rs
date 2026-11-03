@@ -835,11 +835,8 @@ pub fn print_diff(
 ) {
     for c in ch {
         let text = diff_text(ws, run, manifest, c);
-        let text = if st.tty {
-            sanitize::multiline(&text)
-        } else {
-            text
-        };
+        // Always, not only on a terminal: `clio diff | less -R` would draw the file's escapes.
+        let text = sanitize::multiline(&text);
         for l in text.lines() {
             let painted = if l.starts_with("+++") || l.starts_with("---") {
                 st.bold(l)

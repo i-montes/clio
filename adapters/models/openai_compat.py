@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -24,6 +25,23 @@ EFFORT = os.environ.get("LLM_REASONING_EFFORT", "low")
 def fail(message: str) -> None:
     print(f"clio-model-adapter: {message}", file=sys.stderr)
     sys.exit(1)
+
+
+def check_base() -> None:
+    """The key travels in a header: over TLS, or to this machine. `http://` to another host (or any
+    other scheme, `file://` included) would send it readable, or somewhere unintended."""
+    u = urllib.parse.urlsplit(BASE)
+    local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
+    if u.scheme != "https" and not local:
+        fail("LLM_BASE_URL must be https (http only for 127.0.0.1 or localhost)")
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """`urllib` follows a 302 and keeps `Authorization`, which would hand the key to whatever host
+    the answer names. A redirect from the provider is an error here, not something to follow."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def read_key() -> str:
@@ -41,6 +59,7 @@ def read_key() -> str:
     return ""
 
 
+check_base()
 key = read_key()
 if not key:
     fail("the API key is empty")
@@ -70,7 +89,7 @@ http = urllib.request.Request(
     },
 )
 try:
-    with urllib.request.urlopen(http, timeout=TIMEOUT) as response:
+    with urllib.request.build_opener(NoRedirect).open(http, timeout=TIMEOUT) as response:
         answer = json.load(response)
 except urllib.error.HTTPError as e:
     fail(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")

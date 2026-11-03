@@ -75,11 +75,14 @@ pub enum Target {
 }
 
 /// What the status bar needs after a run: Pi's own totals and whether the guard marked the session
-/// as having read outside content.
-#[derive(Debug, Clone, Copy)]
+/// as having read outside content, and what the jail refused Pi to connect to (the whole list).
+#[derive(Debug, Clone)]
 pub struct Refresh {
     pub stats: SessionStats,
     pub tainted: bool,
+    pub egress_denied: Vec<String>,
+    /// How many values the host has struck out of what Pi read, in the whole session.
+    pub masked: u32,
 }
 
 pub struct Opened {

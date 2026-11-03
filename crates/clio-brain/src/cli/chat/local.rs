@@ -151,6 +151,7 @@ impl SessionSource for LocalSource {
             node,
             paths,
             session,
+            helper: exe,
         };
         let pi = start(&launch).map_err(text)?;
         let history = pi.client.get_messages().map_err(text)?;
@@ -249,7 +250,19 @@ impl Session for ChatSession {
         let tainted = entries["entries"]
             .as_array()
             .is_some_and(|a| a.iter().any(is_taint));
-        Ok(Refresh { stats, tainted })
+        let masked = entries["entries"].as_array().map_or(0, |a| masked_total(a));
+        let egress_denied = self
+            .pi
+            .jail
+            .as_ref()
+            .map(clio_brain::pi::jail::PiJail::egress_denied)
+            .unwrap_or_default();
+        Ok(Refresh {
+            stats,
+            tainted,
+            egress_denied,
+            masked,
+        })
     }
 
     fn shutdown(&self) {
@@ -267,6 +280,18 @@ impl Drop for ChatSession {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// How many values the host struck out of what Pi read, from the guard's `clio-guard.masked`
+/// entries (one per read that had any).
+fn masked_total(entries: &[Value]) -> u32 {
+    entries
+        .iter()
+        .filter(|e| e["customType"] == "clio-guard.masked")
+        .filter_map(|e| e["data"]["count"].as_u64())
+        .fold(0u32, |a, n| {
+            a.saturating_add(u32::try_from(n).unwrap_or(u32::MAX))
+        })
 }
 
 fn is_taint(e: &Value) -> bool {
@@ -300,6 +325,20 @@ mod tests {
             max_cost_micro_usd: 1,
         });
         assert_eq!(b.max_ms, i64::MAX);
+    }
+
+    #[test]
+    fn the_masked_entries_of_the_guard_add_up() {
+        let e = |t: &str, n: Value| json!({"type":"custom","customType":t,"data":{"count":n}});
+        let entries = [
+            e("clio-guard.masked", json!(2)),
+            e("clio-guard.taint", json!(5)), // another entry: not counted
+            e("clio-guard.masked", json!(1)),
+            e("clio-guard.masked", json!("many")), // not a number: ignored
+            json!({"type":"message"}),
+        ];
+        assert_eq!(masked_total(&entries), 3);
+        assert_eq!(masked_total(&[]), 0);
     }
 
     #[test]

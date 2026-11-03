@@ -325,6 +325,7 @@ dependencies = [
  "clio-attacks",
  "clio-canaries",
  "clio-core",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

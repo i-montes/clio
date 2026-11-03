@@ -1,7 +1,8 @@
 use crate::{Error, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,9 +50,11 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, Kind)>) -> Result<()> {
         } else if t.is_dir() {
             out.push((rel, Kind::Dir));
             walk(base, &p, out)?;
-        } else {
+        } else if t.is_file() {
             out.push((rel, Kind::File));
         }
+        // A FIFO or a socket (a program of the jail can leave one) is not state to snapshot:
+        // copying a FIFO waits for a writer that never comes.
     }
     Ok(())
 }
@@ -125,8 +128,29 @@ impl Sandbox {
         Ok(cur)
     }
 
+    /// The one way a tool opens an existing file of the folder: it never waits and only a regular
+    /// file comes back. A program that ran in the jail can leave a FIFO in the folder; opening
+    /// one normally waits for a writer that never comes, and the host serves one call at a time,
+    /// so a single read would stop every tool. `O_NONBLOCK` makes the open return at once, and the
+    /// check is on the open file, so a swap after `resolve` cannot change what is checked.
+    pub fn open_regular(&self, rel: &str, write: bool) -> Result<fs::File> {
+        let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);
+        let f = fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .custom_flags(nonblock)
+            .open(self.resolve(rel)?)?;
+        if f.metadata()?.is_file() {
+            Ok(f)
+        } else {
+            Err(Error::BadArgs(format!("{rel} is not a regular file")))
+        }
+    }
+
     pub fn read(&self, rel: &str) -> Result<Vec<u8>> {
-        Ok(fs::read(self.resolve(rel)?)?)
+        let mut b = Vec::new();
+        self.open_regular(rel, false)?.read_to_end(&mut b)?;
+        Ok(b)
     }
 
     pub fn list(&self, rel: &str) -> Result<Vec<String>> {

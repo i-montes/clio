@@ -221,6 +221,11 @@ impl Jail {
         })
     }
 
+    /// Where `bwrap` is (always in a system folder: `find_in_trusted`).
+    pub fn bwrap(&self) -> &Path {
+        &self.bwrap
+    }
+
     pub fn bwrap_version(&self) -> String {
         format!("{}.{}.{}", self.version.0, self.version.1, self.version.2)
     }

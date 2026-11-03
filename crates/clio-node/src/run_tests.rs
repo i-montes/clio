@@ -9,7 +9,10 @@ use std::time::Duration;
 
 /// Folders the jailed code must not change even though they are inside `/work` (S-16 mirror:
 /// they load code or settings by themselves). They are mounted read-only.
-pub const READ_ONLY: [&str; 5] = ["extensions", "skills", ".pi", ".claude", ".git"];
+/// Folders under the working copy that load code or settings by themselves (S-16). The one list:
+/// the toolhost, the built-in agent and `apply` all use it. `.agents` is where Pi looks for
+/// project skills.
+pub const READ_ONLY: [&str; 6] = ["extensions", "skills", ".pi", ".claude", ".git", ".agents"];
 
 /// `cargo_test` is NOT offered: a `cargo` under /usr is usually a rustup shim whose toolchains
 /// live in the person's home, and making it work would mean mounting part of that home (and the

@@ -526,9 +526,9 @@ fn digest_hex(s: &str) -> String {
 }
 
 /// S-16: folders under the workspace root that load code or settings by themselves (Pi
-/// extensions, skills, hooks). The agent may read them, never write them.
-/// shortcut: root level only and case-sensitive names; widen when the node has other loaders.
-pub const PROTECTED_PATHS: [&str; 5] = ["extensions", "skills", ".pi", ".claude", ".git"];
+/// extensions, skills, hooks). The agent may read them, never write them. The same list as the
+/// toolhost and the jail, so the built-in agent and `apply` cannot drift from them.
+pub use clio_toolhost::PROTECTED_PATHS;
 
 /// The declared arguments of the basic tools (the registry holds code, not schemas).
 fn arg_specs(tool: &str) -> Vec<ArgSpec> {

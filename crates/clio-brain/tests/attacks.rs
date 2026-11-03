@@ -1439,6 +1439,17 @@ const PI_STACK_CASES: [&str; 12] = [
     "attack-49",
 ];
 
+/// Run where their scenarios live: 50 and 51 (and half of 52) by `clio-toolhost/tests/hardening.rs`,
+/// the other half of 52 by `copy_secrets.rs`, 53 by `adapter_egress.rs`, 54 and 55 by `pi_jail.rs`.
+const HARDENING_CASES: [&str; 6] = [
+    "attack-50",
+    "attack-51",
+    "attack-52",
+    "attack-53",
+    "attack-54",
+    "attack-55",
+];
+
 /// Run by `clio-node/tests/jail.rs`: they attack the jail itself, not the agent.
 const JAIL_CASES: [&str; 10] = [
     "attack-24",
@@ -1499,6 +1510,7 @@ fn the_active_cases_are_refused_by_the_whole_agent() {
         // 38 to 49 attack the Pi stack (real Pi, clio-guard, clio-toolhost): they are run by
         // clio-toolhost/tests/pi_stack.rs.
         .filter(|c| !PI_STACK_CASES.contains(&c.id.as_str()))
+        .filter(|c| !HARDENING_CASES.contains(&c.id.as_str()))
         .filter(|c| c.id != "attack-34" || jail)
         .collect();
     let report = run(&cases, &AgentTarget);

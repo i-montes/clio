@@ -165,25 +165,16 @@ pub fn key_status(dirs: &Dirs) -> KeyStatus {
     }
 }
 
-/// The adapter script: `CLIO_ADAPTER`, or `adapters/models/openai_compat.py` found next to the
-/// executable or in the working directory's ancestors, or else the copy installed by `init`.
+/// The adapter script: `CLIO_ADAPTER`, or `adapters/models/openai_compat.py` found above the
+/// executable (never in the working directory), or else the copy installed by `init`.
 fn find_adapter(dirs: &Dirs) -> Res<PathBuf> {
-    let rel = Path::new("adapters/models/openai_compat.py");
     if let Some(p) = std::env::var_os("CLIO_ADAPTER") {
         return Ok(PathBuf::from(p));
     }
-    let mut starts: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        starts.extend(exe.parent().map(Path::to_path_buf));
-    }
-    starts.extend(std::env::current_dir().ok());
-    for s in starts {
-        for dir in s.ancestors() {
-            let c = dir.join(rel);
-            if c.is_file() {
-                return c.canonicalize().map_err(|e| io_err(&c, &e));
-            }
-        }
+    // Only next to the executable, never in the working directory: the adapter receives the
+    // model key on every run and runs outside the jail.
+    if let Some(c) = super::find_above_exe(Path::new("adapters/models/openai_compat.py")) {
+        return c.canonicalize().map_err(|e| io_err(&c, &e));
     }
     let dir = dirs.data.join("adapters");
     mkdir_private(&dir)?;

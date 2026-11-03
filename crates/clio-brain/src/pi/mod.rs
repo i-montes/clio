@@ -18,8 +18,10 @@
 
 pub mod budget;
 pub mod install;
+pub mod jail;
 pub mod launch;
 pub mod level;
+pub mod net;
 pub mod rpc;
 pub mod session;
 pub mod sessions;

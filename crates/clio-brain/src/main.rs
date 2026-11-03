@@ -78,6 +78,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "memory"
             | "pi"
             | "toolhost"
+            | "pi-net"
     ) {
         eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
         return Ok(2);
@@ -85,6 +86,10 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     // Internal: the tool host of a Pi session, started by `clio` from its own executable.
     if cmd == "toolhost" {
         return clio_toolhost::cli::run(args.into_raw()).map(|()| 0);
+    }
+    // Internal: inside Pi's jail, the forwarder to the egress proxy that starts Pi (ADR 0009).
+    if cmd == "pi-net" {
+        return clio_brain::pi::net::forward_main(args.into_raw());
     }
     let dirs = Dirs::from_env()?;
     match cmd.as_str() {
