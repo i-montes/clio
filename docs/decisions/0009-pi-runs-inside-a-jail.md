@@ -77,7 +77,7 @@ Pi in its own network namespace (`--unshare-net`: only a loopback with nothing l
 - **The probe cannot use `: > file` to test a read-only mount.** A failed redirection on a special builtin ends a POSIX shell, so the probe exited 1 exactly when the copy was correctly read-only. It runs the write in a subshell.
 - **Mount the least that works.** The guard's own folder only when it is an extension (`index.ts` and its siblings); a loose file alone; the prompt as one file. The folder around a file holds other things (a test caught the whole test rig being exposed through the guard's parent).
 - **A test that skips can hide a broken jail.** The first version of the tests "passed" because the jail failed to prepare and the helper printed SKIPPED, which cargo hides. The helper now skips only where `bwrap` cannot start at all; where it can, a jail that does not prepare fails the test.
-- **Not covered here:** `clio-toolhost/tests/pi_stack.rs` (attacks 38 to 49) starts Pi through its own harness, not through `start`, so it runs Pi without the jail. The jail is tested by `clio-brain/tests/pi_jail.rs`, `pi_real.rs` and `pi_chat.rs`.
+- **Closed afterwards (2026-11-03):** `pi_stack` (attacks 38 to 49) used to start Pi through its own harness and so ran Pi without the jail. It now lives in `clio-brain/tests/pi_stack/` and launches Pi through `launch::build`, the function `start` itself uses, so every scenario runs in the jail; `pi_in_these_tests_runs_inside_the_products_jail` fails if that stops being true (also with `CLIO_PI_JAIL=off`). One consequence: a prompt file that does not exist is now refused by the jail (`bwrap` cannot mount it) before the guard can refuse it; either way Pi does not start.
 
 ## What the implementation taught (3b)
 
@@ -93,7 +93,7 @@ Pi in its own network namespace (`--unshare-net`: only a loopback with nothing l
 ## Tests
 
 - `crates/clio-brain/tests/pi_jail.rs` (attack-54): a process the jail starts cannot reach the vault's sockets, reaches the toolhost's, finds the copy read-only; and Pi does not start if the jail cannot be built. (It replaces the ignored test of `clio-vault`, which failed on purpose until now.)
-- The 15 tests of `clio-toolhost/tests/pi_stack.rs` (attacks 38 to 49) and `pi_chat.rs` must pass with the jail on: they launch the real Pi through `start`, so the jail goes inside `start`.
+- The tests of `pi_stack` (attacks 38 to 49, now in `clio-brain/tests/pi_stack/`) and `pi_chat.rs` must pass with the jail on: they launch the real Pi through `start`/`build`, so the jail goes inside them.
 - 3b: `crates/clio-brain/tests/egress_proxy.rs` (the proxy alone: what it tunnels, what it refuses, tricks that read like the allowed address, a head without end) and a second test in `pi_jail.rs` (attack-55). From inside Pi's jail, a host abstract socket, a loopback TCP port and a host that is not the provider's are not reachable, and the provider is (through the proxy).
 
 ## Consequences

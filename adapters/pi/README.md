@@ -40,7 +40,7 @@ Es la única extensión que Pi carga (`-e adapters/pi/extensions/clio-guard`). *
 
 **Cómo se prueba**
 - `npm run check` (tsc sin emitir, TypeScript 5.9.3 fijado exacto) y `npm ci --ignore-scripts && npm audit --audit-level=high`.
-- `cargo test -p clio-toolhost`: pruebas del servicio solo, y las del Pi REAL con un modelo falso (`tests/pi_stack.rs`: ataques 38 a 49; `tests/pi_failclosed.rs`; `tests/pi_latency.rs`). Necesitan `node` y `npm ci` hechos; si no están, cada prueba dice `SKIPPED`, y con `CLIO_REQUIRE_PI=1` fallan. `bash` necesita la jaula (`CLIO_REQUIRE_JAIL=1`).
+- `cargo test -p clio-toolhost`: pruebas del servicio solo. `cargo test -p clio-brain --test pi_stack`: las del Pi REAL con un modelo falso, lanzado por `pi::launch::build` (la misma jaula que usa `clio`): `stack.rs` (ataques 38 a 49), `failclosed.rs`, `latency.rs`. Necesitan `node` y `npm ci` hechos; si no están, cada prueba dice `SKIPPED`, y con `CLIO_REQUIRE_PI=1` fallan. `bash` y la jaula de Pi necesitan `bwrap` (`CLIO_REQUIRE_JAIL=1`).
 
 **Updating Pi (task 102):** change the exact version, run `npm install --package-lock-only --ignore-scripts`, read the diff of the lockfile and the release notes, rerun `npm audit`, run the bench and the attack battery, and only then merge. Never `^` or `latest`.
 

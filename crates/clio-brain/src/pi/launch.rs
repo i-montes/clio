@@ -323,8 +323,18 @@ pub struct PiProcess {
     pub jail: Option<super::jail::PiJail>,
 }
 
-/// Starts Pi hardened and verifies it. On any failure the process is killed and nothing is left.
-pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
+/// Pi ready to spawn: the command (inside the jail when there is one), the jail that must outlive
+/// the process, and the session id.
+pub struct Built {
+    pub cmd: Command,
+    pub jail: Option<super::jail::PiJail>,
+    pub session_id: String,
+}
+
+/// Everything `start` does before it spawns Pi. Public so the tests that attack the whole stack
+/// launch Pi exactly as the product does (same flags, environment and jail) and not with a
+/// command line of their own.
+pub fn build(l: &Launch) -> Result<Built, PiError> {
     if !l.cwd.is_absolute() || !l.cwd.is_dir() {
         return Err(PiError::Io(format!(
             "la carpeta del proyecto {} no existe",
@@ -358,7 +368,7 @@ pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
         l.install.bin.clone().into_os_string(),
     ];
     inner.extend(hardened_args(l, &r.args));
-    let mut cmd = match &jail {
+    let cmd = match &jail {
         Some(j) => j.command(l, &r.session_id, &inner),
         None => {
             let mut c = Command::new(&inner[0]);
@@ -369,6 +379,20 @@ pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
             c
         }
     };
+    Ok(Built {
+        cmd,
+        jail,
+        session_id: r.session_id,
+    })
+}
+
+/// Starts Pi hardened and verifies it. On any failure the process is killed and nothing is left.
+pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
+    let Built {
+        mut cmd,
+        jail,
+        session_id,
+    } = build(l)?;
     let client = RpcClient::spawn(&mut cmd)?;
     client.set_allowed_tools(
         l.guard_tools.clone(),
@@ -377,10 +401,10 @@ pub fn start(l: &Launch) -> Result<PiProcess, PiError> {
             SessionTarget::New { .. } | SessionTarget::Fork(_)
         ),
     );
-    let state = verify_startup(&client, l, &r.session_id)?; // on Err, `client` drops and kills
+    let state = verify_startup(&client, l, &session_id)?; // on Err, `client` drops and kills
     Ok(PiProcess {
         client,
-        session_id: r.session_id,
+        session_id,
         state,
         jail,
     })

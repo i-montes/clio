@@ -1,6 +1,7 @@
-//! Test harness: the REAL Pi from `adapters/pi/node_modules`, launched with the hardened flags,
-//! the `clio-guard` extension and the real `clio-toolhost` binary, talking RPC, against a fake
-//! model. Everything lives in private temp folders; every child process has a `Drop` guard.
+//! Test harness: the REAL Pi from `adapters/pi/node_modules`, launched through the product's own
+//! `pi::launch::build` (same flags, environment and `bwrap` jail as `clio` uses), with the
+//! `clio-guard` extension and `clio toolhost`, talking RPC, against a fake model. Everything lives
+//! in private temp folders; every child process has a `Drop` guard.
 #![allow(dead_code, clippy::unwrap_used)]
 
 pub mod fake_model;
@@ -12,6 +13,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use clio_brain::pi::PiPaths;
+use clio_brain::pi::install::{NodeInfo, PiInstall};
+use clio_brain::pi::jail::PiJail;
+use clio_brain::pi::launch::{Built, Launch, Provider, Secret, SessionTarget, build};
+use clio_brain::pi::session::{GUARD_TOOLS, PROMPT_NAME, ensure_guard, write_prompt};
 use clio_canaries::Canaries;
 use fake_model::FakeModel;
 use serde_json::{Value, json};
@@ -35,8 +41,6 @@ fn pi_cli() -> PathBuf {
 pub fn extension() -> PathBuf {
     pi_dir().join("extensions/clio-guard")
 }
-
-pub const PROMPT: &str = "clio-agent@4";
 
 /// Where node is, if Pi can run here. Otherwise a visible message (and a panic if
 /// `CLIO_REQUIRE_PI` is set) and `None`: the test must return.
@@ -76,20 +80,24 @@ pub struct World {
     pub scratch: PathBuf,
     pub run_dir: PathBuf,
     pub sock_dir: PathBuf,
+    pub paths: PiPaths,
     pub canaries: Canaries,
 }
 
 pub fn world() -> World {
     let tmp = tempfile::tempdir().unwrap();
     let r = tmp.path().canonicalize().unwrap();
+    // Pi's folders are where the product puts them: the jail binds exactly those.
+    let paths = PiPaths::under_data(&r.join("data"));
     let w = World {
         work: r.join("work"),
-        home: r.join("home"),
-        agent: r.join("agent"),
-        sessions: r.join("sessions"),
+        home: paths.home_dir(),
+        agent: paths.agent_dir(),
+        sessions: paths.sessions_dir(),
         scratch: r.join("scratch"),
         run_dir: r.join("run"),
         sock_dir: r.join("sock"),
+        paths,
         canaries: Canaries::fresh(),
         tmp,
     };
@@ -161,7 +169,9 @@ pub struct Toolhost {
 impl Toolhost {
     pub fn start(w: &World, jail: bool, scrub: Option<(&str, &str)>) -> Self {
         let _ = std::fs::remove_file(w.sock_dir.join("toolhost.sock")); // a killed one leaves it
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio-toolhost"));
+        // The product starts the service as `clio toolhost` (the same code as `clio-toolhost`).
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio"));
+        cmd.arg("toolhost");
         cmd.args(["--socket-dir"]).arg(&w.sock_dir);
         cmd.args(["--work"]).arg(&w.work);
         cmd.args(["--scratch"]).arg(&w.scratch);
@@ -228,6 +238,9 @@ pub struct Pi {
     pub stderr: Arc<Mutex<String>>,
     next: u32,
     pub started_in: Duration,
+    /// Pi's `bwrap` jail and its egress proxy; `None` where the product has none (macOS).
+    /// Declared last on purpose: Pi stops first, then the proxy.
+    pub jail: Option<PiJail>,
 }
 
 pub struct Opts {
@@ -244,6 +257,67 @@ impl Default for Opts {
             prompt_file: None,
         }
     }
+}
+
+/// What the product would launch for this world: Pi from `adapters/pi`, the guard, the fake model
+/// as the provider, and the guard's variables.
+fn launch_of(
+    node: &Path,
+    w: &World,
+    model: &FakeModel,
+    socket: Option<&Path>,
+    o: &Opts,
+) -> Result<Launch, String> {
+    let install = PiInstall {
+        version: "test".into(),
+        dir: pi_dir(),
+        bin: pi_dir().join("node_modules/.bin/pi"),
+    };
+    let mut provider = Provider::opencode_go("fake-model");
+    provider.id = "fake".into();
+    provider.base_url = format!("http://{}/v1", model.addr);
+    provider.context_window = 32_000;
+    provider.reasoning = false;
+    let mut extra_env = vec![
+        (
+            "CLIO_GUARD_PROMPT_VERSION".to_owned(),
+            PROMPT_NAME.to_owned(),
+        ),
+        (
+            "CLIO_GUARD_PROMPT_FILE".to_owned(),
+            match &o.prompt_file {
+                Some(p) => p.display().to_string(),
+                None => write_prompt(&w.paths)?.display().to_string(),
+            },
+        ),
+    ];
+    if let Some(s) = socket {
+        extra_env.push(("CLIO_TOOLHOST_SOCKET".to_owned(), s.display().to_string()));
+    }
+    Ok(Launch {
+        install: install.clone(),
+        node: NodeInfo {
+            path: node.to_path_buf(),
+            version: (22, 19, 0),
+        },
+        paths: w.paths.clone(),
+        provider,
+        api_key: Some(Secret::new("not-a-real-key")),
+        cwd: w.work.clone(),
+        session: match &o.session {
+            Some(f) => SessionTarget::Open(f.display().to_string()),
+            None => SessionTarget::New { id: None },
+        },
+        name: None,
+        guard: o.extension.then(|| ensure_guard(&install)).transpose()?,
+        guard_tools: if o.extension {
+            GUARD_TOOLS.map(String::from).to_vec()
+        } else {
+            vec![]
+        },
+        extra_env,
+        helper: PathBuf::from(env!("CARGO_BIN_EXE_clio")),
+    })
 }
 
 impl Pi {
@@ -266,54 +340,9 @@ impl Pi {
         o: &Opts,
     ) -> Result<Self, String> {
         let t0 = Instant::now();
-        let models = json!({"providers":{"fake":{
-            "baseUrl": format!("http://{}/v1", model.addr), "api":"openai-completions",
-            "apiKey":"not-a-real-key", "models":[{"id":"fake-model","name":"Fake","reasoning":false,
-            "input":["text"],"contextWindow":32000,"maxTokens":2048,
-            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0}}]}}});
-        std::fs::write(w.agent.join("models.json"), models.to_string()).unwrap();
-        let mut cmd = Command::new(node);
-        cmd.arg(pi_cli());
-        cmd.args(["--mode", "rpc", "--no-builtin-tools", "--no-extensions"]);
-        if o.extension {
-            cmd.arg("-e").arg(extension());
-        }
-        cmd.args([
-            "--no-mcp",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--no-themes",
-            "--no-context-files",
-            "--no-approve",
-            "--offline",
-            "--provider",
-            "fake",
-            "--model",
-            "fake-model",
-        ]);
-        if let Some(s) = &o.session {
-            cmd.arg("--session").arg(s);
-        }
-        cmd.env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", &w.home)
-            .env("PI_CODING_AGENT_DIR", &w.agent)
-            .env("PI_CODING_AGENT_SESSION_DIR", &w.sessions)
-            .env("PI_OFFLINE", "1")
-            .env("PI_TELEMETRY", "0")
-            .env("PI_SKIP_VERSION_CHECK", "1")
-            .env("CLIO_GUARD_PROMPT_VERSION", PROMPT)
-            .env(
-                "CLIO_GUARD_PROMPT_FILE",
-                o.prompt_file
-                    .clone()
-                    .unwrap_or_else(|| repo().join(format!("prompts/system/{PROMPT}.md"))),
-            );
-        if let Some(s) = socket {
-            cmd.env("CLIO_TOOLHOST_SOCKET", s);
-        }
+        let launch = launch_of(node, w, model, socket, o)?;
+        let Built { mut cmd, jail, .. } = build(&launch).map_err(|e| e.to_string())?;
         let mut child = cmd
-            .current_dir(&w.work)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -337,6 +366,7 @@ impl Pi {
             stderr,
             next: 0,
             started_in: Duration::ZERO,
+            jail,
         };
         // Ready when it answers a command.
         let id = pi.send(json!({"type":"get_state"}));
