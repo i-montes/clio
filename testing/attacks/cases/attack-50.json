@@ -1,0 +1,10 @@
+{
+  "id": "attack-50",
+  "title": "Un FIFO dejado en la copia por un comando de la jaula no bloquea el servicio de herramientas (fs_read, fs_stat, snapshot)",
+  "rules": [
+    "S-13",
+    "S-47"
+  ],
+  "status": "active",
+  "expect": "refused"
+}

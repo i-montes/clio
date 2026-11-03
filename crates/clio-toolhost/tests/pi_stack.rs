@@ -917,6 +917,41 @@ fn cases() -> Vec<Case> {
     load_cases(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/cases")).unwrap()
 }
 
+// S-18 S-36: the person supervises from the chat. When the host strikes values out of what Pi
+// read, the guard records how many in the session (the chat reads it from there).
+#[test]
+fn values_struck_out_of_a_read_are_recorded_in_the_session() {
+    let Some(node) = pi_available() else {
+        return;
+    };
+    let w = world();
+    w.put(
+        "keys.txt",
+        concat!(
+            "a=ghp_",
+            "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+            "\nb=AKIA",
+            "ABCDEFGHIJKLMNOP",
+            "\n"
+        ),
+    );
+    w.put("plain.txt", "nothing to hide\n");
+    let model = FakeModel::scripted(vec![
+        call("read", json!({"path": "plain.txt"})),
+        call("read", json!({"path": "keys.txt"})),
+    ]);
+    let mut s = stack(&node, &w, &model, false, &Opts::default());
+    let ev = s.pi.prompt("read both");
+    assert_eq!(tool_ends(&ev).len(), 2, "{:?}", tool_ends(&ev));
+    let counts: Vec<u64> =
+        s.pi.entries()
+            .iter()
+            .filter(|e| e["customType"] == "clio-guard.masked")
+            .filter_map(|e| e["data"]["count"].as_u64())
+            .collect();
+    assert_eq!(counts, [2], "one entry, for the read that had two values");
+}
+
 #[test]
 fn the_pi_cases_exist_and_are_active() {
     let mine: Vec<Case> = cases()

@@ -39,6 +39,7 @@ import { loadPrompt } from "./prompt.ts";
 const TAINT = "clio-guard.taint";
 const TOOLS_ENTRY = "clio-guard.tools";
 const BLOCK_ENTRY = "clio-guard.block";
+const MASKED = "clio-guard.masked";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
@@ -103,6 +104,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 			signal,
 		);
 		if (res.tainted) mark("toolhost");
+		// The host says how many values it struck out of what it handed over. The chat, where the
+		// person supervises, reads this entry from the session and says it (S-18, S-36).
+		const masked = Number(res.data?.masked ?? 0);
+		if (Number.isInteger(masked) && masked > 0) {
+			pi.appendEntry(MASKED, { count: masked, tool: op, at: Date.now() });
+		}
 		if (!res.ok) throw new Error(res.content);
 		return res;
 	}

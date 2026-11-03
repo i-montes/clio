@@ -101,23 +101,21 @@ pub fn tools(jail: bool) -> Vec<Tool> {
 }
 
 fn fs_read(s: &Sandbox, a: &Value) -> Result<Value> {
-    let p = s.resolve(text(a, "path")?)?;
-    let meta = fs::metadata(&p)?;
-    if meta.len() > MAX_FILE_BYTES {
+    let file = s.open_regular(text(a, "path")?, false)?;
+    let len = file.metadata()?.len();
+    if len > MAX_FILE_BYTES {
         return Err(Error::BadArgs(format!(
-            "the file is {} bytes, more than the {MAX_FILE_BYTES} allowed",
-            meta.len()
+            "the file is {len} bytes, more than the {MAX_FILE_BYTES} allowed"
         )));
     }
     let mut buf = Vec::new();
-    fs::File::open(&p)?
-        .take(MAX_FILE_BYTES)
-        .read_to_end(&mut buf)?;
+    file.take(MAX_FILE_BYTES).read_to_end(&mut buf)?;
     Ok(json!({ "content": String::from_utf8_lossy(&buf) }))
 }
 
 fn fs_stat(s: &Sandbox, a: &Value) -> Result<Value> {
-    let p = s.resolve(text(a, "path")?)?;
+    let path = text(a, "path")?;
+    let p = s.resolve(path)?;
     let mode = a.get("mode").and_then(Value::as_str).unwrap_or("exists");
     let Ok(meta) = fs::metadata(&p) else {
         if mode == "exists" {
@@ -125,20 +123,16 @@ fn fs_stat(s: &Sandbox, a: &Value) -> Result<Value> {
         }
         return Err(Error::BadArgs("no such file or folder".into()));
     };
-    match mode {
-        "exists" => {}
-        "r" => {
-            if meta.is_dir() {
-                fs::read_dir(&p)?;
-            } else {
-                fs::File::open(&p)?;
-            }
+    match (mode, meta.is_dir()) {
+        ("exists", _) => {}
+        ("r", true) => drop(fs::read_dir(&p)?),
+        ("rw", true) => return Err(Error::BadArgs(format!("{path} is a folder"))),
+        ("r", false) => drop(s.open_regular(path, false)?),
+        ("rw", false) => {
+            drop(s.open_regular(path, false)?);
+            drop(s.open_regular(path, true)?);
         }
-        "rw" => {
-            fs::File::open(&p)?;
-            fs::OpenOptions::new().write(true).open(&p)?;
-        }
-        other => return Err(Error::BadArgs(format!("unknown mode {other:?}"))),
+        (other, _) => return Err(Error::BadArgs(format!("unknown mode {other:?}"))),
     }
     Ok(json!({"exists": true, "is_dir": meta.is_dir()}))
 }

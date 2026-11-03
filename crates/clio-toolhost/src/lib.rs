@@ -37,7 +37,7 @@ use clio_gateway::{
     SessionInfo, Source, Telemetry, ToolDecl, wrap_untrusted,
 };
 use clio_node::{Action, EffectLog, Executor, Jail, Registry, Sandbox};
-use clio_vault::{Scrubber, VaultClient};
+use clio_vault::{Scrubber, VaultClient, count_masks, has_mask};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -54,8 +54,7 @@ pub const OPS: [&str; 7] = [
 /// Folders under the working copy that load code or settings by themselves (S-16): Pi
 /// extensions, skills, hooks, git. Nothing here may write them. Mandatory: a rules file can add
 /// to this list, never remove from it. `.agents` is where Pi looks for project skills.
-pub const PROTECTED_PATHS: [&str; 6] =
-    ["extensions", "skills", ".pi", ".claude", ".git", ".agents"];
+pub const PROTECTED_PATHS: [&str; 6] = clio_node::READ_ONLY;
 
 /// A request line longer than this is refused and the connection closed.
 pub const MAX_REQUEST_BYTES: usize = 4 << 20;
@@ -432,6 +431,20 @@ impl ToolHost {
                 tainted,
             );
         }
+        // What the model was shown has marks where a value was hidden (S-18). Written back whole,
+        // the mark would replace the real value in the file. `edit` reads and writes real bytes.
+        if map
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(has_mask)
+        {
+            return self.refuse(
+                &req.id,
+                "S-18/mask",
+                "the text carries a value that was crossed out (tachado): the file holds the real value, which you were not shown. Do not write the whole file back; change only the lines you need with `edit`".into(),
+                tainted,
+            );
+        }
         let ar = ActionRequest {
             tool: req.tool.clone(),
             version: "1".into(),
@@ -582,15 +595,19 @@ impl ToolHost {
                 } else {
                     self.clean(raw)
                 };
+                // How many values were struck out, for the guard to record: the person
+                // supervises from the chat and wants to see it (S-18, S-36).
+                let masked = count_masks(&text).saturating_sub(count_masks(raw));
                 let data = if req.tool == "exec" {
                     json!({
                         "exit_code": result["exit_code"],
                         "signal": result["signal"],
                         "timed_out": result["timed_out"],
                         "timeout_secs": result["timeout_secs"],
+                        "masked": masked,
                     })
                 } else {
-                    Value::Null
+                    json!({ "masked": masked })
                 };
                 (true, text, data, true)
             }
