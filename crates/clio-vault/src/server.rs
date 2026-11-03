@@ -107,7 +107,7 @@ pub fn handle(vault: &Vault, side: Side, req: Request) -> Response {
         Request::List => as_json(serde_json::to_value(vault.list(&person))),
         Request::Audit => as_json(serde_json::to_value(vault.audit(&person))),
         Request::Alerts => as_json(serde_json::to_value(vault.alerts())),
-        Request::ScanDir { path } => match scan_dir(vault, Path::new(&path)) {
+        Request::ScanDir { path, skip } => match scan_dir(vault, Path::new(&path), &skip) {
             Ok(hits) => Response::ok(Value::Array(hits)),
             Err(e) => Response::err(format!("io: {e}")),
         },
@@ -115,9 +115,9 @@ pub fn handle(vault: &Vault, side: Side, req: Request) -> Response {
     }
 }
 
-/// Every file under `dir` read as lossy text, with the vault values found in it: file, secret
+/// Every file under `dir` (but the folders in `skip`) read as lossy text, with the vault values found in it: file, secret
 /// name and form, never the value. Unreadable files are an error, not a pass.
-fn scan_dir(vault: &Vault, dir: &Path) -> std::io::Result<Vec<Value>> {
+fn scan_dir(vault: &Vault, dir: &Path, skip: &[String]) -> std::io::Result<Vec<Value>> {
     let scrubber = vault.scrubber();
     let mut hits = Vec::new();
     let mut todo = vec![dir.to_path_buf()];
@@ -125,6 +125,14 @@ fn scan_dir(vault: &Vault, dir: &Path) -> std::io::Result<Vec<Value>> {
         // Symlinks, sockets and the like are skipped: no loops, no blocking reads.
         let kind = std::fs::symlink_metadata(&p)?.file_type();
         if kind.is_dir() {
+            // A folder named in `skip` is not entered, wherever it is (the root itself is always).
+            let skipped = p != dir
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| skip.iter().any(|s| s == n));
+            if skipped {
+                continue;
+            }
             for e in std::fs::read_dir(&p)? {
                 todo.push(e?.path());
             }

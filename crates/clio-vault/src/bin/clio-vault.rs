@@ -140,6 +140,7 @@ mod unix {
             "due" => Request::Due,
             "scan" => Request::ScanDir {
                 path: name(&mut args)?,
+                skip: Vec::new(),
             },
             "revoke" => Request::Revoke {
                 name: name(&mut args)?,

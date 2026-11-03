@@ -6,7 +6,8 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use clio_vault::Scrubber;
+use clio_vault::proto::Request;
+use clio_vault::{Scrubber, VaultClient};
 use serde_json::json;
 
 use super::home::{Config, Dirs, KeyStatus, key_status};
@@ -14,6 +15,7 @@ use super::mode;
 use super::tui::app::plural;
 use super::tui::sanitize;
 use super::ui::{Level, Style};
+use super::vault::PERSON_SOCK;
 
 #[derive(Debug, Clone)]
 pub struct Check {
@@ -183,7 +185,7 @@ fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<Path
 
 /// S-18: nothing shaped like a key may sit in what Clio wrote (run logs, transcripts, Pi's
 /// sessions, the memory). Looks for the key shapes the output filter knows; the paths are shown,
-/// never the values. The vault's own values need its unlocked server: `clio-vault scan`.
+/// never the values. The vault's own values are checked by `vault_audit`, which needs its server.
 fn data_audit(o: &mut Report, data: &Path) {
     let mut found = (0, Vec::new(), 0);
     audit_walk(data, 0, &Scrubber::default(), &mut found);
@@ -213,7 +215,7 @@ fn data_audit(o: &mut Report, data: &Path) {
                 if more > 0 { format!(" y {more} más") } else { String::new() }
             ),
             Some(
-                "Dentro de ~/.local/share/clio. Si es el log de efectos de un run de una versión anterior, borra ese archivo; si no, borra el run (`clio runs`). Para valores del baúl: `clio-vault scan`.".into(),
+                "Dentro de ~/.local/share/clio. Si es el log de efectos de un run de una versión anterior, borra ese archivo; si no, borra el run (`clio runs`).".into(),
             ),
         );
     }
@@ -277,6 +279,105 @@ fn jail_lines(o: &mut Report) {
         .map(|c| json!({"name": c.name, "passed": c.passed, "detail": c.detail}))
         .collect();
     o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
+}
+
+/// The vault's own values (S-18, S-58): the key patterns cannot know a value the vault holds that
+/// looks like nothing in particular, so the running vault is asked whether any of its values is in
+/// what Clio wrote. The vault answers file, secret name and form, never a value. A vault that is not
+/// running, or is locked, does not know its values: that is said, not passed over.
+fn vault_audit(o: &mut Report, dirs: &Dirs) {
+    let Some(rt) = &dirs.runtime else {
+        return; // the missing runtime folder already has its own line
+    };
+    let client = VaultClient::new(&rt.join(PERSON_SOCK));
+    let status = client
+        .call(&Request::Status)
+        .ok()
+        .filter(|r| r.ok)
+        .and_then(|r| r.data);
+    let Some(status) = status else {
+        if dirs.data.join("vault.bin").exists() {
+            o.say(
+                Level::Warn,
+                "baúl: hay un baúl pero no está corriendo, sus valores no se comprobaron en lo que Clio escribió (S-18)".into(),
+                Some("`clio vault start` y vuelve a correr `clio doctor`.".into()),
+            );
+        } else {
+            o.say(Level::Pass, "baúl: no hay (es opcional)".into(), None);
+        }
+        return;
+    };
+    if status["locked"] == true {
+        o.say(
+            Level::Warn,
+            "baúl: está bloqueado, no conoce sus valores y no puede decir que no estén en lo que Clio escribió (S-18)".into(),
+            Some("Desbloquéalo y vuelve a correr `clio doctor`.".into()),
+        );
+        return;
+    }
+    let scan = Request::ScanDir {
+        path: dirs.data.display().to_string(),
+        skip: NOT_CLIO_OUTPUT.map(String::from).to_vec(),
+    };
+    let hits = match client.call(&scan) {
+        Ok(r) if r.ok => r.data.unwrap_or_default(),
+        Ok(r) => {
+            let why = r.error.unwrap_or_default();
+            o.say(
+                Level::Warn,
+                format!("baúl: no pudo revisar lo que Clio escribió ({why})"),
+                None,
+            );
+            return;
+        }
+        Err(e) => {
+            o.say(
+                Level::Warn,
+                format!("baúl: no pudo revisar lo que Clio escribió ({e})"),
+                None,
+            );
+            return;
+        }
+    };
+    let mut found: Vec<String> = hits
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            let file = Path::new(h["file"].as_str()?);
+            let rel = file
+                .strip_prefix(&dirs.data)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            Some(format!(
+                "{} ({})",
+                sanitize::line(&rel),
+                sanitize::line(h["name"].as_str()?)
+            ))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    if found.is_empty() {
+        o.say(
+            Level::Pass,
+            "baúl: ningún valor del baúl en lo que Clio escribió (S-18)".into(),
+            None,
+        );
+    } else {
+        let more = found.len().saturating_sub(8);
+        o.say(
+            Level::Fail,
+            format!(
+                "baúl: {} archivo(s) de Clio tienen un valor del baúl (S-18): {}{}",
+                found.len(),
+                found.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
+                if more > 0 { format!(" y {more} más") } else { String::new() }
+            ),
+            Some("Dentro de ~/.local/share/clio. Borra el run o el archivo y rota ese secreto (`clio vault`): alguien pudo verlo.".into()),
+        );
+    }
 }
 
 /// Pi's own jail (ADR 0009): on Linux Pi starts only inside it.
@@ -391,6 +492,7 @@ pub fn collect(dirs: &Dirs) -> Report {
         );
     }
     data_audit(&mut o, &dirs.data);
+    vault_audit(&mut o, dirs);
     match Config::load(dirs) {
         Ok(c) => {
             o.say(
