@@ -23,6 +23,78 @@ use crate::cli::usage::{self, RunLimits, Snapshot};
 
 /// Raw events kept for the debug pane.
 const RAW_KEEP: usize = 300;
+/// Bytes kept of each event in the debug log.
+const RAW_CLIP: usize = 1024;
+/// Bytes of text kept per conversation item: what Pi streams is not trusted to be small.
+const MAX_TEXT: usize = 1 << 20;
+/// Bytes kept of an error or a note.
+const MAX_NOTE: usize = 4096;
+/// Text kept from what Pi streams, in all: past it the conversation stops growing.
+const MAX_HELD: usize = 16 << 20;
+/// Items kept: the oldest go first.
+const MAX_ITEMS: usize = 20_000;
+
+/// `{e:?}` cut at `RAW_CLIP` bytes. It stops writing at the limit instead of building the whole
+/// text first: an event can be tens of megabytes.
+fn debug_clip(e: &Event) -> String {
+    use std::fmt::Write;
+    struct Clip(String);
+    impl Write for Clip {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            let room = RAW_CLIP.saturating_sub(self.0.len());
+            if s.len() <= room {
+                self.0.push_str(s);
+                return Ok(());
+            }
+            let mut end = room;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.0.push_str(&s[..end]);
+            self.0.push('…');
+            Err(std::fmt::Error)
+        }
+    }
+    let mut w = Clip(String::new());
+    let _ = write!(w, "{e:?}");
+    w.0
+}
+
+/// Adds `more` to a conversation item, up to `MAX_TEXT` for the item and `left` for the whole
+/// conversation, and says once that the rest was dropped. Returns the bytes added.
+fn append_capped(text: &mut String, more: &str, left: usize) -> usize {
+    const MARK: &str = "\n[… el resto se omitió]";
+    let room = MAX_TEXT.saturating_sub(text.len()).min(left);
+    if more.len() <= room {
+        text.push_str(more);
+        return more.len();
+    }
+    let mut end = room;
+    while !more.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.push_str(&more[..end]);
+    if !text.ends_with(MARK) {
+        text.push_str(MARK);
+    }
+    end
+}
+
+/// `s` cut at `max` bytes, on a character boundary.
+fn clip_to(s: &str, max: usize) -> String {
+    let mut text = String::new();
+    if s.len() <= max {
+        s.clone_into(&mut text);
+    } else {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.push_str(&s[..end]);
+        text.push('…');
+    }
+    text
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolState {
@@ -78,6 +150,8 @@ pub struct Chat {
     /// The total of struck-out values the chat has already said.
     masked_seen: u32,
     pub raw: VecDeque<String>,
+    /// Bytes of text taken from Pi's events so far (see `MAX_HELD`).
+    held: usize,
     /// Lines scrolled up from the newest.
     pub scroll: usize,
     pub view_h: Cell<u16>,
@@ -111,6 +185,7 @@ impl Chat {
             egress_seen: 0,
             masked_seen: 0,
             raw: VecDeque::new(),
+            held: 0,
             scroll: 0,
             view_h: Cell::new(0),
             view_w: Cell::new(0),
@@ -218,8 +293,10 @@ impl Chat {
     }
 
     pub fn on_event(&mut self, e: &Event) {
+        let (n0, left) = (self.items.len(), MAX_HELD.saturating_sub(self.held));
+        let note = |s: &str| clip_to(s, MAX_NOTE.min(left));
         self.meter.observe(e);
-        self.raw.push_back(format!("{e:?}"));
+        self.raw.push_back(debug_clip(e));
         if self.raw.len() > RAW_KEEP {
             self.raw.pop_front();
         }
@@ -234,12 +311,14 @@ impl Chat {
                 ..
             } if kind == "text_delta" => {
                 self.streamed = true;
+                // A new item is paid for at the end of the event; only an append is paid here.
                 match self.last_live() {
-                    Some(t) => t.push_str(d),
-                    None => self.items.push(Item::Assistant {
-                        text: d.clone(),
-                        live: true,
-                    }),
+                    Some(t) => self.held += append_capped(t, d, left),
+                    None => {
+                        let mut text = String::new();
+                        append_capped(&mut text, d, left);
+                        self.items.push(Item::Assistant { text, live: true });
+                    }
                 }
             }
             Event::MessageEnd(m) if m.role == "assistant" => {
@@ -248,16 +327,15 @@ impl Chat {
                         *live = false;
                     }
                 } else if !m.text.is_empty() {
-                    self.items.push(Item::Assistant {
-                        text: m.text.clone(),
-                        live: false,
-                    });
+                    let mut text = String::new();
+                    append_capped(&mut text, &m.text, left);
+                    self.items.push(Item::Assistant { text, live: false });
                 }
                 if m.stop_reason.as_deref() == Some("error") {
                     self.items.push(Item::Error(
                         m.error_message
-                            .clone()
-                            .unwrap_or_else(|| "el modelo devolvió un error".into()),
+                            .as_deref()
+                            .map_or_else(|| "el modelo devolvió un error".into(), note),
                     ));
                 }
             }
@@ -297,7 +375,7 @@ impl Chat {
                 tokens_after,
                 ..
             } => self.items.push(Item::Note(match (aborted, error) {
-                (_, Some(e)) => format!("la compactación falló: {e}"),
+                (_, Some(e)) => format!("la compactación falló: {}", note(e)),
                 (true, _) => "compactación cancelada".into(),
                 _ => format!(
                     "contexto compactado{}",
@@ -314,8 +392,9 @@ impl Chat {
                 delay_ms,
                 error,
             } => self.items.push(Item::Note(format!(
-                "reintento {attempt}/{max_attempts} en {} ({error})",
-                usage::ms_label(*delay_ms)
+                "reintento {attempt}/{max_attempts} en {} ({})",
+                usage::ms_label(*delay_ms),
+                note(error)
             ))),
             Event::AutoRetryEnd {
                 success: false,
@@ -323,12 +402,25 @@ impl Chat {
                 ..
             } => self.items.push(Item::Error(format!(
                 "los reintentos no bastaron: {}",
-                final_error.clone().unwrap_or_default()
+                note(final_error.as_deref().unwrap_or_default())
             ))),
-            Event::ExtensionError { error, .. } => self
-                .items
-                .push(Item::Note(format!("aviso de la extensión: {error}"))),
+            Event::ExtensionError { error, .. } => self.items.push(Item::Note(format!(
+                "aviso de la extensión: {}",
+                note(error)
+            ))),
             _ => {}
+        }
+        // What this event added is paid from the budget; the oldest items go past the cap.
+        self.held += self.items[n0.min(self.items.len())..]
+            .iter()
+            .map(|i| match i {
+                Item::Assistant { text, .. } | Item::Note(text) | Item::Error(text) => text.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        if self.items.len() > MAX_ITEMS {
+            let extra = self.items.len() - MAX_ITEMS;
+            self.items.drain(..extra);
         }
     }
 
@@ -501,13 +593,14 @@ pub fn wrap(text: &str, w: usize) -> Vec<String> {
         let mut cur = String::new();
         for word in para.split(' ') {
             let mut word = word;
-            while word.chars().count() > w {
+            // Cut a word longer than the line in one pass: counting what is left on every turn
+            // made a single huge word cost the square of its length, on every frame.
+            while let Some((at, _)) = word.char_indices().nth(w) {
                 if !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                 }
-                let cut: String = word.chars().take(w).collect();
-                word = &word[cut.len()..];
-                out.push(cut);
+                out.push(word[..at].to_owned());
+                word = &word[at..];
             }
             let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
             if need > w && !cur.is_empty() {
@@ -981,6 +1074,68 @@ mod tests {
         assert_eq!(c.raw.len(), RAW_KEEP);
     }
 
+    // Second audit, finding 2: Pi is jailed but not trusted, and `clio` holds what it streams. A
+    // stream of huge events must leave a small state behind (the log of events keeps clips, the
+    // assistant's text has a cap) and must not cost time per byte of the event.
+    #[test]
+    fn a_stream_of_huge_events_leaves_a_bounded_state() {
+        let mut c = Chat::opening(1, 0);
+        let huge = "x".repeat(8 << 20);
+        let t = std::time::Instant::now();
+        for _ in 0..40 {
+            c.on_event(&Event::MessageUpdate {
+                usage: None,
+                kind: "text_delta".into(),
+                delta: Some(huge.clone()),
+            });
+            c.on_event(&Event::ToolEnd {
+                id: "t".into(),
+                name: "read".into(),
+                result: json!({"content":[{"type":"text","text": huge}]}),
+                is_error: false,
+                duration_ms: None,
+            });
+            c.on_event(&Event::AutoRetryEnd {
+                success: false,
+                attempt: 1,
+                final_error: Some(huge.clone()),
+            });
+        }
+        let held: usize = c.raw.iter().map(String::len).sum();
+        assert!(held <= RAW_KEEP * 2048, "the event log holds {held} bytes");
+        let text: usize = c
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Assistant { text, .. } | Item::Error(text) | Item::Note(text) => text.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(
+            text <= MAX_HELD + (1 << 20),
+            "the conversation holds {text} bytes of text"
+        );
+        assert!(
+            text >= MAX_HELD / 2,
+            "the budget is spent, not skipped: {text}"
+        );
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "took {:?}",
+            t.elapsed()
+        );
+        // A normal answer is shown whole.
+        let mut c = Chat::opening(1, 0);
+        c.on_event(&Event::MessageUpdate {
+            usage: None,
+            kind: "text_delta".into(),
+            delta: Some("hola, esto cabe".into()),
+        });
+        assert!(
+            matches!(&c.items[..], [Item::Assistant { text, .. }] if text == "hola, esto cabe")
+        );
+    }
+
     #[test]
     fn history_comes_back_as_items() {
         let mut c = Chat::opening(1, 0);
@@ -1199,6 +1354,21 @@ mod tests {
         app.sessions.sel = 2;
         let (app, cmds) = press(app, KeyCode::Enter, none);
         assert!(cmds.is_empty() && app.notice.as_deref() == Some("no es de Clio"));
+    }
+
+    // Second audit, finding 3: a model that prints one huge word with no spaces must not freeze
+    // the chat. The whole history is wrapped on every frame, so the cost has to be linear.
+    #[test]
+    fn wrapping_one_huge_word_takes_linear_time() {
+        // Multi-byte characters are the slow case (a character count is not vectorised).
+        let word = "漢".repeat(4_000_000);
+        let t = std::time::Instant::now();
+        let rows = wrap(&word, 80);
+        let took = t.elapsed();
+        assert_eq!(rows.len(), 4_000_000usize.div_ceil(80));
+        assert!(rows.iter().all(|r| r.chars().count() <= 80));
+        assert_eq!(rows.concat(), word, "nothing lost, every cut on a boundary");
+        assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
     }
 
     #[test]

@@ -23,6 +23,8 @@ use super::{PiError, text};
 
 /// Longest record accepted from Pi (a `get_messages` of a long session can be big).
 const MAX_LINE: usize = 32 * 1024 * 1024;
+/// Errors of the model kept in a run's summary.
+const MAX_ERRORS: usize = 50;
 /// How much of stderr is kept (the tail).
 const STDERR_KEEP: usize = 32 * 1024;
 /// How much of stderr is shown in an error.
@@ -58,11 +60,12 @@ impl Usage {
     }
 
     pub fn add(&mut self, o: &Self) {
-        self.input += o.input;
-        self.output += o.output;
-        self.cache_read += o.cache_read;
-        self.cache_write += o.cache_write;
-        self.total_tokens += o.total_tokens;
+        // Pi's numbers: a counter near `u64::MAX` must not wrap (release) or panic (debug).
+        self.input = self.input.saturating_add(o.input);
+        self.output = self.output.saturating_add(o.output);
+        self.cache_read = self.cache_read.saturating_add(o.cache_read);
+        self.cache_write = self.cache_write.saturating_add(o.cache_write);
+        self.total_tokens = self.total_tokens.saturating_add(o.total_tokens);
         self.cost += o.cost;
     }
 }
@@ -504,11 +507,42 @@ impl RunSummary {
 
 type Pending = Arc<Mutex<HashMap<String, Sender<Response>>>>;
 
+/// Lines on their way to Pi's input. A writer thread owns the pipe: a Pi that stops reading blocks
+/// that thread and nobody else (`enqueue` never waits), and dropping the sender closes the pipe
+/// once what is queued has been written (Pi's orderly shutdown).
+type Outbox = Arc<Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>>;
+
+/// Lines waiting for the writer: more than this means Pi has stopped reading.
+const OUTBOX_LINES: usize = 64;
+
+fn start_writer(mut pipe: ChildStdin) -> Outbox {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(OUTBOX_LINES);
+    std::thread::spawn(move || {
+        while let Ok(line) = rx.recv() {
+            if pipe.write_all(&line).and_then(|()| pipe.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    Arc::new(Mutex::new(Some(tx)))
+}
+
+/// Queues one line. `Err(true)`: the queue is full (Pi is not reading); `Err(false)`: it is closed.
+fn enqueue(out: &Outbox, line: Vec<u8>) -> Result<(), bool> {
+    use std::sync::mpsc::TrySendError;
+    let g = out.lock().map_err(|_| false)?;
+    match g.as_ref().ok_or(false)?.try_send(line) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(true),
+        Err(TrySendError::Disconnected(_)) => Err(false),
+    }
+}
+
 pub struct RpcClient {
     child: Mutex<Child>,
     pid: u32,
     reaped: AtomicBool,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    stdin: Outbox,
     pending: Pending,
     events: Mutex<Receiver<Event>>,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -549,7 +583,7 @@ impl RpcClient {
             return Err(PiError::Spawn("Pi sin pipes".into()));
         };
         let pid = child.id();
-        let stdin = Arc::new(Mutex::new(Some(stdin)));
+        let stdin = start_writer(stdin);
         let pending: Pending = Arc::default();
         let (tx, rx) = mpsc::channel();
         {
@@ -620,14 +654,16 @@ impl RpcClient {
     fn send(&self, v: &Value) -> Result<(), PiError> {
         let mut line = serde_json::to_vec(v).map_err(|e| PiError::Protocol(e.to_string()))?;
         line.push(b'\n');
-        let mut g = self
-            .stdin
-            .lock()
-            .map_err(|_| PiError::Protocol("stdin envenenado".into()))?;
-        let w = g.as_mut().ok_or_else(|| self.exited())?;
-        w.write_all(&line)
-            .and_then(|()| w.flush())
-            .map_err(|_| self.exited())
+        enqueue(&self.stdin, line).map_err(|full| {
+            if full {
+                PiError::Timeout {
+                    what: "Pi no lee su entrada".into(),
+                    secs: 0,
+                }
+            } else {
+                self.exited()
+            }
+        })
     }
 
     /// Sends one command and waits for its response (at most `timeout`). Returns its `data`.
@@ -946,7 +982,12 @@ impl RpcClient {
                         sum.usage.add(u);
                     }
                     if m.stop_reason.as_deref() == Some("error") {
-                        sum.errors.push(m.error_message.clone().unwrap_or_default());
+                        // A bounded list: Pi could report an error on every message, forever.
+                        if sum.errors.len() < MAX_ERRORS {
+                            // As sent, but not longer than a message of an error should be.
+                            let e = m.error_message.as_deref().unwrap_or_default();
+                            sum.errors.push(e.chars().take(2000).collect());
+                        }
                     }
                 }
                 Event::ToolStart { .. } => sum.tool_calls += 1,
@@ -982,7 +1023,7 @@ impl Drop for RpcClient {
 /// The stdout thread: LF-split records, routing, extension dialogs answered "cancelled".
 fn reader(
     stdout: std::process::ChildStdout,
-    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    stdin: &Outbox,
     pending: &Pending,
     events: &Sender<Event>,
 ) {
@@ -1036,13 +1077,10 @@ fn reader(
             );
             if dialog && let Some(id) = v["id"].as_str() {
                 let reply = json!({"type": "extension_ui_response", "id": id, "cancelled": true});
-                if let Ok(mut g) = stdin.lock()
-                    && let Some(w) = g.as_mut()
-                {
-                    let mut line = reply.to_string().into_bytes();
-                    line.push(b'\n');
-                    let _ = w.write_all(&line).and_then(|()| w.flush());
-                }
+                // Queued like any other line: the reader must never wait on a Pi that is not reading.
+                let mut line = reply.to_string().into_bytes();
+                line.push(b'\n');
+                let _ = enqueue(stdin, line);
             }
         }
         if events.send(Event::from_value(&v)).is_err() {
@@ -1059,6 +1097,36 @@ fn reader(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // Second audit, finding 4: "nothing in this client waits without a deadline". A Pi that stops
+    // reading its input (jailed, but not trusted) must not block the writer: a prompt bigger than
+    // the pipe would wait for ever, and `abort` after it would wait behind the same lock.
+    #[test]
+    fn a_pi_that_does_not_read_its_input_never_blocks_the_client() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "sleep 1000"]);
+            let mut c = RpcClient::spawn(&mut cmd).unwrap();
+            c.timeouts.request = Duration::from_millis(40);
+            c.timeouts.grace = Duration::from_millis(40);
+            let big = "x".repeat(1 << 20);
+            let started = Instant::now();
+            // Far more than the pipe (64 KiB) and the queue in front of it can hold.
+            let answers: Vec<_> = (0..(OUTBOX_LINES + 6))
+                .map(|_| c.request("prompt", json!({"message": big})).is_err())
+                .collect();
+            let abort = c.abort();
+            c.kill();
+            let _ = tx.send((answers, abort.is_err(), started.elapsed()));
+        });
+        let (answers, abort_failed, took) = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the client blocked on a Pi that does not read");
+        assert!(answers.iter().all(|e| *e), "none can be answered");
+        assert!(abort_failed);
+        assert!(took < Duration::from_secs(50), "took {took:?}");
+    }
 
     #[test]
     fn events_parse_and_unknown_ones_do_not_fail() {
