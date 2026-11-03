@@ -1,0 +1,28 @@
+# S-04: rules of docs/security.md that have no Rust test, and where else each one is checked. Every
+# other rule must have a test that runs, or `rule-coverage.sh` fails. One per line: the rule, two
+# spaces, the reason. The script fails if a reason is missing, if the rule now HAS a test (remove it
+# from here), or if no document defines it any more.
+S-09  CI job gate-invariants runs scripts/check-prompts.py, the secret scanner over the versioned prompts
+S-28  the nodes and the tailnet are not built yet (crates/clio-network is a placeholder)
+S-29  the nodes and the tailnet are not built yet (signed orders; crates/clio-network is a placeholder)
+S-30  the nodes and the tailnet are not built yet (the node daemon; crates/clio-network is a placeholder)
+S-31  a setting of the person's Tailscale account, reviewed by hand; no node exists yet
+S-32  a drill of the person's, with no node to revoke yet
+S-33  the PWA is not built yet (apps/pwa is a placeholder)
+S-34  the PWA is not built yet (apps/pwa is a placeholder)
+S-35  the PWA is not built yet (apps/pwa is a placeholder)
+S-37  the PWA is not built yet (apps/pwa is a placeholder)
+S-38  infra/local/check-host.sh, run by `clio doctor`, checks that nothing of Clio listens on a public interface
+S-39  infra/local/check-host.sh and the review of the deployment; there is one user on the host today (ADR 0006)
+S-40  infra/local/backup-selftest.unix.sh and infra/local/check-host.sh (encrypted disk, restic repository)
+S-41  CI jobs audit (cargo-audit), deny (cargo-deny) and unsafe-forbid
+S-42  CI job pi-lock (lockfile and exact version of Pi) and the nightly pi-audit
+S-43  the pre-commit hook .githooks/pre-commit and the CI job secrets (gitleaks over the whole history)
+S-45  spending caps in each provider's panel, reviewed monthly by the person
+S-48  SECURITY.md exists and the nightly CI job fuzz runs the parsers (fuzz/)
+S-49  autonomy, scheduled jobs and standing policies are not built yet (crates/clio-policy is a placeholder)
+S-50  autonomy, scheduled jobs and standing policies are not built yet (crates/clio-policy is a placeholder)
+S-51  autonomy, scheduled jobs and standing policies are not built yet (crates/clio-policy is a placeholder)
+S-52  autonomy, scheduled jobs and standing policies are not built yet (crates/clio-policy is a placeholder)
+S-53  Clio does not change itself yet; the CODEOWNERS review of protected paths is what holds it
+S-55  there is one task at a time; interrupting or reordering tasks is not built yet
