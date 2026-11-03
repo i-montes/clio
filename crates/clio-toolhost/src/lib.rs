@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-pub use memory::{Found, MemoryItem, MemoryPort, Origin};
+pub use memory::{Found, MemoryItem, MemoryPort, Origin, ProposalKind};
 pub use sanitize::sanitize;
 pub use server::Server;
 
@@ -148,8 +148,9 @@ pub struct Config {
     /// Extra rules (breaker threshold, more protected paths, ...). The working folder, the tool
     /// declarations and the mandatory protected paths are always the host's own.
     pub rules: Option<Rules>,
-    /// The person's memory, read only. Without it `memory_search` and `memory_get` are not
-    /// declared and the gateway denies them (S-02): the loose `clio-toolhost` binary has none.
+    /// The person's memory: read, and propose into quarantine. Without it `memory_search`,
+    /// `memory_get` and `memory_propose` are not declared and the gateway denies them (S-02): the
+    /// loose `clio-toolhost` binary has none.
     pub memory: Option<Arc<dyn MemoryPort>>,
 }
 

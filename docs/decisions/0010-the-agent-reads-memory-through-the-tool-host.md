@@ -1,6 +1,6 @@
 # 0010: The agent reads memory through the tool host, with two read-only tools
 
-Status: accepted (2026-11-03). Stage 1 (reading) is built; stage 2 (writing) is not, and waits for the cap on quarantine described below. Design: `docs/specs/2026-11-03-memory-tools-design.md`.
+Status: accepted (2026-11-03). Stage 1 (reading) and stage 2 (`memory_propose`, into quarantine only) are built. Design: `docs/specs/2026-11-03-memory-tools-design.md`.
 
 ## Context
 
@@ -27,12 +27,16 @@ Two tools, `memory_search` and `memory_get`, **served by the tool host** (ADR 00
 - There is no sensitivity class: everything active can be searched. The budget is per session, so a new session starts with a new one.
 - The first call may be slow when the vector model is on disk (it loads then, once); the call has a 10 s deadline and fails with a short message, never hangs.
 
-## What stage 2 waits for
+## Stage 2: `memory_propose`
 
-`memory_propose` (always quarantine, actor `agente`, origin `external`) is not built, declared or registered: a request for it is an undeclared operation (S-02). It waits for a **cap on quarantine** in `clio-memory`: there is none today, so a hostile model with 5 proposals per session and 20 per hour could fill the review list until what is legitimate is buried. It needs deduplication against quarantine too and a maximum of pending per actor, with a clear message to the person. That is a change in `clio-memory` with its own short design. Then S-27 is rewritten to say who may write (the person, the close of a run, and `memory_propose` only into quarantine).
+Built after the cap on quarantine existed (50 pending per actor, one candidate per untrusted text). The tool takes `text` (1 to 400 characters after cleaning) and `kind` (`semantic` or `procedural`); the actor (`agente`), the origin (external) and the scope (`clio`) are not arguments, the port fixes them, so the call can only leave a candidate in quarantine and the person is the only one who promotes (S-61). The text goes through the vault's cleaner first and a text that had a secret is not proposed; the engine adds its own detector, the per-hour quota of the actor `agente` and the cap on quarantine; a procedure also waits for approval (S-26). A session may propose five (a file in the run folder, counted before the port is asked, so failed calls spend it and a restart does not reset it). A proposal does not mark the session as tainted: it holds what the model said, not what a memory said. The memory is opened for writing for the call and closed after, because the engine holds the writer lock while it lives; if another writer has it, the open waits two seconds and then fails with a short message. The close of a run (`RECORDAR:` / `PROCEDIMIENTO:` lines of the builtin loop) keeps working and shares the quota and the cap.
+
+The secret check looks at the text as typed and as it will be proposed (one line): a secret with spaces cannot get through by swapping a space for a newline or a no-break space. A call that runs out of its 10 seconds tells the model it failed while the write may still complete in the background; the candidate is in quarantine either way and the call was counted.
+
+Rulings: proposals are made during the session, not only at its close (a Pi chat has no single "close"); a text with a secret is refused instead of proposed with a hole in it; a refused call counts against the five; the vector index is not touched (a candidate gets its vector when the person's own commands embed what is pending).
 
 ## Tests
 
 - `crates/clio-toolhost/tests/memory.rs`: the port, the budget (survives a restart, counts failed calls, hard cap), the facts log, tainting by origin.
 - `crates/clio-brain/tests/memory_port.rs`: `LinkPort` over a real database, read only, one error for the four cases.
-- `crates/clio-brain/tests/pi_stack/memory.rs`: the real Pi inside its jail, attacks 56 to 60. An order inside an active memory of the agent arrives as data and taints the session (56); repeated searches end at the cap, by calls and by bytes (57); a value of the vault inside a memory arrives struck out and is in no file of the run folder (58); quarantined, archived and foreign memories are not readable and their errors are identical (59); arguments that do not exist are refused and nothing that promotes, archives or purges can be asked, of the model or of the socket (60).
+- `crates/clio-brain/tests/pi_stack/memory.rs`: the real Pi inside its jail, attacks 56 to 61 (61: what the model proposes waits in quarantine, from a tainted session too, and the sixth is refused). An order inside an active memory of the agent arrives as data and taints the session (56); repeated searches end at the cap, by calls and by bytes (57); a value of the vault inside a memory arrives struck out and is in no file of the run folder (58); quarantined, archived and foreign memories are not readable and their errors are identical (59); arguments that do not exist are refused and nothing that promotes, archives or purges can be asked, of the model or of the socket (60).
