@@ -13,15 +13,32 @@ use super::{Res, io_err, mkdir_private, write_private};
 /// The person's socket, inside `$XDG_RUNTIME_DIR/clio/` (`clio doctor` asks the vault through it).
 pub(super) const PERSON_SOCK: &str = "vault-person.sock";
 
-fn vault_bin() -> PathBuf {
-    if let Some(p) = std::env::var_os("CLIO_VAULT_BIN") {
-        return PathBuf::from(p);
+/// The binary that receives the master passphrase on its input: next to `clio`, or the absolute path
+/// in `CLIO_VAULT_BIN`. Never searched in the PATH: whatever came first there would get the passphrase.
+fn vault_bin() -> Res<PathBuf> {
+    vault_bin_from(
+        std::env::var_os("CLIO_VAULT_BIN"),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn vault_bin_from(env: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Res<PathBuf> {
+    if let Some(p) = env {
+        let p = PathBuf::from(p);
+        return if p.is_absolute() && p.is_file() {
+            Ok(p)
+        } else {
+            Err(format!(
+                "CLIO_VAULT_BIN debe ser la ruta absoluta de un archivo ({})",
+                p.display()
+            ))
+        };
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(|d| d.join("clio-vault")))
+    exe.and_then(|e| e.parent().map(|d| d.join("clio-vault")))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("clio-vault"))
+        .ok_or_else(|| {
+            "no encuentro `clio-vault` junto a `clio`: instala los dos juntos (`just install`); no lo busco en el PATH, porque recibe tu frase maestra".into()
+        })
 }
 
 /// One line from stdin; with echo off when stdin is a terminal.
@@ -63,7 +80,7 @@ fn paths(dirs: &Dirs) -> Res<Paths> {
 
 /// Runs `clio-vault` with `args`, feeding `stdin` to it. Its output goes straight to the terminal.
 fn call(args: &[String], stdin: Option<&str>) -> Res<()> {
-    let bin = vault_bin();
+    let bin = vault_bin()?;
     let mut c = Command::new(&bin);
     c.args(args).stdin(if stdin.is_some() {
         Stdio::piped()
@@ -95,7 +112,7 @@ fn start(dirs: &Dirs) -> Res<()> {
         return Err(format!("the vault is already running (pid {pid})"));
     }
     let pass = read_secret("vault passphrase")?;
-    let bin = vault_bin();
+    let bin = vault_bin()?;
     let s = |x: &std::path::Path| x.display().to_string();
     if !p.vault.exists() {
         println!("creating a new vault at {}", p.vault.display());
@@ -190,5 +207,57 @@ pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
             call(&full, value.as_deref())
         }
         other => Err(format!("unknown vault command {other:?}")),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    fn exe_dir_with(vault: bool) -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("clio");
+        std::fs::write(&exe, "").unwrap();
+        if vault {
+            std::fs::write(d.path().join("clio-vault"), "").unwrap();
+        }
+        (d, exe)
+    }
+
+    // The vault binary receives the master passphrase on its input: it is found next to `clio`,
+    // or by an absolute path the person gave, and never by searching the PATH.
+    #[test]
+    fn the_vault_binary_is_next_to_clio_and_never_searched_in_the_path() {
+        let (d, exe) = exe_dir_with(true);
+        assert_eq!(
+            vault_bin_from(None, Some(exe)).unwrap(),
+            d.path().join("clio-vault")
+        );
+        let (_d, exe) = exe_dir_with(false);
+        let err = vault_bin_from(None, Some(exe)).unwrap_err();
+        assert!(err.contains("PATH") && err.contains("junto a"), "{err}");
+        assert!(vault_bin_from(None, None).is_err());
+    }
+
+    #[test]
+    fn clio_vault_bin_must_be_an_absolute_path_to_a_file() {
+        let (d, exe) = exe_dir_with(true);
+        let real = d.path().join("clio-vault");
+        let given = |p: &Path| Some(OsString::from(p));
+        assert_eq!(
+            vault_bin_from(given(&real), Some(exe.clone())).unwrap(),
+            real
+        );
+        for bad in [
+            Path::new("clio-vault"),
+            Path::new("./x/clio-vault"),
+            &d.path().join("nothing"),
+        ] {
+            let err = vault_bin_from(given(bad), Some(exe.clone())).unwrap_err();
+            assert!(err.contains("CLIO_VAULT_BIN"), "{bad:?}: {err}");
+        }
     }
 }

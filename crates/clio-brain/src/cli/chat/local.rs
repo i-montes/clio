@@ -102,9 +102,11 @@ impl SessionSource for LocalSource {
         let paths = crate::cli::pi::paths(d);
         let node = install::find_node(&path_var()).map_err(text)?;
         let install = install::locate(&paths).map_err(text)?;
-        let key = read_api_key("OPENCODE_API_KEY", &d.key_file()).ok_or(
-            "falta la clave del modelo: ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key",
-        )?;
+        let key = read_api_key("OPENCODE_API_KEY", &d.key_file())
+            .map_err(text)?
+            .ok_or(
+                "falta la clave del modelo: ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key",
+            )?;
         // 1. the working copy
         let (id, session) = match target {
             Target::New { project } => {

@@ -65,7 +65,7 @@ impl PiBench {
         let key = read_api_key(
             "OPENCODE_API_KEY",
             &home.join(".config/clio/opencode-api-key"),
-        )
+        )?
         .ok_or("falta la clave del modelo: OPENCODE_API_KEY o ~/.config/clio/opencode-api-key")?;
         let mut p = Provider::opencode_go(model);
         p.id = provider.into();
