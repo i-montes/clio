@@ -520,6 +520,36 @@ fn import_refuses_a_file_that_contradicts_a_tombstone() {
     assert!(r.unwrap_err().to_string().contains("was purged"));
 }
 
+/// An embedder whose error message quotes what it was asked to embed, as a library might.
+struct Echo;
+
+impl Embedder for Echo {
+    fn model_id(&self) -> &str {
+        "m"
+    }
+    fn dim(&self) -> usize {
+        8
+    }
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Err(Error::Embedding(format!("cannot embed {texts:?}")))
+    }
+}
+
+// S-24 (second audit): a failed job keeps the error it got, and an error can quote the text. A
+// purge that leaves the queue's error behind has not erased the text.
+#[test]
+fn s24_purge_also_erases_what_a_failed_job_kept_of_the_text() {
+    let f = fixture_with(Arc::new(Echo));
+    let m = f.engine.propose(prop(f.scope, f.person, TEXT)).unwrap();
+    f.engine.run_jobs(&RunOpts::default()).unwrap();
+    assert!(
+        contains(&raw_files(&f), "zafiro"),
+        "the premise: a failed job's error quotes the text"
+    );
+    f.engine.purge(m.memory, f.person, "x").unwrap();
+    assert!(!contains(&raw_files(&f), "zafiro"));
+}
+
 #[test]
 fn a_backup_made_before_the_purge_still_has_the_text() {
     // Honest limit, written down so nobody assumes otherwise: PURGE cannot reach copies that
