@@ -81,5 +81,42 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str) -> Res<i32> {
         );
     }
     println!("siguiente: clio diff {}", opened.id);
-    Ok(i32::from(r.aborted || !r.errors.is_empty()))
+    Ok(exit_code(&r))
+}
+
+/// 0 only for a run that ended by itself: aborted, with errors from the model, or cut by a budget
+/// cap (S-47) is a failure for whoever scripts `clio run`.
+fn exit_code(r: &clio_brain::pi::rpc::RunSummary) -> i32 {
+    i32::from(r.aborted || r.stopped.is_some() || !r.errors.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clio_brain::control::Stop;
+    use clio_brain::pi::rpc::RunSummary;
+
+    #[test]
+    fn only_a_run_that_ended_by_itself_exits_zero() {
+        assert_eq!(exit_code(&RunSummary::default()), 0);
+        let stopped = RunSummary {
+            stopped: Some(Stop::Steps),
+            ..RunSummary::default()
+        };
+        assert_eq!(
+            exit_code(&stopped),
+            1,
+            "cut by a cap, even if Pi had settled"
+        );
+        let aborted = RunSummary {
+            aborted: true,
+            ..RunSummary::default()
+        };
+        assert_eq!(exit_code(&aborted), 1);
+        let errors = RunSummary {
+            errors: vec!["x".into()],
+            ..RunSummary::default()
+        };
+        assert_eq!(exit_code(&errors), 1);
+    }
 }

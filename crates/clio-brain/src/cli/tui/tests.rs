@@ -1489,3 +1489,17 @@ impl App {
         b
     }
 }
+
+// Second audit: run folders are listed by name and a name can be anything. One whose `-` sit where
+// a run id has them but with a multi-byte character before them must not take the screen down.
+#[test]
+fn short_id_never_panics_on_a_non_ascii_name() {
+    use super::home::short_id;
+    // `-` at bytes 8 and 15, and `é` straddling the cut at byte 4.
+    let odd = "abcéfgh-123456-xyz01";
+    assert_eq!(odd.as_bytes()[8], b'-');
+    assert_eq!(odd.as_bytes()[15], b'-');
+    assert!(!short_id(odd).is_empty());
+    // A real id is still shortened as before.
+    assert_eq!(short_id("20261031-181646-5a67"), "1031-1816-5a67");
+}

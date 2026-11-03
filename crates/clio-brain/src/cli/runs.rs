@@ -584,7 +584,7 @@ pub fn execute(
         id: id.clone(),
         workspace: p.ws.display().to_string(),
         instruction: instruction.to_owned(),
-        ending: format!("{:?}", outcome.ending),
+        ending: ending_text(&outcome.ending, &p.scrubber),
         level: format!("{:?}", outcome.level),
         steps: outcome.steps,
         elapsed_ms: outcome.elapsed_ms,
@@ -605,6 +605,13 @@ pub fn execute(
     };
     write_json(&path.join("summary.json"), &summary)?;
     Ok(summary)
+}
+
+/// How a run ended, as `summary.json` keeps it: the `Debug` form (`Final`, `Stopped(Steps)`...) with
+/// the values the vault knows struck out. A model error carries what the adapter printed, and a
+/// provider's error can echo the key (S-58).
+fn ending_text(e: &clio_brain::agent::Ending, scrubber: &clio_vault::Scrubber) -> String {
+    scrubber.scrub(&format!("{e:?}"))
 }
 
 fn exit_code(s: &RunSummary) -> i32 {
@@ -1072,6 +1079,28 @@ mod tests {
         };
         let text = diff_text(&ws, &run, &BTreeMap::new(), &c);
         assert!(!text.contains("LO-DE-FUERA"), "read through a link: {text}");
+    }
+
+    // S-58 (second audit): `summary.json` kept the text of a model error as the adapter printed it,
+    // and a provider error can echo the key. The summary says how the run ended with the values
+    // the vault knows struck out; the words `succeeded` and the screens compare with stay as they were.
+    #[test]
+    fn the_ending_in_the_summary_never_carries_a_known_value() {
+        let value = "violeta-azul-7731-clio";
+        let scrubber = clio_vault::Scrubber::new(Arc::new(SystemClock));
+        scrubber.add("opencode_api_key", value);
+        let err = clio_brain::agent::Ending::ModelError(format!("401: invalid key {value}"));
+        let text = ending_text(&err, &scrubber);
+        assert!(!text.contains(value), "{text}");
+        assert!(text.starts_with("ModelError"), "{text}");
+        assert_eq!(
+            ending_text(&clio_brain::agent::Ending::Final, &scrubber),
+            "Final"
+        );
+        assert_eq!(
+            ending_text(&clio_brain::agent::Ending::Cancelled, &scrubber),
+            "Cancelled"
+        );
     }
 
     #[test]

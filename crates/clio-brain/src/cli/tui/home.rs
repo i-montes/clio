@@ -81,7 +81,9 @@ impl Home {
 /// `20261031-181646-5a67` shown as `1031-1816-5a67`: enough to tell runs apart on one line.
 pub fn short_id(id: &str) -> String {
     let b = id.as_bytes();
-    if b.len() >= 20 && b[8] == b'-' && b[15] == b'-' {
+    // Byte offsets: only for an ASCII name (a run folder can be named anything, and a cut inside a
+    // multi-byte character would panic).
+    if id.is_ascii() && b.len() >= 20 && b[8] == b'-' && b[15] == b'-' {
         format!("{}-{}-{}", &id[4..8], &id[9..13], &id[16..])
     } else {
         id.chars().take(14).collect()

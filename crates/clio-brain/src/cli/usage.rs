@@ -71,9 +71,9 @@ impl RunUsage {
     pub fn totals(&self) -> (u64, u64, u64) {
         self.calls.iter().fold((0, 0, 0), |(i, o, c), u| {
             (
-                i + u64::from(u.input_tokens),
-                o + u64::from(u.output_tokens),
-                c + u.cost_micro,
+                i.saturating_add(u64::from(u.input_tokens)),
+                o.saturating_add(u64::from(u.output_tokens)),
+                c.saturating_add(u.cost_micro),
             )
         })
     }
@@ -169,9 +169,12 @@ pub fn tokens(n: u64) -> String {
         return n.to_string();
     }
     let (tenths, unit) = if n < 999_950 {
-        ((n * 10 + 500) / 1_000, 'k')
+        ((n.saturating_mul(10).saturating_add(500)) / 1_000, 'k')
     } else {
-        ((n * 10 + 500_000) / 1_000_000, 'M')
+        (
+            (n.saturating_mul(10).saturating_add(500_000)) / 1_000_000,
+            'M',
+        )
     };
     let (whole, frac) = (tenths / 10, tenths % 10);
     if frac == 0 || (unit == 'k' && whole >= 100) {
@@ -188,7 +191,7 @@ pub fn usd(micro: u64) -> String {
         return "$0".into();
     }
     if micro >= 10_000 {
-        let cents = (micro + 5_000) / 10_000;
+        let cents = micro.saturating_add(5_000) / 10_000;
         return format!("${},{:02}", cents / 100, cents % 100);
     }
     let digits = format!("{micro:06}");
@@ -221,6 +224,18 @@ pub fn ms_label(ms: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    // Second audit: the numbers come from Pi, which is not trusted: a counter near the top of the
+    // range must not panic (debug) or wrap into a small figure (release).
+    #[test]
+    fn huge_counters_do_not_overflow_the_labels() {
+        assert!(!super::tokens(u64::MAX).is_empty());
+        assert!(super::tokens(u64::MAX).ends_with('M'));
+        assert!(!super::usd(u64::MAX).is_empty());
+        assert!(super::usd(u64::MAX).starts_with('$'));
+        assert_eq!(super::tokens(999), "999");
+        assert_eq!(super::usd(15), "$0,000015");
+    }
+
     use super::*;
 
     #[test]
