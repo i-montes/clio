@@ -47,6 +47,33 @@ fn call_t(e: &Env, session: &str, tool: &str, args: Value, tainted: bool) -> Res
     serde_json::from_str(&e.host.handle_line(&line)).unwrap()
 }
 
+// S-05, S-36 (second audit): what the person is told when they apply a chat session's changes
+// ("the agent read outside content") must come from the service, which saw it, not from Pi, which
+// could say it read nothing. The service leaves it in the run folder, and only when it happened.
+#[test]
+fn the_taint_is_recorded_in_the_run_folder_by_the_service() {
+    let e = env();
+    let file = e._t.path().canonicalize().unwrap().join("run/tainted.json");
+    std::fs::write(e.work.join("a.txt"), "hello").unwrap();
+    call(&e, "s1", "fs_write", json!({"path":"b.txt","content":"x"}));
+    call(&e, "s1", "fs_stat", json!({"path":"a.txt"}));
+    assert!(!file.exists(), "nothing external was read yet");
+    call(&e, "s1", "fs_read", json!({"path":"a.txt"}));
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(
+        v["sources"].as_array().unwrap().contains(&json!("file")),
+        "{v}"
+    );
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // A second source is added, the first stays.
+    call(&e, "s1", "fs_list", json!({"path":"."}));
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(v["sources"].as_array().unwrap().contains(&json!("file")));
+}
+
 #[test]
 fn reads_are_external_and_taint_and_writes_are_not() {
     let e = env();

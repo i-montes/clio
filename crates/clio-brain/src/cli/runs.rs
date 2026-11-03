@@ -614,6 +614,27 @@ fn ending_text(e: &clio_brain::agent::Ending, scrubber: &clio_vault::Scrubber) -
     scrubber.scrub(&format!("{e:?}"))
 }
 
+/// Whether the agent read outside content in this run, for the apply dialog (S-05, S-36). A run of
+/// the built-in loop says it in `summary.json`; a chat session has no summary, but its tool host
+/// leaves `toolhost/tainted.json` when it saw outside content (the service saw it: Pi could say it
+/// read nothing), so a service that ran and left none means it read nothing. `None`: no record.
+pub fn run_taint(run: &Path) -> Option<bool> {
+    let summary = read_json::<RunSummary>(&run.join("summary.json"))
+        .ok()
+        .map(|s| s.tainted);
+    let host = if run.join("toolhost/tainted.json").is_file() {
+        Some(true)
+    } else if run.join("toolhost").is_dir() {
+        Some(false)
+    } else {
+        None
+    };
+    match (summary, host) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(false) || b.unwrap_or(false)),
+    }
+}
+
 fn exit_code(s: &RunSummary) -> i32 {
     i32::from(!s.succeeded())
 }
@@ -1059,6 +1080,45 @@ mod tests {
 
     // S-13 (second audit, finding 6): the original is the person's folder, and a link inside it can
     // lead anywhere. The diff must not read through one.
+    // S-05, S-36 (second audit): whether the agent read outside content, for the apply dialog. A run
+    // of the built-in loop has it in `summary.json`; a chat session has no summary, but its tool
+    // host leaves `toolhost/tainted.json` when it saw outside content. No record at all is unknown.
+    #[test]
+    fn a_runs_taint_comes_from_the_summary_or_from_what_the_tool_host_saw() {
+        let t = tempfile::tempdir().unwrap();
+        let run = |name: &str| {
+            let d = t.path().join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        assert_eq!(run_taint(&run("none")), None, "no record: unknown");
+        // A chat session whose service ran and never saw outside content.
+        let clean = run("chat-clean");
+        std::fs::create_dir_all(clean.join("toolhost")).unwrap();
+        assert_eq!(run_taint(&clean), Some(false));
+        // One whose service saw it.
+        let tainted = run("chat-tainted");
+        std::fs::create_dir_all(tainted.join("toolhost")).unwrap();
+        std::fs::write(
+            tainted.join("toolhost/tainted.json"),
+            "{\"sources\":[\"file\"]}",
+        )
+        .unwrap();
+        assert_eq!(run_taint(&tainted), Some(true));
+        // A run of the built-in loop: the summary says.
+        let s = RunSummary {
+            tainted: true,
+            ..RunSummary::default()
+        };
+        let builtin = run("builtin");
+        write_json(&builtin.join("summary.json"), &s).unwrap();
+        assert_eq!(run_taint(&builtin), Some(true));
+        let s = RunSummary::default();
+        let builtin2 = run("builtin-clean");
+        write_json(&builtin2.join("summary.json"), &s).unwrap();
+        assert_eq!(run_taint(&builtin2), Some(false));
+    }
+
     #[test]
     fn the_diff_does_not_read_the_original_through_a_link() {
         let d = tempfile::tempdir().unwrap();

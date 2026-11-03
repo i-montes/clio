@@ -401,12 +401,49 @@ impl ToolHost {
             return true; // too many sessions: report tainted, which is the safe answer
         }
         let t = s.entry(session.to_owned()).or_default();
-        if !t.sources.contains(&source) {
+        let new = !t.sources.contains(&source);
+        if new {
             t.sources.push(source);
         }
+        // Every source seen by any session of this host, for the file below.
+        let mut all: Vec<&'static str> =
+            s.values().flat_map(|t| t.sources.iter().copied()).collect();
+        all.sort_unstable();
+        all.dedup();
         drop(s);
         self.gateway.mark_tainted(session);
+        if new {
+            self.record_taint(&all);
+        }
         true
+    }
+
+    /// Leaves in the run folder that outside content was seen (`tainted.json`, only when it was).
+    /// What the person is told when they apply the changes of a chat session comes from here: the
+    /// service saw it, and Pi, which is not trusted, could say it read nothing. Best effort and
+    /// saved in one piece; a failure is said in the log and tried again with the next new source.
+    fn record_taint(&self, sources: &[&str]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let (path, tmp) = (
+            self.run_dir.join("tainted.json"),
+            self.run_dir.join("tainted.json.tmp"),
+        );
+        let text = json!({ "sources": sources }).to_string();
+        let saved = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = saved {
+            eprintln!(
+                "clio-toolhost: could not record the taint in {}: {e}",
+                path.display()
+            );
+        }
     }
 
     fn refuse(&self, id: &str, rule: &str, why: String, tainted: bool) -> Response {

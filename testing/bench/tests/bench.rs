@@ -189,6 +189,89 @@ fn the_shipped_tasks_load_and_a_duplicate_id_or_unknown_field_is_refused() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn task_file(dir: &std::path::Path, name: &str, id: &str, workspace: Option<&str>) {
+    let ws = workspace.map_or(String::new(), |w| format!(",\"workspace\":{w:?}"));
+    std::fs::create_dir_all(dir).expect("dir");
+    std::fs::write(
+        dir.join(name),
+        format!(
+            "{{\"id\":{id:?},\"input\":\"x\",\"check\":{{\"kind\":\"equals\",\"value\":\"y\"}},\"max_steps\":1,\"max_cost_micro_usd\":1,\"max_duration_ms\":1{ws}}}"
+        ),
+    )
+    .expect("task");
+}
+
+// Second audit: a task is a file somebody wrote (a pull request can add one) and the nightly bench
+// runs it. Its id becomes a folder name that is later deleted, and its workspace a folder that is
+// copied: neither may point out of where it belongs.
+#[test]
+fn a_task_id_that_is_a_path_is_refused() {
+    for bad in [
+        "../../evil",
+        "/etc",
+        "a/b",
+        "",
+        ".hidden",
+        "con espacio",
+        &"x".repeat(100),
+    ] {
+        let dir = tmp("badid");
+        task_file(&dir, "t.json", bad, None);
+        let e = load_tasks(&dir).expect_err(bad);
+        assert!(e.contains("task id"), "{bad:?}: {e}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let dir = tmp("goodid");
+    task_file(&dir, "t.json", "real-12-ssrf_webhook.v2", None);
+    assert_eq!(load_tasks(&dir).expect("ok").len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_workspace_outside_the_task_folder_is_refused() {
+    for bad in ["../outside", "/etc", "a/../../b", "./", ""] {
+        let dir = tmp("badws");
+        task_file(&dir, "t.json", "ok-1", Some(bad));
+        let e = load_tasks(&dir).expect_err(bad);
+        assert!(e.contains("workspace"), "{bad:?}: {e}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    let dir = tmp("goodws");
+    task_file(&dir, "t.json", "ok-1", Some("workspace"));
+    assert_eq!(load_tasks(&dir).expect("ok").len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_link_in_the_tasks_folder_is_not_followed() {
+    let dir = tmp("links");
+    task_file(&dir, "real.json", "real-1", None);
+    // A folder that leads back to the top (a loop), and one that leads out to a task elsewhere.
+    std::os::unix::fs::symlink(&dir, dir.join("loop")).expect("link");
+    let elsewhere = tmp("elsewhere");
+    task_file(&elsewhere, "alien.json", "alien-1", None);
+    std::os::unix::fs::symlink(&elsewhere, dir.join("out")).expect("link");
+    // And a file that is a link to a task file elsewhere.
+    std::os::unix::fs::symlink(elsewhere.join("alien.json"), dir.join("alias.json")).expect("link");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let d = dir.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(load_tasks(&d));
+    });
+    let tasks = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("loading followed a loop")
+        .expect("tasks");
+    let ids: Vec<_> = tasks.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["real-1"],
+        "a task behind a link is not part of the folder"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(elsewhere);
+}
+
 #[test]
 fn a_json_file_inside_a_fixture_folder_is_not_taken_for_a_task() {
     let dir = tmp("fixture");
