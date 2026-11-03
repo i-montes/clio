@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# S-04: list rule ids from docs/security.md and docs/specs that no test references.
-# Warns about every rule without a test, and fails (exit 1) only for the ones listed in
-# scripts/rule-coverage.enforced, so a rule joins the gate once it has its tests.
+# S-04: every rule id of docs/security.md has a test that runs, or an entry in
+# scripts/rule-coverage.exempt that says, with a reason, where else it is checked (a CI job, a host
+# script, a part of the system that is not built yet). A rule added without either fails the build
+# (exit 1): it does not wait for someone to remember to add it to a list. The acceptance tests of the
+# specs are enforced for the specs listed in scripts/rule-coverage.enforced.
+# RULE_COVERAGE_ROOT points at another tree (the script's own test uses it).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "${RULE_COVERAGE_ROOT:-$(dirname "$0")/..}"
 fail=0
 enforced=$(grep -vE '^\s*(#|$)' scripts/rule-coverage.enforced 2>/dev/null || true)
 is_enforced() { echo "$enforced" | grep -qx "$1"; }
+exempt_lines=$(grep -vE '^\s*(#|$)' scripts/rule-coverage.exempt 2>/dev/null || true)
+exempt=$(echo "$exempt_lines" | awk 'NF {print $1}')
 
 # grep exits 1 when nothing matches; that must not stop the script.
 ids=$({ grep -rhoE --include='*.md' 'S-[0-9]{2}' docs/security.md docs/specs || true; } | sort -u)
@@ -43,18 +48,22 @@ missing=$(comm -23 <(echo "$ids") <(echo "$tested"))
 
 total=$(echo "$ids" | grep -c . || true)
 count=$(echo "$missing" | grep -c . || true)
-echo "rule coverage: $((total - count))/$total rules referenced by a test"
-if [ "$count" -gt 0 ]; then
-  echo "warning: rules without a test:"
-  echo "$missing" | sed 's/^/  /'
-fi
+exempt_n=$(echo "$exempt" | grep -c . || true)
+echo "rule coverage: $((total - count))/$total rules referenced by a test; exempt: $exempt_n (checked elsewhere, scripts/rule-coverage.exempt)"
 for id in $missing; do
-  if is_enforced "$id"; then echo "error: $id is enforced and has no test" >&2; fail=1; fi
+  echo "$exempt" | grep -qx "$id" || { echo "error: $id has no test and is not exempt: write its test, or say in scripts/rule-coverage.exempt where else it is checked" >&2; fail=1; }
 done
-# An entry whose rule or spec was deleted would otherwise stop being checked without a sound.
+# An exemption must say why, must still be needed, and must name a rule that exists: otherwise it
+# would hide a rule for good.
+while read -r id reason; do
+  [ -n "$id" ] || continue
+  [ -n "$reason" ] || { echo "error: $id is exempt without a reason" >&2; fail=1; }
+  echo "$ids" | grep -qx "$id" || { echo "error: $id is exempt but no document defines it" >&2; fail=1; }
+  echo "$tested" | grep -qx "$id" && { echo "error: $id is exempt but has a test: remove it from scripts/rule-coverage.exempt" >&2; fail=1; }
+done <<<"$exempt_lines"
+# An entry whose spec was deleted would otherwise stop being checked without a sound.
 for e in $enforced; do
   case $e in
-    S-*) echo "$ids" | grep -qx "$e" || { echo "error: $e is enforced but no document defines it" >&2; fail=1; } ;;
     spec-*) ls docs/specs/"${e#spec-}"-spec-v*.md >/dev/null 2>&1 || { echo "error: $e is enforced but its spec file is gone" >&2; fail=1; } ;;
   esac
 done

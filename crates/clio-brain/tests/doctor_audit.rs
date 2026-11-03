@@ -19,6 +19,7 @@ fn doctor(e: &Env) -> (bool, String) {
     )
 }
 
+// S-58
 #[test]
 fn doctor_flags_a_key_shaped_value_in_what_clio_wrote_and_never_prints_it() {
     let e = Env::new();

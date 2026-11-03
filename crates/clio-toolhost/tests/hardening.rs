@@ -91,7 +91,7 @@ fn a_fifo_in_the_copy_does_not_hang_the_host() {
     }
 }
 
-// Finding 2 (attack-51), S-18, S-20, S-23: what the model sees is scrubbed, and so must be what
+// Finding 2 (attack-51), S-18, S-20, S-23, S-58: what the model sees is scrubbed, and so must be what
 // the host writes to disk. `effects.jsonl` records the result of every `exec`, and
 // `backup.unix.sh` backs the run folder up.
 #[test]
@@ -184,7 +184,7 @@ fn a_command_in_the_jail_cannot_write_the_folders_that_run_code_when_a_project_o
 
 const GH: &str = concat!("ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
 
-// Finding 1 (attack-52), S-18, S-44: a token inside an ordinary file reaches the model masked, and
+// Finding 1 (attack-52), S-18, S-44, S-57: a token inside an ordinary file reaches the model masked, and
 // the mark says what it is and what to do, in the place where the value was.
 #[test]
 fn a_token_inside_a_file_reaches_the_model_masked_with_a_guide() {
@@ -231,7 +231,7 @@ fn a_read_says_how_many_values_it_struck_out() {
     assert_eq!(r.data["masked"], 0, "{r:?}");
 }
 
-// Finding 1, S-18: the model reads the masked text and may write it back whole. That would put
+// Finding 1, S-18, S-57: the model reads the masked text and may write it back whole. That would put
 // the mark where the real value was, so a write that carries a mark is refused, and says to use
 // `edit` (which reads and writes the real bytes).
 #[test]

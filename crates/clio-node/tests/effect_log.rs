@@ -6,6 +6,7 @@
 use clio_node::EffectLog;
 use serde_json::json;
 
+// S-58
 #[test]
 fn the_log_keeps_facts_and_not_the_text_of_a_result() {
     let t = tempfile::tempdir().unwrap();
