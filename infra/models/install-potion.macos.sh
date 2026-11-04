@@ -4,7 +4,7 @@
 # Pinned to one Hugging Face commit; every file is checked against its sha256 before it is used.
 #
 # Destination: $CLIO_MODEL, or ~/.cache/clio-models/potion-multilingual-128M (the default of
-# scripts/memory-dev.sh). Not ~/Library/Caches: macOS may purge it, and the model is 530 MB.
+# Clio and of clio-memory). Not ~/Library/Caches: macOS may purge it, and the model is 530 MB.
 set -euo pipefail
 
 [ "$(uname -s)" = Darwin ] || { echo "this script is for macOS" >&2; exit 1; }
