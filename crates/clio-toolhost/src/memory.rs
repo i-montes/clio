@@ -312,6 +312,21 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
     }
 }
 
+/// The arguments of a memory tool as the gateway checks them: name, JSON type and whether it is
+/// required. Other callers (the MCP server) build their schema from this, not from a copy.
+pub fn memory_args(tool: &str) -> Vec<(String, &'static str, bool)> {
+    arg_specs(tool)
+        .into_iter()
+        .map(|a| {
+            let ty = match a.kind {
+                ArgKind::Int => "integer",
+                _ => "string",
+            };
+            (a.name, ty, a.required)
+        })
+        .collect()
+}
+
 /// The declarations for the gateway, and each one's description hash (S-15).
 pub(crate) fn decls() -> Vec<ToolDecl> {
     [

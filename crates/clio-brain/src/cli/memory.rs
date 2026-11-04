@@ -28,7 +28,8 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory pin|unpin <id>                  fija un recuerdo (sale primero en el contexto) o lo suelta
   clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
   clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
-  clio memory stats [--json]                  conteos y tamaño";
+  clio memory stats [--json]                  conteos y tamaño
+  clio memory mcp                             servidor MCP para otros agentes (leer y proponer; nada más)";
 
 fn id_of(s: &str) -> Res<MemoryId> {
     s.trim_start_matches('m')
@@ -61,6 +62,9 @@ fn row_json(link: &MemoryLink, m: &MemoryRow) -> Value {
         "topic": m.topic_key,
         "source": m.source,
         "run": m.session,
+        "title": m.title,
+        "category": m.category.map(|c| c.label()),
+        "place": link.place_label(m),
         "valid_from": m.valid_from,
         "known_since": m.known_since,
     })
@@ -107,6 +111,11 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
     let mut args = Args::new(it.collect());
     match sub.as_str() {
         "-h" | "--help" | "help" => println!("{USAGE}"),
+        // Other agents, over MCP: read and propose only.
+        "mcp" => {
+            args.rest()?;
+            return super::mcp::serve(dirs);
+        }
         "search" => {
             let json = args.flag("--json");
             let limit = args
