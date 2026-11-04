@@ -386,7 +386,7 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
 }
 
 #[test]
-fn a_run_that_read_files_leaves_its_record_in_quarantine_and_promote_and_archive_ask() {
+fn a_run_that_read_files_leaves_its_record_active_marked_external_and_archive_asks() {
     let e = Env::new(true);
     e.script(&[
         json!({"tool": "read_file", "args": {"path": "app.py"}}),
@@ -394,46 +394,28 @@ fn a_run_that_read_files_leaves_its_record_in_quarantine_and_promote_and_archive
     ]);
     let (panel, summary) = e.run("lee app.py", &[]);
     assert_eq!(summary["tainted"], true);
-    assert_eq!(summary["memory"]["pending"], 1, "{summary}");
+    assert_eq!(summary["memory"]["pending"], 0, "{summary}");
     assert!(
-        panel.contains("memoria: 0 guardado(s), 1 en cuarentena"),
+        panel.contains("memoria: 1 guardado(s), 0 en cuarentena"),
         "{panel}"
     );
-    let pending = e.clio(&["memory", "list", "--pending"]);
+    let active = e.clio(&["memory", "list"]);
     assert!(
-        pending.contains("cuarentena")
-            && pending.contains("episódico")
-            && pending.contains("externo"),
-        "{pending}"
+        active.contains("m1") && active.contains("episódico") && active.contains("externo"),
+        "{active}"
     );
     assert!(
-        e.clio(&["memory", "list"])
-            .contains("todavía no hay recuerdos activos")
+        e.clio(&["memory", "list", "--pending"])
+            .contains("nada pendiente")
     );
-    assert!(
-        e.clio(&["memory", "search", "lee app.py"])
-            .contains("nada relevante")
-    );
-    let shown = e.clio(&["memory", "show", "1"]);
-    assert!(shown.contains("en cuarentena"), "{shown}");
 
     // The question is asked; no answer, "n" or an empty stdin changes nothing.
     assert!(
-        e.clio(&["memory", "promote", "1"])
-            .contains("no se cambió nada")
-    );
-    assert!(
-        e.clio_with_stdin(&["memory", "promote", "1"], "n\n")
-            .contains("no se cambió nada")
-    );
-    assert!(e.clio(&["memory", "list", "--pending"]).contains("m1"));
-    assert!(
-        e.clio_with_stdin(&["memory", "promote", "1"], "s\n")
-            .contains("aprobado: m1")
-    );
-    assert!(e.clio(&["memory", "list"]).contains("m1"));
-    assert!(
         e.clio(&["memory", "archive", "1"])
+            .contains("no se cambió nada")
+    );
+    assert!(
+        e.clio_with_stdin(&["memory", "archive", "1"], "n\n")
             .contains("no se cambió nada")
     );
     assert!(
@@ -550,10 +532,10 @@ fn a_decoy_in_what_a_run_wants_to_remember_is_nowhere_in_the_home() {
         let bytes = std::fs::read(p).unwrap();
         c.assert_clean(&p.display().to_string(), &String::from_utf8_lossy(&bytes));
     }
-    // And the proposals did happen: crossed out, in quarantine.
-    let pending = e.clio(&["memory", "list", "--pending"]);
-    assert!(pending.contains("procedimental"), "{pending}");
-    for l in e.clio(&["memory", "list", "--json", "--pending"]).lines() {
+    // And the proposals did happen: crossed out, active.
+    let active = e.clio(&["memory", "list"]);
+    assert!(active.contains("procedimental"), "{active}");
+    for l in e.clio(&["memory", "list", "--json"]).lines() {
         c.assert_clean("list", l);
     }
 }
@@ -747,7 +729,7 @@ fn projects_review_due_reviewed_and_timeline() {
     let s = clio_toolhost::Judging::default();
     let a = alfa.propose(&draft("usa Postgres"), "s1", &s).unwrap().id;
     let b = alfa.propose(&draft("usa Redis"), "s1", &s).unwrap().id;
-    let other = alfa.propose(&draft("usa Kafka"), "s2", &s).unwrap().id;
+    alfa.propose(&draft("usa Kafka"), "s2", &s).unwrap();
     drop(alfa);
     let projects: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();
     assert_eq!(
@@ -755,7 +737,7 @@ fn projects_review_due_reviewed_and_timeline() {
         json!([
             {"place": "personal", "active": 2, "quarantine": 0, "archived": 0},
             {"place": "lecciones", "active": 0, "quarantine": 0, "archived": 0},
-            {"place": "proyecto alfa", "active": 0, "quarantine": 3, "archived": 0},
+            {"place": "proyecto alfa", "active": 3, "quarantine": 0, "archived": 0},
         ]),
         "{projects:#}"
     );
@@ -769,13 +751,6 @@ fn projects_review_due_reviewed_and_timeline() {
     e.clio(&["memory", "reviewed", &old.0.to_string()]);
     let due: Value = serde_json::from_str(&e.clio(&["memory", "review-due", "--json"])).unwrap();
     assert!(due.as_array().unwrap().is_empty(), "{due:#}");
-    // Not active yet: no timeline (said plainly).
-    let o = e.try_clio(&["memory", "timeline", &b.to_string()]);
-    assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("solo los recuerdos activos"));
-    for id in [a, b, other] {
-        e.clio(&["memory", "promote", &id.to_string(), "--yes"]);
-    }
     let t: Value =
         serde_json::from_str(&e.clio(&["memory", "timeline", &b.to_string(), "--json"])).unwrap();
     let ids: Vec<i64> = t
@@ -1037,9 +1012,16 @@ fn the_person_merges_renames_and_archives_projects() {
     };
     let s = clio_toolhost::Judging::default();
     let a = alfa.propose(&draft("usa Postgres"), "s", &s).unwrap().id;
-    alfa.propose(&draft("usa Redis"), "s", &s).unwrap();
+    let b = alfa.propose(&draft("usa Redis"), "s", &s).unwrap().id;
     drop(alfa);
-    e.clio(&["memory", "promote", &a.to_string(), "--yes"]);
+    clio_brain::memory_link::MemoryLink::open_write_in(
+        &data,
+        &clio_brain::memory_link::EmbedModel::none(),
+        Some("alfa"),
+    )
+    .unwrap()
+    .forget_as_agent(clio_memory::MemoryId(b))
+    .unwrap();
     let out = e.clio(&["memory", "projects", "merge", "alfa", "Alfa Web", "--yes"]);
     assert!(out.contains("movidos 2"), "{out}");
     let places: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();

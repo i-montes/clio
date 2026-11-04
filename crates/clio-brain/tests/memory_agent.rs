@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used)]
 //! The memory and the agent together, with a scripted model and no network: one run writes, the
-//! next one remembers; what comes from outside waits in quarantine; procedures wait for a person;
-//! every actor has its own quota; "nothing relevant" is an answer; a refusal never breaks a close.
+//! next one remembers; what the agent saves is active at once, marked by where it read; it forgets
+//! to quarantine; every actor has its own quota; "nothing relevant" is an answer; a refusal never
+//! breaks a close.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -257,8 +258,10 @@ fn abstention_is_valid_nothing_relevant_means_no_memory_layer() {
 
 // S-25: what a run learned after touching outside content waits in quarantine and `recall` does
 // not bring it back.
+// S-25: a run that read outside content saves its episode active, marked as from outside, and the
+// builtin loop (which does not mark itself tainted when it reads memory) is not shown it.
 #[test]
-fn external_content_ends_in_quarantine_and_is_not_recalled() {
+fn external_content_is_active_marked_external_and_not_shown_to_the_builtin_loop() {
     let w = world();
     let s = scrubber();
     std::fs::write(
@@ -278,15 +281,11 @@ fn external_content_ends_in_quarantine_and_is_not_recalled() {
     );
     assert!(r1.out.tainted);
     assert_eq!(r1.report.saved.len(), 1);
-    assert_eq!(r1.report.saved[0].state, State::Quarantine);
+    assert_eq!(r1.report.saved[0].state, State::Active);
     let l = link(&w);
     let row = l.get(clio_memory::MemoryId(r1.report.saved[0].id)).unwrap();
     assert_eq!(row.origin, Origin::External);
-    assert_eq!(l.pending().unwrap().len(), 1);
-    assert!(l.list(State::Active).unwrap().is_empty());
-    // Not by search, not by the next run's context.
-    let (hits, _) = l.search("servidor de pruebas TITAN-9", 10).unwrap();
-    assert!(hits.is_empty());
+    assert!(l.pending().unwrap().is_empty());
     let r2 = run(
         &w,
         "r2",
@@ -296,24 +295,12 @@ fn external_content_ends_in_quarantine_and_is_not_recalled() {
     );
     assert_eq!(r2.recalled.items, 0);
     assert!(!r2.first_user.contains("TITAN-9"));
-    // The person reviews it: only then does it come back.
-    let w_link = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
-    w_link.promote(clio_memory::MemoryId(row.id.0)).unwrap();
-    drop(w_link);
-    let r3 = run(
-        &w,
-        "r3",
-        "cómo se llama el servidor de pruebas",
-        vec![final_msg("TITAN-9")],
-        &s,
-    );
-    assert!(r3.recalled.ids.contains(&row.id.0), "{:?}", r3.recalled.ids);
 }
 
-// S-26: a procedure proposed by the agent waits for a person, even in a run with no outside
-// content, and the agent actor cannot approve anything.
+// S-26: what the model asks to keep at the close (procedures too) is active at once, marked as
+// from outside; the agent and session actors still cannot promote or archive anything.
 #[test]
-fn procedures_proposed_by_the_agent_wait_for_the_person() {
+fn what_the_model_asks_to_keep_is_active_and_marked_external() {
     let w = world();
     let s = scrubber();
     let r = run(
@@ -328,45 +315,86 @@ fn procedures_proposed_by_the_agent_wait_for_the_person() {
     assert!(!r.out.tainted);
     let kinds: Vec<(MemoryType, State)> =
         r.report.saved.iter().map(|s| (s.kind, s.state)).collect();
-    assert!(kinds.contains(&(MemoryType::Episodic, State::Active)));
-    assert!(
-        kinds.contains(&(MemoryType::Procedural, State::Quarantine)),
-        "{kinds:?}"
-    );
-    // What the model says it learned is never active by itself, procedure or not.
-    assert!(
-        kinds.contains(&(MemoryType::Semantic, State::Quarantine)),
-        "{kinds:?}"
-    );
+    for kind in [
+        MemoryType::Episodic,
+        MemoryType::Procedural,
+        MemoryType::Semantic,
+    ] {
+        assert!(kinds.contains(&(kind, State::Active)), "{kinds:?}");
+    }
     let l = link(&w);
-    assert_eq!(l.pending().unwrap().len(), 2);
-    assert!(
-        l.list(State::Active)
-            .unwrap()
-            .iter()
-            .all(|m| m.kind == MemoryType::Episodic)
-    );
-    let proc_id = r
-        .report
-        .saved
-        .iter()
-        .find(|s| s.kind == MemoryType::Procedural)
+    assert!(l.pending().unwrap().is_empty());
+    let asked: Vec<_> = l
+        .list(State::Active)
         .unwrap()
-        .id;
-    // The agent and the session actors cannot promote, archive or revert.
+        .into_iter()
+        .filter(|m| m.kind != MemoryType::Episodic)
+        .collect();
+    assert_eq!(asked.len(), 2);
+    assert!(asked.iter().all(|m| m.origin == Origin::External));
     let w_link = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
     let a = w_link.actors();
     let e = w_link.engine();
     for actor in [a.agente, a.sesion, a.importador] {
-        assert!(e.promote(clio_memory::MemoryId(proc_id), actor).is_err());
-        assert!(e.archive(clio_memory::MemoryId(proc_id), actor).is_err());
+        assert!(e.archive(asked[0].id, actor).is_err());
     }
-    // The person can.
-    w_link.promote(clio_memory::MemoryId(proc_id)).unwrap();
-    assert_eq!(
-        w_link.get(clio_memory::MemoryId(proc_id)).unwrap().state,
-        State::Active
-    );
+}
+
+// The agent saves active, with origin `agente`, or `externo` when its session read outside content;
+// it forgets to quarantine, where search no longer finds it.
+#[test]
+fn the_agent_saves_active_marked_by_what_it_read_and_forgets_to_quarantine() {
+    use clio_brain::memory_link::{Draft, Place};
+    let w = world();
+    let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
+    let draft = |t: &str| Draft::plain(t, MemoryType::Semantic);
+    let clean = l
+        .save_as_agent(
+            &draft("el despliegue usa compose"),
+            "s1",
+            Place::Personal,
+            false,
+        )
+        .unwrap();
+    let read = l
+        .save_as_agent(
+            &draft("la página dice que el puerto es 8080"),
+            "s1",
+            Place::Personal,
+            true,
+        )
+        .unwrap();
+    for (o, origin) in [(&clean, Origin::Agent), (&read, Origin::External)] {
+        assert_eq!(o.state, State::Active);
+        assert_eq!(l.get(o.memory).unwrap().origin, origin);
+    }
+    l.forget_as_agent(clean.memory).unwrap();
+    let (hits, _) = l.search("despliegue compose", 10).unwrap();
+    assert!(hits.iter().all(|m| m.id != clean.memory), "{hits:?}");
+    assert_eq!(l.pending().unwrap()[0].id, clean.memory);
+}
+
+// The agent corrects a memory, the person's too: the old one is replaced and the person's revert
+// brings it back.
+#[test]
+fn the_agent_updates_a_persons_memory_and_the_person_reverts_it() {
+    use clio_brain::memory_link::Draft;
+    let w = world();
+    let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
+    let mine = l.remember("me llamo Iván Ruiz", None).unwrap();
+    let o = l
+        .update_as_agent(
+            mine,
+            &Draft::plain("se llama Iván Montes", MemoryType::Semantic),
+            "s1",
+            false,
+        )
+        .unwrap();
+    assert_eq!(o.state, State::Active);
+    assert_eq!(l.get(mine).unwrap().state, State::Replaced);
+    assert_eq!(l.get(o.memory).unwrap().content, "se llama Iván Montes");
+    l.revert(o.op).unwrap();
+    assert_eq!(l.get(mine).unwrap().state, State::Active);
 }
 
 // S-27: each actor has its own quota, a flood from one does not touch the others, and a refusal
@@ -398,19 +426,12 @@ fn every_actor_has_its_own_quota_and_a_flood_never_breaks_a_close() {
     assert!(rejected_total > 0, "the quota never spoke");
     let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
     let from_agent = l
-        .pending()
+        .list(State::Active)
         .unwrap()
         .iter()
         .filter(|m| m.actor == l.actors().agente)
         .count();
     assert_eq!(from_agent, 20, "the agent actor is capped at its quota");
-    // Quarantine only: nothing the flood wrote is active.
-    assert!(
-        l.list(State::Active)
-            .unwrap()
-            .iter()
-            .all(|m| m.actor != l.actors().agente)
-    );
     // The person's quota is separate: they can still write.
     l.remember("Sigo pudiendo escribir", None).unwrap();
 }
@@ -493,7 +514,6 @@ fn only_the_person_writes_user_origin_facts() {
             assert_ne!(l.actor_name(m.actor), "persona");
         }
     }
-    assert!(l.list(State::Active).unwrap().is_empty());
     // Typing it as the person does is the only way in.
     let w_link = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
     let id = w_link.remember("Vivo en Tolú", Some("identidad")).unwrap();

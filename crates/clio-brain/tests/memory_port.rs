@@ -1351,7 +1351,7 @@ fn the_timeline_is_the_session_and_the_context_starts_with_its_summary_and_pins(
     };
     {
         let link = MemoryLink::open_write_in(&w.data, &EmbedModel::none(), Some("alfa")).unwrap();
-        link.propose_draft_as_agent(
+        link.save_as_agent(
             &clio_brain::memory_link::Draft {
                 text: "Objetivo: X · Hecho: Y".into(),
                 title: Some("Resumen de la sesión".into()),
@@ -1360,6 +1360,7 @@ fn the_timeline_is_the_session_and_the_context_starts_with_its_summary_and_pins(
             },
             "sesion-1",
             clio_brain::memory_link::Place::Project,
+            false,
         )
         .unwrap();
     }

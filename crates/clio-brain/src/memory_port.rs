@@ -321,11 +321,15 @@ impl LinkPort {
                 }
             }
         }
-        link.propose_draft_as_agent(&draft, session, place)
-            .map(|id| Proposed {
-                id: id.0,
-                saved: Saved::Waiting,
-                change: None,
+        link.save_as_agent(&draft, session, place, judging.tainted)
+            .map(|o| Proposed {
+                id: o.memory.0,
+                saved: match o.kind {
+                    OpKind::Noop => Saved::Known,
+                    OpKind::Update => Saved::Replaced,
+                    _ => Saved::Active,
+                },
+                change: (o.kind != OpKind::Noop).then_some(o.op.0),
             })
     }
 }

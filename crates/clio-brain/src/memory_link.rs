@@ -10,12 +10,14 @@
 //!   the instruction, each under its own budget. "Nothing relevant" is a valid answer: the
 //!   context then has no memory layer at all.
 //! - At the close, [`MemoryLink::close_run`] writes ONE batch, after the model loop is over.
-//!   The run's own record is episodic: active only if the run never touched outside content
-//!   (`tainted == false`), in quarantine otherwise. What the model proposes (lines `RECORDAR:` or
-//!   `PROCEDIMIENTO:` in its final message) ALWAYS goes to quarantine, as external origin: a model
-//!   that read a hostile file can say anything, and nothing it says is a fact of the person.
-//!   Procedural memories wait for a person on top of that. A refusal (secret, quota, size) is
-//!   recorded in the report and never breaks the close.
+//!   Everything is active at once (the memory is the agent's): the run's own record is episodic,
+//!   with origin `agente`, or `externo` if the run touched outside content (`tainted`). What the
+//!   model asks to keep (lines `RECORDAR:` or `PROCEDIMIENTO:` in its final message) is always
+//!   `externo`: a model that read a hostile file can say anything, so it is read back marked. A
+//!   refusal (secret, quota, size) is recorded in the report and never breaks the close.
+//! - During a session the agent saves, corrects and forgets ([`MemoryLink::save_as_agent`],
+//!   [`MemoryLink::update_as_agent`], [`MemoryLink::forget_as_agent`]); forgetting sends to
+//!   quarantine, where the record stays.
 //! - Facts of the person only enter through [`MemoryLink::remember`], which no agent code calls.
 //!
 //! The embedding model is optional: without it everything works by text and `note()` says so.
@@ -670,7 +672,7 @@ impl MemoryLink {
         if let Some(m) = f.final_message.as_deref().filter(|m| !m.trim().is_empty()) {
             episode += &format!(" Dijo: {}", text(m, 240));
         }
-        // Active only for a run that never read outside content; external origin = quarantine.
+        // Active either way; the origin says whether the run read outside content.
         let origin = if f.tainted {
             Origin::External
         } else {
@@ -684,7 +686,7 @@ impl MemoryLink {
             "run",
         );
 
-        // What the model asks to keep: always quarantine, as external; procedures wait on top.
+        // What the model asks to keep: active, always marked as from outside.
         let mut asked = 0usize;
         for line in f.final_message.as_deref().unwrap_or_default().lines() {
             let t = line.trim();
@@ -755,28 +757,51 @@ impl MemoryLink {
         }
     }
 
-    /// What the agent proposes during a session (the `memory_propose` tool): always the agent's
-    /// and always from outside content, so it always lands in quarantine, and a procedure also
-    /// waits for approval whatever its origin (S-26). There is no argument for the actor, the
-    /// origin or the scope: they are not the caller's to say (S-61). The engine's quota for the
-    /// agent and the cap on the quarantine (S-27) still apply; the message says which one
-    /// refused. Returns the id of the candidate.
-    pub fn propose_as_agent(&self, text: &str, kind: MemoryType, session: &str) -> Res<MemoryId> {
-        self.propose_draft_as_agent(&Draft::plain(text, kind), session, Place::Personal)
-    }
-
-    /// The same for a draft (title, category) in a place. A place this link has no scope for
-    /// (a project when there is none) is the person's.
-    pub fn propose_draft_as_agent(
+    /// What the agent saves during a session (the `memory_save` tool): active at once, the agent's,
+    /// with origin `externo` when the session read outside content (`tainted`) and `agente`
+    /// otherwise. There is no argument for the actor or the scope beyond the place: they are not
+    /// the caller's to say (S-61). The engine's secret check and the agent's quota still apply. A
+    /// place this link has no scope for (a project when there is none) is the person's.
+    pub fn save_as_agent(
         &self,
         draft: &Draft,
         session: &str,
         place: Place,
-    ) -> Res<MemoryId> {
+        tainted: bool,
+    ) -> Res<Outcome> {
         self.need_write()?;
         self.engine
-            .propose(self.agent_proposal(draft, session, place))
-            .map(|o| o.memory)
+            .propose(self.agent_proposal(draft, session, place, tainted))
+            .map_err(|e| explain(&e))
+    }
+
+    /// The agent corrects `old` (the `memory_update` tool): the new text replaces exactly that
+    /// memory, whoever wrote it, in its place and of its kind. The old one stays in the log as
+    /// replaced and the person's revert brings it back.
+    pub fn update_as_agent(
+        &self,
+        old: MemoryId,
+        draft: &Draft,
+        session: &str,
+        tainted: bool,
+    ) -> Res<Outcome> {
+        self.need_write()?;
+        let row = self.get(old)?;
+        let place = self
+            .place_of(row.scope)
+            .ok_or("esa memoria no es de este lugar")?;
+        let mut p = self.agent_proposal(draft, session, place, tainted);
+        p.kind = row.kind;
+        self.engine.replace(old, p).map_err(|e| explain(&e))
+    }
+
+    /// The agent forgets `id` (the `memory_forget` tool): to quarantine, out of every search, its
+    /// record kept; the person's revert brings it back.
+    pub fn forget_as_agent(&self, id: MemoryId) -> Res<OpId> {
+        self.need_write()?;
+        self.get(id)?; // only a memory of this link's places
+        self.engine
+            .forget(id, self.actors.agente, "olvidado por el agente")
             .map_err(|e| explain(&e))
     }
 
@@ -800,7 +825,13 @@ impl MemoryLink {
         clip(&clean_text(text), AGENT_TEXT_CHARS)
     }
 
-    fn agent_proposal(&self, draft: &Draft, session: &str, place: Place) -> Proposal {
+    fn agent_proposal(
+        &self,
+        draft: &Draft,
+        session: &str,
+        place: Place,
+        tainted: bool,
+    ) -> Proposal {
         let session = Self::agent_session(session);
         // Where it was learned: the project, when there is one (what a lesson shows elsewhere).
         let source = match self.project_name() {
@@ -813,7 +844,11 @@ impl MemoryLink {
             kind: draft.kind,
             content: Self::agent_text(&draft.text),
             topic_key: None,
-            origin: Origin::External,
+            origin: if tainted {
+                Origin::External
+            } else {
+                Origin::Agent
+            },
             session: Some(session.clone()),
             // The session is the episode: the timeline groups by it.
             episode: Some(session),
@@ -863,7 +898,7 @@ impl MemoryLink {
         let judge = self.engine.judge()?;
         self.engine.propose_judged(
             &judge,
-            self.agent_proposal(draft, session, place),
+            self.agent_proposal(draft, session, place, true),
             how,
             Sureness { confidence },
         )

@@ -682,17 +682,21 @@ fn with_jev_on_the_model_gets_the_time_the_memory_and_the_tool_suggestions_in_fr
     w.assert_key_nowhere();
 }
 
-/// A semantic memory of the agent, active (the person promoted it): origin `external`.
+/// A semantic memory the agent saved in a session that read outside content: active, origin
+/// `external`.
 fn agent_memory(w: &World, text: &str) {
-    use clio_brain::memory_link::{EmbedModel, MemoryLink};
+    use clio_brain::memory_link::{Draft, EmbedModel, MemoryLink, Place};
     use clio_memory::MemoryType;
     let data = w.home().join(".local/share/clio");
     std::fs::create_dir_all(&data).unwrap();
     let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
-    let id = link
-        .propose_as_agent(text, MemoryType::Semantic, "s1")
-        .unwrap();
-    link.promote(id).unwrap();
+    link.save_as_agent(
+        &Draft::plain(text, MemoryType::Semantic),
+        "s1",
+        Place::Personal,
+        true,
+    )
+    .unwrap();
 }
 
 fn find_files(d: &Path, name: &str) -> Vec<PathBuf> {

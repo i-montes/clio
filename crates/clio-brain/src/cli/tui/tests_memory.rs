@@ -466,9 +466,9 @@ fn a_36_escape_sequences_stored_in_the_file_do_not_reach_the_terminal() {
     }
     drop(engine);
     let loaded = MemoryData::load(&d).unwrap();
-    assert_eq!(loaded.pending.len(), HOSTILE.len());
+    assert_eq!(loaded.active, HOSTILE.len() as u64);
     assert!(
-        loaded.pending.iter().any(|r| r.content.contains('\u{1b}')),
+        loaded.recent.iter().any(|r| r.content.contains('\u{1b}')),
         "the file does hold the raw escape: this test is about the display"
     );
     let mut a = memory_app();
