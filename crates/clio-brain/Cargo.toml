@@ -21,7 +21,7 @@ telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
 # clio-memory v0.4.0, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "350c31828cb5a859dd2501b9de0a679ba66b6177" }
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "e753455bfb516cda2f6870459f91f83504f2090e" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }

@@ -1833,3 +1833,75 @@ fn a_near_duplicate_save_says_so() {
         "no memory text outside the data frame"
     );
 }
+
+// A vault value that straddles the preview's cut is crossed out whole, not left half shown.
+#[test]
+fn a_secret_across_the_preview_cut_is_crossed_out() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    let text = format!("{}{value} y más texto", "x".repeat(50));
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(2, Origin::Person, &text)],
+        )],
+        Mode::Items,
+    );
+    let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+    let g = call(&e, "s", "memory_get", json!({ "id": 1 }));
+    assert!(!g.content.contains("canario-del"), "{g:?}");
+    assert!(g.content.contains("[secreto"), "{g:?}");
+    assert_eq!(g.data["masked"], 1, "the crossed-out value is counted");
+}
+
+// The log says which memories reached the model, the neighbors whose words were shown too.
+#[test]
+fn the_log_names_the_neighbors_shown() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![
+                near(2, Origin::Person, "dos"),
+                near(3, Origin::Agent, "tres"),
+            ],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    assert!(call(&e, "s", "memory_get", json!({ "id": 1 })).ok);
+    let log = std::fs::read_to_string(run_dir(&e).join("memory.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(last["ids"], json!([1]));
+    assert_eq!(last["near"], json!([2, 3]));
+}
+
+// Neighbor ids never cost a search a result: a line that does not fit with them goes without.
+#[test]
+fn neighbor_ids_never_push_a_result_out() {
+    for len in (200..600).step_by(7) {
+        let items = |near: bool| -> Vec<MemoryItem> {
+            (1..=6)
+                .map(|i| {
+                    let it = item(i, Origin::Person, &"é".repeat(len));
+                    if near {
+                        with_near(
+                            it,
+                            (10..13)
+                                .map(|n| self::near(n, Origin::Person, "x"))
+                                .collect(),
+                        )
+                    } else {
+                        it
+                    }
+                })
+                .collect()
+        };
+        let shown = |near: bool| {
+            let r = search(&env(&FakePort::new(items(near), Mode::Items)), "s", "q");
+            assert!(r.content.len() <= 4096);
+            r.data["count"].as_u64().unwrap()
+        };
+        assert_eq!(shown(true), shown(false), "memories of {len} characters");
+    }
+}

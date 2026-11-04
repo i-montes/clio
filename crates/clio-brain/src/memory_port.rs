@@ -462,11 +462,13 @@ fn origin_of(row: &MemoryRow) -> Origin {
     }
 }
 
+/// Its title, else its text, whole: the tool host scrubs vault values before it cuts, and a cut
+/// here first could leave half of one that the scrubber no longer recognizes.
 fn near_of(row: &MemoryRow) -> Near {
     Near {
         id: row.id.0,
         origin: origin_of(row),
-        preview: clio_memory::agent::preview(row),
+        preview: row.title.clone().unwrap_or_else(|| row.content.clone()),
     }
 }
 

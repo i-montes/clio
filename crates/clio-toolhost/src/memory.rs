@@ -178,6 +178,7 @@ pub struct MemoryItem {
 pub struct Near {
     pub id: i64,
     pub origin: Origin,
+    /// Its title or text, uncut: cleaned (vault values crossed out) before it is cut to a preview.
     pub preview: String,
 }
 
@@ -514,6 +515,8 @@ impl Budget {
 #[derive(Default)]
 struct Facts {
     ids: Vec<i64>,
+    /// Neighbors whose words were shown with a memory read in full.
+    near: Vec<i64>,
     /// The change (operation) an undo was about: not a memory id.
     change: Option<i64>,
     /// This call marked the session (a memory that is not the person's).
@@ -970,6 +973,7 @@ impl ToolHost {
             "tool": req.tool,
             "results": facts.ids.len(),
             "ids": facts.ids,
+            "near": facts.near,
             "change": facts.change,
             "bytes": bytes,
             "tainted": facts.marked,
@@ -1106,6 +1110,7 @@ impl ToolHost {
             }
             None => false,
         });
+        let mut ids_after: Vec<(usize, String)> = Vec::new();
         let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
         // A memory read on its own is shown whole (within the cap); a list shows previews.
         let max_line = if req.tool == "memory_get" {
@@ -1136,7 +1141,10 @@ impl ToolHost {
                 &one_line(&cleaned),
                 max_line.saturating_sub(head.chars().count()),
             );
-            let mut line = format!("{head}{text}");
+            let line = format!("{head}{text}");
+            if used + line.len() + 1 > room {
+                break;
+            }
             if !previews && !it.near.is_empty() {
                 let near: Vec<String> = it
                     .near
@@ -1144,10 +1152,7 @@ impl ToolHost {
                     .take(NEAR_SEARCH)
                     .map(|n| format!("m{}", n.id))
                     .collect();
-                line.push_str(&format!(" · cerca: {}", near.join(", ")));
-            }
-            if used + line.len() + 1 > room {
-                break;
+                ids_after.push((lines.len(), format!(" · cerca: {}", near.join(", "))));
             }
             used += line.len() + 1;
             // Only memories that are shown: one left out was never in front of the model.
@@ -1178,9 +1183,21 @@ impl ToolHost {
                     if used + near_line.len() < room {
                         used += near_line.len() + 1;
                         lines.push(near_line);
+                        for n in it.near.iter().take(k) {
+                            facts.near.push(n.id);
+                            masked += count_masks(&self.clean(&n.preview))
+                                .saturating_sub(count_masks(&n.preview));
+                        }
                         break;
                     }
                 }
+            }
+        }
+        // Neighbor ids go in the room the results left: they never cost a result.
+        for (at, near) in ids_after {
+            if used + near.len() <= room {
+                used += near.len();
+                lines[at].push_str(&near);
             }
         }
         let left = found.items.len() - ids.len();

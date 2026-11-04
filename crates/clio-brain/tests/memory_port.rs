@@ -1877,3 +1877,27 @@ fn a_merge_in_clio_carries_the_relations() {
         related_to(&w, merged)
     );
 }
+
+// The tool host scrubs vault values before it cuts; a preview cut here first could leave half of
+// one, which the scrubber no longer recognizes. So the neighbor's text goes whole.
+#[test]
+fn a_neighbor_preview_reaches_the_tool_host_whole() {
+    let w = world();
+    let p = port(&w);
+    let long = "la clave de la base de staging es canario-del-baul-7f3a9c y vive en el baúl";
+    let a = ask(
+        &p,
+        "la base de staging guarda la clave",
+        ProposalKind::Semantic,
+    )
+    .unwrap()
+    .id;
+    let b = ask(&p, long, ProposalKind::Semantic).unwrap().id;
+    let got = MemoryPort::get(&p, a).unwrap();
+    let near = got
+        .near
+        .iter()
+        .find(|n| n.id == b)
+        .expect("b is a neighbor of a");
+    assert_eq!(near.preview, long);
+}
