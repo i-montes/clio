@@ -375,3 +375,31 @@ fn what_pi_reads_never_changes_the_level_of_the_prompt() {
     assert!(question.text.contains("esto es nivel 0"));
     assert_eq!(question.assessment.unwrap().level, Level::Direct);
 }
+
+// The brain puts the time in front of what the person typed (spec: Jev, «el antes del prompt»):
+// Pi receives the envelope, and the level is still judged on the person's words alone.
+#[test]
+fn pi_receives_the_time_in_front_of_what_the_person_typed() {
+    if need("pi_receives_the_time", false).is_none() {
+        return;
+    }
+    let c = fake(None);
+    let a = Assessor::new(Arc::new(SystemClock));
+    let got = assessed(&c, &a, "echo");
+    assert!(
+        got.text.starts_with("<clio-contexto>\nhora: 20"),
+        "{}",
+        got.text
+    );
+    assert!(
+        got.text.ends_with("</clio-contexto>\n\necho"),
+        "{}",
+        got.text
+    );
+    assert_eq!(clio_brain::pi::envelope::strip(&got.text), "echo");
+    assert_eq!(
+        got.assessment.unwrap(),
+        a.assess("echo"),
+        "the level ignores the envelope"
+    );
+}

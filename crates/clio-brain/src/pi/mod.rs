@@ -17,6 +17,7 @@
 //! it is installed, and the `builtin` harness is the fallback (`--harness builtin` forces it).
 
 pub mod budget;
+pub mod envelope;
 pub mod install;
 pub mod jail;
 pub mod launch;

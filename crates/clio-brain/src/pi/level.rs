@@ -91,7 +91,9 @@ pub fn run_assessed(
 ) -> Result<RunSummary, PiError> {
     // S-07: decided now, from the person's text, before Pi is asked anything.
     let assessment = assessor.assess(text);
-    let mut summary = client.run_prompt_limited(text, cancel, guard, on_event)?;
+    // The time goes in front of what Pi receives; the level above was judged without it.
+    let wire = super::envelope::wrap(&super::envelope::stamp_now(), text);
+    let mut summary = client.run_prompt_limited(&wire, cancel, guard, on_event)?;
     summary.assessment = Some(assessment);
     Ok(summary)
 }

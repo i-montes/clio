@@ -187,3 +187,22 @@ fn a_big_file_is_sampled_not_loaded_and_hundreds_of_sessions_list_fast() {
     assert!(took < Duration::from_secs(3), "listing took {took:?}");
     eprintln!("401 sessions listed in {took:?}");
 }
+
+// The title of a session is the first thing the person typed, not the envelope the brain put in
+// front of it (spec: Jev, «el antes del prompt»).
+#[test]
+fn the_title_is_what_the_person_typed_not_the_envelope() {
+    let d = tempfile::tempdir().unwrap();
+    let wrapped = clio_brain::pi::envelope::wrap("2026-11-03 18:42 -05:00", "revisa el login");
+    write(
+        d.path(),
+        "2026-10-31T12-00-00-000Z_aaa.jsonl",
+        &[
+            header("aaa", "/home/x/proj"),
+            user(1, &wrapped),
+            assistant(1),
+        ],
+    );
+    let list = list_sessions(d.path());
+    assert_eq!(list.sessions[0].title, "revisa el login");
+}
