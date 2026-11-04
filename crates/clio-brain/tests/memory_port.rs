@@ -1718,3 +1718,30 @@ fn a_merge_stays_in_the_memories_own_project_and_never_mixes_two() {
         .unwrap();
     assert_eq!(nowhere.get(m.id).unwrap().place, "proyecto alfa");
 }
+
+// The other form of the same bug: a session in project beta merging two of alfa's memories saved
+// the merge in beta.
+#[test]
+fn a_merge_from_another_project_lands_in_the_memories_project() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let decision = |t: &str| {
+        MemoryPort::propose(&alfa, &titled(t, t, "decision"), "s", &Judging::default())
+            .unwrap()
+            .id
+    };
+    let (a1, a2) = (
+        decision("Qué: alfa usa Postgres"),
+        decision("Qué: alfa usa la 16"),
+    );
+    let beta = in_project(&w, "beta");
+    let m = beta
+        .consolidate(
+            &[a1, a2],
+            &draft("Qué: alfa usa Postgres 16", ProposalKind::Semantic),
+            "s",
+            &judging(false),
+        )
+        .unwrap();
+    assert_eq!(beta.get(m.id).unwrap().place, "proyecto alfa");
+}

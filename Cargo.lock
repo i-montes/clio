@@ -313,7 +313,7 @@ dependencies = [
 [[package]]
 name = "clio-memory"
 version = "0.2.1"
-source = "git+https://github.com/i-montes/clio-memory?tag=v0.2.1#2b78db283eaea3013620409c3bd8914fcf11fdf6"
+source = "git+https://github.com/i-montes/clio-memory?rev=2b78db283eaea3013620409c3bd8914fcf11fdf6#2b78db283eaea3013620409c3bd8914fcf11fdf6"
 dependencies = [
  "model2vec-rs",
  "regex",
@@ -323,6 +323,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tracing",
  "unicode-normalization",
 ]
 
@@ -1893,6 +1894,25 @@ dependencies = [
  "unicode-normalization-alignments",
  "unicode-segmentation",
  "unicode_categories",
+]
+
+[[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
 ]
 
 [[package]]
