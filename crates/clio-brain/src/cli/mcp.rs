@@ -24,8 +24,8 @@ use super::home::{Config, Dirs};
 use super::vault::gateway_socket;
 use super::{Res, jev, mkdir_private};
 
-/// What another agent may use. The change tools of a Pi session (forget, promote, revert, pin)
-/// need the person's own words in the session, which an MCP client cannot give: they are not here.
+/// What another agent may use: reading, saving and the session summary. The changes (update,
+/// forget, pin, revert, merge) come with the standalone `clio-memory` server.
 const TOOLS: [(&str, &str); 6] = [
     (
         "memory_search",
@@ -44,8 +44,8 @@ const TOOLS: [(&str, &str); 6] = [
         "Read the last session's summary, what is pinned and the most recent memories of this project: use it when you start or resume work.",
     ),
     (
-        "memory_propose",
-        "Hand a memory to Clio (verified knowledge that is costly to rebuild): it is kept, replaces an earlier one, was known, or waits for the person's review. text: one line 'Qué: … · Por qué: … · Dónde: … · Aprendido: …'; kind: semantic or procedural; category: decision, architecture, bugfix, pattern, config, discovery, preference (how the person wants answers and work), profile (who the person is) or learning.",
+        "memory_save",
+        "Save a memory (verified knowledge that is costly to rebuild): it is memory at once, replaces an earlier one of the same topic, or was known. text: one line 'Qué: … · Por qué: … · Dónde: … · Aprendido: …'; kind: semantic or procedural; category: decision, architecture, bugfix, pattern, config, discovery, preference (how the person wants answers and work), profile (who the person is) or learning.",
     ),
     (
         "memory_session_summary",
@@ -263,6 +263,12 @@ fn call(
     if name == PROJECT_TOOL {
         return tool_result(id, project.unwrap_or("(ninguno: lo personal)"), false);
     }
+    // The old name of `memory_save`, for one version.
+    let name = if name == "memory_propose" {
+        "memory_save"
+    } else {
+        name
+    };
     if !TOOLS.iter().any(|(n, _)| *n == name) {
         return error(id, -32602, "unknown tool");
     }
@@ -274,8 +280,8 @@ fn call(
         args,
         session: state.session.clone(),
         call_id: n,
-        // What another agent brings is from outside, whatever it read before: its proposals are
-        // judged as a tainted session's (five at most, Jev's higher bar).
+        // What another agent brings is from outside, whatever it read before: its saves are a
+        // tainted session's (five at most, marked `externo`).
         tainted: true,
     });
     tool_result(id, &r.content, !r.ok)

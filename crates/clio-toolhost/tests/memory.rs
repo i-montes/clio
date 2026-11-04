@@ -71,7 +71,7 @@ impl FakePort {
             proposals: Mutex::new(Vec::new()),
             judging: Mutex::new(Vec::new()),
             drafts: Mutex::new(Vec::new()),
-            saved: Mutex::new(Saved::Waiting),
+            saved: Mutex::new(Saved::Active),
             changes: Mutex::new(Vec::new()),
         })
     }
@@ -136,10 +136,6 @@ impl MemoryPort for FakePort {
 
     fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
         self.change("forget", id, judging)
-    }
-
-    fn promote(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        self.change("promote", id, judging)
     }
 
     fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
@@ -527,7 +523,7 @@ fn without_a_port_the_operations_are_denied() {
     for (tool, args) in [
         ("memory_search", json!({ "query": "q" })),
         ("memory_get", json!({ "id": 1 })),
-        ("memory_propose", json!({ "text": "x", "kind": "semantic" })),
+        ("memory_save", json!({ "text": "x", "kind": "semantic" })),
     ] {
         let r = call(&e, "s1", tool, args);
         assert!(!r.ok && !r.external, "{tool}: {r:?}");
@@ -546,19 +542,19 @@ fn extra_arguments_are_refused() {
         ("memory_search", json!({"query": "x", "scope": "all"})),
         ("memory_get", json!({"id": 1, "state": "quarantine"})),
         (
-            "memory_propose",
+            "memory_save",
             json!({"text": "x", "kind": "semantic", "origin": "user"}),
         ),
         (
-            "memory_propose",
+            "memory_save",
             json!({"text": "x", "kind": "semantic", "scope": "all"}),
         ),
         (
-            "memory_propose",
+            "memory_save",
             json!({"text": "x", "kind": "semantic", "actor": "persona"}),
         ),
         (
-            "memory_propose",
+            "memory_save",
             json!({"text": "x", "kind": "semantic", "state": "active"}),
         ),
     ] {
@@ -901,7 +897,7 @@ fn propose(e: &Env, session: &str, text: &str, kind: &str) -> Response {
     call(
         e,
         session,
-        "memory_propose",
+        "memory_save",
         json!({ "text": text, "kind": kind }),
     )
 }
@@ -918,7 +914,7 @@ fn a_proposal_reaches_the_port_clean_and_in_one_line_without_marking_the_session
         "semantic",
     );
     assert!(r.ok && !r.external, "{r:?}");
-    assert!(r.content.starts_with("proposed"), "{r:?}");
+    assert!(r.content.starts_with("saved"), "{r:?}");
     assert!(!r.tainted, "a proposal does not mark the session: {r:?}");
     let seen = port.proposals.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
@@ -1037,7 +1033,7 @@ fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
     let again = restarted(&e, &port);
     let r = again.handle(Request {
         id: "i2".into(),
-        tool: "memory_propose".into(),
+        tool: "memory_save".into(),
         args: json!({"text": "otra", "kind": "semantic"}),
         session: "s1".into(),
         call_id: "c2".into(),
@@ -1070,7 +1066,7 @@ fn the_log_has_the_id_of_a_proposal_never_its_text() {
     }
     let log = std::fs::read_to_string(run.join("memory.jsonl")).unwrap();
     let row: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
-    assert_eq!(row["tool"], "memory_propose");
+    assert_eq!(row["tool"], "memory_save");
     assert_eq!(row["ids"].as_array().unwrap().len(), 1);
 }
 
@@ -1108,8 +1104,7 @@ fn the_model_is_told_what_became_of_its_proposal() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     for (saved, starts, how) in [
-        (Saved::Waiting, "proposed", "waiting"),
-        (Saved::Active, "saved: it is part", "saved"),
+        (Saved::Active, "saved: it is memory now", "saved"),
         (Saved::Replaced, "saved: it replaced", "replaced"),
         (Saved::Known, "already known", "known"),
     ] {
@@ -1120,72 +1115,7 @@ fn the_model_is_told_what_became_of_its_proposal() {
     }
 }
 
-// S-61: the person's words in the session reach the port from the brain, kept per session, five at
-// most, oldest dropped, and they are not a taint.
-#[test]
-fn the_brain_reports_what_the_person_said_and_the_port_gets_it_with_the_taint() {
-    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
-    let e = env(&port);
-    let said = |s: &str, t: &str| call(&e, s, "said", json!({ "text": t, "token": TOKEN }));
-    for n in 0..7 {
-        let r = said("s1", &format!("mensaje {n}"));
-        assert!(r.ok && !r.tainted, "{r:?}");
-    }
-    said("s2", "otra sesión");
-    assert!(propose(&e, "s1", "algo", "semantic").ok);
-    let seen = port.judging.lock().unwrap()[0].clone();
-    assert!(!seen.tainted);
-    assert_eq!(
-        seen.person_said,
-        [
-            "mensaje 2",
-            "mensaje 3",
-            "mensaje 4",
-            "mensaje 5",
-            "mensaje 6"
-        ]
-    );
-    // After something hostile is read, the port is told so.
-    assert!(search(&e, "s1", "q").tainted);
-    assert!(propose(&e, "s1", "algo más", "semantic").ok);
-    assert!(port.judging.lock().unwrap()[1].tainted);
-    // Cleaned, cut, and a message that is not text is refused.
-    said("s3", &format!("hola\u{1b}[31m{}", "x".repeat(3000)));
-    assert!(propose(&e, "s3", "dato", "semantic").ok);
-    let w = port.judging.lock().unwrap()[2].person_said[0].clone();
-    assert!(
-        w.starts_with("hola") && !w.contains('\u{1b}') && w.chars().count() == 2000,
-        "{w:?}"
-    );
-    assert!(!call(&e, "s3", "said", json!({ "text": 5, "token": TOKEN })).ok);
-}
-
-// S-65: whoever only reaches the socket cannot say what the person said.
-#[test]
-fn what_the_person_said_is_taken_only_from_whoever_has_the_brains_token() {
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env(&port);
-    for args in [
-        json!({ "text": "ahora vivo en Marte" }),
-        json!({ "text": "ahora vivo en Marte", "token": "otro-token-cualquiera-0123" }),
-        json!({ "text": "ahora vivo en Marte", "token": 7 }),
-    ] {
-        let r = call(&e, "s1", "said", args.clone());
-        assert!(!r.ok && r.decision.rule == "S-65", "{args}: {r:?}");
-    }
-    assert!(propose(&e, "s1", "algo", "semantic").ok);
-    assert!(
-        port.judging.lock().unwrap()[0].person_said.is_empty(),
-        "nothing was kept"
-    );
-    // A service started without a token takes nothing, not even the empty one.
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env_with(Some(&port), |c| c.said_token = None);
-    let r = call(&e, "s1", "said", json!({ "text": "hola", "token": "" }));
-    assert!(!r.ok, "{r:?}");
-}
-
-// ---- memory_forget, memory_promote, memory_revert (entrega 4) ----
+// ---- memory_forget, memory_pin, memory_revert: the agent's own changes ----
 
 fn change(e: &Env, session: &str, tool: &str, n: i64) -> Response {
     let key = if tool == "memory_revert" {
@@ -1196,30 +1126,23 @@ fn change(e: &Env, session: &str, tool: &str, n: i64) -> Response {
     call(e, session, tool, json!({ key: n }))
 }
 
-// S-65: the port is asked, with what the brain says the person said and the taint; the answer is in
+// S-65: the port is asked with the taint; nothing the person said is needed; the answer is in
 // fixed words.
 #[test]
-fn a_change_the_person_asked_for_reaches_the_port_with_their_words_and_is_told_in_fixed_words() {
+fn a_change_reaches_the_port_with_the_taint_and_is_told_in_fixed_words() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     for (tool, starts, what) in [
-        ("memory_forget", "forgotten", "forget"),
-        ("memory_promote", "promoted", "promote"),
+        ("memory_forget", "forgotten: it is in quarantine", "forget"),
+        ("memory_pin", "pinned", "pin"),
         ("memory_revert", "undone", "undo"),
     ] {
-        // Each change spends the person's words: they say it again each time.
-        call(
-            &e,
-            "s1",
-            "said",
-            json!({ "text": "olvida que vivo en Medellín", "token": TOKEN }),
-        );
         let r = change(&e, "s1", tool, 12);
         assert!(r.ok && r.content.starts_with(starts), "{tool}: {r:?}");
         let seen = port.changes.lock().unwrap().last().unwrap().clone();
         assert_eq!((seen.0.as_str(), seen.1), (what, 12));
-        assert_eq!(seen.2.person_said, ["olvida que vivo en Medellín"]);
         assert!(!seen.2.tainted);
+        assert_eq!(seen.2.session, "s1");
     }
     // After something hostile was read the port is told so.
     assert!(call(&e, "s1", "taint", json!({})).tainted);
@@ -1227,9 +1150,9 @@ fn a_change_the_person_asked_for_reaches_the_port_with_their_words_and_is_told_i
     assert!(port.changes.lock().unwrap().last().unwrap().2.tainted);
 }
 
-// S-65: the port can say no, and a memory with no judge cannot make the change at all.
+// S-65: the port can say no, and a memory that does not implement a change sends to the CLI.
 #[test]
-fn a_refused_change_says_why_and_a_port_without_a_judge_sends_the_person_to_the_cli() {
+fn a_refused_change_says_why_and_a_port_without_changes_sends_the_person_to_the_cli() {
     let port = FakePort::new(
         vec![],
         Mode::Fail("no consta que la persona lo pidiera".into()),
@@ -1257,7 +1180,7 @@ fn a_refused_change_says_why_and_a_port_without_a_judge_sends_the_person_to_the_
     cfg.jail = JailMode::Off;
     cfg.memory = Some(Arc::new(Plain));
     let host = ToolHost::new(cfg).unwrap();
-    let line = json!({"id":"i","tool":"memory_promote","args":{"id": 3},"session":"s","call_id":"c","tainted":false}).to_string();
+    let line = json!({"id":"i","tool":"memory_pin","args":{"id": 3},"session":"s","call_id":"c","tainted":false}).to_string();
     let resp: Response = serde_json::from_str(&host.handle_line(&line)).unwrap();
     assert!(!resp.ok && resp.content.contains("clio memory"), "{resp:?}");
 }
@@ -1294,10 +1217,10 @@ fn a_change_needs_a_positive_number_and_a_session_has_ten_of_them_and_the_refuse
     let failing = FakePort::new(vec![], Mode::Fail("no".into()));
     let e = env(&failing);
     for n in 1..=10 {
-        let r = change(&e, "s1", "memory_promote", n);
+        let r = change(&e, "s1", "memory_pin", n);
         assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
     }
-    assert!(denied_by_budget(&change(&e, "s1", "memory_promote", 11)));
+    assert!(denied_by_budget(&change(&e, "s1", "memory_pin", 11)));
 }
 
 #[test]
@@ -1311,63 +1234,20 @@ fn a_proposal_that_became_memory_tells_the_model_the_change_to_undo_it() {
         "{r:?}"
     );
     assert_eq!(r.data["change"], 41);
-    *port.saved.lock().unwrap() = Saved::Waiting;
+    *port.saved.lock().unwrap() = Saved::Known;
     let r = propose(&e, "s1", "otro dato", "semantic");
     assert!(
         !r.content.contains("change"),
-        "waiting has nothing to undo: {r:?}"
-    );
-}
-
-// S-65: one request of the person is one change; the next change needs new words.
-#[test]
-fn the_persons_words_are_spent_by_the_change_they_asked_for() {
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env(&port);
-    call(
-        &e,
-        "s1",
-        "said",
-        json!({ "text": "olvida lo de Medellín", "token": TOKEN }),
-    );
-    assert!(change(&e, "s1", "memory_forget", 3).ok);
-    assert!(change(&e, "s1", "memory_forget", 4).ok);
-    let seen = port.changes.lock().unwrap().clone();
-    assert_eq!(seen[0].2.person_said, ["olvida lo de Medellín"]);
-    assert!(
-        seen[1].2.person_said.is_empty(),
-        "spent by the first change"
-    );
-    assert_eq!(seen[0].2.session, "s1");
-    // A refused change does not spend them.
-    let failing = FakePort::new(vec![], Mode::Fail("no".into()));
-    let e = env(&failing);
-    call(
-        &e,
-        "s1",
-        "said",
-        json!({ "text": "olvida X", "token": TOKEN }),
-    );
-    assert!(!change(&e, "s1", "memory_forget", 3).ok);
-    change(&e, "s1", "memory_forget", 3);
-    assert_eq!(
-        failing.changes.lock().unwrap()[1].2.person_said,
-        ["olvida X"]
+        "already known has nothing to undo: {r:?}"
     );
 }
 
 #[test]
-fn a_proposal_that_waits_tells_the_model_its_number_and_an_undo_is_logged_as_a_change() {
+fn a_save_tells_the_model_its_number_and_an_undo_is_logged_as_a_change() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     let r = propose(&e, "s1", "dato", "semantic");
-    assert!(r.content.starts_with("proposed (m"), "{r:?}");
-    call(
-        &e,
-        "s1",
-        "said",
-        json!({ "text": "deshaz", "token": TOKEN }),
-    );
+    assert!(r.content.contains("(m90"), "{r:?}");
     assert!(change(&e, "s1", "memory_revert", 77).ok);
     let log = std::fs::read_to_string(run_dir(&e).join("memory.jsonl")).unwrap();
     let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
@@ -1384,7 +1264,7 @@ fn a_proposal_carries_its_title_and_category_checked_like_the_text() {
     let r = call(
         &e,
         "s1",
-        "memory_propose",
+        "memory_save",
         json!({"text": "Qué: Postgres 16 · Por qué: lo pide el cliente", "kind": "semantic",
                "title": "Base  de\ndatos", "category": "Decision"}),
     );
@@ -1410,13 +1290,13 @@ fn a_proposal_carries_its_title_and_category_checked_like_the_text() {
             "long text",
         ),
     ] {
-        assert!(!call(&e, "s2", "memory_propose", args).ok, "{why}");
+        assert!(!call(&e, "s2", "memory_save", args).ok, "{why}");
     }
     assert!(
         call(
             &e,
             "s3",
-            "memory_propose",
+            "memory_save",
             json!({"text": "y".repeat(1200), "kind": "semantic"})
         )
         .ok
@@ -1433,7 +1313,7 @@ fn a_title_with_a_secret_is_not_proposed() {
     let r = call(
         &e,
         "s1",
-        "memory_propose",
+        "memory_save",
         json!({"text": "algo", "kind": "semantic", "title": format!("clave {value}")}),
     );
     assert!(!r.ok && !r.content.contains(value), "{r:?}");
@@ -1540,7 +1420,7 @@ fn a_session_summary_is_one_episodic_line_in_a_fixed_order() {
                "next_steps": "medir", "instructions": "sin dependencias nuevas"}),
     );
     assert!(r.ok && !r.external && !r.tainted, "{r:?}");
-    assert!(r.content.starts_with("proposed"), "{r:?}");
+    assert!(r.content.starts_with("saved"), "{r:?}");
     let d = port.drafts.lock().unwrap()[0].clone();
     assert_eq!(d.kind, ProposalKind::Session);
     assert_eq!(
@@ -1600,12 +1480,6 @@ fn a_summary_with_a_secret_is_not_proposed_and_it_counts_as_a_proposal() {
 fn a_closed_session_only_saves_its_summary() {
     let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
     let e = env(&port);
-    call(
-        &e,
-        "s",
-        "said",
-        json!({ "text": "olvida el dato", "token": TOKEN }),
-    );
     assert!(!call(&e, "s", "closing", json!({ "token": "otro" })).ok);
     assert!(!call(&e, "s", "closing", json!({})).ok);
     assert!(search(&e, "s", "dato").ok, "not closed by a stranger");
@@ -1613,7 +1487,7 @@ fn a_closed_session_only_saves_its_summary() {
     for (tool, args) in [
         ("memory_forget", json!({"id": 1})),
         ("memory_search", json!({"query": "dato"})),
-        ("memory_propose", json!({"text": "x", "kind": "semantic"})),
+        ("memory_save", json!({"text": "x", "kind": "semantic"})),
         ("ls", json!({"path": "."})),
     ] {
         let r = call(&e, "s", tool, args);
@@ -1623,38 +1497,22 @@ fn a_closed_session_only_saves_its_summary() {
     assert!(port.changes.lock().unwrap().is_empty());
     let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
     assert!(r.ok, "{r:?}");
-    assert!(
-        port.judging
-            .lock()
-            .unwrap()
-            .last()
-            .unwrap()
-            .person_said
-            .is_empty()
-    );
     // Another session is not closed.
     assert!(search(&e, "otra", "dato").ok);
 }
 
 // ---- memory_pin and relations (stage 4) ----
 
-// S-65: pinning is a change the person asks for, like forgetting: their words reach the port, the
-// answer is in fixed words and it counts among the session's ten changes.
+// S-65: pinning is one of the agent's changes: the answer is in fixed words and it counts among
+// the session's ten changes.
 #[test]
-fn a_pin_the_person_asked_for_reaches_the_port_and_counts_as_a_change() {
+fn a_pin_reaches_the_port_and_counts_as_a_change() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
-    call(
-        &e,
-        "s1",
-        "said",
-        json!({ "text": "fija lo de Postgres", "token": TOKEN }),
-    );
     let r = change(&e, "s1", "memory_pin", 7);
     assert!(r.ok && r.content.starts_with("pinned"), "{r:?}");
     let seen = port.changes.lock().unwrap().last().unwrap().clone();
     assert_eq!((seen.0.as_str(), seen.1), ("pin", 7));
-    assert_eq!(seen.2.person_said, ["fija lo de Postgres"]);
     assert!(!change(&e, "s1", "memory_pin", 0).ok);
     for _ in 0..9 {
         change(&e, "s1", "memory_pin", 7);
@@ -1738,7 +1596,7 @@ fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() 
     assert!(denied_by_budget(&call(
         &e,
         "t",
-        "memory_propose",
+        "memory_save",
         json!({"text": "x", "kind": "semantic"})
     )));
 }
@@ -1748,7 +1606,7 @@ fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() 
 // A merge names 2 to 5 memories, carries the person's words to the port, is checked like a
 // proposal, and spends those words: the next change needs new ones.
 #[test]
-fn a_merge_reaches_the_port_with_the_persons_words_and_spends_them() {
+fn a_merge_reaches_the_port_with_its_ids_checked() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     for ids in ["12", "12, 12", "1,2,3,4,5,6", "doce, trece", "0, 3", ""] {
@@ -1761,12 +1619,6 @@ fn a_merge_reaches_the_port_with_the_persons_words_and_spends_them() {
         assert!(!r.ok, "{ids:?}: {r:?}");
     }
     assert!(port.changes.lock().unwrap().is_empty());
-    call(
-        &e,
-        "s",
-        "said",
-        json!({ "text": "une lo de Postgres", "token": TOKEN }),
-    );
     let r = call(
         &e,
         "s",
@@ -1776,28 +1628,28 @@ fn a_merge_reaches_the_port_with_the_persons_words_and_spends_them() {
     assert!(r.ok && r.content.starts_with("merged into m"), "{r:?}");
     let seen = port.changes.lock().unwrap().last().unwrap().clone();
     assert_eq!(seen.0, "consolidate [12, 15]");
-    assert_eq!(seen.2.person_said, ["une lo de Postgres"]);
     assert_eq!(
         port.drafts.lock().unwrap().last().unwrap().text,
         "usa Postgres 16"
     );
-    // Spent: a second merge reaches the port with no words.
-    call(
+}
+
+// The old name of `memory_save` still saves, for one version; `memory_promote` is gone (S-02).
+#[test]
+fn memory_propose_still_saves_and_memory_promote_is_not_declared() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = call(
         &e,
-        "s",
-        "memory_consolidate",
-        json!({"ids": "1, 2", "text": "y"}),
+        "s1",
+        "memory_propose",
+        json!({"text": "dato viejo", "kind": "semantic"}),
     );
-    assert!(
-        port.changes
-            .lock()
-            .unwrap()
-            .last()
-            .unwrap()
-            .2
-            .person_said
-            .is_empty()
-    );
+    assert!(r.ok && r.content.starts_with("saved"), "{r:?}");
+    assert_eq!(port.proposals.lock().unwrap()[0].0, "dato viejo");
+    let r = call(&e, "s1", "memory_promote", json!({"id": 3}));
+    assert!(!r.ok && r.decision.rule == "S-02", "{r:?}");
+    assert!(port.changes.lock().unwrap().is_empty());
 }
 
 // A merge is also one of the session's ten changes.
@@ -1826,7 +1678,7 @@ fn a_proposal_may_be_about_who_the_person_is() {
     let r = call(
         &e,
         "s",
-        "memory_propose",
+        "memory_save",
         json!({"text": "Qué: se llama Iván", "kind": "semantic", "title": "Nombre", "category": "Profile"}),
     );
     assert!(r.ok, "{r:?}");

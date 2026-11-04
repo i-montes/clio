@@ -1065,6 +1065,13 @@ impl Engine {
         }
     }
 
+    fn require_person_or_agent(&self, actor: ActorId) -> Result<()> {
+        match self.store.actor_kind(actor)? {
+            ActorKind::Person | ActorKind::Agent => Ok(()),
+            _ => Err(Error::NotAllowed),
+        }
+    }
+
     pub fn create_scope(&self, name: &str, language: &str) -> Result<ScopeId> {
         let _g = self.write_guard();
         self.check_name(name)?;
@@ -1779,10 +1786,16 @@ impl Engine {
         outcome!(span, self.revert_inner(op, actor))
     }
 
+    /// A person reverts anything; an agent only what it signed itself.
     fn revert_inner(&self, op: OpId, actor: ActorId) -> Result<OpId> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
-        self.revert_locked(&self.store.operation(op)?, actor)
+        let done = self.store.operation(op)?;
+        if self.require_person(actor).is_err()
+            && (self.store.actor_kind(actor)? != ActorKind::Agent || done.actor != actor)
+        {
+            return Err(Error::NotAllowed);
+        }
+        self.revert_locked(&done, actor)
     }
 
     /// Reverts everything `target` did that is still revertible, newest first.
@@ -1915,11 +1928,11 @@ impl Engine {
         self.store.list(scope, state, kind)
     }
 
-    /// Pins a memory: it comes first in the context. A person's choice (the model asks through a
-    /// person's request); not part of the log. Only an active memory can be pinned.
+    /// Pins a memory: it comes first in the context. The person's or the agent's choice; not part
+    /// of the log. Only an active memory can be pinned.
     pub fn pin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
+        self.require_person_or_agent(actor)?;
         if self.store.get(id)?.state != State::Active {
             return Err(Error::InvalidState);
         }
@@ -1928,7 +1941,7 @@ impl Engine {
 
     pub fn unpin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
+        self.require_person_or_agent(actor)?;
         self.store.get(id)?;
         self.store.set_pin(id, None)
     }

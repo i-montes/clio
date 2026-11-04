@@ -157,7 +157,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
             "memory_context",
             "memory_current_project",
             "memory_get",
-            "memory_propose",
+            "memory_save",
             "memory_search",
             "memory_session_summary",
             "memory_timeline"
@@ -170,7 +170,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
     );
     let proposed = by_id(&answers, 4);
     assert_eq!(proposed["result"]["isError"], json!(false), "{proposed}");
-    assert!(text(proposed).starts_with("proposed"), "{proposed}");
+    assert!(text(proposed).starts_with("saved"), "{proposed}");
     assert_eq!(text(by_id(&answers, 5)), "proj");
     for id in [6, 7, 9] {
         let a = by_id(&answers, id);
@@ -188,23 +188,30 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
         .filter(|id| by_id(&answers, *id)["result"]["isError"] == json!(false))
         .count();
     assert_eq!(more, 4, "the first one and four more: five in all");
-    // The proposals wait for the person, as the agent's, from outside, in the project, with the
-    // first client's name as their session; the person's memory is as it was.
-    let pending: Value =
-        serde_json::from_str(&e.clio(&["memory", "list", "--pending", "--json"])).unwrap();
-    let rows = pending.as_array().unwrap();
-    assert_eq!(rows.len(), 5, "{pending:#}");
+    // The saves are memory at once, the agent's, from outside, in the project, with the first
+    // client's name as their session; the person's memory is as it was.
+    let all: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
+    let rows: Vec<&Value> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["actor"] == "agente")
+        .collect();
+    assert_eq!(rows.len(), 5, "{all:#}");
     assert!(
         rows.iter().all(|r| r["run"] == "mcp:claude-code"
             && r["origin"] == "externo"
             && r["actor"] == "agente"
             && r["place"] == "proyecto proj"),
-        "{pending:#}"
+        "{all:#}"
     );
     let row = rows.iter().find(|r| r["title"] == "Base de datos").unwrap();
     assert_eq!(row["content"], "Qué: usa Postgres 16", "{row:#}");
-    let active: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
-    assert_eq!(active.as_array().unwrap().len(), 1, "{active:#}");
+    assert_eq!(
+        all.as_array().unwrap().len(),
+        6,
+        "the person's one and five: {all:#}"
+    );
     // Nothing of it is left among the runs nor in the runtime folder.
     let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
     assert!(runs.as_array().unwrap().is_empty(), "{runs:#}");

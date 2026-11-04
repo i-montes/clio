@@ -74,16 +74,10 @@ pub type Taint = Arc<dyn Fn() -> bool + Send + Sync>;
 /// What was shown, facts only (ids and counts), for the session's log.
 pub type Log = Arc<dyn Fn(&Prepared) + Send + Sync>;
 
-/// Tells the tool host what the person just said in this session. Only the brain hears it: a
-/// request to change a memory is compared with this, never with what the model says the person
-/// asked.
-pub type Said = Arc<dyn Fn(&str) + Send + Sync>;
-
 /// What the pre-prompt tells the rest of the system.
 #[derive(Clone)]
 pub struct Hooks {
     pub taint: Taint,
-    pub said: Said,
     pub log: Log,
 }
 
@@ -92,7 +86,6 @@ impl Hooks {
     pub fn none() -> Self {
         Self {
             taint: Arc::new(|| true),
-            said: Arc::new(|_| {}),
             log: Arc::new(|_| {}),
         }
     }
@@ -243,7 +236,6 @@ impl PrePrompt {
 impl Inner {
     fn prepare(&self, person_text: &str, stamp: &str, ask: Option<&str>) -> Prepared {
         let first = self.first.swap(false, Ordering::SeqCst);
-        (self.hooks.said)(person_text);
         // Cleaned first and cut after: a cut must never leave the front half of a secret.
         let cleaned = (self.scrub)(person_text).ok();
         let message: String = cleaned
@@ -488,7 +480,6 @@ mod tests {
         can_taint: Arc<AtomicBool>,
         asked: Arc<Mutex<Vec<String>>>,
         logged: Arc<Mutex<Vec<Vec<i64>>>>,
-        said: Arc<Mutex<Vec<String>>>,
         memory: Arc<Memory>,
     }
 
@@ -526,7 +517,6 @@ mod tests {
         let can_taint = Arc::new(AtomicBool::new(true));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let logged = Arc::new(Mutex::new(Vec::new()));
-        let said = Arc::new(Mutex::new(Vec::new()));
         let jev = o.jev.then(|| {
             Arc::new(Jev::new(
                 Config::default(),
@@ -546,12 +536,7 @@ mod tests {
             asked: asked.clone(),
             slow: o.slow,
         });
-        let (t, ct, lg, sd) = (
-            tainted.clone(),
-            can_taint.clone(),
-            logged.clone(),
-            said.clone(),
-        );
+        let (t, ct, lg) = (tainted.clone(), can_taint.clone(), logged.clone());
         let pp = PrePrompt::new(
             jev,
             catalog(),
@@ -562,7 +547,6 @@ mod tests {
                     t.fetch_add(1, Ordering::SeqCst);
                     ct.load(Ordering::SeqCst)
                 }),
-                said: Arc::new(move |m| sd.lock().unwrap().push(m.to_owned())),
                 log: Arc::new(move |p| lg.lock().unwrap().push(p.memory_ids.clone())),
             },
             Settings {
@@ -577,7 +561,6 @@ mod tests {
             can_taint,
             asked,
             logged,
-            said,
             memory,
         }
     }
@@ -805,15 +788,6 @@ mod tests {
         assert!(r.pp.prepare("d", STAMP).memory_ids.is_empty());
     }
 
-    // S-61: the brain tells the tool host what the person said, even when nothing else happens.
-    #[test]
-    fn what_the_person_said_is_reported_to_the_host_for_every_message() {
-        let r = rig(opts(false, &[], vec![]));
-        r.pp.prepare("primero", STAMP);
-        r.pp.prepare("segundo", STAMP);
-        assert_eq!(*r.said.lock().unwrap(), ["primero", "segundo"]);
-    }
-
     #[test]
     fn what_was_shown_is_logged_as_ids() {
         let r = rig(opts(false, &[], vec![cand(1, "dato", true)]));
@@ -899,17 +873,12 @@ mod tests {
 
     #[test]
     fn the_closing_message_is_only_clios_request_and_says_nothing_as_the_person() {
-        let said = Arc::new(Mutex::new(Vec::<String>::new()));
-        let seen = said.clone();
         let pre = PrePrompt::new(
             None,
             Vec::new(),
             None,
             Arc::new(|s| Ok(s.to_owned())),
-            Hooks {
-                said: Arc::new(move |t| seen.lock().unwrap().push(t.to_owned())),
-                ..Hooks::none()
-            },
+            Hooks::none(),
             Settings {
                 memory: false,
                 tool_hints: false,
@@ -923,6 +892,5 @@ mod tests {
             "{t}"
         );
         assert_eq!(envelope::strip(&t), "", "no words of the person");
-        assert!(said.lock().unwrap().is_empty());
     }
 }

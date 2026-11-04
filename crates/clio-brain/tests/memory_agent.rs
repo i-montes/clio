@@ -643,10 +643,10 @@ fn a_full_quarantine_is_explained_to_the_person() {
 }
 
 // S-63, S-64: the builtin loop does not mark a run as tainted when it reads memory, so it is
-// shown only what the person holds. What the judge made active from the agent's own proposals
-// is for the Pi chat, which shows it as data and marks the session.
+// shown only what the person holds and what did not come from outside. What the agent saved
+// marked `externo` is for the Pi chat, which shows it as data and marks the session.
 #[test]
-fn the_builtin_loop_is_shown_what_the_person_holds_and_not_what_the_judge_activated() {
+fn the_builtin_loop_is_shown_what_the_person_holds_and_not_what_the_agent_read_outside() {
     let w = world();
     let (judged, mine) = {
         let link = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
@@ -654,12 +654,14 @@ fn the_builtin_loop_is_shown_what_the_person_holds_and_not_what_the_judge_activa
             .remember("La persona prefiere el xilófono de madera", None)
             .unwrap();
         let judged = link
-            .propose_judged_as_agent(
-                "El xilófono de la oficina es de plástico",
-                MemoryType::Semantic,
+            .save_as_agent(
+                &clio_brain::memory_link::Draft::plain(
+                    "El xilófono de la oficina es de plástico",
+                    MemoryType::Semantic,
+                ),
                 "s",
-                clio_memory::Judged::Add,
-                0.95,
+                clio_brain::memory_link::Place::Personal,
+                true,
             )
             .unwrap();
         assert_eq!(judged.state, State::Active);

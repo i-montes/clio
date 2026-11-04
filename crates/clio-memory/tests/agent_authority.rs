@@ -112,3 +112,51 @@ fn replace_targets_exactly_one() {
         Err(Error::InvalidState)
     ));
 }
+
+#[test]
+fn an_agent_pins_but_an_importer_does_not() {
+    let f = fixture();
+    let id = f
+        .engine
+        .propose(prop(f.scope, f.person, "la rama es main"))
+        .unwrap()
+        .memory;
+    f.engine.pin(id, f.agent).unwrap();
+    assert_eq!(f.engine.pinned(f.scope).unwrap()[0].id, id);
+    f.engine.unpin(id, f.agent).unwrap();
+    let importer = f
+        .engine
+        .register_actor("importador", ActorKind::Importer, Quota::default())
+        .unwrap();
+    assert!(matches!(f.engine.pin(id, importer), Err(Error::NotAllowed)));
+}
+
+#[test]
+fn an_agent_reverts_only_what_it_signed() {
+    let f = fixture();
+    let other = f
+        .engine
+        .register_actor("mcp:otro", ActorKind::Agent, Quota::default())
+        .unwrap();
+    let mine = f
+        .engine
+        .propose(prop(f.scope, f.agent, "dato del agente"))
+        .unwrap();
+    let theirs = f
+        .engine
+        .propose(prop(f.scope, other, "dato de otro"))
+        .unwrap();
+    let persons = f
+        .engine
+        .propose(prop(f.scope, f.person, "dato de la persona"))
+        .unwrap();
+    for op in [theirs.op, persons.op] {
+        assert!(matches!(
+            f.engine.revert(op, f.agent),
+            Err(Error::NotAllowed)
+        ));
+    }
+    f.engine.revert(mine.op, f.agent).unwrap();
+    assert_ne!(f.engine.get(mine.memory).unwrap().state, State::Active);
+    assert_eq!(f.engine.get(persons.memory).unwrap().state, State::Active);
+}

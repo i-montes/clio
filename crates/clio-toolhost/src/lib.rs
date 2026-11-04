@@ -155,9 +155,8 @@ pub struct Config {
     /// `memory_get` and `memory_propose` are not declared and the gateway denies them (S-02): the
     /// loose `clio-toolhost` binary has none.
     pub memory: Option<Arc<dyn MemoryPort>>,
-    /// What the brain must show to tell the service what the person said (`said`): a secret the
-    /// brain made and put in this process's environment, which Pi never gets. Without it nothing
-    /// can be reported, and what is not reported cannot be confirmed.
+    /// What the brain must show to close a session (`closing`): a secret the brain made and put in
+    /// this process's environment, which Pi never gets.
     pub said_token: Option<String>,
 }
 
@@ -180,16 +179,9 @@ impl Config {
 #[derive(Default)]
 struct Taint {
     sources: Vec<&'static str>,
-    /// The person's last words in this session, as the brain reported them (memory only, never
-    /// kept on disk): what a judge compares a request against.
-    said: std::collections::VecDeque<String>,
     /// The person closed the session: only its summary may still be saved (`closing`).
     closing: bool,
 }
-
-/// How many of the person's messages are kept per session, and how long each may be.
-const SAID_KEEP: usize = 5;
-const SAID_CHARS: usize = 2000;
 
 /// An approval for exactly the action the gateway just allowed.
 struct Approved(String);
@@ -380,7 +372,7 @@ impl ToolHost {
     }
 
     pub fn is_tainted(&self, session: &str) -> bool {
-        // An entry only for what the person said (no sources) is not a taint.
+        // An entry only for a closing (no sources) is not a taint.
         lock(&self.sessions)
             .get(session)
             .is_some_and(|t| !t.sources.is_empty())
@@ -486,8 +478,11 @@ impl ToolHost {
         }
     }
 
-    pub fn handle(&self, req: Request) -> Response {
+    pub fn handle(&self, mut req: Request) -> Response {
         let _one_at_a_time = lock(&self.busy);
+        if req.tool == memory::OLD_SAVE {
+            req.tool = "memory_save".into();
+        }
         if !valid_session(&req.session) || req.id.len() > 128 || req.call_id.len() > 128 {
             return self.refuse(
                 &req.id,
@@ -514,14 +509,11 @@ impl ToolHost {
         if req.tool == "taint" {
             return self.taint(&req);
         }
-        if req.tool == "said" {
-            return self.said(&req, &map);
-        }
         if req.tool == "closing" {
             return self.closing(&req, &map);
         }
         // The last turn of a closed session saves its summary and nothing else: no file, no
-        // command, no change of the memory on words the person said earlier.
+        // command, no other change of the memory.
         if req.tool != "memory_session_summary"
             && lock(&self.sessions)
                 .get(&req.session)
@@ -767,59 +759,7 @@ impl ToolHost {
         }
     }
 
-    /// The brain reports what the person just said in this session. Only the brain knows it: the
-    /// model's claim about what the person asked is never taken in its place.
-    fn said(&self, req: &Request, args: &Map<String, Value>) -> Response {
-        let tainted = self.is_tainted(&req.session);
-        // Only the brain knows the token: a process that merely reaches the socket cannot put
-        // words in the person's mouth.
-        let known = self.said_token.as_deref();
-        let given = args.get("token").and_then(Value::as_str);
-        if known.is_none() || known != given {
-            return self.refuse(
-                &req.id,
-                "S-65",
-                "the person's words are reported by the brain only".into(),
-                tainted,
-            );
-        }
-        let Some(text) = args.get("text").and_then(Value::as_str) else {
-            return self.refuse(
-                &req.id,
-                "protocol",
-                "\"text\" must be a string".into(),
-                tainted,
-            );
-        };
-        let text: String = sanitize(text).chars().take(SAID_CHARS).collect();
-        {
-            let mut s = lock(&self.sessions);
-            if s.len() >= MAX_SESSIONS && !s.contains_key(&req.session) {
-                return self.refuse(&req.id, "protocol", "too many sessions".into(), tainted);
-            }
-            let t = s.entry(req.session.clone()).or_default();
-            if t.said.len() == SAID_KEEP {
-                t.said.pop_front();
-            }
-            t.said.push_back(text);
-        }
-        Response {
-            id: req.id.clone(),
-            ok: true,
-            content: String::new(),
-            data: Value::Null,
-            decision: DecisionOut {
-                outcome: "allow".into(),
-                rule: "said".into(),
-                reason: "keeping the person's words has no effect on the machine".into(),
-            },
-            tainted,
-            external: false,
-        }
-    }
-
-    /// The brain closes the session (with the same token as `said`): from now on only the summary
-    /// is served, and the person's earlier words count for nothing.
+    /// The brain closes the session (with its token): from now on only the summary is served.
     fn closing(&self, req: &Request, args: &Map<String, Value>) -> Response {
         let tainted = self.is_tainted(&req.session);
         let known = self.said_token.as_deref();
@@ -838,7 +778,6 @@ impl ToolHost {
             }
             let t = s.entry(req.session.clone()).or_default();
             t.closing = true;
-            t.said.clear();
         }
         Response {
             id: req.id.clone(),
@@ -853,21 +792,6 @@ impl ToolHost {
             tainted,
             external: false,
         }
-    }
-
-    /// The person's words in `session` were used for a change: a next change needs new ones.
-    pub(crate) fn forget_said(&self, session: &str) {
-        if let Some(t) = lock(&self.sessions).get_mut(session) {
-            t.said.clear();
-        }
-    }
-
-    /// The person's last words in `session`, oldest first.
-    pub(crate) fn person_said(&self, session: &str) -> Vec<String> {
-        lock(&self.sessions)
-            .get(session)
-            .map(|t| t.said.iter().cloned().collect())
-            .unwrap_or_default()
     }
 
     fn filter(&self, req: &Request, args: &Map<String, Value>, tainted: bool) -> Response {

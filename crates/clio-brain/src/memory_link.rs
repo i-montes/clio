@@ -27,9 +27,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clio_memory::{
-    ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, Judged, MemoryId,
-    MemoryRow, MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation,
-    ScopeId, SearchOpts, Signal, State, Sureness, SystemClock,
+    ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, MemoryId, MemoryRow,
+    MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation, ScopeId,
+    SearchOpts, Signal, State, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -795,6 +795,28 @@ impl MemoryLink {
         self.engine.replace(old, p).map_err(|e| explain(&e))
     }
 
+    /// The agent pins `id` (the `memory_pin` tool): it comes first in the context.
+    pub fn pin_as_agent(&self, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        self.get(id)?; // only a memory of this link's places
+        self.engine
+            .pin(id, self.actors.agente)
+            .map_err(|e| explain(&e))
+    }
+
+    /// The agent undoes `op` (the `memory_revert` tool): only a change it signed itself, in a
+    /// place of this link.
+    pub fn revert_as_agent(&self, op: OpId) -> Res<OpId> {
+        self.need_write()?;
+        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
+        if done.actor != self.actors.agente || self.place_of(done.scope).is_none() {
+            return Err("ese cambio no lo hizo el agente: no se puede deshacer por aquí".into());
+        }
+        self.engine
+            .revert(op, self.actors.agente)
+            .map_err(|e| explain(&e))
+    }
+
     /// The agent forgets `id` (the `memory_forget` tool): to quarantine, out of every search, its
     /// record kept; the person's revert brings it back.
     pub fn forget_as_agent(&self, id: MemoryId) -> Res<OpId> {
@@ -808,16 +830,6 @@ impl MemoryLink {
     /// The session of an agent's proposal as it is stored.
     pub fn agent_session(session: &str) -> String {
         clip(&clean_text(session), 200)
-    }
-
-    /// The judge's actor, if it was ever registered (read-only: it never registers it).
-    pub fn judge_actor(&self) -> Option<ActorId> {
-        self.engine
-            .actors()
-            .ok()?
-            .into_iter()
-            .find(|a| a.kind == ActorKind::Judge)
-            .map(|a| a.id)
     }
 
     /// The text of an agent's proposal as it is stored: clean, one line.
@@ -862,78 +874,6 @@ impl MemoryLink {
                 .filter(|t| !t.is_empty()),
             category: draft.category,
         }
-    }
-
-    /// The same proposal, decided by the judge (Jev) instead of the rules: new, a replacement or
-    /// already known. The engine still runs the quota and the secret check first, keeps the agent
-    /// as the author and the origin as outside, signs the operation as the judge and refuses to
-    /// replace what the person wrote without the person's confirmation. The error is the engine's
-    /// own so the caller can tell «refused, ask the person» from a failure.
-    pub fn propose_judged_as_agent(
-        &self,
-        text: &str,
-        kind: MemoryType,
-        session: &str,
-        how: Judged,
-        confidence: f32,
-    ) -> std::result::Result<Outcome, Error> {
-        self.propose_judged_draft(
-            &Draft::plain(text, kind),
-            session,
-            Place::Personal,
-            how,
-            confidence,
-        )
-    }
-
-    /// The same for a draft in a place.
-    pub fn propose_judged_draft(
-        &self,
-        draft: &Draft,
-        session: &str,
-        place: Place,
-        how: Judged,
-        confidence: f32,
-    ) -> std::result::Result<Outcome, Error> {
-        let judge = self.engine.judge()?;
-        self.engine.propose_judged(
-            &judge,
-            self.agent_proposal(draft, session, place, true),
-            how,
-            Sureness { confidence },
-        )
-    }
-
-    /// Undoes a change the judge made (the person asked, Jev confirmed). Only the judge's own
-    /// operations: what the person or anyone else did is not for the model to undo.
-    pub fn revert_judged(&self, op: OpId) -> Res<()> {
-        self.need_write()?;
-        let judge = self.engine.judge().map_err(|e| explain(&e))?;
-        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
-        if done.actor != judge.actor() || self.place_of(done.scope).is_none() {
-            return Err("ese cambio no lo hizo Jev: no se puede deshacer por aquí".into());
-        }
-        self.engine
-            .revert(op, self.actors.persona)
-            .map(|_| ())
-            .map_err(|e| explain(&e))
-    }
-
-    /// The change (operation) that the judge's `memory` came from, if the judge made it.
-    pub fn judge_change_of(&self, memory: MemoryId) -> Option<OpId> {
-        let judge = self.engine.judge().ok()?;
-        self.engine
-            .history(memory)
-            .ok()?
-            .into_iter()
-            .find(|o| o.actor == judge.actor())
-            .map(|o| o.id)
-    }
-
-    /// Is this memory the person's own (written by them, in a fixed block, or accepted by them)?
-    /// Then only the person's own words replace it. When in doubt (it cannot be read) it is.
-    pub fn is_protected(&self, row: &MemoryRow) -> bool {
-        self.engine.held_by_person(row).unwrap_or(true)
     }
 
     // ---------------------------------------------------------------- the person

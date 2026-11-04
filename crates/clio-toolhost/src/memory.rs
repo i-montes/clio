@@ -1,7 +1,9 @@
-//! The memory tools: `memory_search` and `memory_get` read the person's active memories;
-//! `memory_propose` suggests one, and a suggestion only ever lands in quarantine, where the person
-//! decides (S-61). The memory itself sits behind [`MemoryPort`] (the real one lives in
-//! `clio-brain`), so this crate never opens a database.
+//! The memory tools. The memory is the agent's: `memory_search`, `memory_get`, `memory_timeline`
+//! and `memory_context` read the active memories; `memory_save` (also `memory_propose`, its old
+//! name, for one version), `memory_update`, `memory_forget` (to quarantine), `memory_pin`,
+//! `memory_consolidate` and `memory_revert` (the agent's own changes) act at once (S-61, S-65). The
+//! memory itself sits behind [`MemoryPort`] (the real one lives in `clio-brain`), so this crate
+//! never opens a database.
 //!
 //! What comes back is text somebody wrote, maybe long ago, maybe hostile. It is cleaned first,
 //! cut after cleaning (so a secret is never split by the cut), kept to one line per memory (a
@@ -30,26 +32,30 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 12] = [
+pub(crate) const MEMORY_OPS: [&str; 11] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
     "memory_context",
-    "memory_propose",
+    "memory_save",
     "memory_session_summary",
     "memory_update",
     "memory_consolidate",
     "memory_forget",
-    "memory_promote",
     "memory_revert",
     "memory_pin",
 ];
 
+/// The old name of `memory_save`, still served for one version (a prompt or a client of before).
+pub(crate) const OLD_SAVE: &str = "memory_propose";
+
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
-const PROPOSE_DESCRIPTION: &str = "Propose a memory: Clio decides whether it is kept, replaces another, was known, or waits for the person's review";
+const SAVE_DESCRIPTION: &str =
+    "Save a memory: it is memory at once (Clio may refuse something unsafe or not worth keeping)";
 
-const SUMMARY_DESCRIPTION: &str = "Save the summary of this session (goal, what was done, discoveries, next steps, files): Clio decides it like a proposal";
+const SUMMARY_DESCRIPTION: &str =
+    "Save the summary of this session (goal, what was done, discoveries, next steps, files)";
 /// The parts of a session summary, in the order they are written, and the two it cannot lack.
 const SUMMARY_PARTS: [(&str, &str); 6] = [
     ("goal", "Objetivo"),
@@ -60,9 +66,10 @@ const SUMMARY_PARTS: [(&str, &str); 6] = [
     ("files", "Archivos"),
 ];
 
-const UPDATE_DESCRIPTION: &str = "Propose a new text for one memory (its id): Clio decides whether it replaces it, like any proposal";
+const UPDATE_DESCRIPTION: &str = "Correct one memory (its id) with a new text: it replaces it at once; the old one stays in the log";
 
-const CONSOLIDATE_DESCRIPTION: &str = "Merge two to five memories into one because the person asked (Clio checks the person's words); the originals are archived, not erased";
+const CONSOLIDATE_DESCRIPTION: &str =
+    "Merge two to five memories into one; the originals are forgotten (quarantine), not erased";
 /// How many memories one merge may join.
 const MAX_MERGE: usize = 5;
 
@@ -70,13 +77,11 @@ const TIMELINE_DESCRIPTION: &str =
     "Read the memories around one, of its session (or its place), in order (read-only)";
 const CONTEXT_DESCRIPTION: &str =
     "Read the last session's summary, the pinned memories and the most recent ones (read-only)";
-const FORGET_DESCRIPTION: &str =
-    "Archive a memory because the person asked (it is not erased; Clio checks the person's words)";
-const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Clio checks the person's words)";
-const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context, because the person asked (Clio checks the person's words)";
-const REVERT_DESCRIPTION: &str = "Undo a change Clio made to the memory because the person asked (Clio checks the person's words)";
+const FORGET_DESCRIPTION: &str = "Forget a memory: it leaves the memory for quarantine, its record kept (the person can restore it)";
+const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
+const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
 
-/// Changes a session may ask for through these three tools (S-47, S-65).
+/// Changes a session may make through forget, pin, revert and consolidate (S-47, S-65).
 pub(crate) const MAX_CHANGES: u32 = 10;
 const NO_CHANGES: &str =
     "this memory cannot make that change: the person can do it with `clio memory`";
@@ -209,50 +214,44 @@ pub enum ProposalKind {
 /// What the memory did with a proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Saved {
-    /// It is memory now (the judge, Jev, said it is new).
+    /// It is memory now.
     Active,
     /// It replaced an earlier memory of the same fact.
     Replaced,
     /// It was already known: nothing was added.
     Known,
-    /// It waits for the person's review.
-    Waiting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Proposed {
     pub id: i64,
     pub saved: Saved,
-    /// The change (operation) the judge made, so the model can undo it if the person asks.
+    /// The change (operation) the agent made, so it can undo it (`memory_revert`).
     pub change: Option<i64>,
 }
 
-/// What the tool host tells the port about the call so it can judge it: whether the session read
-/// anything hostile, and the person's last words in it (what they said themselves, never what the
-/// model reports they said).
+/// What the tool host tells the port about the call: whether the session read anything hostile
+/// (what it saves is marked `externo`, and Jev is told).
 #[derive(Debug, Clone, Default)]
 pub struct Judging {
     pub tainted: bool,
-    pub person_said: Vec<String>,
     /// The Pi session the call comes from.
     pub session: String,
 }
 
-/// What the tool host needs from the memory: active memories of the person's scope to read, and
-/// one way to write: a proposal that waits for the person. There is no way to promote, archive,
-/// revert or purge through it, and nothing here says who the writer is or how far to trust it:
-/// the port decides that (S-60, S-61).
+/// What the tool host needs from the memory: active memories to read, and the agent's own writes.
+/// There is no way to promote, archive or purge through it (the person's, with `clio memory`), and
+/// nothing here says who the writer is or which origin it gets: the port decides that (S-60, S-61).
 pub trait MemoryPort: Send + Sync {
-    /// Hands `text` to the memory as the agent's, from outside content: the memory decides (the
-    /// judge when there is one, else the rules: quarantine for the person). `session` is only for
-    /// the record. Returns the id and what became of it.
+    /// Saves `text` as the agent's, at once. `session` is only for the record. Returns the id and
+    /// what became of it; a refusal (a secret, the quota, Jev's clear «no») is the error.
     fn propose(
         &self,
         draft: &ProposalDraft,
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String>;
-    /// A new text for memory `id`, decided like a proposal (the judge, or the person's review).
+    /// A new text for memory `id`: it replaces it at once.
     fn update(
         &self,
         _id: i64,
@@ -262,8 +261,8 @@ pub trait MemoryPort: Send + Sync {
     ) -> Result<Proposed, String> {
         Err("this memory cannot update; propose a new one".into())
     }
-    /// One memory instead of `ids` (same place, facts), because the person asked: the port checks
-    /// their words with the judge, saves the merged one and archives the originals.
+    /// One memory instead of `ids` (same place, facts): the merged one is saved and the originals
+    /// are forgotten.
     fn consolidate(
         &self,
         _ids: &[i64],
@@ -281,20 +280,15 @@ pub trait MemoryPort: Send + Sync {
     fn context(&self) -> Result<Vec<MemoryItem>, String> {
         Err("this memory has no context".into())
     }
-    /// Archives memory `id` (reversible, not an erasure) because the person asked. The port checks
-    /// the person's words in `judging`; the model's claim is not evidence.
+    /// Forgets memory `id`: to quarantine, its record kept, restorable.
     fn forget(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
     }
-    /// Accepts the candidate `id` that waits for review, because the person asked.
-    fn promote(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
-        Err(NO_CHANGES.into())
-    }
-    /// Pins memory `id` (it comes first in the context), because the person asked.
+    /// Pins memory `id` (it comes first in the context).
     fn pin(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
     }
-    /// Undoes `change`, one the judge made, because the person asked.
+    /// Undoes `change`, one the agent made itself.
     fn undo(&self, _change: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
     }
@@ -315,7 +309,7 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("query", ArgKind::Text, true),
             a("limit", ArgKind::Int, false),
         ],
-        "memory_propose" => vec![
+        "memory_save" | OLD_SAVE => vec![
             a("text", ArgKind::Text, true),
             a("kind", ArgKind::Text, true),
             a("title", ArgKind::Text, false),
@@ -376,12 +370,11 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_get", GET_DESCRIPTION),
         ("memory_timeline", TIMELINE_DESCRIPTION),
         ("memory_context", CONTEXT_DESCRIPTION),
-        ("memory_propose", PROPOSE_DESCRIPTION),
+        ("memory_save", SAVE_DESCRIPTION),
         ("memory_session_summary", SUMMARY_DESCRIPTION),
         ("memory_update", UPDATE_DESCRIPTION),
         ("memory_consolidate", CONSOLIDATE_DESCRIPTION),
         ("memory_forget", FORGET_DESCRIPTION),
-        ("memory_promote", PROMOTE_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
         ("memory_pin", PIN_DESCRIPTION),
     ]
@@ -389,7 +382,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
     .map(|(name, description)| ToolDecl {
         name: name.into(),
         version: "1".into(),
-        // A proposal changes the memory file, but only by adding a candidate nobody trusts.
+        // A write changes the memory file, and every change stays in its log (revertible).
         effect: if matches!(
             name,
             "memory_search" | "memory_get" | "memory_timeline" | "memory_context"
@@ -581,13 +574,13 @@ impl ToolHost {
     ) -> Response {
         if matches!(
             req.tool.as_str(),
-            "memory_propose" | "memory_session_summary" | "memory_update" | "memory_consolidate"
+            "memory_save" | "memory_session_summary" | "memory_update" | "memory_consolidate"
         ) {
             return self.propose_call(req, args, out);
         }
         if matches!(
             req.tool.as_str(),
-            "memory_forget" | "memory_promote" | "memory_revert" | "memory_pin"
+            "memory_forget" | "memory_revert" | "memory_pin"
         ) {
             return self.change_call(req, args, out);
         }
@@ -623,13 +616,7 @@ impl ToolHost {
         }
     }
 
-    /// `memory_propose`, after the gateway let the call through: the proposals a session may make
-    /// (S-47) are counted in a file before the port is asked, as the reads are, and the log has to
-    /// be kept or the call is denied. A proposal never marks the session: it carries what the
-    /// model decided to say, not what a memory said.
-    /// `memory_forget`, `memory_promote` and `memory_revert`: what the person asks the model to do
-    /// with their memory. The port checks the person's own words (reported by the brain, never the
-    /// model's claim) with Jev; without a judge it says no, and the person uses `clio memory`.
+    /// `memory_forget`, `memory_pin` and `memory_revert`: the agent's own changes, counted (S-65).
     fn change_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
@@ -659,7 +646,6 @@ impl ToolHost {
         }
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
-            person_said: self.person_said(&req.session),
             session: req.session.clone(),
         };
         let tool = req.tool.clone();
@@ -669,7 +655,6 @@ impl ToolHost {
             &port,
             move |p| match tool.as_str() {
                 "memory_forget" => p.forget(n, &judging),
-                "memory_promote" => p.promote(n, &judging),
                 "memory_pin" => p.pin(n, &judging),
                 _ => p.undo(n, &judging),
             },
@@ -678,8 +663,6 @@ impl ToolHost {
         let mut facts = Facts::default();
         let resp = match done {
             Ok(()) => {
-                // One request of the person is one change: the next one needs new words.
-                self.forget_said(&req.session);
                 if req.tool == "memory_revert" {
                     facts.change = Some(n);
                 } else {
@@ -687,12 +670,9 @@ impl ToolHost {
                 }
                 let content = match req.tool.as_str() {
                     "memory_forget" => {
-                        "forgotten: it is archived, not erased; the person can restore it"
+                        "forgotten: it is in quarantine, not erased; the person can restore it"
                     }
-                    "memory_promote" => "promoted: it is part of the person's memory now",
-                    "memory_pin" => {
-                        "pinned: it comes first in the context; the person can unpin it with `clio memory`"
-                    }
+                    "memory_pin" => "pinned: it comes first in the context",
                     _ => "undone: the change was reverted",
                 };
                 Response {
@@ -713,8 +693,12 @@ impl ToolHost {
         }
     }
 
+    /// `memory_save` and the other writes, after the gateway let the call through: the saves a
+    /// session may make (S-47) are counted in a file before the port is asked, as the reads are,
+    /// and the log has to be kept or the call is denied. A save never marks the session: it carries
+    /// what the model decided to say, not what a memory said.
     fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
-        // A merge archives memories: it is also one of the session's ten changes (S-65).
+        // A merge forgets memories: it is also one of the session's ten changes (S-65).
         if req.tool == "memory_consolidate" {
             let path = self.run_dir.join("memory-changes.json");
             let mut changes = match Budget::load(&path) {
@@ -743,10 +727,7 @@ impl ToolHost {
             MAX_PROPOSALS_CLEAN
         };
         if budget.calls >= cap {
-            return self.budget_denied(
-                req,
-                &format!("this session made its memory proposals ({cap}); the person reviews what is there"),
-            );
+            return self.budget_denied(req, &format!("this session made its memory saves ({cap})"));
         }
         budget.calls += 1;
         if let Err(why) = budget.save(&path) {
@@ -892,11 +873,10 @@ impl ToolHost {
         let session = req.session.clone();
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
-            person_said: self.person_said(&req.session),
             session: req.session.clone(),
         };
-        // Up to four questions to Jev (place, decision, the person's words, relation) and the
-        // writer: a proposal reported as failed must not be saved afterwards in the background.
+        // Up to three questions to Jev (the guard, the place, a relation) and the writer: a save
+        // reported as failed must not be saved afterwards in the background.
         match self.ask_port_for(
             &port,
             move |p| match (merge, target) {
@@ -909,13 +889,11 @@ impl ToolHost {
             Ok(done) if req.tool == "memory_consolidate" => {
                 facts.ids.push(done.id);
                 facts.ids.extend(merged_ids.iter().copied());
-                // One request of the person is one change: the next one needs new words.
-                self.forget_said(&req.session);
                 Response {
                     id: req.id.clone(),
                     ok: true,
                     content: format!(
-                        "merged into m{}: the originals are archived, not erased (the person can restore them)",
+                        "merged into m{}: the originals are forgotten (quarantine), not erased",
                         done.id
                     ),
                     data: json!({ "proposed": true, "result": "merged", "change": done.change }),
@@ -927,26 +905,19 @@ impl ToolHost {
             Ok(done) => {
                 facts.ids.push(done.id);
                 let (content, how) = match done.saved {
-                    Saved::Active => ("saved: it is part of the person's memory now", "saved"),
+                    Saved::Active => ("saved: it is memory now", "saved"),
                     Saved::Replaced => (
                         "saved: it replaced an earlier memory of the same fact",
                         "replaced",
                     ),
                     Saved::Known => ("already known: nothing was added", "known"),
-                    Saved::Waiting => (
-                        "proposed: it waits for the person's review and is not memory until they accept it",
-                        "waiting",
-                    ),
                 };
-                // The change number is only for undoing, if the person asks: `memory_revert`.
+                // The change number is for undoing it: `memory_revert`.
                 let content = match done.change {
-                    _ if done.saved == Saved::Waiting => format!(
-                        "proposed (m{}): it waits for the person's review and is not memory until they accept it",
-                        done.id
-                    ),
                     Some(c) if matches!(done.saved, Saved::Active | Saved::Replaced) => {
                         format!(
-                            "{content} (change {c}: if the person asks you to undo it, use memory_revert with it)"
+                            "{content} (m{}, change {c}: memory_revert undoes it)",
+                            done.id
                         )
                     }
                     _ => content.to_owned(),

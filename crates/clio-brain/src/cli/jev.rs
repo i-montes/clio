@@ -225,16 +225,8 @@ pub fn taint_session(socket: &Path, session: &str) -> bool {
     false
 }
 
-/// Tells the tool host what the person just said in this session, so that a request to change a
-/// memory is compared with it and not with the model's report of it. Best effort: if it is not
-/// known, the memory simply does not change what the person wrote.
-pub fn said_to_host(socket: &Path, session: &str, token: &str, text: &str) {
-    let req = json!({"id": "said", "tool": "said", "args": {"text": text, "token": token}, "session": session, "call_id": "said"});
-    let _ = ask_host(socket, &req);
-}
-
-/// Tells the tool host the person closed the session: its last turn may only save the summary,
-/// and their earlier words no longer back any change. `false` if the host did not take it.
+/// Tells the tool host the person closed the session: its last turn may only save the summary.
+/// `false` if the host did not take it.
 pub fn closing_to_host(socket: &Path, session: &str, token: &str) -> bool {
     let req = json!({"id": "closing", "tool": "closing", "args": {"token": token}, "session": session, "call_id": "closing"});
     ask_host(socket, &req).is_some_and(|r| r["ok"] == json!(true))
@@ -266,7 +258,6 @@ pub fn preprompt(
         None => Err("sin baúl".into()),
     });
     let (socket, id) = (toolhost.socket.clone(), session.to_owned());
-    let (socket2, id2, token) = (socket.clone(), id.clone(), toolhost.said_token.clone());
     let log_file = run_dir.join("memory-inject.jsonl");
     PrePrompt::new(
         client(dirs, cfg),
@@ -275,7 +266,6 @@ pub fn preprompt(
         scrub,
         Hooks {
             taint: Arc::new(move || taint_session(&socket, &id)),
-            said: Arc::new(move |t| said_to_host(&socket2, &id2, &token, t)),
             log: Arc::new(move |p| log_shown(&log_file, p)),
         },
         Settings {
