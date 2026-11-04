@@ -4,7 +4,8 @@
 # scripts/rule-coverage.exempt says where else it is checked.
 spec-clio-contract
 spec-clio-gateway
-spec-clio-memory
 spec-clio-models
 spec-clio-triage
 spec-clio-vault
+# spec-clio-memory: its acceptance tests run in i-montes/clio-memory's CI, where the engine lives
+# now (Clio pins it by tag, crates/clio-brain/Cargo.toml).
