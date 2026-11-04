@@ -23,6 +23,7 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
                                               lo que Clio recuerda (clio memory --help)
   clio doctor [--json]                        revisa permisos, clave, sockets y el equipo
+  clio --version                              la versión
   clio pi doctor|install|sessions [--json]    Pi (el arnés del agente): estado, instalación, sesiones
 
 Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
@@ -62,6 +63,10 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     let mut args = Args::new(it.collect());
     if matches!(cmd.as_str(), "-h" | "--help" | "help") {
         println!("{USAGE}");
+        return Ok(0);
+    }
+    if matches!(cmd.as_str(), "-V" | "--version" | "version") {
+        println!("clio {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
     if !matches!(

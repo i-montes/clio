@@ -25,6 +25,12 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory purge <id> [--reason \"motivo\"] [--yes]
                                               borra el contenido PARA SIEMPRE (texto, vector, historial);
                                               deja una lápida sin contenido. No se puede deshacer
+  clio memory review [--json]                 lo que espera tu revisión (igual que list --pending)
+  clio memory history <id> [--json]           cada cambio que tocó un recuerdo (sus versiones)
+  clio memory revert <cambio> [--yes]         deshace un cambio (su número sale en history)
+  clio memory context [--json]                lo que recibe una sesión que empieza en esta carpeta
+  clio memory conflicts [--json]              recuerdos que Jev juzgó que se contradicen
+  clio memory import <archivo>                trae una exportación a una memoria vacía
   clio memory project [set <nombre>]          el proyecto de esta carpeta y de dónde sale; set lo fija (.clio-project)
   clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
   clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
@@ -360,6 +366,165 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 ));
             };
             println!("{}", setup_text(agent)?);
+        }
+        // Waiting for the person: the same as `list --pending`, by the name the docs use.
+        "review" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let rows = link.pending()?;
+            if json {
+                let v: Vec<Value> = rows.iter().map(|m| row_json(&link, m)).collect();
+                print_json(&Value::Array(v))?;
+            } else {
+                print_rows(st, &rows, "nada pendiente de revisar");
+            }
+        }
+        // The versions of a memory: every change that touched it, with who and when.
+        "history" => {
+            let json = args.flag("--json");
+            let rest = args.rest()?;
+            let [id] = rest.as_slice() else {
+                return Err("falta el id: clio memory history <id>".into());
+            };
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let ops = link.history(id_of(id)?)?;
+            if json {
+                let v: Vec<Value> = ops
+                    .iter()
+                    .map(|o| json!({"change": o.id.0, "kind": format!("{:?}", o.kind), "actor": link.actor_name(o.actor), "at": o.at, "reverts": o.reverts.map(|r| r.0)}))
+                    .collect();
+                print_json(&Value::Array(v))?;
+            } else if ops.is_empty() {
+                println!("sin cambios registrados");
+            } else {
+                for o in ops {
+                    println!(
+                        "cambio {:<6} {:<10} {}{}",
+                        o.id.0,
+                        format!("{:?}", o.kind).to_lowercase(),
+                        sanitize::line(&link.actor_name(o.actor)),
+                        o.reverts
+                            .map_or(String::new(), |r| format!(" (deshace {})", r.0))
+                    );
+                }
+            }
+        }
+        // Undo one change (its number from `history`), as the person.
+        "revert" => {
+            let yes = args.flag("--yes");
+            let rest = args.rest()?;
+            let [op] = rest.as_slice() else {
+                return Err("falta el cambio: clio memory revert <cambio> (míralo con clio memory history ID)".into());
+            };
+            let op: i64 = op
+                .parse()
+                .map_err(|_| format!("{op:?} no es un número de cambio"))?;
+            if !yes && !confirm(&format!("¿Deshacer el cambio {op}?")) {
+                println!("no se cambió nada");
+                return Ok(0);
+            }
+            let done = open_write(dirs)?.revert(clio_memory::OpId(op))?;
+            println!(
+                "deshecho: el cambio {op} (lo registra el cambio {})",
+                done.0
+            );
+        }
+        // What the memory gives a session started in this folder (the summary, pinned, recent).
+        "context" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            let project = clio_brain::project::settle(&dirs.data, &cwd).map(|(n, _, _)| n);
+            let port = clio_brain::memory_port::LinkPort::new(&dirs.data, None).in_project(project);
+            let items = clio_toolhost::MemoryPort::context(&port)?;
+            if json {
+                let v: Vec<Value> = items
+                    .iter()
+                    .map(|i| json!({"id": i.id, "title": i.title, "text": i.text, "place": i.place, "notes": i.notes}))
+                    .collect();
+                print_json(&Value::Array(v))?;
+            } else if items.is_empty() {
+                println!("nada todavía");
+            } else {
+                for i in items {
+                    let head = match &i.title {
+                        Some(t) => format!("{t} — "),
+                        None => String::new(),
+                    };
+                    println!(
+                        "m{:<5} {} {}{}",
+                        i.id,
+                        st.dim(&sanitize::line(&i.place)),
+                        sanitize::line(&head),
+                        sanitize::line(&i.text)
+                    );
+                }
+            }
+        }
+        // Pairs of memories Jev judged to contradict each other: to decide which one stays.
+        "conflicts" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let pairs = link.conflicts()?;
+            if json {
+                let v: Vec<Value> = pairs
+                    .iter()
+                    .map(|(a, b)| json!([row_json(&link, a), row_json(&link, b)]))
+                    .collect();
+                print_json(&Value::Array(v))?;
+            } else if pairs.is_empty() {
+                println!("ninguna contradicción anotada");
+            } else {
+                for (a, b) in pairs {
+                    println!("{}", row_line(st, &a, ui::width()));
+                    println!("  contradice a");
+                    println!("{}\n", row_line(st, &b, ui::width()));
+                }
+            }
+        }
+        // An export back into an empty memory (another machine, a restore).
+        "import" => {
+            let rest = args.rest()?;
+            let [file] = rest.as_slice() else {
+                return Err("uso: clio memory import <archivo> (solo en una memoria vacía)".into());
+            };
+            let db = MemoryLink::db_path(&dirs.data);
+            if db.exists() {
+                return Err(format!(
+                    "ya hay una memoria en {}: la importación solo va a una vacía (muévela antes)",
+                    db.display()
+                ));
+            }
+            let f = std::fs::File::open(file).map_err(|e| format!("{file}: {e}"))?;
+            let engine = clio_memory::Engine::open(
+                &db,
+                clio_memory::OpenMode::ReadWrite,
+                std::sync::Arc::new(clio_memory::SystemClock),
+            )
+            .map_err(|e| e.to_string())?;
+            let s = engine
+                .import(&mut std::io::BufReader::new(f))
+                .map_err(|e| format!("{file}: {e}"));
+            drop(engine);
+            match s {
+                Ok(s) => println!("importado: {} operaciones", s.operations),
+                Err(why) => {
+                    // Nothing came in (it is one transaction): no half memory is left behind.
+                    let _ = std::fs::remove_file(&db);
+                    return Err(why);
+                }
+            }
         }
         "projects" => {
             let json = args.flag("--json");
