@@ -1151,6 +1151,43 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// The operations that touched `id`, oldest first (its versions), if this view can read it.
+    pub fn history(&self, id: MemoryId) -> Res<Vec<clio_memory::Operation>> {
+        self.get(id)?;
+        self.engine.history(id).map_err(|e| explain(&e))
+    }
+
+    /// Undoes operation `op` as the person (the engine refuses what cannot be undone).
+    pub fn revert(&self, op: OpId) -> Res<OpId> {
+        self.need_write()?;
+        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
+        if self.place_of(done.scope).is_none() {
+            return Err("ese cambio no es de esta memoria".into());
+        }
+        self.engine
+            .revert(op, self.actors.persona)
+            .map_err(|e| explain(&e))
+    }
+
+    /// Pairs of active memories judged to contradict each other, in the places this view knows,
+    /// each pair once (the newest relations first).
+    pub fn conflicts(&self) -> Res<Vec<(MemoryRow, MemoryRow)>> {
+        let mut out: Vec<(MemoryRow, MemoryRow)> = Vec::new();
+        for row in self.list(State::Active)? {
+            for r in self.engine.relations(row.id).map_err(|e| explain(&e))? {
+                if r.relation != Relation::ConflictsWith || r.source != row.id {
+                    continue;
+                }
+                if let Ok(other) = self.get(r.target)
+                    && other.state == State::Active
+                {
+                    out.push((row.clone(), other));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Is this active memory past its review cycle? (Only its place is looked at.)
     pub fn is_due(&self, row: &MemoryRow) -> bool {
         self.engine.due(row).unwrap_or(false)

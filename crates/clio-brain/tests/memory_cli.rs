@@ -950,3 +950,73 @@ fn open_engine(
     }
     panic!("the memory stayed locked");
 }
+
+// The rest of what the person needs at the command line: what waits (review), the versions of a
+// memory (history) and undoing one change (revert), what a session here starts with (context),
+// what contradicts what (conflicts), and bringing an export into an empty memory (import).
+#[test]
+fn review_history_revert_context_conflicts_and_import() {
+    let e = Env::new(true);
+    let data = e.home().join(".local/share/clio");
+    e.clio(&["memory", "remember", "El proyecto usa PostgreSQL 15"]);
+    e.clio(&["memory", "remember", "El proyecto usa PostgreSQL 16"]);
+    assert!(e.clio(&["memory", "review"]).contains("nada pendiente"));
+    let h: Value = serde_json::from_str(&e.clio(&["memory", "history", "1", "--json"])).unwrap();
+    assert_eq!(h.as_array().unwrap().len(), 1, "{h:#}");
+    let first_change = h[0]["change"].as_i64().unwrap();
+    // What a session in this folder starts with: the newest of the person's place.
+    let c: Value = serde_json::from_str(&e.clio(&["memory", "context", "--json"])).unwrap();
+    assert!(
+        c.as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["text"] == "El proyecto usa PostgreSQL 16"),
+        "{c:#}"
+    );
+    // Jev noted that the two contradict each other.
+    clio_brain::memory_link::MemoryLink::open_write(
+        &data,
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .relate_judged(
+        clio_memory::MemoryId(2),
+        clio_memory::MemoryId(1),
+        clio_memory::Relation::ConflictsWith,
+        0.9,
+    )
+    .unwrap();
+    let pairs: Value = serde_json::from_str(&e.clio(&["memory", "conflicts", "--json"])).unwrap();
+    assert_eq!(pairs.as_array().unwrap().len(), 1, "{pairs:#}");
+    assert_eq!(pairs[0][0]["id"], 2);
+    assert_eq!(pairs[0][1]["id"], 1);
+    // Undo the first one: it is no longer remembered, and the history says so.
+    e.clio(&["memory", "revert", &first_change.to_string(), "--yes"]);
+    let active: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
+    assert!(
+        active.as_array().unwrap().iter().all(|r| r["id"] != 1),
+        "{active:#}"
+    );
+    assert!(e.clio(&["memory", "conflicts"]).contains("ninguna"));
+    // Export, then bring it into an empty memory elsewhere; never over an existing one.
+    let file = e.tmp.path().join("mem.jsonl");
+    e.clio(&["memory", "export", &file.display().to_string()]);
+    let o = e.try_clio(&["memory", "import", &file.display().to_string()]);
+    assert!(!o.status.success() && text(&o.stderr).contains("ya hay una memoria"));
+    let other = Env::new(false);
+    std::fs::create_dir_all(other.home().join(".local/share/clio")).unwrap();
+    assert!(
+        other
+            .clio(&["memory", "import", &file.display().to_string()])
+            .contains("importado")
+    );
+    assert!(other.clio(&["--version"]).starts_with("clio "));
+    let back: Value = serde_json::from_str(&other.clio(&["memory", "list", "--json"])).unwrap();
+    assert!(
+        back.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["content"] == "El proyecto usa PostgreSQL 16"),
+        "{back:#}"
+    );
+}
