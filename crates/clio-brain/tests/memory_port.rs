@@ -1684,3 +1684,37 @@ fn jev_guards_a_session_summary_too() {
     let e = MemoryPort::propose(&unsafe_, &summary, "s", &judging(true)).unwrap_err();
     assert!(e.contains("Clio no lo guardó"), "{e}");
 }
+
+// A merge joins memories of one scope (one project, not just «a project») and stays there; two
+// projects are never mixed.
+#[test]
+fn a_merge_stays_in_the_memories_own_project_and_never_mixes_two() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let beta = in_project(&w, "beta");
+    let decision = |p: &LinkPort, t: &str| {
+        MemoryPort::propose(p, &titled(t, t, "decision"), "s", &Judging::default())
+            .unwrap()
+            .id
+    };
+    let a1 = decision(&alfa, "Qué: alfa usa Postgres");
+    let a2 = decision(&alfa, "Qué: alfa usa la versión 16");
+    let b1 = decision(&beta, "Qué: beta usa Redis");
+    let nowhere = port(&w);
+    let merged = draft("Qué: mezcla", ProposalKind::Semantic);
+    assert_eq!(
+        nowhere
+            .consolidate(&[a1, b1], &merged, "s", &judging(false))
+            .unwrap_err(),
+        "solo se unen memorias del mismo sitio"
+    );
+    let m = nowhere
+        .consolidate(
+            &[a1, a2],
+            &draft("Qué: alfa usa Postgres 16", ProposalKind::Semantic),
+            "s",
+            &judging(false),
+        )
+        .unwrap();
+    assert_eq!(nowhere.get(m.id).unwrap().place, "proyecto alfa");
+}

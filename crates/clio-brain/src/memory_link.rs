@@ -787,6 +787,24 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// The same, in the scope of `beside` (another project's too): what a merge of that place's
+    /// memories saves.
+    pub fn save_beside(
+        &self,
+        draft: &Draft,
+        session: &str,
+        beside: &MemoryRow,
+        tainted: bool,
+    ) -> Res<Outcome> {
+        self.need_write()?;
+        let place = self
+            .place_of(beside.scope)
+            .ok_or("esa memoria no es de este lugar")?;
+        let mut p = self.agent_proposal(draft, session, place, tainted);
+        p.scope = beside.scope;
+        self.engine.propose(p).map_err(|e| explain(&e))
+    }
+
     /// The agent corrects `old` (the `memory_update` tool): the new text replaces exactly that
     /// memory, whoever wrote it, in its place and of its kind. The old one stays in the log as
     /// replaced and the person's revert brings it back.
