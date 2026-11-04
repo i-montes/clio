@@ -56,6 +56,16 @@ pub const GUARD_FILES: [(&str, &str); 4] = [
 const TOOLHOST_READY: Duration = Duration::from_secs(60);
 const TOOLHOST_GRACE: Duration = Duration::from_secs(3);
 
+/// 128 random bits as hex, from the system.
+fn random_token() -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| format!("no pude hacer una clave aleatoria: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn text(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -121,6 +131,9 @@ pub struct Toolhost {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
     pub socket: PathBuf,
+    /// What the service wants to see before it believes the brain about what the person said. Made
+    /// here, put in the service's own environment (Pi never gets it) and shown by nobody else.
+    pub said_token: String,
     sock_dir: PathBuf,
 }
 
@@ -172,6 +185,7 @@ impl Toolhost {
         } else {
             "auto"
         };
+        let said_token = random_token()?;
         let mut cmd = Command::new(exe);
         cmd.arg("toolhost");
         if let Some((data, model)) = memory {
@@ -192,6 +206,7 @@ impl Toolhost {
             .args(["--jail", jail])
             .env_clear()
             .envs(extra_env.iter().map(|(k, v)| (k, v)))
+            .env("CLIO_SAID_TOKEN", &said_token)
             .env("HOME", paths.home_dir())
             .env("PATH", "/usr/bin:/bin")
             .env(
@@ -219,6 +234,7 @@ impl Toolhost {
             child: Mutex::new(Some(child)),
             stdin: Mutex::new(stdin),
             socket,
+            said_token,
             sock_dir,
         };
         // On any failure `this` drops here and stops the process.

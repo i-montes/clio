@@ -1023,6 +1023,21 @@ impl Engine {
         }
     }
 
+    /// Is this memory the person's own: written by them, held in a fixed block, or a candidate
+    /// they accepted (a person's `promote` makes it theirs, whoever wrote it)? Only the person's
+    /// own words replace it.
+    pub fn held_by_person(&self, row: &MemoryRow) -> Result<bool> {
+        if row.origin == Origin::User || self.in_block(row.scope, row.id)? {
+            return Ok(true);
+        }
+        for op in self.store.history(row.id)? {
+            if op.kind == OpKind::Promote && self.store.actor_kind(op.actor)? == ActorKind::Person {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Is `id` in a fixed block of the scope (who the person is, rules, preferences)?
     fn in_block(&self, scope: ScopeId, id: MemoryId) -> Result<bool> {
         for b in self.store.blocks(scope)? {
@@ -1197,9 +1212,7 @@ impl Engine {
                 if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
                     return Err(Error::InvalidState);
                 }
-                if !person_confirmed
-                    && (row.origin == Origin::User || self.in_block(p.scope, row.id)?)
-                {
+                if !person_confirmed && self.held_by_person(&row)? {
                     return Err(Error::NotAllowed); // what the person wrote is replaced by the person
                 }
                 topic_key = row.topic_key.clone();

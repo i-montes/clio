@@ -404,3 +404,53 @@ fn the_decision_log_says_the_judge_decided_and_how_sure_it_was() {
     assert!((d.confidence.unwrap() - 0.87).abs() < 1e-6);
     assert!(d.reason.as_deref().unwrap().contains("judged: add"));
 }
+
+// S-25 S-27 S-64: a candidate the person accepted is theirs, whoever wrote it.
+#[test]
+fn a_candidate_the_person_accepted_is_protected_like_what_they_wrote() {
+    let f = fixture();
+    let j = f.engine.judge().unwrap();
+    let waiting = f
+        .engine
+        .propose(external(&f, "La reunión es los martes"))
+        .unwrap()
+        .memory;
+    f.engine.promote(waiting, f.person).unwrap();
+    let e = f
+        .engine
+        .propose_judged(
+            &j,
+            external(&f, "La reunión es los miércoles"),
+            Judged::Update {
+                old: waiting,
+                person_confirmed: false,
+            },
+            sure(),
+        )
+        .unwrap_err();
+    assert!(matches!(e, Error::NotAllowed), "{e:?}");
+    // What the judge itself made active is not the person's: it can be replaced.
+    let made = f
+        .engine
+        .propose_judged(
+            &j,
+            external(&f, "El proyecto usa Rust"),
+            Judged::Add,
+            sure(),
+        )
+        .unwrap()
+        .memory;
+    let o = f
+        .engine
+        .propose_judged(
+            &j,
+            external(&f, "El proyecto usa Go"),
+            Judged::Update {
+                old: made,
+                person_confirmed: false,
+            },
+            sure(),
+        )
+        .unwrap();
+    assert_eq!(o.kind, OpKind::Update);
+}

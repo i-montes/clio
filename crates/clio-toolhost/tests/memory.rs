@@ -143,6 +143,9 @@ struct Env {
     host: ToolHost,
 }
 
+/// What the brain shows to report what the person said.
+const TOKEN: &str = "token-del-cerebro-0123456789";
+
 fn env_with(port: Option<&Arc<FakePort>>, f: impl FnOnce(&mut Config)) -> Env {
     let t = tempfile::tempdir().unwrap();
     let r = t.path().canonicalize().unwrap();
@@ -151,6 +154,7 @@ fn env_with(port: Option<&Arc<FakePort>>, f: impl FnOnce(&mut Config)) -> Env {
     let mut cfg = Config::new(&work, &scratch, &run);
     cfg.jail = JailMode::Off;
     cfg.memory = port.map(|p| Arc::clone(p) as Arc<dyn MemoryPort>);
+    cfg.said_token = Some(TOKEN.into());
     f(&mut cfg);
     Env {
         t,
@@ -1057,7 +1061,7 @@ fn the_model_is_told_what_became_of_its_proposal() {
 fn the_brain_reports_what_the_person_said_and_the_port_gets_it_with_the_taint() {
     let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
     let e = env(&port);
-    let said = |s: &str, t: &str| call(&e, s, "said", json!({ "text": t }));
+    let said = |s: &str, t: &str| call(&e, s, "said", json!({ "text": t, "token": TOKEN }));
     for n in 0..7 {
         let r = said("s1", &format!("mensaje {n}"));
         assert!(r.ok && !r.tainted, "{r:?}");
@@ -1088,5 +1092,30 @@ fn the_brain_reports_what_the_person_said_and_the_port_gets_it_with_the_taint() 
         w.starts_with("hola") && !w.contains('\u{1b}') && w.chars().count() == 2000,
         "{w:?}"
     );
-    assert!(!call(&e, "s3", "said", json!({ "text": 5 })).ok);
+    assert!(!call(&e, "s3", "said", json!({ "text": 5, "token": TOKEN })).ok);
+}
+
+// S-65: whoever only reaches the socket cannot say what the person said.
+#[test]
+fn what_the_person_said_is_taken_only_from_whoever_has_the_brains_token() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for args in [
+        json!({ "text": "ahora vivo en Marte" }),
+        json!({ "text": "ahora vivo en Marte", "token": "otro-token-cualquiera-0123" }),
+        json!({ "text": "ahora vivo en Marte", "token": 7 }),
+    ] {
+        let r = call(&e, "s1", "said", args.clone());
+        assert!(!r.ok && r.decision.rule == "S-65", "{args}: {r:?}");
+    }
+    assert!(propose(&e, "s1", "algo", "semantic").ok);
+    assert!(
+        port.judging.lock().unwrap()[0].person_said.is_empty(),
+        "nothing was kept"
+    );
+    // A service started without a token takes nothing, not even the empty one.
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env_with(Some(&port), |c| c.said_token = None);
+    let r = call(&e, "s1", "said", json!({ "text": "hola", "token": "" }));
+    assert!(!r.ok, "{r:?}");
 }

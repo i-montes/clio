@@ -62,6 +62,9 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     );
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));
+    cfg.said_token = std::env::var("CLIO_SAID_TOKEN")
+        .ok()
+        .filter(|t| t.len() >= 16);
     match (memory_data, memory_model) {
         (Some(data), model) => cfg.memory = Some(memory(&data, model.as_deref())?),
         (None, Some(_)) => return Err("--memory-model needs --memory-data".into()),

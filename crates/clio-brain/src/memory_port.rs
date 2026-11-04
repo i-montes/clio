@@ -79,37 +79,46 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
+        let kind = match kind {
+            ProposalKind::Semantic => MemoryType::Semantic,
+            ProposalKind::Procedural => MemoryType::Procedural,
+        };
+        // Jev is asked BEFORE the writer is taken: what it is asked about is read without holding
+        // the lock, so a slow answer never keeps the person's own writes waiting. The engine
+        // re-checks every memory it is told to replace once it holds the lock.
+        let verdict = self.judge.as_ref().map(|judge| {
+            let stored = MemoryLink::agent_text(text);
+            let neighbors: Vec<Neighbor> =
+                match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
+                    Ok(Some(link)) => link
+                        .search(&stored, 3)
+                        .map(|(rows, _)| {
+                            rows.into_iter()
+                                .map(|r| Neighbor {
+                                    id: r.id.0,
+                                    protected: link.is_protected(&r),
+                                    text: r.content,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+            judge.decide(
+                &stored,
+                kind == MemoryType::Procedural,
+                &neighbors,
+                judging.tainted,
+                &judging.person_said,
+            )
+        });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
         let link = MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
             // The detail names a path of the person's: the service's log, not the model.
             eprintln!("clio-toolhost: memory: {why}");
             "la memoria no se puede abrir para escribir ahora".to_owned()
         })?;
-        let kind = match kind {
-            ProposalKind::Semantic => MemoryType::Semantic,
-            ProposalKind::Procedural => MemoryType::Procedural,
-        };
-        if let Some(judge) = &self.judge {
-            let stored = MemoryLink::agent_text(text);
-            let neighbors: Vec<Neighbor> = link
-                .search(&stored, 3)
-                .map(|(rows, _)| {
-                    rows.into_iter()
-                        .map(|r| Neighbor {
-                            id: r.id.0,
-                            protected: link.is_protected(&r),
-                            text: r.content,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let v = judge.decide(
-                &stored,
-                kind == MemoryType::Procedural,
-                &neighbors,
-                judging.tainted,
-                &judging.person_said,
-            );
+        if let Some(v) = verdict {
             let how = match v.call {
                 Call::Add => Some(Judged::Add),
                 Call::Update {
@@ -138,10 +147,19 @@ impl MemoryPort for LinkPort {
                             saved,
                         });
                     }
-                    // The engine refused what the judge asked (a neighbor that stopped being
-                    // active, one the person owns): the person decides, as before the judge.
-                    Err(Error::NotAllowed | Error::InvalidState | Error::NotFound) => {}
-                    Err(e) => return Err(explain(&e)),
+                    // A refusal that is the proposal's own (a secret, a quota, too long, empty,
+                    // another writer) is said as it is; anything else the judge asked for and the
+                    // engine could not do (a neighbor that stopped being active, one the person
+                    // owns, a date, a judge that cannot be registered) leaves the proposal to the
+                    // person, as it was before the judge.
+                    Err(
+                        e @ (Error::SecretDetected
+                        | Error::QuotaExceeded
+                        | Error::TooLong
+                        | Error::EmptyContent
+                        | Error::WriterLocked),
+                    ) => return Err(explain(&e)),
+                    Err(_) => {}
                 }
             }
         }

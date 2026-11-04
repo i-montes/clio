@@ -152,6 +152,10 @@ pub struct Config {
     /// `memory_get` and `memory_propose` are not declared and the gateway denies them (S-02): the
     /// loose `clio-toolhost` binary has none.
     pub memory: Option<Arc<dyn MemoryPort>>,
+    /// What the brain must show to tell the service what the person said (`said`): a secret the
+    /// brain made and put in this process's environment, which Pi never gets. Without it nothing
+    /// can be reported, and what is not reported cannot be confirmed.
+    pub said_token: Option<String>,
 }
 
 impl Config {
@@ -165,6 +169,7 @@ impl Config {
             vault: None,
             rules: None,
             memory: None,
+            said_token: None,
         }
     }
 }
@@ -204,6 +209,7 @@ pub struct ToolHost {
     exec_status: Result<(), String>,
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
+    said_token: Option<String>,
     /// Where the memory tools keep their budget and their log.
     run_dir: PathBuf,
 }
@@ -340,6 +346,7 @@ impl ToolHost {
             exec_status,
             memory: cfg.memory,
             memory_timeout: memory::MEMORY_TIMEOUT,
+            said_token: cfg.said_token,
             run_dir: cfg.run_dir,
         })
     }
@@ -742,6 +749,18 @@ impl ToolHost {
     /// model's claim about what the person asked is never taken in its place.
     fn said(&self, req: &Request, args: &Map<String, Value>) -> Response {
         let tainted = self.is_tainted(&req.session);
+        // Only the brain knows the token: a process that merely reaches the socket cannot put
+        // words in the person's mouth.
+        let known = self.said_token.as_deref();
+        let given = args.get("token").and_then(Value::as_str);
+        if known.is_none() || known != given {
+            return self.refuse(
+                &req.id,
+                "S-65",
+                "the person's words are reported by the brain only".into(),
+                tainted,
+            );
+        }
         let Some(text) = args.get("text").and_then(Value::as_str) else {
             return self.refuse(
                 &req.id,

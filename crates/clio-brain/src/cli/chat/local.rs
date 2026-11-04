@@ -202,6 +202,7 @@ impl SessionSource for LocalSource {
             &cfg.jev,
             &entries,
             &toolhost.socket,
+            &toolhost.said_token,
             &pi.session_id,
             &run_dir,
         );

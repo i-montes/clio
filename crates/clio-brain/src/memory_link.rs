@@ -61,6 +61,11 @@ pub fn explain(e: &Error) -> String {
     }
 }
 
+/// The id of a line that starts `[m12]`, as the engine's context lines do.
+fn memory_line_id(line: &str) -> Option<i64> {
+    line.strip_prefix("[m")?.split(']').next()?.parse().ok()
+}
+
 /// Control characters, bidi marks and zero-width characters become spaces: a memory is one
 /// short line of plain text.
 pub fn clean_text(s: &str) -> String {
@@ -476,10 +481,22 @@ impl MemoryLink {
             Ok(text) if !text.trim().is_empty() => {
                 // One clean line per memory: the model never sees a control character or a
                 // secret, whatever the file holds.
+                // This loop does not mark the run as tainted when it reads memory, so what came from
+                // outside is shown only if the person holds it (accepted it). What the judge made
+                // active from the agent's own proposals is for the Pi chat, which shows it as data
+                // and marks the session (S-63). The loop's own episodes are not from outside.
                 let text = text
                     .lines()
                     .map(|l| clean_text(&scrubber.scrub(l)))
                     .filter(|l| !l.is_empty())
+                    .filter(|l| {
+                        memory_line_id(l).is_none_or(|id| {
+                            self.engine.get(MemoryId(id)).ok().is_some_and(|row| {
+                                row.origin != Origin::External
+                                    || self.engine.held_by_person(&row).unwrap_or(false)
+                            })
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 for l in text.lines() {
@@ -676,17 +693,10 @@ impl MemoryLink {
         )
     }
 
-    /// Is this memory the person's own, or held in a fixed block? Then only the person replaces it.
-    /// When in doubt (the blocks cannot be read) it is protected.
+    /// Is this memory the person's own (written by them, in a fixed block, or accepted by them)?
+    /// Then only the person's own words replace it. When in doubt (it cannot be read) it is.
     pub fn is_protected(&self, row: &MemoryRow) -> bool {
-        row.origin == Origin::User
-            || self.engine.blocks(self.scope).map_or(true, |blocks| {
-                blocks.iter().any(|b| {
-                    self.engine
-                        .block_get(b.id)
-                        .map_or(true, |ids| ids.contains(&row.id))
-                })
-            })
+        self.engine.held_by_person(row).unwrap_or(true)
     }
 
     // ---------------------------------------------------------------- the person

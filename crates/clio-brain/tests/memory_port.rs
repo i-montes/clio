@@ -837,3 +837,52 @@ fn the_engines_checks_still_come_first() {
     assert!(e.contains("secreto") || e.contains("clave"), "{e}");
     assert!(open(&w).list(State::Active).unwrap().is_empty());
 }
+
+// While Jev thinks the writer is not held: the person's own `clio memory remember` goes through.
+#[test]
+fn the_writer_is_not_held_while_jev_answers() {
+    use std::sync::Mutex;
+    struct Slow(Mutex<mpsc::Sender<()>>);
+    impl Transport for Slow {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let _ = self.0.lock().unwrap().send(());
+            std::thread::sleep(Duration::from_millis(1500));
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": "add", "confidence": 0.95}}}))
+        }
+    }
+    let w = world();
+    let (tx, rx) = mpsc::channel();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Slow(Mutex::new(tx))),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    let p = Arc::new(LinkPort::new(&w.data, None).with_judge(Arc::new(judge)));
+    // The database has to exist before the reader looks at it.
+    drop(open(&w));
+    let q = p.clone();
+    let proposing = std::thread::spawn(move || {
+        MemoryPort::propose(
+            &*q,
+            "El proyecto usa PostgreSQL 16",
+            ProposalKind::Semantic,
+            "s",
+            &Judging::default(),
+        )
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("Jev was asked");
+    let t = Instant::now();
+    let mine = open(&w).remember("Marta vive en Medellín", None);
+    assert!(
+        mine.is_ok() && t.elapsed() < Duration::from_millis(1200),
+        "{mine:?} {:?}",
+        t.elapsed()
+    );
+    assert_eq!(proposing.join().unwrap().unwrap().saved, Saved::Active);
+}
