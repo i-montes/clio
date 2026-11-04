@@ -83,7 +83,8 @@ impl MemoryData {
             archived: link.counts()?.2,
             active: link.counts()?.0,
             due: link.review_due()?.len(),
-            note: (!MemoryLink::model_dir(&dirs.home).is_dir())
+            note: MemoryLink::model_dirs(&dirs.home)
+                .is_empty()
                 .then(|| "sin modelo de embeddings: busca solo por texto".to_owned()),
             missing: false,
         })

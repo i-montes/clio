@@ -148,7 +148,7 @@ impl ProposeId for clio_brain::memory_port::LinkPort {
 }
 
 fn port(w: &World) -> LinkPort {
-    LinkPort::new(&w.data, None)
+    LinkPort::new(&w.data, &[])
 }
 
 /// Runs `f` off this thread: a call that hangs fails the test instead of the whole suite.
@@ -682,7 +682,7 @@ fn judged_port(w: &World, script: Scripted) -> LinkPort {
         Arc::new(clio_core::SystemClock),
     ));
     let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
-    LinkPort::new(&w.data, None).with_judge(Arc::new(judge))
+    LinkPort::new(&w.data, &[]).with_judge(Arc::new(judge))
 }
 
 fn judging(tainted: bool) -> Judging {
@@ -987,7 +987,7 @@ fn a_memory_file_of_the_old_schema_is_upgraded_when_it_is_first_read() {
 // ---- projects, the person's and the lessons (spec 2026-11-04-memory-engram-design.md) ----
 
 fn in_project(w: &World, project: &str) -> LinkPort {
-    LinkPort::new(&w.data, None).in_project(Some(project.into()))
+    LinkPort::new(&w.data, &[]).in_project(Some(project.into()))
 }
 
 fn titled(text: &str, title: &str, category: &str) -> clio_toolhost::ProposalDraft {
@@ -1280,7 +1280,7 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
     drop(link);
     assert_eq!(alfa.context().unwrap()[0].id, d.id);
     // Without a project it is the person's place's, active as well.
-    let plain = LinkPort::new(&w.data, None).with_judge(judge);
+    let plain = LinkPort::new(&w.data, &[]).with_judge(judge);
     let d = MemoryPort::propose(&plain, &summary, "sesion-10", &Judging::default()).unwrap();
     assert_eq!(d.saved, Saved::Active);
     let l = open(&w);
@@ -1392,7 +1392,7 @@ fn no_neighbor_or_an_unsure_jev_notes_no_relation() {
         Box::new(|| Ok("KEY".into())),
         Arc::new(clio_core::SystemClock),
     ));
-    let p = LinkPort::new(&w.data, None).with_judge(Arc::new(MemoryJudge::new(
+    let p = LinkPort::new(&w.data, &[]).with_judge(Arc::new(MemoryJudge::new(
         jev,
         Arc::new(|s| Ok(s.to_owned())),
     )));

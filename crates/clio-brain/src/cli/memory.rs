@@ -446,7 +446,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             args.rest()?;
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             let project = clio_brain::project::settle(&dirs.data, &cwd).map(|(n, _, _)| n);
-            let port = clio_brain::memory_port::LinkPort::new(&dirs.data, None).in_project(project);
+            let port = clio_brain::memory_port::LinkPort::new(&dirs.data, &[]).in_project(project);
             let items = clio_toolhost::MemoryPort::context(&port)?;
             if json {
                 let v: Vec<Value> = items
@@ -696,7 +696,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             };
             let (active, quarantine, archived) = link.counts()?;
             let s = link.engine().stats().map_err(|e| e.to_string())?;
-            let model = MemoryLink::model_dir(&dirs.home).is_dir();
+            let model = !MemoryLink::model_dirs(&dirs.home).is_empty();
             if json {
                 print_json(&json!({
                     "active": active, "quarantine": quarantine, "archived": archived,
