@@ -496,3 +496,23 @@ fn print_memory_screens() {
     let (a, _) = feed(a, vec![ch('c')]);
     println!("{}", screen_text(&a, 100, 24));
 }
+
+// `y` copies the selected memory to the terminal's clipboard: cleaned, through OSC 52 in base64.
+#[test]
+fn y_copies_the_selected_memory_cleaned() {
+    let mut d = data();
+    d.recent[0].content = "Mi proyecto usa Rust\u{1b}]52;c;bWFs\u{7} y SQLite".into();
+    let mut a = memory_app();
+    a = update(a, Input::Bg(Bg::Memory(Ok(Box::new(d))))).0;
+    let (a, cmds) = feed(a, vec![ch('j'), ch('j'), ch('y')]);
+    let Some(Cmd::Clipboard(text)) = cmds.last() else {
+        panic!("{cmds:?}");
+    };
+    assert!(
+        text.starts_with("Mi proyecto usa Rust") && !text.contains('\u{1b}'),
+        "{text:?}"
+    );
+    assert!(screen_text(&a, 120, 30).contains("copiado al portapapeles"));
+    assert_eq!(crate::cli::tui::osc52("hola"), "\u{1b}]52;c;aG9sYQ==\u{7}");
+    assert_eq!(crate::cli::tui::osc52("ñ!"), "\u{1b}]52;c;w7Eh\u{7}");
+}

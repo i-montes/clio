@@ -369,6 +369,107 @@ impl MemoryPort for LinkPort {
         self.propose_to(&draft, session, judging, Some(target))
     }
 
+    /// One memory instead of several, because the person asked: all of them facts, active, in one
+    /// place this session reads; Jev checks the person's words (as for forgetting); then the merged
+    /// one is saved there, signed by the judge, and the originals are archived as the person's act
+    /// (restorable). Read-only checks come first; nothing reaches Jev when the merge cannot apply.
+    fn consolidate(
+        &self,
+        ids: &[i64],
+        draft: &ProposalDraft,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        let (place, texts) = {
+            let link = self.reader()?;
+            let mut place = None;
+            let mut texts = Vec::new();
+            for id in ids {
+                let r = link
+                    .get(MemoryId(*id))
+                    .ok()
+                    .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
+                    .ok_or_else(|| NOT_READABLE.to_owned())?;
+                // What the person holds (wrote, accepted, pinned) is not merged away into a
+                // memory of the agent's: they merge it themselves.
+                if link.is_protected(&r) || link.is_pinned(&r) {
+                    return Err(
+                        "una de esas memorias es de la persona o está fijada: no se une desde aquí"
+                            .into(),
+                    );
+                }
+                let here = link
+                    .place_of(r.scope)
+                    .ok_or_else(|| NOT_READABLE.to_owned())?;
+                if place.is_some_and(|p| p != here) {
+                    return Err("solo se unen memorias del mismo sitio".into());
+                }
+                place = Some(here);
+                texts.push(format!("[m{id}] {}", r.content));
+            }
+            (place.ok_or_else(|| NOT_READABLE.to_owned())?, texts)
+        };
+        let originals = texts.join(" | ");
+        if !judge.confirm(
+            Request::Consolidate,
+            &originals,
+            &judging.person_said,
+            judging.tainted,
+        ) {
+            return Err(NOT_CONFIRMED.to_owned());
+        }
+        // And what is saved says only what they said: the merged text is the model's.
+        if !judge.faithful_merge(
+            &MemoryLink::agent_text(&draft.text),
+            &originals,
+            judging.tainted,
+        ) {
+            return Err(
+                "Jev no confirmó que el texto unido diga solo lo que dicen esas memorias".into(),
+            );
+        }
+        let link = self.writer()?;
+        for id in ids {
+            // Checked again under the writer: still active, still here.
+            link.get(MemoryId(*id))
+                .ok()
+                .filter(|r| r.state == State::Active && link.place_of(r.scope) == Some(place))
+                .ok_or_else(|| NOT_READABLE.to_owned())?;
+        }
+        let merged = Draft {
+            text: draft.text.clone(),
+            title: draft.title.clone(),
+            category: draft.category.as_deref().and_then(Category::parse),
+            kind: MemoryType::Semantic,
+        };
+        // Jev confirmed the person's words at the bar of a request: the same sureness here.
+        let o = link
+            .propose_judged_draft(&merged, session, place, Judged::Add, 0.9)
+            .map_err(|e| explain(&e))?;
+        // A new memory, active, not one of them (the engine answers a repeat with the existing
+        // one): otherwise nothing is archived.
+        if o.kind != OpKind::Add || o.state != State::Active || ids.contains(&o.memory.0) {
+            return Err("la unión no dio una memoria nueva y activa: no se archivó nada".into());
+        }
+        for (archived, id) in ids.iter().enumerate() {
+            if let Err(why) = link.archive(MemoryId(*id)) {
+                return Err(format!(
+                    "se guardó m{} y se archivaron {archived} de {}; falló una: {why}",
+                    o.memory.0,
+                    ids.len()
+                ));
+            }
+        }
+        // No change number: undoing only the new one would leave the originals archived; the
+        // person restores with `clio memory`.
+        Ok(Proposed {
+            id: o.memory.0,
+            saved: Saved::Active,
+            change: None,
+        })
+    }
+
     /// Pins a memory the session can read, because the person asked (Jev checks their words).
     fn pin(&self, id: i64, judging: &Judging) -> Result<(), String> {
         self.change(

@@ -25,9 +25,9 @@ use crate::common::*;
 use clio_attacks::{Case, Observed, Status, Target, load_cases, run};
 use serde_json::{Value, json};
 
-/// The tools the guard registers: Pi's own and the eleven memory ones. `grep` is not here: see the
+/// The tools the guard registers: Pi's own and the twelve memory ones. `grep` is not here: see the
 /// extension.
-const SEVENTEEN: [&str; 17] = [
+const EIGHTEEN: [&str; 18] = [
     "read",
     "write",
     "edit",
@@ -41,6 +41,7 @@ const SEVENTEEN: [&str; 17] = [
     "memory_propose",
     "memory_session_summary",
     "memory_update",
+    "memory_consolidate",
     "memory_forget",
     "memory_promote",
     "memory_revert",
@@ -141,7 +142,7 @@ pub(crate) fn ask_host(socket: &Path, req: Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 38: the tools are exactly the guard's seventeen, through the guard; nothing else exists
+// 38: the tools are exactly the guard's eighteen, through the guard; nothing else exists
 // ---------------------------------------------------------------------------------------------
 
 fn attack_38() -> Option<bool> {
@@ -162,19 +163,19 @@ fn attack_38() -> Option<bool> {
         Turn::Text("done".into()),
     ]);
     let mut s = stack(&node, &w, &model, false, &Opts::default());
-    let active = s.pi.verify_tools(&SEVENTEEN).unwrap();
-    assert_eq!(active.len(), 17, "{active:?}");
+    let active = s.pi.verify_tools(&EIGHTEEN).unwrap();
+    assert_eq!(active.len(), 18, "{active:?}");
     let ev = s.pi.prompt("use any tool you like");
     let ends = tool_ends(&ev);
     assert_eq!(ends.len(), 7, "all seven calls were attempted: {ends:?}");
     all_errors(&ends);
     let mut declared = declared_tools(&model);
     declared.sort();
-    let mut want: Vec<String> = SEVENTEEN.iter().map(|s| (*s).to_owned()).collect();
+    let mut want: Vec<String> = EIGHTEEN.iter().map(|s| (*s).to_owned()).collect();
     want.sort();
     assert_eq!(
         declared, want,
-        "the model must be told about exactly the seventeen tools"
+        "the model must be told about exactly the eighteen tools"
     );
     assert_eq!(w.tree(), before, "nothing was created or changed");
     // A stricter allowed list than the extension's own: the start-up check must fail.
@@ -527,7 +528,7 @@ fn attack_42() -> Option<bool> {
     assert_eq!(ends.len(), names.len(), "{ends:?}");
     all_errors(&ends);
     assert_eq!(w.tree(), before);
-    s.pi.verify_tools(&SEVENTEEN).unwrap();
+    s.pi.verify_tools(&EIGHTEEN).unwrap();
     Some(true)
 }
 
@@ -998,7 +999,7 @@ macro_rules! scenario {
         }
     };
 }
-scenario!(attack_38_only_the_guards_seventeen_tools_exist, attack_38);
+scenario!(attack_38_only_the_guards_eighteen_tools_exist, attack_38);
 scenario!(attack_39_nothing_outside_the_folder_is_read, attack_39);
 scenario!(attack_40_nothing_is_written_where_pi_loads_code, attack_40);
 scenario!(attack_41_bash_is_confined, attack_41);

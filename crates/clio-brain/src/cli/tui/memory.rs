@@ -214,6 +214,13 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             }
         }
         Act::Promote | Act::Archive => return ask(app, act),
+        Act::Copy => {
+            if let Some((r, _)) = app.memory.selected() {
+                let text = sanitize::multiline(&r.content);
+                app.flash = Some(format!("m{} copiado al portapapeles", r.id));
+                return vec![Cmd::Clipboard(text)];
+            }
+        }
         _ => {}
     }
     vec![]
