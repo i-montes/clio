@@ -67,7 +67,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists fourteen tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists fifteen tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -97,7 +97,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        14,
+        15,
         "{:?}",
         declared_tools(&model)
     );
@@ -120,7 +120,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_fourteen_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_fifteen_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -639,7 +639,7 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        14,
+        15,
         "{:?}",
         declared_tools(&model)
     );
@@ -659,6 +659,17 @@ fn attack_60() -> Option<bool> {
         ("memory_propose", vec!["category", "kind", "text", "title"]),
         ("memory_timeline", vec!["after", "before", "id"]),
         ("memory_context", vec![]),
+        (
+            "memory_session_summary",
+            vec![
+                "accomplished",
+                "discoveries",
+                "files",
+                "goal",
+                "instructions",
+                "next_steps",
+            ],
+        ),
         ("memory_forget", vec!["id"]),
         ("memory_promote", vec!["id"]),
         ("memory_revert", vec!["change"]),

@@ -29,12 +29,13 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 8] = [
+pub(crate) const MEMORY_OPS: [&str; 9] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
     "memory_context",
     "memory_propose",
+    "memory_session_summary",
     "memory_forget",
     "memory_promote",
     "memory_revert",
@@ -43,6 +44,17 @@ pub(crate) const MEMORY_OPS: [&str; 8] = [
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
 const PROPOSE_DESCRIPTION: &str = "Propose a memory: Clio decides whether it is kept, replaces another, was known, or waits for the person's review";
+
+const SUMMARY_DESCRIPTION: &str = "Save the summary of this session (goal, what was done, discoveries, next steps, files): Clio decides it like a proposal";
+/// The parts of a session summary, in the order they are written, and the two it cannot lack.
+const SUMMARY_PARTS: [(&str, &str); 6] = [
+    ("goal", "Objetivo"),
+    ("instructions", "Instrucciones"),
+    ("discoveries", "Descubrimientos"),
+    ("accomplished", "Hecho"),
+    ("next_steps", "Siguiente"),
+    ("files", "Archivos"),
+];
 
 const TIMELINE_DESCRIPTION: &str =
     "Read the memories around one, of its session (or its place), in order (read-only)";
@@ -176,6 +188,8 @@ pub struct Found {
 pub enum ProposalKind {
     Semantic,
     Procedural,
+    /// The summary of a session (`memory_session_summary`), never asked for with `kind`.
+    Session,
 }
 
 /// What the memory did with a proposal.
@@ -268,6 +282,16 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("title", ArgKind::Text, false),
             a("category", ArgKind::Text, false),
         ],
+        "memory_session_summary" => SUMMARY_PARTS
+            .iter()
+            .map(|(name, _)| {
+                a(
+                    name,
+                    ArgKind::Text,
+                    matches!(*name, "goal" | "accomplished"),
+                )
+            })
+            .collect(),
         "memory_timeline" => vec![
             a("id", ArgKind::Int, true),
             a("before", ArgKind::Int, false),
@@ -287,6 +311,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_timeline", TIMELINE_DESCRIPTION),
         ("memory_context", CONTEXT_DESCRIPTION),
         ("memory_propose", PROPOSE_DESCRIPTION),
+        ("memory_session_summary", SUMMARY_DESCRIPTION),
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_promote", PROMOTE_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
@@ -309,6 +334,22 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         args: arg_specs(name),
     })
     .collect()
+}
+
+/// The parts of a summary that were given, as typed, each after its label: the vault and the
+/// checks of a proposal see it whole, then it is flattened like any proposal.
+fn summary_text(args: &Map<String, Value>) -> Result<String, &'static str> {
+    let mut parts = Vec::new();
+    for (name, label) in SUMMARY_PARTS {
+        match args.get(name).and_then(Value::as_str).map(str::trim) {
+            Some(v) if !v.is_empty() => parts.push(format!("{label}: {v}")),
+            _ if matches!(name, "goal" | "accomplished") => {
+                return Err("a summary needs its goal and what was accomplished");
+            }
+            _ => {}
+        }
+    }
+    Ok(parts.join(" · "))
 }
 
 /// Whitespace of any kind becomes one space and what is left of the control characters goes: one
@@ -449,7 +490,10 @@ impl ToolHost {
         args: &Map<String, Value>,
         out: DecisionOut,
     ) -> Response {
-        if req.tool == "memory_propose" {
+        if matches!(
+            req.tool.as_str(),
+            "memory_propose" | "memory_session_summary"
+        ) {
             return self.propose_call(req, args, out);
         }
         if matches!(
@@ -615,12 +659,21 @@ impl ToolHost {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
         };
-        let kind = match args.get("kind").and_then(Value::as_str) {
-            Some("semantic") => ProposalKind::Semantic,
-            Some("procedural") => ProposalKind::Procedural,
-            _ => return self.memory_failed(req, out, "kind must be semantic or procedural"),
+        let (typed, kind) = if req.tool == "memory_session_summary" {
+            match summary_text(args) {
+                Ok(t) => (t, ProposalKind::Session),
+                Err(why) => return self.memory_failed(req, out, why),
+            }
+        } else {
+            let kind = match args.get("kind").and_then(Value::as_str) {
+                Some("semantic") => ProposalKind::Semantic,
+                Some("procedural") => ProposalKind::Procedural,
+                _ => return self.memory_failed(req, out, "kind must be semantic or procedural"),
+            };
+            let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
+            (text.to_owned(), kind)
         };
-        let typed = args.get("text").and_then(Value::as_str).unwrap_or_default();
+        let typed = typed.as_str();
         // The vault's cleaner sees the text before anything is proposed, as typed AND as it will be
         // proposed (flattened to one line): a secret with spaces in it must not get through by
         // swapping a space for a newline, a tab or a no-break space, which flattening puts back.

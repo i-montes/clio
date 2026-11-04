@@ -51,6 +51,11 @@ pub trait Recall: Send + Sync {
     fn candidates(&self, query: &str, limit: usize) -> Vec<Candidate>;
 }
 
+/// What Clio asks after Pi compacted the conversation.
+pub const COMPACTED_ASK: &str = "la conversación se acaba de compactar: antes de responder, guarda el resumen de lo hecho hasta ahora con memory_session_summary y recupera el contexto con memory_context.";
+/// What Clio asks when the person closes the session.
+pub const CLOSING_ASK: &str = "la persona cerró esta sesión: guarda su resumen con memory_session_summary y no hagas nada más (no cambies archivos ni le respondas).";
+
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
     /// Put memories in front of the message.
@@ -106,6 +111,10 @@ struct Inner {
     hooks: Hooks,
     settings: Settings,
     first: AtomicBool,
+    /// Ask for the session's summary (the person did not turn it off in `memory.session_summary`).
+    summaries: AtomicBool,
+    /// Pi compacted the conversation: the next message asks for the summary first.
+    compacted: AtomicBool,
     /// What this session has been shown: ids (never twice) and characters (up to a budget).
     shown: Mutex<(HashSet<i64>, usize)>,
 }
@@ -140,6 +149,8 @@ impl PrePrompt {
             hooks,
             settings,
             first: AtomicBool::new(true),
+            summaries: AtomicBool::new(false),
+            compacted: AtomicBool::new(false),
             shown: Mutex::new((HashSet::new(), 0)),
         }))
     }
@@ -157,6 +168,35 @@ impl PrePrompt {
                 tool_hints: false,
             },
         )
+    }
+
+    /// Whether Clio asks the model for the session's summary (after a compaction, at the close).
+    pub fn set_summaries(&self, on: bool) {
+        self.0.summaries.store(on, Ordering::SeqCst);
+    }
+
+    /// Pi compacted the conversation: the next message asks for the summary before anything else.
+    pub fn compacted(&self) {
+        if self.0.summaries.load(Ordering::SeqCst) {
+            self.0.compacted.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The last message of a session the person closes: only Clio's request for the summary, with
+    /// nothing of the person after it (so nothing is reported to the service as their words).
+    pub fn closing_text(&self, stamp: &str) -> Option<String> {
+        self.0.summaries.load(Ordering::SeqCst).then(|| {
+            envelope::wrap_with(
+                &Envelope {
+                    stamp,
+                    memory: &[],
+                    outside: &[],
+                    tools: &[],
+                    ask: Some(CLOSING_ASK),
+                },
+                "",
+            )
+        })
     }
 
     /// `prepare`, but a vault, a disk or Jev that hangs cannot hold the message: after `WAIT`
@@ -267,6 +307,10 @@ impl Inner {
                 memory: &mine,
                 outside: &outside,
                 tools: &out.tools,
+                ask: self
+                    .compacted
+                    .swap(false, Ordering::SeqCst)
+                    .then_some(COMPACTED_ASK),
             },
             person_text,
         );
@@ -799,5 +843,59 @@ mod tests {
         let p = PrePrompt::time_only().prepare("hola", STAMP);
         assert_eq!(p.text, envelope::wrap(STAMP, "hola"));
         assert!(!p.used_jev && p.memory_ids.is_empty() && !p.tainted);
+    }
+
+    #[test]
+    fn after_a_compaction_the_next_message_asks_for_the_summary_once() {
+        let pre = PrePrompt::time_only();
+        pre.compacted();
+        assert!(
+            !pre.prepare("hola", STAMP).text.contains("pedido de Clio"),
+            "off unless the person keeps it on"
+        );
+        pre.set_summaries(true);
+        pre.compacted();
+        let p = pre.prepare("sigue", STAMP);
+        assert!(
+            p.text
+                .contains(&format!("pedido de Clio: {COMPACTED_ASK}\n")),
+            "{}",
+            p.text
+        );
+        assert_eq!(envelope::strip(&p.text), "sigue");
+        assert!(
+            !pre.prepare("y ahora", STAMP)
+                .text
+                .contains("pedido de Clio")
+        );
+    }
+
+    #[test]
+    fn the_closing_message_is_only_clios_request_and_says_nothing_as_the_person() {
+        let said = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = said.clone();
+        let pre = PrePrompt::new(
+            None,
+            Vec::new(),
+            None,
+            Arc::new(|s| Ok(s.to_owned())),
+            Hooks {
+                said: Arc::new(move |t| seen.lock().unwrap().push(t.to_owned())),
+                ..Hooks::none()
+            },
+            Settings {
+                memory: false,
+                tool_hints: false,
+            },
+        );
+        assert_eq!(pre.closing_text(STAMP), None);
+        pre.set_summaries(true);
+        let t = pre.closing_text(STAMP).unwrap();
+        assert!(
+            t.contains(&format!("pedido de Clio: {CLOSING_ASK}\n")),
+            "{t}"
+        );
+        assert_eq!(envelope::strip(&t), "", "no words of the person");
+        assert!(said.lock().unwrap().is_empty());
     }
 }

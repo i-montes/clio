@@ -22,6 +22,9 @@ pub struct Envelope<'a> {
     /// tool result gets, because a memory of this kind can say anything.
     pub outside: &'a [String],
     pub tools: &'a [String],
+    /// Something Clio asks of the model before it goes on (a fixed text of the brain's, never the
+    /// person's words nor anything read): save the session's summary.
+    pub ask: Option<&'a str>,
 }
 
 /// `stamp` in front of the person's `text`, inside the envelope.
@@ -32,6 +35,7 @@ pub fn wrap(stamp: &str, text: &str) -> String {
             memory: &[],
             outside: &[],
             tools: &[],
+            ask: None,
         },
         text,
     )
@@ -60,6 +64,9 @@ pub fn wrap_with(e: &Envelope, text: &str) -> String {
             "herramientas que podrían servir (solo una sugerencia): {}\n",
             e.tools.join(", ")
         ));
+    }
+    if let Some(ask) = e.ask {
+        out.push_str(&format!("pedido de Clio: {}\n", neutralize(ask)));
     }
     out.push_str(CLOSE);
     out.push_str(text);
@@ -184,10 +191,15 @@ mod tests {
                 memory: &memory,
                 outside: &outside,
                 tools: &tools,
+                ask: Some("guarda el resumen"),
             },
             "hola",
         );
         assert!(w.contains("[m12] vive en Medellín\n"));
+        assert!(
+            w.contains("pedido de Clio: guarda el resumen\n</clio-contexto>"),
+            "{w}"
+        );
         assert!(
             w.contains("<<<UNTRUSTED-DATA memory ") && w.contains("<<<END-UNTRUSTED-DATA "),
             "what the person did not write is inside the data markers: {w}"

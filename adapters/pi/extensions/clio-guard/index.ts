@@ -42,7 +42,7 @@ const TOOLS_ENTRY = "clio-guard.tools";
 const BLOCK_ENTRY = "clio-guard.block";
 const MASKED = "clio-guard.masked";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
-export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_propose", "memory_forget", "memory_promote", "memory_revert"] as const;
+export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_propose", "memory_session_summary", "memory_forget", "memory_promote", "memory_revert"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
 /**
  * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
@@ -61,13 +61,14 @@ export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
 	memory_timeline: "ver qué se guardó antes y después de una memoria, en la misma sesión",
 	memory_context: "recuperar el resumen de la última sesión y lo más reciente del proyecto, por ejemplo al retomar el trabajo",
 	memory_propose: "guardar un dato estable que la persona acaba de contar o enseñar",
+	memory_session_summary: "guardar el resumen de la sesión: objetivo, lo hecho, lo descubierto y los siguientes pasos, al cerrar o tras compactar",
 	memory_forget: "olvidar un recuerdo porque la persona acaba de pedirlo",
 	memory_promote: "aceptar un recuerdo que espera revisión porque la persona acaba de pedirlo",
 	memory_revert: "deshacer un cambio de la memoria porque la persona acaba de pedirlo",
 };
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
-const MEMORY_TOOLS = new Set<string>(["memory_search", "memory_get", "memory_timeline", "memory_context", "memory_propose", "memory_forget", "memory_promote", "memory_revert"]);
+const MEMORY_TOOLS = new Set<string>(["memory_search", "memory_get", "memory_timeline", "memory_context", "memory_propose", "memory_session_summary", "memory_forget", "memory_promote", "memory_revert"]);
 // Same list as PROTECTED_PATHS in the host: folders Pi (or git) loads code or settings from.
 const PROTECTED = new Set([
 	"extensions",
@@ -338,6 +339,20 @@ export default function clioGuard(pi: ExtensionAPI) {
 		["title", "text", "category", "kind"],
 	);
 
+	const part = (description: string) => ({ type: "string", minLength: 1, maxLength: 600, description });
+	memoryTool(
+		"memory_session_summary",
+		"Save the summary of this session for the next one: Clio decides it like a proposal and keeps it as this project's episode. Use it when Clio asks (the session closes or the conversation was compacted) or after a long piece of work; only what was verified, no secrets.",
+		{
+			goal: part("What the session was for."),
+			instructions: part("What the person asked about how to work (optional)."),
+			discoveries: part("What was learned that was not known (optional)."),
+			accomplished: part("What was done and checked."),
+			next_steps: part("What is left (optional)."),
+			files: part("The files that matter (optional)."),
+		},
+		["goal", "accomplished"],
+	);
 	memoryTool(
 		"memory_forget",
 		"Archive a memory because the person asked you to forget it (use the number after [m). It is not erased: the person can restore it. Clio checks their words.",

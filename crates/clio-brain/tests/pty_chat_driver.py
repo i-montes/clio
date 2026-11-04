@@ -257,6 +257,16 @@ elif scenario == "reopen":
     send(fd, b"q")
     out["code2"] = wait_exit(fd, pid)
     out["procs_after_quit"] = len(pi_procs())
+elif scenario == "summary":
+    # Four messages, back to the selector (the chat closes on its own thread and asks for the
+    # summary), and leave at once: leaving waits for that close.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = all(ask(fd, f"paso {i}", f"respuesta {i}") for i in range(1, 5))
+    send(fd, ESC)
+    out["back_in_selector"] = wait_screen(fd, "sesiones de Pi", 15)
+    send(fd, b"q")
+    out["code"] = wait_exit(fd, pid, 60)
+    out["procs_after_quit"] = len(pi_procs())
 elif scenario == "sigkill":
     out["opened"] = open_new_chat(fd)
     out["procs_while_open"] = len(pi_procs())
