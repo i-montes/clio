@@ -142,9 +142,7 @@ fn the_person_pins_and_a_pin_goes_with_a_purge() {
         f.engine.pin(a, f.agent).unwrap_err(),
         Error::NotAllowed
     ));
-    let mut ext = prop(f.scope, f.agent, "de fuera");
-    ext.origin = Origin::External;
-    let waiting = f.engine.propose(ext).unwrap().memory;
+    let waiting = quarantined(&f, "de fuera");
     assert!(matches!(
         f.engine.pin(waiting, f.person).unwrap_err(),
         Error::InvalidState

@@ -51,12 +51,10 @@ fn revert_update_restores_old_and_archives_new() {
 #[test]
 fn revert_promote_returns_to_quarantine() {
     let f = fixture();
-    let mut p = prop(f.scope, f.person, "dato externo");
-    p.origin = Origin::External;
-    let cand = f.engine.propose(p).unwrap();
-    let promote = f.engine.promote(cand.memory, f.person).unwrap();
+    let cand = quarantined(&f, "dato externo");
+    let promote = f.engine.promote(cand, f.person).unwrap();
     f.engine.revert(promote, f.person).unwrap();
-    assert_eq!(state(&f, cand.memory), State::Quarantine);
+    assert_eq!(state(&f, cand), State::Quarantine);
 }
 
 #[test]

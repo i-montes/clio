@@ -225,9 +225,7 @@ fn feedback_needs_an_active_memory() {
         f.engine.feedback(m, Signal::Useful, f.agent),
         Err(Error::InvalidState)
     ));
-    let mut ext = prop(f.scope, f.person, "dato externo");
-    ext.origin = Origin::External;
-    let q = f.engine.propose(ext).unwrap().memory;
+    let q = quarantined(&f, "dato externo");
     assert!(matches!(
         f.engine.feedback(q, Signal::Wrong, f.agent),
         Err(Error::InvalidState)

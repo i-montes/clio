@@ -70,9 +70,7 @@ fn quarantined_memory_cannot_enter_a_block() {
     let ok = memory(&f, "uno");
     let id = block(&f, "reglas", 100);
     f.engine.block_set(id, &[ok], f.person).unwrap();
-    let mut p = prop(f.scope, f.person, "dato externo");
-    p.origin = Origin::External;
-    let external = f.engine.propose(p).unwrap().memory;
+    let external = quarantined(&f, "dato externo");
     assert!(matches!(
         f.engine.block_set(id, &[ok, external], f.person),
         Err(Error::InvalidState)
@@ -221,23 +219,24 @@ fn block_follows_updates() {
 }
 
 #[test]
-fn block_never_shows_stale_or_quarantined_facts() {
+fn block_never_shows_forgotten_or_archived_facts() {
     let f = fixture();
     f.clock.set(100);
     let mut p = prop(f.scope, f.person, "vive en Medellín");
     p.topic_key = Some("residencia".into());
     let old = f.engine.propose(p).unwrap().memory;
+    let gone = memory(&f, "trabaja en Cartagena");
     let b = block(&f, "identidad", 100);
-    f.engine.block_set(b, &[old], f.person).unwrap();
+    f.engine.block_set(b, &[old, gone], f.person).unwrap();
 
-    // an external update waits in quarantine: the block keeps showing the trusted fact
+    // a forgotten memory leaves the block; the rest keeps showing
     f.clock.set(200);
-    let mut ext = prop(f.scope, f.person, "vive en Bogotá");
-    ext.topic_key = Some("residencia".into());
-    ext.origin = Origin::External;
-    f.engine.propose(ext).unwrap();
+    f.engine.forget(gone, f.agent, "ya no aplica").unwrap();
     let out = f.engine.context(f.scope, &ctx(None, 0)).unwrap();
-    assert!(out.contains("Medellín") && !out.contains("Bogotá"), "{out}");
+    assert!(
+        out.contains("Medellín") && !out.contains("Cartagena"),
+        "{out}"
+    );
 
     // archived: nothing renders, not even a header
     f.engine.archive(old, f.person).unwrap();

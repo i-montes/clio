@@ -175,13 +175,9 @@ fn active_nothing_falls_through_to_the_next() {
 
 // S-25: the rules decide trust; a decider is never consulted about it and cannot undo it
 #[test]
-fn rules_veto_and_end_the_cascade() {
+fn rules_end_the_cascade() {
     let d = ScriptedDecider::new("d", Behavior::Say(Choice::Add, 0.99));
     let f = rig(vec![active(&d)]);
-    let mut ext = prop(f.scope, f.person, "la página dice algo");
-    ext.origin = Origin::External;
-    assert_eq!(f.engine.propose(ext).unwrap().state, State::Quarantine);
-    assert_eq!(d.calls(), 0, "untrusted origin is settled by the rules");
 
     f.engine
         .propose(prop(f.scope, f.person, "hecho uno"))

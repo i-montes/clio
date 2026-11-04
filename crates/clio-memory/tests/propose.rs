@@ -75,33 +75,32 @@ fn s18_secret_in_metadata_fields_is_rejected() {
 }
 
 // S-25: external content stays in quarantine
+// S-25: what comes from outside is active at once and keeps its origin, so a reader knows it
+// was not the person's
 #[test]
-fn t04_external_origin_hidden_until_promote_s25() {
+fn t04_external_origin_is_active_and_marked_s25() {
     let f = fixture();
     let mut p = prop(f.scope, f.person, "página web dice algo");
     p.origin = Origin::External;
     let out = f.engine.propose(p).unwrap();
-    assert_eq!(out.state, State::Quarantine);
-    assert!(
+    assert_eq!(out.state, State::Active);
+    assert_eq!(f.engine.get(out.memory).unwrap().origin, Origin::External);
+    assert_eq!(
         f.engine
             .search(f.scope, "página", SearchOpts::default())
             .unwrap()
-            .is_empty()
+            .len(),
+        1
     );
-    let quarantined = f
-        .engine
-        .list(f.scope, Some(State::Quarantine), None)
-        .unwrap();
-    assert_eq!(quarantined.len(), 1);
 }
 
-// S-26: agent-proposed procedures wait for review
+// S-26: a procedure is the agent's to keep, like a fact
 #[test]
-fn s26_agent_procedural_is_quarantined_person_procedural_is_active() {
+fn s26_procedures_are_active_whoever_proposes_them() {
     let f = fixture();
     let mut p = prop(f.scope, f.agent, "para desplegar: correr just deploy");
     p.kind = MemoryType::Procedural;
-    assert_eq!(f.engine.propose(p).unwrap().state, State::Quarantine);
+    assert_eq!(f.engine.propose(p).unwrap().state, State::Active);
     let mut p = prop(f.scope, f.person, "para probar: correr just test");
     p.kind = MemoryType::Procedural;
     assert_eq!(f.engine.propose(p).unwrap().state, State::Active);

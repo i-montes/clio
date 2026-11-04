@@ -1117,7 +1117,7 @@ impl Engine {
         how: Judged,
         sure: Sureness,
     ) -> Result<Outcome> {
-        self.propose_inner(p, Some((judge, how, sure)))
+        self.propose_inner(p, Some((judge, how, sure)), None)
     }
 
     /// The only way content enters the memory.
@@ -1131,7 +1131,26 @@ impl Engine {
             outcome = ::tracing::field::Empty,
             state = ::tracing::field::Empty,
         );
-        let result = self.propose_inner(p, None);
+        let result = self.propose_inner(p, None, None);
+        finish_propose!(span, result);
+        result
+    }
+
+    /// `p` replaces exactly `old`: the agent correcting one memory («no es Iván Ruiz sino Iván
+    /// Montes»). `old` must be active, of the same scope and kind; the secret check and the quota
+    /// run first, the replacement is an Update in the log (revertible) and an exact copy of an
+    /// active memory is a no-op.
+    pub fn replace(&self, old: MemoryId, p: Proposal) -> Result<Outcome> {
+        let span = span!(
+            "propose",
+            scope = p.scope.0,
+            actor = p.actor.0,
+            kind = format!("{:?}", p.kind).as_str(),
+            trace_id = ::tracing::field::Empty,
+            outcome = ::tracing::field::Empty,
+            state = ::tracing::field::Empty,
+        );
+        let result = self.propose_inner(p, None, Some(old));
         finish_propose!(span, result);
         result
     }
@@ -1140,6 +1159,7 @@ impl Engine {
         &self,
         p: Proposal,
         judged: Option<(&Judge, Judged, Sureness)>,
+        target: Option<MemoryId>,
     ) -> Result<Outcome> {
         let _g = self.write_guard();
         if p.content.trim().is_empty() {
@@ -1210,21 +1230,19 @@ impl Engine {
         };
         // A judged update names the memory it replaces, whatever its topic key.
         let mut topic_key = p.topic_key;
+        if let Some(old) = target {
+            let row = self.store.get(old)?;
+            if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
+                return Err(Error::InvalidState);
+            }
+            topic_key = row.topic_key.clone();
+            by_topic = Some(row);
+        }
         match &judged {
-            Some((
-                _,
-                Judged::Update {
-                    old,
-                    person_confirmed,
-                },
-                _,
-            )) => {
+            Some((_, Judged::Update { old, .. }, _)) => {
                 let row = self.store.get(*old)?;
                 if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
                     return Err(Error::InvalidState);
-                }
-                if !person_confirmed && self.held_by_person(&row)? {
-                    return Err(Error::NotAllowed); // what the person wrote is replaced by the person
                 }
                 topic_key = row.topic_key.clone();
                 by_topic = Some(row);
@@ -1283,6 +1301,12 @@ impl Engine {
             },
             (Some((_, Judged::Update { old, .. }, _)), None) => Verdict::Update { old: *old },
             (Some((_, Judged::Noop { existing }, _)), None) => Verdict::Noop(*existing),
+            // Replacing a named memory: an exact copy of something active changes nothing.
+            (None, Some(dup)) if target.is_some() => Verdict::Noop(dup.id),
+            (None, None) => match target {
+                Some(old) => Verdict::Update { old },
+                None => verdict,
+            },
             (None, _) => verdict,
         };
         // The same untrusted text twice is one candidate: a second copy neither adds a row to
@@ -1625,6 +1649,34 @@ impl Engine {
             after,
         }];
         self.log(to, OpKind::Move, id, changes, actor, "moved")
+    }
+
+    /// The agent forgets a memory: it goes to quarantine (no longer recalled), its record stays,
+    /// and `revert` brings it back. Any registered actor but the system; only an active memory.
+    pub fn forget(&self, id: MemoryId, actor: ActorId, reason: &str) -> Result<OpId> {
+        let _g = self.write_guard();
+        if self.store.actor_kind(actor)? == ActorKind::System {
+            return Err(Error::NotAllowed);
+        }
+        let row = self.store.get(id)?;
+        if row.state != State::Active {
+            return Err(Error::InvalidState);
+        }
+        let mut after = row.clone();
+        after.state = State::Quarantine;
+        let changes = vec![Change {
+            memory: id,
+            before: Some(row.clone()),
+            after,
+        }];
+        self.log(
+            row.scope,
+            OpKind::Forget,
+            id,
+            changes,
+            actor,
+            &self.bounded(reason),
+        )
     }
 
     /// PURGE: erases a memory's content everywhere (S-24, S-25) and leaves a tombstone. Only a

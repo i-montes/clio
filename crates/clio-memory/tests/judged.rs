@@ -54,20 +54,11 @@ fn the_judge_is_made_by_the_engine_and_nobody_else_can_be_one() {
     }
 }
 
-// S-25: the one exception to «outside text waits in quarantine»: a signed judgment.
+// S-25: a judged add from outside is active, keeps its origin and is signed by the judge.
 // S-64
 #[test]
-fn a_judged_add_is_active_where_the_rules_would_hold_it_and_the_judge_signs_it() {
+fn a_judged_add_is_active_and_the_judge_signs_it() {
     let f = fixture();
-    let rules_only = f
-        .engine
-        .propose(external(&f, "El proyecto usa PostgreSQL 16"))
-        .unwrap();
-    assert_eq!(
-        rules_only.state,
-        State::Quarantine,
-        "the control: the rules hold it"
-    );
     let j = f.engine.judge().unwrap();
     let o = f
         .engine
@@ -161,10 +152,10 @@ fn a_judged_update_replaces_the_old_memory_and_the_person_can_revert_it() {
     assert_eq!(f.engine.get(old.memory).unwrap().state, State::Active);
 }
 
-// S-25 S-27: what the person wrote is replaced by the person.
-// S-64
+// S-25 S-27 S-64: the memory is the agent's: a judged update replaces what the person wrote, and
+// the person's revert brings it back.
 #[test]
-fn what_the_person_wrote_is_replaced_only_with_the_persons_confirmation() {
+fn a_judged_update_replaces_what_the_person_wrote_and_revert_restores_it() {
     let f = fixture();
     let mine = f
         .engine
@@ -176,7 +167,7 @@ fn what_the_person_wrote_is_replaced_only_with_the_persons_confirmation() {
         old: mine,
         person_confirmed: confirmed,
     };
-    let e = f
+    let o = f
         .engine
         .propose_judged(
             &j,
@@ -184,60 +175,12 @@ fn what_the_person_wrote_is_replaced_only_with_the_persons_confirmation() {
             update(false),
             sure(),
         )
-        .unwrap_err();
-    assert!(matches!(e, Error::NotAllowed), "{e:?}");
-    assert_eq!(
-        f.engine.get(mine).unwrap().state,
-        State::Active,
-        "nothing changed"
-    );
-    assert_eq!(active(&f).len(), 1);
-    let o = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "Marta ahora vive en Bogotá"),
-            update(true),
-            sure(),
-        )
         .unwrap();
     assert_eq!(o.state, State::Active);
     assert_eq!(f.engine.get(mine).unwrap().state, State::Replaced);
-}
-
-// S-25 S-27: a fixed block holds what the person said about themselves, whoever's origin the row has.
-#[test]
-fn a_memory_in_a_fixed_block_is_protected_like_the_persons_own() {
-    let f = fixture();
-    let j = f.engine.judge().unwrap();
-    let held = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "Marta es ingeniera de datos"),
-            Judged::Add,
-            sure(),
-        )
-        .unwrap()
-        .memory;
-    let block = f
-        .engine
-        .create_block(f.scope, "identidad", 200, f.person)
-        .unwrap();
-    f.engine.block_set(block, &[held], f.person).unwrap();
-    let e = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "Marta ahora es gerente"),
-            Judged::Update {
-                old: held,
-                person_confirmed: false,
-            },
-            sure(),
-        )
-        .unwrap_err();
-    assert!(matches!(e, Error::NotAllowed), "{e:?}");
+    assert_eq!(active(&f).len(), 1);
+    f.engine.revert(o.op, f.person).unwrap();
+    assert_eq!(f.engine.get(mine).unwrap().state, State::Active);
 }
 
 #[test]
@@ -403,54 +346,4 @@ fn the_decision_log_says_the_judge_decided_and_how_sure_it_was() {
     assert!(d.acted);
     assert!((d.confidence.unwrap() - 0.87).abs() < 1e-6);
     assert!(d.reason.as_deref().unwrap().contains("judged: add"));
-}
-
-// S-25 S-27 S-64: a candidate the person accepted is theirs, whoever wrote it.
-#[test]
-fn a_candidate_the_person_accepted_is_protected_like_what_they_wrote() {
-    let f = fixture();
-    let j = f.engine.judge().unwrap();
-    let waiting = f
-        .engine
-        .propose(external(&f, "La reunión es los martes"))
-        .unwrap()
-        .memory;
-    f.engine.promote(waiting, f.person).unwrap();
-    let e = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "La reunión es los miércoles"),
-            Judged::Update {
-                old: waiting,
-                person_confirmed: false,
-            },
-            sure(),
-        )
-        .unwrap_err();
-    assert!(matches!(e, Error::NotAllowed), "{e:?}");
-    // What the judge itself made active is not the person's: it can be replaced.
-    let made = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "El proyecto usa Rust"),
-            Judged::Add,
-            sure(),
-        )
-        .unwrap()
-        .memory;
-    let o = f
-        .engine
-        .propose_judged(
-            &j,
-            external(&f, "El proyecto usa Go"),
-            Judged::Update {
-                old: made,
-                person_confirmed: false,
-            },
-            sure(),
-        )
-        .unwrap();
-    assert_eq!(o.kind, OpKind::Update);
 }
