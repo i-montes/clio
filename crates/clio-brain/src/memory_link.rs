@@ -26,10 +26,13 @@ use std::time::Duration;
 
 use clio_memory::{
     ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, Judged, MemoryId,
-    MemoryRow, MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId,
-    SearchOpts, Signal, State, Sureness, SystemClock,
+    MemoryRow, MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation,
+    ScopeId, SearchOpts, Signal, State, Sureness, SystemClock,
 };
 use clio_vault::Scrubber;
+
+/// The name the judge (Jev) signs its relations with, as the engine names its actor.
+const JUDGE_NAME: &str = "jev";
 
 pub const SCOPE: &str = "clio";
 pub const DB_FILE: &str = "memory.db";
@@ -964,6 +967,63 @@ impl MemoryLink {
     /// What is left of a purged memory: who, when and why, never the content.
     pub fn tombstone(&self, id: MemoryId) -> Res<Option<clio_memory::Tombstone>> {
         self.engine.tombstone(id).map_err(|e| explain(&e))
+    }
+
+    /// First in the context of its place. Only the person pins (directly, or by asking the model
+    /// and Jev confirming their words).
+    pub fn pin(&self, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        self.engine
+            .pin(id, self.actors.persona)
+            .map_err(|e| explain(&e))
+    }
+
+    pub fn unpin(&self, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        self.engine
+            .unpin(id, self.actors.persona)
+            .map_err(|e| explain(&e))
+    }
+
+    /// How `source` stands to `target`, as the judge (Jev) said.
+    pub fn relate_judged(
+        &self,
+        source: MemoryId,
+        target: MemoryId,
+        relation: Relation,
+        confidence: f32,
+    ) -> Res<()> {
+        self.need_write()?;
+        self.engine
+            .relate(source, target, relation, JUDGE_NAME, confidence)
+            .map_err(|e| explain(&e))
+    }
+
+    /// What the relations of `row` say, for the model and the person: only those with a memory
+    /// this link can read and that is active (a note pointing at nothing readable says nothing).
+    pub fn relation_notes(&self, row: &MemoryRow) -> Vec<String> {
+        let Ok(rels) = self.engine.relations(row.id) else {
+            return Vec::new();
+        };
+        rels.into_iter()
+            .filter_map(|r| {
+                let mine = r.source == row.id;
+                let other = if mine { r.target } else { r.source };
+                let readable = self.get(other).is_ok_and(|o| o.state == State::Active);
+                if !readable {
+                    return None;
+                }
+                let n = other.0;
+                Some(match (r.relation, mine) {
+                    (Relation::ConflictsWith, _) => format!("contradice a m{n}"),
+                    (Relation::Compatible, _) => format!("compatible con m{n}"),
+                    (Relation::Related, _) => format!("relacionada con m{n}"),
+                    (Relation::Scoped, true) => format!("caso concreto de m{n}"),
+                    (Relation::Scoped, false) => format!("m{n} es un caso concreto"),
+                    (Relation::NotConflict, _) => return None,
+                })
+            })
+            .collect()
     }
 
     pub fn archive(&self, id: MemoryId) -> Res<()> {

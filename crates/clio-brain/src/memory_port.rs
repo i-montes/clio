@@ -232,17 +232,24 @@ impl MemoryPort for LinkPort {
                         .unwrap_or_default(),
                     _ => Vec::new(),
                 };
-                judge.decide(
+                let v = judge.decide(
                     &stored,
                     kind == MemoryType::Procedural,
                     &neighbors,
                     judging.tainted,
                     &judging.person_said,
-                )
+                );
+                // Something new next to a memory it does not replace: how the two stand (asked
+                // now, before the writer, like everything Jev is asked).
+                let relation = match (&v.call, neighbors.first()) {
+                    (Call::Add, Some(n)) => judge.relation(&stored, &n.text).map(|r| (n.id, r)),
+                    _ => None,
+                };
+                (v, relation)
             });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
         let link = self.writer()?;
-        if let Some(v) = verdict {
+        if let Some((v, relation)) = verdict {
             let how = match v.call {
                 Call::Add => Some(Judged::Add),
                 Call::Update {
@@ -260,6 +267,12 @@ impl MemoryPort for LinkPort {
             if let Some(how) = how {
                 match link.propose_judged_draft(&draft, session, place, how, v.confidence) {
                     Ok(o) => {
+                        if let (OpKind::Add, State::Active, Some((other, (rel, sure)))) =
+                            (o.kind, o.state, relation)
+                        {
+                            // Best effort: a relation is a note on the memory, not the memory.
+                            let _ = link.relate_judged(o.memory, MemoryId(other), rel, sure);
+                        }
                         let saved = match (o.kind, o.state) {
                             (OpKind::Noop, _) => Saved::Known,
                             (OpKind::Update, State::Active) => Saved::Replaced,
@@ -295,6 +308,17 @@ impl MemoryPort for LinkPort {
                 saved: Saved::Waiting,
                 change: None,
             })
+    }
+
+    /// Pins a memory the session can read, because the person asked (Jev checks their words).
+    fn pin(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        self.change(
+            id,
+            judging,
+            Request::Pin,
+            |r| r.state == State::Active,
+            |link, row| link.pin(row.id),
+        )
     }
 
     fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
@@ -449,6 +473,7 @@ fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
         title: row.title.clone(),
         category: row.category.map(|c| c.label().to_owned()),
         place: link.place_label(row),
+        notes: link.relation_notes(row),
     }
 }
 

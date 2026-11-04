@@ -57,6 +57,8 @@ El proyecto lo detecta el cerebro (no el modelo) desde la carpeta de trabajo: no
 
 Cuando Jev decide una propuesta y hay memorias parecidas que **no** reemplaza, se le pregunta (una opción cerrada) qué relación tiene con la más parecida: `related`, `compatible`, `scoped`, `conflicts_with`, `not_conflict`. Se guarda en una tabla `relations` (fuera del registro, como las decisiones), y la búsqueda anota cada resultado: «contradice a #N», «reemplaza a #N», «reemplazada por #N». `supersedes` ya lo da el reemplazo del motor.
 
+*Decisiones mías al construirlo:* `not_conflict` no se le ofrece a Jev (solo tiene sentido para corregir un «contradice» que marcó alguien); a Jev se le ofrece «ninguna»; umbral 0,7; solo se pregunta con lo que Jev guarda como nuevo (no con lo que espera revisión) y contra la memoria más parecida; las notas solo nombran memorias activas que la sesión puede leer, así que «reemplaza a» / «reemplazada por» no se muestran (la vieja ya no es legible); `memory_pin` usa el camino de `memory_forget` (palabras de la persona y Jev, 0,9) y fija firmado como la persona.
+
 ### 7. Servidor MCP
 
 `clio memory mcp`: JSON-RPC 2.0 por la entrada estándar (sin dependencias nuevas). Herramientas: `memory_search`, `memory_get`, `memory_timeline`, `memory_context`, `memory_propose`, `memory_session_summary`, `memory_current_project`. Escribe como un actor propio por cliente (`mcp:<nombre>`, de tipo agente) y **siempre** con origen externo, así que lo que propone pasa por Jev o espera en cuarentena; nunca promueve, archiva, revierte ni purga (S-25). Lee solo lo activo. Abre la memoria en solo lectura salvo durante una propuesta (como el servicio de Pi). Cuota propia.

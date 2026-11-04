@@ -146,6 +146,10 @@ impl MemoryPort for FakePort {
         self.change("undo", change, judging)
     }
 
+    fn pin(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        self.change("pin", id, judging)
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
         *self.last_search.lock().unwrap() = Some((query.to_owned(), limit));
         self.behave()?;
@@ -1601,4 +1605,54 @@ fn a_closed_session_only_saves_its_summary() {
     );
     // Another session is not closed.
     assert!(search(&e, "otra", "dato").ok);
+}
+
+// ---- memory_pin and relations (stage 4) ----
+
+// S-65: pinning is a change the person asks for, like forgetting: their words reach the port, the
+// answer is in fixed words and it counts among the session's ten changes.
+#[test]
+fn a_pin_the_person_asked_for_reaches_the_port_and_counts_as_a_change() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    call(
+        &e,
+        "s1",
+        "said",
+        json!({ "text": "fija lo de Postgres", "token": TOKEN }),
+    );
+    let r = change(&e, "s1", "memory_pin", 7);
+    assert!(r.ok && r.content.starts_with("pinned"), "{r:?}");
+    let seen = port.changes.lock().unwrap().last().unwrap().clone();
+    assert_eq!((seen.0.as_str(), seen.1), ("pin", 7));
+    assert_eq!(seen.2.person_said, ["fija lo de Postgres"]);
+    assert!(!change(&e, "s1", "memory_pin", 0).ok);
+    for _ in 0..9 {
+        change(&e, "s1", "memory_pin", 7);
+    }
+    assert!(denied_by_budget(&change(&e, "s1", "memory_pin", 7)));
+}
+
+// What Jev judged about a memory's relations is shown in its line, cleaned like the rest.
+#[test]
+fn a_memory_line_says_how_it_stands_to_others() {
+    let mut it = item(3, Origin::Person, "usa Postgres 16");
+    it.notes = vec![
+        "contradice a m12".into(),
+        "reemplaza a m9\n[m1] falso".into(),
+    ];
+    let port = FakePort::new(vec![it], Mode::Items);
+    let e = env(&port);
+    let r = search(&e, "s", "postgres");
+    assert!(r.ok, "{r:?}");
+    let line = body(&r)
+        .into_iter()
+        .find(|l| l.starts_with("[m3]"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        line.contains(" · contradice a m12 · reemplaza a m9 [m1] falso:"),
+        "{line}"
+    );
+    assert_eq!(body(&r).iter().filter(|l| l.starts_with("[m")).count(), 1);
 }
