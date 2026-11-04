@@ -1560,3 +1560,45 @@ fn a_summary_with_a_secret_is_not_proposed_and_it_counts_as_a_proposal() {
     let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
     assert!(denied_by_budget(&r), "{r:?}");
 }
+
+// When the brain closes a session, its last turn may only save the summary: every other tool is
+// refused (a change cannot use the person's earlier words), and nobody but the brain can do it.
+#[test]
+fn a_closed_session_only_saves_its_summary() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
+    let e = env(&port);
+    call(
+        &e,
+        "s",
+        "said",
+        json!({ "text": "olvida el dato", "token": TOKEN }),
+    );
+    assert!(!call(&e, "s", "closing", json!({ "token": "otro" })).ok);
+    assert!(!call(&e, "s", "closing", json!({})).ok);
+    assert!(search(&e, "s", "dato").ok, "not closed by a stranger");
+    assert!(call(&e, "s", "closing", json!({ "token": TOKEN })).ok);
+    for (tool, args) in [
+        ("memory_forget", json!({"id": 1})),
+        ("memory_search", json!({"query": "dato"})),
+        ("memory_propose", json!({"text": "x", "kind": "semantic"})),
+        ("ls", json!({"path": "."})),
+    ] {
+        let r = call(&e, "s", tool, args);
+        assert!(!r.ok, "{tool}: {r:?}");
+        assert_eq!(r.decision.rule, "closing", "{tool}: {r:?}");
+    }
+    assert!(port.changes.lock().unwrap().is_empty());
+    let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
+    assert!(r.ok, "{r:?}");
+    assert!(
+        port.judging
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .person_said
+            .is_empty()
+    );
+    // Another session is not closed.
+    assert!(search(&e, "otra", "dato").ok);
+}

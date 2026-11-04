@@ -183,6 +183,8 @@ struct Taint {
     /// The person's last words in this session, as the brain reported them (memory only, never
     /// kept on disk): what a judge compares a request against.
     said: std::collections::VecDeque<String>,
+    /// The person closed the session: only its summary may still be saved (`closing`).
+    closing: bool,
 }
 
 /// How many of the person's messages are kept per session, and how long each may be.
@@ -515,6 +517,23 @@ impl ToolHost {
         if req.tool == "said" {
             return self.said(&req, &map);
         }
+        if req.tool == "closing" {
+            return self.closing(&req, &map);
+        }
+        // The last turn of a closed session saves its summary and nothing else: no file, no
+        // command, no change of the memory on words the person said earlier.
+        if req.tool != "memory_session_summary"
+            && lock(&self.sessions)
+                .get(&req.session)
+                .is_some_and(|t| t.closing)
+        {
+            return self.refuse(
+                &req.id,
+                "closing",
+                "the person closed this session: only memory_session_summary is left".into(),
+                tainted,
+            );
+        }
         if map
             .get("content")
             .and_then(Value::as_str)
@@ -793,6 +812,43 @@ impl ToolHost {
                 outcome: "allow".into(),
                 rule: "said".into(),
                 reason: "keeping the person's words has no effect on the machine".into(),
+            },
+            tainted,
+            external: false,
+        }
+    }
+
+    /// The brain closes the session (with the same token as `said`): from now on only the summary
+    /// is served, and the person's earlier words count for nothing.
+    fn closing(&self, req: &Request, args: &Map<String, Value>) -> Response {
+        let tainted = self.is_tainted(&req.session);
+        let known = self.said_token.as_deref();
+        if known.is_none() || known != args.get("token").and_then(Value::as_str) {
+            return self.refuse(
+                &req.id,
+                "closing",
+                "only the brain closes a session".into(),
+                tainted,
+            );
+        }
+        {
+            let mut s = lock(&self.sessions);
+            if s.len() >= MAX_SESSIONS && !s.contains_key(&req.session) {
+                return self.refuse(&req.id, "protocol", "too many sessions".into(), tainted);
+            }
+            let t = s.entry(req.session.clone()).or_default();
+            t.closing = true;
+            t.said.clear();
+        }
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: String::new(),
+            data: Value::Null,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "closing".into(),
+                reason: "closing a session only narrows what it may do".into(),
             },
             tainted,
             external: false,

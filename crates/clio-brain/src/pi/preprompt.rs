@@ -206,24 +206,42 @@ impl PrePrompt {
     }
 
     fn prepare_for(&self, person_text: &str, stamp: &str, limit: Duration) -> Prepared {
+        // Taken here, not in the worker: a worker given up on must not take the request with it.
+        let ask = self.take_ask();
         let (tx, rx) = channel();
         let (inner, text, at) = (self.0.clone(), person_text.to_owned(), stamp.to_owned());
         std::thread::spawn(move || {
-            let _ = tx.send(inner.prepare(&text, &at));
+            let _ = tx.send(inner.prepare(&text, &at, ask));
         });
         rx.recv_timeout(limit).unwrap_or_else(|_| Prepared {
-            text: envelope::wrap(stamp, person_text),
+            text: envelope::wrap_with(
+                &Envelope {
+                    stamp,
+                    memory: &[],
+                    outside: &[],
+                    tools: &[],
+                    ask,
+                },
+                person_text,
+            ),
             ..Prepared::default()
         })
     }
 
     pub fn prepare(&self, person_text: &str, stamp: &str) -> Prepared {
-        self.0.prepare(person_text, stamp)
+        self.0.prepare(person_text, stamp, self.take_ask())
+    }
+
+    fn take_ask(&self) -> Option<&'static str> {
+        self.0
+            .compacted
+            .swap(false, Ordering::SeqCst)
+            .then_some(COMPACTED_ASK)
     }
 }
 
 impl Inner {
-    fn prepare(&self, person_text: &str, stamp: &str) -> Prepared {
+    fn prepare(&self, person_text: &str, stamp: &str, ask: Option<&str>) -> Prepared {
         let first = self.first.swap(false, Ordering::SeqCst);
         (self.hooks.said)(person_text);
         // Cleaned first and cut after: a cut must never leave the front half of a secret.
@@ -307,10 +325,7 @@ impl Inner {
                 memory: &mine,
                 outside: &outside,
                 tools: &out.tools,
-                ask: self
-                    .compacted
-                    .swap(false, Ordering::SeqCst)
-                    .then_some(COMPACTED_ASK),
+                ask,
             },
             person_text,
         );
@@ -836,6 +851,18 @@ mod tests {
             envelope::wrap(STAMP, "hola"),
             "it goes with only the time"
         );
+    }
+
+    #[test]
+    fn the_request_after_a_compaction_survives_a_preparation_that_hangs() {
+        let mut o = opts(false, &[], vec![cand(1, "dato", true)]);
+        o.slow = Duration::from_secs(3);
+        let r = rig(o);
+        r.pp.set_summaries(true);
+        r.pp.compacted();
+        let p = r.pp.prepare_for("hola", STAMP, Duration::from_millis(150));
+        assert!(p.text.contains(COMPACTED_ASK), "{}", p.text);
+        assert_eq!(envelope::strip(&p.text), "hola");
     }
 
     #[test]

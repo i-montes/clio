@@ -412,3 +412,35 @@ fn pi_receives_the_time_in_front_of_what_the_person_typed() {
         "the level ignores the envelope"
     );
 }
+
+// A compaction that went through, seen while a prompt runs, makes the next message ask for the
+// session's summary; one that failed or was cut does not.
+#[test]
+fn a_compaction_during_a_run_asks_for_the_summary_in_the_next_message() {
+    if need("a_compaction_during_a_run", false).is_none() {
+        return;
+    }
+    use clio_brain::pi::preprompt::{COMPACTED_ASK, PrePrompt};
+    let c = fake(None);
+    let a = Assessor::new(Arc::new(SystemClock));
+    for (msg, asks) in [
+        ("compact:fail", false),
+        ("compact:aborted", false),
+        ("compact:ok", true),
+    ] {
+        let pre = PrePrompt::time_only();
+        pre.set_summaries(true);
+        let day = Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
+        let mut g = RunGuard::new(Arc::new(SystemClock), "t", caps(40, 4), day);
+        let mut seen = 0;
+        run_assessed(&c, &a, &pre, msg, &Cancel::new(), &mut g, &mut |e| {
+            if matches!(e, Event::CompactionEnd { .. }) {
+                seen += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(seen, 1, "{msg}: the event still reaches the screen");
+        let next = pre.prepare("sigue", "2026-11-04 00:10 -05:00").text;
+        assert_eq!(next.contains(COMPACTED_ASK), asks, "{msg}: {next}");
+    }
+}

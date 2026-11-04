@@ -970,8 +970,9 @@ fn closing_a_session_of_four_messages_saves_its_summary() {
     let mut script: Vec<Value> = (1..=4)
         .map(|i| json!({"text": format!("respuesta {i}"), "usage": [10, 2]}))
         .collect();
+    // Slow on purpose: the person leaves at once, and leaving must wait for the close.
     script.push(
-        json!({"tool_calls": [{"name": "memory_session_summary", "arguments": {
+        json!({"delay_ms": 3000, "tool_calls": [{"name": "memory_session_summary", "arguments": {
         "reason": "Clio lo pidió", "goal": "probar el cierre", "accomplished": "cuatro pasos"}}]}),
     );
     script.push(json!({"text": "guardado", "usage": [10, 2]}));

@@ -266,7 +266,8 @@ elif scenario == "summary":
     out["back_in_selector"] = wait_screen(fd, "sesiones de Pi", 15)
     send(fd, b"q")
     out["code"] = wait_exit(fd, pid, 60)
-    out["procs_after_quit"] = len(pi_procs())
+    out["procs_at_exit"] = [c for _, c in pi_procs()]
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "sigkill":
     out["opened"] = open_new_chat(fd)
     out["procs_while_open"] = len(pi_procs())

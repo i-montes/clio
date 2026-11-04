@@ -1456,8 +1456,8 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
         Box::new(|| Ok("KEY".into())),
         Arc::new(clio_core::SystemClock),
     ));
-    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
-    let alfa = in_project(&w, "alfa").with_judge(Arc::new(judge));
+    let judge = Arc::new(MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned()))));
+    let alfa = in_project(&w, "alfa").with_judge(judge.clone());
     let summary = clio_toolhost::ProposalDraft {
         text: "Objetivo: migrar · Hecho: esquema 2".into(),
         title: Some("lo que diga el modelo".into()),
@@ -1489,8 +1489,8 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
     );
     drop(link);
     assert_eq!(alfa.context().unwrap()[0].id, d.id);
-    // Without a project it is the person's, and without Jev it waits like any proposal.
-    let plain = LinkPort::new(&w.data, None);
+    // Without a project it is the person's and it waits for them, even with Jev.
+    let plain = LinkPort::new(&w.data, None).with_judge(judge);
     let d = MemoryPort::propose(&plain, &summary, "sesion-10", &Judging::default()).unwrap();
     assert_eq!(d.saved, Saved::Waiting);
     let l = open(&w);

@@ -11,6 +11,7 @@
 //   "tools:N" starts N tools with different paths, one every 20 ms, then waits for `abort`
 //   "same:N"  the same, with the same path every time
 //   "deaf:N"  like "tools:N" but never answers `abort` with a settle (a Pi that does not stop)
+//   "compact:ok|fail|aborted" compacts the conversation during the run (it works, fails or is cut)
 // Env FAKE_PI_PIDFILE: writes its own pid and the pid of a `sleep` child (same group).
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -73,6 +74,17 @@ function prompt(id, raw) {
       i += 1;
     }, 20);
     return;
+  }
+  const compact = /^compact:(ok|fail|aborted)$/.exec(msg);
+  if (compact) {
+    out({ type: "compaction_start", reason: "threshold" });
+    out({
+      type: "compaction_end",
+      reason: "threshold",
+      aborted: compact[1] === "aborted",
+      willRetry: false,
+      ...(compact[1] === "fail" ? { errorMessage: "too big" } : { result: { tokensBefore: 900, estimatedTokensAfter: 100 } }),
+    });
   }
   if (msg === "slow") { setTimeout(() => settle(false), 5000); return; }
   if (msg === "flood") process.stderr.write("x".repeat(200000));

@@ -373,6 +373,15 @@ impl Session for ChatSession {
         else {
             return;
         };
+        // The service first narrows the session to the summary: a closing turn that cannot be
+        // narrowed is not run (the model would have every tool and nobody watching).
+        if !jev::closing_to_host(
+            &self.toolhost.socket,
+            &self.pi.session_id,
+            &self.toolhost.said_token,
+        ) {
+            return;
+        }
         let mut budget = self.budget;
         budget.max_steps = budget.max_steps.min(SUMMARY_STEPS);
         budget.max_ms = budget.max_ms.min(SUMMARY_MS);

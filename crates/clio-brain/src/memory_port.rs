@@ -200,39 +200,46 @@ impl MemoryPort for LinkPort {
                 (true, false) => Place::Personal,
                 _ => Place::by_rule(draft.category, has_project),
             });
-        let verdict = self.judge.as_ref().map(|judge| {
-            // A summary is about its own session: nothing to replace or to have known already.
-            let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
-                &self.data,
-                &EmbedModel::none(),
-                self.project.as_deref(),
-            ) {
-                Ok(Some(link)) if !summary => link
-                    .search_in(place, &stored, 3)
-                    .map(|rows| {
-                        rows.into_iter()
-                            .map(|r| Neighbor {
-                                id: r.id.0,
-                                // A lesson learned in another project is not this session's to
-                                // replace: only the person's words would (as with their own).
-                                protected: link.is_protected(&r)
-                                    || (place == Place::Lessons
-                                        && MemoryLink::learned_in(&r) != self.project.as_deref()),
-                                text: r.content,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            judge.decide(
-                &stored,
-                kind == MemoryType::Procedural,
-                &neighbors,
-                judging.tainted,
-                &judging.person_said,
-            )
-        });
+        // A summary with no project would be the person's and show up everywhere: the person
+        // decides on it, never Jev.
+        let verdict = self
+            .judge
+            .as_ref()
+            .filter(|_| !summary || has_project)
+            .map(|judge| {
+                // A summary is about its own session: nothing to replace or to have known already.
+                let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
+                    &self.data,
+                    &EmbedModel::none(),
+                    self.project.as_deref(),
+                ) {
+                    Ok(Some(link)) if !summary => link
+                        .search_in(place, &stored, 3)
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(|r| Neighbor {
+                                    id: r.id.0,
+                                    // A lesson learned in another project is not this session's to
+                                    // replace: only the person's words would (as with their own).
+                                    protected: link.is_protected(&r)
+                                        || (place == Place::Lessons
+                                            && MemoryLink::learned_in(&r)
+                                                != self.project.as_deref()),
+                                    text: r.content,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                judge.decide(
+                    &stored,
+                    kind == MemoryType::Procedural,
+                    &neighbors,
+                    judging.tainted,
+                    &judging.person_said,
+                )
+            });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
         let link = self.writer()?;
         if let Some(v) = verdict {

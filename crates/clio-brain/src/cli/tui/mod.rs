@@ -148,7 +148,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         debug: DebugCtl::new(debug, false),
-        closing: Mutex::new(Vec::new()),
+        closing: Arc::default(),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -221,7 +221,9 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
             .unwrap_or_default();
         if open.is_some() || !closing.is_empty() {
             restore_terminal();
-            eprintln!("clio: cerrando la sesión de Pi (y guardando su resumen; hasta 30 s)…");
+            eprintln!(
+                "clio: cerrando la sesión de Pi y guardando su resumen (unos 35 s como mucho; Ctrl-C para no esperar)…"
+            );
             if let Some(s) = open {
                 s.summarize();
             }
@@ -274,7 +276,22 @@ struct Ctx {
     debug: DebugCtl,
     /// Sessions being closed on their own thread (each may first save its summary): waited for
     /// when the person leaves, so leaving right after closing a chat does not cut it short.
-    closing: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    closing: Closing,
+}
+
+/// The threads closing a session (and saving its summary).
+type Closing = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+
+/// Waits for every session being closed: a session is never opened again (two Pi on one file and
+/// one working copy) while its last turn still runs.
+fn wait_closing(closing: &Closing) {
+    let pending: Vec<_> = closing
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default();
+    for h in pending {
+        let _ = h.join();
+    }
 }
 
 /// Sends what the agent does to the screen.
@@ -487,8 +504,10 @@ impl Ctx {
             Cmd::ChatOpen { seq, target } => {
                 self.stop_chat_later(seq);
                 let (sources, slot) = (self.sources.clone(), self.chat.clone());
+                let closing = self.closing.clone();
                 self.spawn(
                     move |d, _| -> Result<Box<ChatInfo>, String> {
+                        wait_closing(&closing);
                         let target = match target {
                             OpenTarget::New { project } => Target::New {
                                 project: expand(&project, &d.home),
