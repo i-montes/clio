@@ -369,3 +369,40 @@ fn a_file_of_schema_1_is_upgraded_by_its_first_writer_and_never_by_a_reader() {
             .all(|c| c.name != "schema_version" || c.ok)
     );
 }
+
+// A person moves a memory to another scope (projects merged or renamed): it is found there and no
+// longer in the old one, with its history; revert brings it back; nobody else may move.
+#[test]
+fn a_person_moves_a_memory_and_revert_brings_it_back() {
+    let f = fixture();
+    let other = f.engine.create_scope("proyecto:nuevo", "es").unwrap();
+    let id = f
+        .engine
+        .propose(prop(f.scope, f.person, "el despliegue usa compose"))
+        .unwrap()
+        .memory;
+    let opts = RecallOpts::default();
+    let found = |s| {
+        f.engine
+            .recall(s, "despliegue compose", &opts)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.memory.id == id)
+    };
+    assert!(
+        f.engine.move_to(id, other, f.agent).is_err(),
+        "only a person"
+    );
+    assert!(
+        f.engine.move_to(id, f.scope, f.person).is_err(),
+        "same scope"
+    );
+    let op = f.engine.move_to(id, other, f.person).unwrap();
+    assert_eq!(f.engine.get(id).unwrap().scope, other);
+    assert!(found(other) && !found(f.scope));
+    assert_eq!(f.engine.history(id).unwrap().len(), 2);
+    f.engine.revert(op, f.person).unwrap();
+    assert_eq!(f.engine.get(id).unwrap().scope, f.scope);
+    assert!(found(f.scope) && !found(other));
+}

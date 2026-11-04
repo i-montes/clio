@@ -1607,6 +1607,26 @@ impl Engine {
         self.log(row.scope, OpKind::Archive, id, changes, actor, "archived")
     }
 
+    /// Moves a memory to another scope (a person merging or renaming projects). Only a person; the
+    /// scope must exist and be another one; its state, history and relations go with it, and
+    /// `revert` brings it back.
+    pub fn move_to(&self, id: MemoryId, to: ScopeId, actor: ActorId) -> Result<OpId> {
+        let _g = self.write_guard();
+        self.require_person(actor)?;
+        let row = self.store.get(id)?;
+        if row.scope == to || !self.store.scopes()?.iter().any(|s| s.id == to) {
+            return Err(Error::InvalidState);
+        }
+        let mut after = row.clone();
+        after.scope = to;
+        let changes = vec![Change {
+            memory: id,
+            before: Some(row),
+            after,
+        }];
+        self.log(to, OpKind::Move, id, changes, actor, "moved")
+    }
+
     /// PURGE: erases a memory's content everywhere (S-24, S-25) and leaves a tombstone. Only a
     /// person may do it, and it is never reachable from an agent or MCP. `reason` is stored in the
     /// clear: do not put the erased text in it. Revert cannot undo it. Copies of the file made

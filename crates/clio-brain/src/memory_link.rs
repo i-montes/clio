@@ -1151,6 +1151,67 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// Every memory of project `from` (any state but purged) moves to project `into`, created if
+    /// it does not exist: projects merged, or renamed. One revertible operation per memory, signed
+    /// by the person. Returns how many moved.
+    pub fn merge_projects(&self, from: &str, into: &str) -> Res<usize> {
+        self.need_write()?;
+        let (from, into) = (crate::project::normal(from), crate::project::normal(into));
+        if from.is_empty() || into.is_empty() || from == into {
+            return Err("hacen falta dos proyectos distintos".into());
+        }
+        let scopes = self.engine.scopes().map_err(|e| explain(&e))?;
+        let find = |n: &str| {
+            scopes
+                .iter()
+                .find(|s| s.name == format!("{PROJECT_PREFIX}{n}"))
+                .map(|s| s.id)
+        };
+        let src = find(&from).ok_or_else(|| format!("no hay un proyecto {from}"))?;
+        let dst = match find(&into) {
+            Some(id) => id,
+            None => self
+                .engine
+                .create_scope(&format!("{PROJECT_PREFIX}{into}"), "es")
+                .map_err(|e| explain(&e))?,
+        };
+        let rows = self.engine.list(src, None, None).map_err(|e| explain(&e))?;
+        for r in &rows {
+            self.engine
+                .move_to(r.id, dst, self.actors.persona)
+                .map_err(|e| explain(&e))?;
+        }
+        Ok(rows.len())
+    }
+
+    /// Archives every active or pending memory of project `name` (reversible, not an erasure).
+    pub fn archive_project(&self, name: &str) -> Res<usize> {
+        self.need_write()?;
+        let name = crate::project::normal(name);
+        let scope = self
+            .engine
+            .scopes()
+            .map_err(|e| explain(&e))?
+            .into_iter()
+            .find(|s| s.name == format!("{PROJECT_PREFIX}{name}"))
+            .ok_or_else(|| format!("no hay un proyecto {name}"))?
+            .id;
+        let mut n = 0;
+        for state in [State::Active, State::Quarantine] {
+            for r in self
+                .engine
+                .list(scope, Some(state), None)
+                .map_err(|e| explain(&e))?
+            {
+                self.engine
+                    .archive(r.id, self.actors.persona)
+                    .map_err(|e| explain(&e))?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// The operations that touched `id`, oldest first (its versions), if this view can read it.
     pub fn history(&self, id: MemoryId) -> Res<Vec<clio_memory::Operation>> {
         self.get(id)?;

@@ -167,6 +167,8 @@ pub enum OpKind {
     /// The content of a memory was erased everywhere, past operations included. It has no
     /// `changes`; a tombstone is read from it.
     Purge,
+    /// A memory moved to another scope by a person (projects merged or renamed). Revertible.
+    Move,
 }
 
 /// What is left of a purged memory: that it existed and who erased it, when and why. Never its
