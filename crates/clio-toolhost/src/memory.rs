@@ -664,7 +664,8 @@ impl ToolHost {
                         "the title had a secret in it: nothing was proposed",
                     );
                 }
-                if cleaned.chars().count() > MAX_TITLE_CHARS {
+                // The memory also caps a title at 256 bytes: a title of wide characters can reach it.
+                if cleaned.chars().count() > MAX_TITLE_CHARS || cleaned.len() > 256 {
                     return self.memory_failed(
                         req,
                         out,

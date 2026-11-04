@@ -42,11 +42,11 @@ fn open_read(dirs: &Dirs, model: bool) -> Res<Option<MemoryLink>> {
     } else {
         EmbedModel::none()
     };
-    MemoryLink::open_read(&dirs.data, &m)
+    MemoryLink::open_read(&dirs.data, &m).map(|l| l.map(MemoryLink::for_person))
 }
 
 fn open_write(dirs: &Dirs) -> Res<MemoryLink> {
-    MemoryLink::open_write(&dirs.data, &EmbedModel::none())
+    MemoryLink::open_write(&dirs.data, &EmbedModel::none()).map(MemoryLink::for_person)
 }
 
 fn row_json(link: &MemoryLink, m: &MemoryRow) -> Value {

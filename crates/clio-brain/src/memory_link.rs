@@ -270,6 +270,9 @@ pub struct MemoryLink {
     /// The project of the session and its scope, when there is one (and, reading, when it exists).
     project: Option<(String, Option<ScopeId>)>,
     lessons: Option<ScopeId>,
+    /// The person's view (`for_person`): every other project's scope and its name.
+    others: Vec<(ScopeId, String)>,
+    person_view: bool,
     actors: Actors,
     writable: bool,
     embeddings: bool,
@@ -434,6 +437,8 @@ impl MemoryLink {
             scope,
             project,
             lessons,
+            others: Vec::new(),
+            person_view: false,
             actors,
             writable: true,
             embeddings,
@@ -490,6 +495,8 @@ impl MemoryLink {
             scope,
             project,
             lessons,
+            others: Vec::new(),
+            person_view: false,
             actors: Actors {
                 persona,
                 agente,
@@ -986,6 +993,37 @@ impl MemoryLink {
         }
     }
 
+    /// The person's own view (the CLI and the TUI): every place, every project's memories, so
+    /// what the agent saved in a project can be seen, accepted, archived or purged. Never for what
+    /// a model reads.
+    #[must_use]
+    pub fn for_person(mut self) -> Self {
+        let own = self.scope_of(Place::Project);
+        self.others = self
+            .engine
+            .scopes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| Some(s.id) != own)
+            .filter_map(|s| {
+                let name = s.name.strip_prefix(PROJECT_PREFIX)?.to_owned();
+                Some((s.id, name))
+            })
+            .collect();
+        self.person_view = true;
+        self
+    }
+
+    /// The scopes the person's commands see: all of them in the person's view, else the person's.
+    fn person_scopes(&self) -> Vec<ScopeId> {
+        if !self.person_view {
+            return vec![self.scope];
+        }
+        let mut v = self.reading_scopes();
+        v.extend(self.others.iter().map(|(id, _)| *id));
+        v
+    }
+
     /// The project of this link, if it has one.
     pub fn project_name(&self) -> Option<&str> {
         self.project.as_ref().map(|(p, _)| p.as_str())
@@ -997,7 +1035,9 @@ impl MemoryLink {
             Some(Place::Personal)
         } else if Some(scope) == self.lessons {
             Some(Place::Lessons)
-        } else if self.project.as_ref().and_then(|(_, s)| *s) == Some(scope) {
+        } else if self.project.as_ref().and_then(|(_, s)| *s) == Some(scope)
+            || self.others.iter().any(|(id, _)| *id == scope)
+        {
             Some(Place::Project)
         } else {
             None
@@ -1058,7 +1098,10 @@ impl MemoryLink {
     /// A label for where a memory lives, for the model: `proyecto`, `personal`, `lección de X`.
     pub fn place_label(&self, row: &MemoryRow) -> String {
         match self.place_of(row.scope) {
-            Some(Place::Project) => "proyecto".into(),
+            Some(Place::Project) => match self.others.iter().find(|(id, _)| *id == row.scope) {
+                Some((_, name)) => format!("proyecto {name}"),
+                None => "proyecto".into(),
+            },
             Some(Place::Personal) => "personal".into(),
             Some(Place::Lessons) => match Self::learned_in(row) {
                 Some(p) => format!("lección de {p}"),
@@ -1075,10 +1118,14 @@ impl MemoryLink {
 
     /// Newest first.
     pub fn list(&self, state: State) -> Res<Vec<MemoryRow>> {
-        let mut v = self
-            .engine
-            .list(self.scope, Some(state), None)
-            .map_err(|e| explain(&e))?;
+        let mut v = Vec::new();
+        for scope in self.person_scopes() {
+            v.extend(
+                self.engine
+                    .list(scope, Some(state), None)
+                    .map_err(|e| explain(&e))?,
+            );
+        }
         v.sort_by_key(|r| std::cmp::Reverse(r.id));
         Ok(v)
     }
@@ -1099,19 +1146,22 @@ impl MemoryLink {
         };
         let r = self
             .engine
-            .recall(self.scope, &clean_text(query), &opts)
+            .recall_many(&self.person_scopes(), &clean_text(query), &opts)
             .map_err(|e| explain(&e))?;
         Ok((r.hits.into_iter().map(|h| h.memory).collect(), r.abstained))
     }
 
-    /// (active, quarantine, archived) of the scope.
+    /// (active, quarantine, archived) of the scope (of every place, in the person's view).
     pub fn counts(&self) -> Res<(u64, u64, u64)> {
         let st = self.engine.stats().map_err(|e| explain(&e))?;
+        let scopes = self.person_scopes();
         Ok(st
             .scopes
             .iter()
-            .find(|s| s.scope == self.scope)
-            .map_or((0, 0, 0), |s| (s.active, s.quarantine, s.archived)))
+            .filter(|s| scopes.contains(&s.scope))
+            .fold((0, 0, 0), |(a, q, r), s| {
+                (a + s.active, q + s.quarantine, r + s.archived)
+            }))
     }
 
     pub fn actor_name(&self, id: ActorId) -> String {

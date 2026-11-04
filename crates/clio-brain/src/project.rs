@@ -26,10 +26,12 @@ pub fn detect(dir: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Lowercase, blanks to `-`, nothing but letters, digits, `-`, `_` and `.`, no dots at the ends,
+/// NFC, lowercase, blanks to `-`, nothing but letters, digits, `-`, `_` and `.`, no dots at the ends,
 /// at most `MAX_NAME` characters.
 pub fn normal(s: &str) -> String {
-    let joined = s.split_whitespace().collect::<Vec<_>>().join("-");
+    use unicode_normalization::UnicodeNormalization;
+    let nfc: String = s.nfc().collect();
+    let joined = nfc.split_whitespace().collect::<Vec<_>>().join("-");
     let kept: String = joined
         .to_lowercase()
         .chars()
@@ -60,7 +62,8 @@ fn origin_url(root: &Path) -> Option<String> {
     } else {
         // A worktree: `.git` is a file that says `gitdir: <path>`; its config is the main one's.
         let text = std::fs::read_to_string(&git).ok()?;
-        let gitdir = PathBuf::from(text.strip_prefix("gitdir:")?.trim());
+        // A relative `gitdir:` is relative to the worktree, not to wherever `clio` runs.
+        let gitdir = root.join(text.strip_prefix("gitdir:")?.trim());
         let common = gitdir.join("commondir");
         match std::fs::read_to_string(&common) {
             Ok(rel) => gitdir.join(rel.trim()),
@@ -146,6 +149,13 @@ mod tests {
         std::fs::create_dir(&wt).unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
         assert_eq!(detect(&wt).as_deref(), Some("clio"));
+        // The same worktree with a relative `gitdir:` (`worktree.useRelativePaths`).
+        std::fs::write(
+            wt.join(".git"),
+            "gitdir: ../Mi Proyecto/.git/worktrees/e4\n",
+        )
+        .unwrap();
+        assert_eq!(detect(&wt.join(".")).as_deref(), Some("clio"));
     }
 
     #[test]
@@ -154,6 +164,11 @@ mod tests {
         assert_eq!(normal("Mi Proyecto Grande"), "mi-proyecto-grande");
         assert_eq!(normal("../evil\u{1b}[31m"), "evil31m");
         assert_eq!(normal("Ñandú"), "ñandú");
+        assert_eq!(
+            normal("N\u{303}andu\u{301}"),
+            "ñandú",
+            "NFD is the same project"
+        );
         assert_eq!(normal(&"a".repeat(200)).len(), MAX_NAME);
         assert_eq!(normal("..."), "");
     }

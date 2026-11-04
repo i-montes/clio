@@ -72,7 +72,13 @@ impl LinkPort {
     fn with_link<T>(&self, f: impl FnOnce(&MemoryLink) -> Res<T>) -> Res<T> {
         // A panic in an earlier call leaves nothing half-done in a read-only link.
         let mut slot = self.link.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.is_none() {
+        // A place made after the link was opened (by a proposal here or anywhere else) is only
+        // seen by a new link: one that lacks a place is opened again.
+        let stale = slot.as_ref().is_some_and(|l| {
+            l.scope_of(Place::Lessons).is_none()
+                || (self.project.is_some() && l.scope_of(Place::Project).is_none())
+        });
+        if slot.is_none() || stale {
             match MemoryLink::open_read_in(&self.data, &self.model, self.project.as_deref()) {
                 Ok(Some(link)) => *slot = Some(link),
                 Ok(None) => return Err("la memoria no existe todavía".into()),
@@ -191,7 +197,11 @@ impl MemoryPort for LinkPort {
                         rows.into_iter()
                             .map(|r| Neighbor {
                                 id: r.id.0,
-                                protected: link.is_protected(&r),
+                                // A lesson learned in another project is not this session's to
+                                // replace: only the person's words would (as with their own).
+                                protected: link.is_protected(&r)
+                                    || (place == Place::Lessons
+                                        && MemoryLink::learned_in(&r) != self.project.as_deref()),
                                 text: r.content,
                             })
                             .collect()

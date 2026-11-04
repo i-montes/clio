@@ -1465,3 +1465,25 @@ fn the_timeline_and_the_context_are_reads_with_the_same_budget_and_taint() {
         "no arguments"
     );
 }
+
+// S-60: the timeline and the context spend the same 20 calls as a search.
+#[test]
+fn the_timeline_and_the_context_spend_the_session_budget() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
+    let e = env(&port);
+    for i in 0..20 {
+        let r = if i % 2 == 0 {
+            call(&e, "s", "memory_timeline", json!({"id": 1}))
+        } else {
+            call(&e, "s", "memory_context", json!({}))
+        };
+        assert!(r.ok, "{i}: {r:?}");
+    }
+    assert!(denied_by_budget(&call(
+        &e,
+        "s",
+        "memory_context",
+        json!({})
+    )));
+    assert!(denied_by_budget(&search(&e, "s", "dato")));
+}

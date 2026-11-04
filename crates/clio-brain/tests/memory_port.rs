@@ -1359,3 +1359,76 @@ fn the_timeline_is_the_session_and_the_context_starts_with_its_summary_and_pins(
     assert_eq!(c[1].id, mine.0);
     assert!(c.iter().any(|i| i.id == ids[2]));
 }
+
+// What the agent saved in a project is the person's to see and to decide on: their view (the CLI
+// and the TUI) lists it, opens it, accepts it, finds it and counts it; a link without that
+// project (what the builtin loop reads) still does not.
+#[test]
+fn the_person_sees_and_controls_what_was_saved_in_any_project() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let d = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Postgres 16", "Base de datos", "decision"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    assert_eq!(d.saved, Saved::Waiting);
+    let id = clio_memory::MemoryId(d.id);
+    {
+        let plain = open(&w);
+        assert!(plain.get(id).is_err(), "not the agent's loop's to read");
+        assert!(plain.pending().unwrap().iter().all(|r| r.id != id));
+    }
+    let person = open(&w).for_person();
+    assert!(person.pending().unwrap().iter().any(|r| r.id == id));
+    let row = person.get(id).unwrap();
+    assert_eq!(person.place_label(&row), "proyecto alfa");
+    person.promote(id).unwrap();
+    let (found, _) = person.search("Postgres", 5).unwrap();
+    assert_eq!(found.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
+    assert_eq!(person.counts().unwrap().0, 1);
+    person.archive(id).unwrap();
+    assert_eq!(person.counts().unwrap(), (0, 0, 1));
+}
+
+// A read before the first proposal (the prompt asks for `memory_context` first) must not leave
+// the service blind to the project's place once a proposal makes it.
+#[test]
+fn a_read_before_the_place_exists_does_not_hide_what_is_saved_in_it_later() {
+    struct Add;
+    impl Transport for Add {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            let choice = if name == "lugar" { "proyecto" } else { "add" };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
+        }
+    }
+    let w = world();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Add),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    // The memory exists (with only the person's place) when the session first reads it.
+    open(&w).remember("Marta usa Linux", None).unwrap();
+    let beta = in_project(&w, "beta").with_judge(Arc::new(judge));
+    assert!(beta.context().is_ok());
+    assert!(beta.search("nada", 3).is_ok());
+    let d = MemoryPort::propose(
+        &beta,
+        &titled("Qué: despliega con compose", "Despliegue", "config"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    assert_eq!(d.saved, Saved::Active);
+    assert_eq!(beta.get(d.id).unwrap().place, "proyecto");
+    assert_eq!(beta.search("compose", 3).unwrap().items[0].id, d.id);
+    assert_eq!(beta.context().unwrap()[0].id, d.id);
+}
