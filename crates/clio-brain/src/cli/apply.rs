@@ -70,6 +70,12 @@ fn hard_refusal(rel: &str) -> Option<String> {
     {
         return Some("ruta protegida".into());
     }
+    // It names the folder's project for the memory: the person sets it, never a run.
+    if lower.iter().any(|c| c == clio_brain::project::PROJECT_FILE) {
+        return Some(
+            "nombra el proyecto de la memoria: lo fija la persona (clio memory project set)".into(),
+        );
+    }
     if comps.iter().any(|c| SKIP_DIRS.contains(c)) {
         return Some("carpeta que la copia deja fuera (se genera sola)".into());
     }
@@ -599,6 +605,9 @@ mod tests {
             ".cargo/config.toml",
             "crates/x/.cargo/config.toml",
             ".devcontainer/devcontainer.json",
+            // The memory's project for this folder (and any below it).
+            ".clio-project",
+            "sub/.CLIO-project",
         ] {
             assert!(hard_refusal(r).is_some(), "{r}");
         }

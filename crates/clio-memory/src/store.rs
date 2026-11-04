@@ -171,6 +171,8 @@ pub trait Store: VectorIndex + Send + Sync {
     fn pinned(&self, scope: ScopeId) -> Result<Vec<MemoryRow>>;
     /// Marks a memory as looked at again (its review cycle starts over). Not part of the log.
     fn set_reviewed(&self, memory: MemoryId, at: i64) -> Result<()>;
+    /// When the person last looked at this memory again, if ever.
+    fn reviewed_at(&self, memory: MemoryId) -> Result<Option<i64>>;
     /// The active memories of a scope that have a category, with when they were last reviewed.
     fn review_candidates(&self, scope: ScopeId) -> Result<Vec<(MemoryRow, Option<i64>)>>;
     /// Records (or revises) the judged relation between two memories. Not part of the log.

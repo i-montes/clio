@@ -85,6 +85,7 @@ impl Env {
             )
             .env_remove("OPENCODE_API_KEY")
             .env_remove("CLIO_DEBUG")
+            .env_remove("CLIO_PROJECT")
             .current_dir(self.tmp.path())
             .stdin(Stdio::null());
         c
@@ -692,7 +693,7 @@ fn the_person_pins_and_unpins_a_memory() {
 // starts it over when looked at again), the timeline of a session, and a memory with its place.
 #[test]
 fn projects_review_due_reviewed_and_timeline() {
-    use clio_memory::{Category, Engine, FixedClock, MemoryType, OpenMode, Origin, Proposal};
+    use clio_memory::{Category, FixedClock, MemoryType, OpenMode, Origin, Proposal};
     use clio_toolhost::MemoryPort;
     let e = Env::new(true);
     let data = e.home().join(".local/share/clio");
@@ -711,12 +712,11 @@ fn projects_review_due_reviewed_and_timeline() {
         .unwrap()
         .as_secs() as i64;
     let old = {
-        let engine = Engine::open(
+        let engine = open_engine(
             &data.join("memory.db"),
             OpenMode::ReadWrite,
             std::sync::Arc::new(FixedClock::new(now - 200 * 86_400)),
-        )
-        .unwrap();
+        );
         engine
             .propose(Proposal {
                 scope,
@@ -811,7 +811,7 @@ fn projects_review_due_reviewed_and_timeline() {
 // a line break comes out as one plain line.
 #[test]
 fn a_hostile_title_never_reaches_the_terminal_raw() {
-    use clio_memory::{Engine, MemoryType, OpenMode, Origin, Proposal, SystemClock};
+    use clio_memory::{MemoryType, OpenMode, Origin, Proposal, SystemClock};
     let e = Env::new(true);
     let data = e.home().join(".local/share/clio");
     e.clio(&["memory", "remember", "algo"]);
@@ -823,12 +823,11 @@ fn a_hostile_title_never_reaches_the_terminal_raw() {
         .unwrap();
         (l.actors().persona, l.scope())
     };
-    let id = Engine::open(
+    let id = open_engine(
         &data.join("memory.db"),
         OpenMode::ReadWrite,
         std::sync::Arc::new(SystemClock),
     )
-    .unwrap()
     .propose(Proposal {
         scope,
         actor: person,
@@ -885,4 +884,69 @@ fn the_doctor_does_not_upgrade_an_old_memory_file() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(v, 1, "still the old schema");
+}
+
+// The project of a folder: detected, named by hand in `.clio-project`, or by `CLIO_PROJECT`; and
+// how to plug another agent in, printed and never written into its configuration.
+#[test]
+fn the_folders_project_can_be_named_and_other_agents_get_their_setup() {
+    let e = Env::new(true);
+    assert!(
+        e.clio(&["memory", "project"])
+            .contains("(detectado de la carpeta)")
+    );
+    assert!(
+        e.clio(&["memory", "project", "set", "Mi Web"])
+            .contains("mi-web")
+    );
+    assert_eq!(
+        std::fs::read_to_string(e.tmp.path().join(".clio-project")).unwrap(),
+        "mi-web\n"
+    );
+    assert_eq!(
+        e.clio(&["memory", "project"]).trim(),
+        "mi-web (.clio-project)"
+    );
+    let o = e
+        .cmd(&["memory", "project"])
+        .env("CLIO_PROJECT", "Otro")
+        .output()
+        .unwrap();
+    assert_eq!(text(&o.stdout).trim(), "otro (CLIO_PROJECT)");
+    assert!(
+        !e.try_clio(&["memory", "project", "set", "..."])
+            .status
+            .success()
+    );
+    let claude = e.clio(&["memory", "setup", "claude-code"]);
+    assert!(
+        claude.contains("claude mcp add clio-memory -- clio memory mcp"),
+        "{claude}"
+    );
+    for agent in ["cursor", "codex", "gemini", "opencode"] {
+        assert!(
+            e.clio(&["memory", "setup", agent]).contains("memory"),
+            "{agent}"
+        );
+    }
+    let o = e.try_clio(&["memory", "setup", "otro"]);
+    assert!(!o.status.success() && text(&o.stderr).contains("clio memory mcp"));
+}
+
+/// The engine for writing, waiting a little for a writer that holds it (a job of `clio` that has
+/// not finished yet when the whole suite runs).
+fn open_engine(
+    path: &std::path::Path,
+    mode: clio_memory::OpenMode,
+    clock: std::sync::Arc<dyn clio_memory::Clock>,
+) -> clio_memory::Engine {
+    for _ in 0..100 {
+        match clio_memory::Engine::open(path, mode, clock.clone()) {
+            Err(clio_memory::Error::WriterLocked) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            r => return r.unwrap(),
+        }
+    }
+    panic!("the memory stayed locked");
 }

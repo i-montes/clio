@@ -1737,6 +1737,17 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn reviewed_at(&self, memory: MemoryId) -> Result<Option<i64>> {
+        Ok(self
+            .reader()?
+            .query_row(
+                "SELECT at FROM reviews WHERE memory = ?1",
+                [memory.0],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     fn review_candidates(&self, scope: ScopeId) -> Result<Vec<(MemoryRow, Option<i64>)>> {
         let cols = prefixed(MEM_COLS, "m");
         let conn = self.reader()?;

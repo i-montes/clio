@@ -1153,12 +1153,7 @@ impl MemoryLink {
 
     /// Is this active memory past its review cycle? (Only its place is looked at.)
     pub fn is_due(&self, row: &MemoryRow) -> bool {
-        row.state == State::Active
-            && row.category.and_then(Category::review_days).is_some()
-            && self
-                .engine
-                .review_due(row.scope)
-                .is_ok_and(|v| v.iter().any(|r| r.id == row.id))
+        self.engine.due(row).unwrap_or(false)
     }
 
     /// Is it pinned (first in its place's context)?

@@ -157,7 +157,8 @@ impl SessionSource for LocalSource {
         // (the copy has no history), never by the model.
         let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))
             .ok()
-            .and_then(|m| clio_brain::project::detect(Path::new(&m.workspace)));
+            .and_then(|m| clio_brain::project::resolve(Path::new(&m.workspace)))
+            .map(|(name, _)| name);
         let mut service_env = jev::toolhost_env(d, &cfg.jev);
         if let Some(p) = &project {
             service_env.push(("CLIO_MEMORY_PROJECT".into(), p.clone()));
