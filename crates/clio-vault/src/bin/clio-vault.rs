@@ -6,6 +6,7 @@
 //! clio-vault [--sock P] unlock [--eager NAME]...    (passphrase: one line on stdin)
 //! clio-vault [--sock P] put NAME --dest TOOL:DOMAIN... [--kind api_key|oauth_token|password|ssh_key]
 //!                                [--rotate-days N]  (value: one line on stdin)
+//! clio-vault [--sock P] upgrade-kdf                 (passphrase: one line on stdin; raises its cost)
 //! clio-vault [--sock P] rotate NAME                 (new value: one line on stdin)
 //! clio-vault [--sock P] scan DIR                    (vault values found in files; exit 1 if any)
 //! clio-vault [--sock P] revoke NAME | list | audit | alerts | due | lock | status
@@ -80,7 +81,7 @@ mod unix {
             take_one(&mut args, "--sock")?.or_else(|| std::env::var("CLIO_VAULT_PERSON_SOCK").ok());
         let person_sock = take_one(&mut args, "--person-sock")?.or_else(|| sock.clone());
         if args.is_empty() {
-            return Err("usage: clio-vault init|serve|unlock|put|rotate|revoke|list|audit|alerts|due|lock|status".into());
+            return Err("usage: clio-vault init|serve|unlock|upgrade-kdf|put|rotate|revoke|list|audit|alerts|due|lock|status".into());
         }
         let cmd = args.remove(0);
         match cmd.as_str() {
@@ -134,6 +135,9 @@ mod unix {
         Ok(match cmd {
             "status" => Request::Status,
             "lock" => Request::Lock,
+            "upgrade-kdf" => Request::UpgradeKdf {
+                passphrase: read_line("passphrase")?,
+            },
             "list" => Request::List,
             "audit" => Request::Audit,
             "alerts" => Request::Alerts,

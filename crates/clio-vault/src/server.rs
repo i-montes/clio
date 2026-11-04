@@ -41,6 +41,8 @@ pub fn handle(vault: &Vault, side: Side, req: Request) -> Response {
         Request::Status => Response::ok(json!({
             "locked": vault.is_locked(),
             "secrets": vault.list(&person).len(),
+            "kdf": vault.kdf().to_string(),
+            "kdf_current": vault.kdf().is_current(),
         })),
         Request::Resolve {
             name,
@@ -82,6 +84,10 @@ pub fn handle(vault: &Vault, side: Side, req: Request) -> Response {
             vault.lock();
             Response::ok(Value::Null)
         }
+        Request::UpgradeKdf { passphrase } => match vault.upgrade_kdf(&person, &passphrase) {
+            Ok(done) => Response::ok(json!({ "upgraded": done })),
+            Err(e) => Response::err(e),
+        },
         Request::Put {
             name,
             value,

@@ -1,7 +1,7 @@
 //! The only place that touches the ciphers: XChaCha20-Poly1305 for sealing, Argon2id to turn a
 //! passphrase into the master key. A sealed blob is `nonce (24 bytes) || ciphertext+tag`.
 
-use crate::VaultError;
+use crate::{Kdf, VaultError};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -15,9 +15,10 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N], VaultError> {
     Ok(b)
 }
 
-/// Argon2id with the OWASP minimum (19 MiB, 2 passes, 1 lane).
-pub(crate) fn derive(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN], VaultError> {
-    let params = Params::new(19 * 1024, 2, 1, Some(KEY_LEN)).map_err(|_| VaultError::Crypto)?;
+/// Argon2id with the cost the vault file asks for (see `kdf`).
+pub(crate) fn derive(passphrase: &str, salt: &[u8], kdf: Kdf) -> Result<[u8; KEY_LEN], VaultError> {
+    let params =
+        Params::new(kdf.m_kib, kdf.t, kdf.p, Some(KEY_LEN)).map_err(|_| VaultError::Crypto)?;
     let mut key = [0u8; KEY_LEN];
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(passphrase.as_bytes(), salt, &mut key)

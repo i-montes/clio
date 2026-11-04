@@ -54,6 +54,10 @@ pub enum Request {
         eager: Vec<String>,
     },
     Lock,
+    /// Raises the cost of the passphrase (see `Vault::upgrade_kdf`).
+    UpgradeKdf {
+        passphrase: String,
+    },
     Put {
         name: String,
         value: String,
@@ -110,6 +114,7 @@ impl Request {
             Self::Scrub { .. } => "scrub".into(),
             Self::Unlock { .. } => "unlock".into(),
             Self::Lock => "lock".into(),
+            Self::UpgradeKdf { .. } => "upgrade_kdf".into(),
             Self::Put { name, .. } => format!("put {name}"),
             Self::Rotate { name, .. } => format!("rotate {name}"),
             Self::Revoke { name } => format!("revoke {name}"),

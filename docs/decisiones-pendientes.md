@@ -40,7 +40,7 @@ Se pegó en el chat de una sesión de la fase 1. **Decidido el 2026-11-02: no se
 ## Cosas que quedan por hacer y no son decisiones
 Ver la lista maestra (`docs/lista-maestra.md`): tareas de la fase 1 aún abiertas, sobre todo mediciones con el agente completo, el proceso aparte y el socket del vault (233, 234), y el aislamiento de preproducción (055).
 
-- **Argon2id del vault (hallazgo 11 de la auditoría):** los parámetros son los mínimos de OWASP y están fijos en el código. Subirlos exige guardarlos en el archivo del baúl y migrar los baúles existentes (si no, el tuyo dejaría de abrir): queda como trabajo aparte.
+- **Argon2id del vault (hallazgo 11 de la auditoría):** hecho. El coste se guarda en el archivo del baúl y los baúles nuevos usan 64 MiB y 3 pasadas. Tu baúl actual sigue con el coste antiguo hasta que corras `clio vault upgrade-kdf` (con el baúl en marcha; pide tu frase y deja una copia `vault.pre-argon2` que puedes borrar cuando compruebes que abre). `clio doctor` te avisa mientras siga con el coste antiguo.
 - **Permiso `workflow` del token de GitHub:** se añadió para poder actualizar ramas con cambios en `.github/workflows`. Si ya no lo necesitas: `gh auth refresh -h github.com -r workflow`.
 
 ## Pendiente de probar en un Mac
