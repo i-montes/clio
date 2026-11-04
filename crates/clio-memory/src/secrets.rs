@@ -50,9 +50,33 @@ fn is_random(run: &str) -> bool {
         || (b.len() > 2 * WINDOW && b.windows(WINDOW).step_by(8).any(|w| entropy(w) >= RANDOM))
 }
 
+/// A run made of plain words joined by `/`, `-` or `_` (a path, a kebab-case name with a date):
+/// every piece is a lowercase or Title word, a number, or a number with a short unit (`128M`).
+/// A key split by dashes has pieces that mix cases and digits, and is not this.
+fn plain_words(run: &str) -> bool {
+    let word = |p: &str| {
+        let b = p.as_bytes();
+        let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+        p.len() <= 24
+            && (b.iter().all(u8::is_ascii_lowercase)
+                || (b[0].is_ascii_uppercase() && b[1..].iter().all(u8::is_ascii_lowercase))
+                || (digits > 0
+                    && b.len() - digits <= 2
+                    && b[digits..].iter().all(u8::is_ascii_alphabetic)))
+    };
+    let pieces: Vec<&str> = run
+        .split(['/', '-', '_'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    pieces.len() >= 2 && pieces.iter().all(|p| word(p))
+}
+
 /// True when the text looks like it contains a key or token.
 pub fn find_secret(s: &str) -> bool {
-    KNOWN_FORMATS.is_match(s) || LONG_TOKEN.find_iter(s).any(|m| is_random(m.as_str()))
+    KNOWN_FORMATS.is_match(s)
+        || LONG_TOKEN
+            .find_iter(s)
+            .any(|m| !plain_words(m.as_str()) && is_random(m.as_str()))
 }
 
 #[cfg(test)]
@@ -112,6 +136,28 @@ mod tests {
             ),
         ] {
             assert!(!find_secret(&s), "should not flag a long plain run");
+        }
+    }
+
+    // A path or a kebab-case name with a date is made of plain words: not a token. A key split
+    // by dashes still has pieces that mix cases and digits, and is still found.
+    #[test]
+    fn paths_and_dated_names_are_words_and_dashed_keys_are_not() {
+        for s in [
+            "Dónde: docs/specs/2026-11-04-clio-memory-standalone-design.md",
+            "docs/superpowers/plans/2026-11-04-memory-agent-authority.md",
+            "crates/clio-brain/src/memory_link.rs y crates/clio-toolhost/src/memory.rs",
+            "Clio-Memory-Standalone-Design-2026-11-04-Delivery-Two-Plan",
+            "~/.local/share/clio/memory.db y ~/.cache/clio-models/potion-multilingual-128M",
+        ] {
+            assert!(!find_secret(s), "should not flag: {s}");
+        }
+        for s in [
+            concat!("qZ8rT2vL-x9KdWm4N-", "pB7cYh3J-fS6gAe1U-oXi5VtRn"),
+            concat!("k8x2m9p4-q7w3e5r1-", "t6y8u2i0-o9p1a3s5-d4f6g8h2"),
+            concat!("docs/specs/2026-11-04-", "qZ8rT2vLx9KdWm4NpB7cYh3JfS6gAe1U"),
+        ] {
+            assert!(find_secret(s), "should flag: {s}");
         }
     }
 
