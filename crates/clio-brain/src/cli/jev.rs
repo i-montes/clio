@@ -127,10 +127,10 @@ pub struct MemoryRecall {
 }
 
 impl MemoryRecall {
-    pub fn new(data: &Path, model_dir: Option<&Path>, project: Option<&str>) -> Self {
+    pub fn new(data: &Path, model_dirs: &[PathBuf], project: Option<&str>) -> Self {
         Self {
             data: data.to_path_buf(),
-            model: EmbedModel::new(model_dir.map(Path::to_path_buf)),
+            model: EmbedModel::with_dirs(model_dirs.to_vec()),
             project: project.map(str::to_owned),
         }
     }
@@ -239,12 +239,8 @@ pub fn preprompt(
     run_dir: &Path,
     project: Option<&str>,
 ) -> PrePrompt {
-    let model = MemoryLink::model_dir(&dirs.home);
-    let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(
-        &dirs.data,
-        Some(model.as_path()).filter(|m| m.is_dir()),
-        project,
-    ));
+    let models = MemoryLink::model_dirs(&dirs.home);
+    let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(&dirs.data, &models, project));
     let vault = gateway_socket(dirs)
         .ok()
         .map(|s| VaultClient::new(&s).with_timeout(Duration::from_secs(2)));

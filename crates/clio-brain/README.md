@@ -52,7 +52,8 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   outside content, quarantine otherwise) and up to five `RECORDAR:` / `PROCEDIMIENTO:` lines of
   the final message, always quarantined as external (procedures wait for a person on top of that).
   A refusal (secret, quota, size) is a line in `CloseReport`, never an error. The embedding model
-  (`EmbedModel`, optional `model2vec` feature, on by default) loads once per process and only on
+  (`EmbedModel`, the library's: Granite, else the static model; features `granite` and
+  `model2vec`, on by default) loads once per process and only on
   demand; without it everything works by text. CLI `clio memory` (`src/cli/memory.rs`: `search`,
   `list`, `show`, `remember`, `promote`, `archive`, `feedback`, `export`, `stats`; no `purge`
   until PURGE exists) and the Memory screen (`m`, `src/cli/tui/memory.rs`). Tests:

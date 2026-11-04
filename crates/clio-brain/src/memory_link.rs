@@ -23,7 +23,7 @@
 //! The embedding model is optional: without it everything works by text and `note()` says so.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clio_memory::{
@@ -41,8 +41,6 @@ const JUDGE_NAME: &str = "jev";
 
 pub const SCOPE: &str = "clio";
 pub const DB_FILE: &str = "memory.db";
-/// Where the local embedding model lives, relative to HOME.
-pub const MODEL_REL: &str = ".cache/clio-models/potion-multilingual-128M";
 /// Most proposals a run may make through its final message; the rest are counted and dropped.
 pub const MAX_AGENT_PROPOSALS: usize = 5;
 /// Tokens for what is recalled (each fixed block has its own budget).
@@ -300,18 +298,6 @@ fn private_dir(dir: &Path) -> Res<()> {
         .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
-#[cfg(feature = "model2vec")]
-fn load_embedder(dir: &Path) -> Result<Arc<dyn clio_memory::Embedder>, String> {
-    clio_memory::Model2VecEmbedder::from_dir(dir)
-        .map(|e| Arc::new(e) as Arc<dyn clio_memory::Embedder>)
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(not(feature = "model2vec"))]
-fn load_embedder(_: &Path) -> Result<Arc<dyn clio_memory::Embedder>, String> {
-    Err("este Clio se compiló sin la característica model2vec".into())
-}
-
 /// The agent's writes an hour: a brake on a loop, not a review (the memory is the agent's).
 const AGENT_QUOTA: u32 = 500;
 
@@ -322,56 +308,9 @@ fn quota(max: u32) -> Quota {
     }
 }
 
-/// The embedding model: loaded at most once per process (reading it takes seconds, and a run
-/// opens the memory twice), and only when something asks for it. Share it with an `Arc`.
-pub struct EmbedModel {
-    dir: Option<PathBuf>,
-    cell: OnceLock<Result<Arc<dyn clio_memory::Embedder>, String>>,
-}
-
-impl EmbedModel {
-    /// A model in `dir`, or none (`None`): memory then works by text only.
-    pub fn new(dir: Option<PathBuf>) -> Arc<Self> {
-        Arc::new(Self {
-            dir,
-            cell: OnceLock::new(),
-        })
-    }
-
-    /// An embedder given by the caller (a test, a host with its own model).
-    pub fn from_embedder(embedder: Arc<dyn clio_memory::Embedder>) -> Arc<Self> {
-        let model = Self {
-            dir: Some(PathBuf::from("<embedder>")),
-            cell: OnceLock::new(),
-        };
-        let _ = model.cell.set(Ok(embedder));
-        Arc::new(model)
-    }
-
-    /// No model, never loads anything.
-    pub fn none() -> Arc<Self> {
-        Self::new(None)
-    }
-
-    /// The model Clio would use in `home`: the local one when it is on disk.
-    pub fn of_home(home: &Path) -> Arc<Self> {
-        Self::new(Some(MemoryLink::model_dir(home)).filter(|m| m.is_dir()))
-    }
-
-    pub fn is_present(&self) -> bool {
-        self.dir.is_some()
-    }
-
-    fn get(&self) -> Result<Option<Arc<dyn clio_memory::Embedder>>, String> {
-        let Some(dir) = &self.dir else {
-            return Ok(None);
-        };
-        self.cell
-            .get_or_init(|| load_embedder(dir))
-            .clone()
-            .map(Some)
-    }
-}
+/// The vector model: the library's (Granite, else the static model, else text), loaded at most
+/// once per process and only when something asks for it. Clio and clio-memory choose the same.
+pub use clio_memory::agent::EmbedModel;
 
 /// Attaches the embedder when there is a model and it loads.
 fn with_model(engine: Engine, model: &EmbedModel) -> (Engine, bool, Option<String>) {
@@ -387,8 +326,9 @@ impl MemoryLink {
         data.join(DB_FILE)
     }
 
-    pub fn model_dir(home: &Path) -> PathBuf {
-        home.join(MODEL_REL)
+    /// The vector models installed in `home`, best first (none: the search is by text).
+    pub fn model_dirs(home: &Path) -> Vec<PathBuf> {
+        EmbedModel::of_home(home).dirs().to_vec()
     }
 
     /// Opens (creating on first use) `<data>/memory.db` for writing, with the scope, the four

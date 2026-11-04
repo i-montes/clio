@@ -2,12 +2,12 @@
 //! (the same process, started by the TUI from its own executable).
 //!
 //! `--socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off]
-//! [--vault-socket P] [--memory-data D [--memory-model M]]`. Prints `READY <socket path>` on stdout once it listens, then runs until
+//! [--vault-socket P] [--memory-data D [--memory-model M]...]`. Prints `READY <socket path>` on stdout once it listens, then runs until
 //! its stdin closes (the process that started it is gone or asked it to stop), so it can not
 //! outlive its parent. `CLIO_TOOLHOST_SCRUB_JSON` (`{"name":"value"}`) teaches the output filter
 //! extra values. With `--memory-data` the memory tools are offered, over what the binary's
 //! [`MemoryFactory`] makes of the two folders (the loose `clio-toolhost` has none). The vector
-//! model's folder comes from the parent: this process runs with another `HOME`.
+//! models' folders come from the parent, best first: this process runs with another `HOME`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -19,9 +19,8 @@ use clio_vault::{Scrubber, VaultClient};
 
 use crate::{Config, JailMode, MemoryPort, Server, ToolHost};
 
-/// Builds the memory from its data folder and, if there is one, the vector model's folder.
-pub type MemoryFactory<'a> =
-    &'a dyn Fn(&Path, Option<&Path>) -> Result<Arc<dyn MemoryPort>, String>;
+/// Builds the memory from its data folder and the vector models' folders (best first; none: text).
+pub type MemoryFactory<'a> = &'a dyn Fn(&Path, &[PathBuf]) -> Result<Arc<dyn MemoryPort>, String>;
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
     run_with(args, &|_, _| Err("this binary has no memory".into()))
@@ -31,7 +30,7 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let mut args = args.into_iter();
     let (mut dir, mut work, mut scratch, mut run_dir) = (None, None, None, None);
     let (mut rules, mut vault, mut jail) = (None, None, JailMode::Auto);
-    let (mut memory_data, mut memory_model) = (None, None);
+    let (mut memory_data, mut memory_model) = (None, Vec::new());
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -42,7 +41,7 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
             "--rules" => rules = Some(PathBuf::from(value()?)),
             "--vault-socket" => vault = Some(PathBuf::from(value()?)),
             "--memory-data" => memory_data = Some(PathBuf::from(value()?)),
-            "--memory-model" => memory_model = Some(PathBuf::from(value()?)),
+            "--memory-model" => memory_model.push(PathBuf::from(value()?)),
             "--jail" => {
                 jail = match value()?.as_str() {
                     "auto" => JailMode::Auto,
@@ -65,10 +64,12 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     cfg.said_token = std::env::var("CLIO_SAID_TOKEN")
         .ok()
         .filter(|t| t.len() >= 16);
-    match (memory_data, memory_model) {
-        (Some(data), model) => cfg.memory = Some(memory(&data, model.as_deref())?),
-        (None, Some(_)) => return Err("--memory-model needs --memory-data".into()),
-        (None, None) => {}
+    match memory_data {
+        Some(data) => cfg.memory = Some(memory(&data, &memory_model)?),
+        None if !memory_model.is_empty() => {
+            return Err("--memory-model needs --memory-data".into());
+        }
+        None => {}
     }
     if let Some(p) = rules {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;

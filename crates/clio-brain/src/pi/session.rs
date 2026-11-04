@@ -129,8 +129,8 @@ pub fn guard_env(paths: &PiPaths, toolhost: &Toolhost) -> Result<Vec<(String, St
 /// What a tool host may be given besides its folders.
 #[derive(Default, Clone, Copy)]
 pub struct ToolhostOpts<'a> {
-    /// The person's data folder and, if there is one, the vector model's: the memory tools.
-    pub memory: Option<(&'a Path, Option<&'a Path>)>,
+    /// The person's data folder and the vector models' (best first): the memory tools.
+    pub memory: Option<(&'a Path, &'a [PathBuf])>,
     /// Extra variables for the service (what it needs to judge proposals with Jev).
     pub extra_env: &'a [(String, String)],
 }
@@ -198,7 +198,7 @@ impl Toolhost {
         cmd.arg("toolhost");
         if let Some((data, model)) = memory {
             cmd.arg("--memory-data").arg(data);
-            if let Some(model) = model {
+            for model in model {
                 cmd.arg("--memory-model").arg(model);
             }
         }

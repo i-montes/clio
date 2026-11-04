@@ -91,7 +91,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     // Internal: the tool host of a Pi session, started by `clio` from its own executable.
     if cmd == "toolhost" {
         // The memory tools exist only here: the loose `clio-toolhost` binary has no memory.
-        let memory = |data: &std::path::Path, model: Option<&std::path::Path>| {
+        let memory = |data: &std::path::Path, model: &[std::path::PathBuf]| {
             // The project comes from `clio` (which decided it from the person's folder).
             let project = std::env::var("CLIO_MEMORY_PROJECT")
                 .ok()

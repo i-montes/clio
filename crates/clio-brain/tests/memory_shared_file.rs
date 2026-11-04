@@ -84,3 +84,19 @@ fn a_file_written_by_the_standalone_memory_opens_in_clio() {
     .unwrap();
     assert_eq!(cc.get(m2).unwrap().content, "prefiere respuestas cortas");
 }
+
+// Clio and clio-memory choose the same vector model in the same home (Granite, then the static
+// one), so their vectors of the shared file carry the same model id and each search uses them.
+#[test]
+fn clio_and_clio_memory_search_with_the_same_model() {
+    use clio_memory::setup::{GRANITE, POTION};
+    let t = tempfile::tempdir().unwrap();
+    let home = t.path();
+    assert!(MemoryLink::model_dirs(home).is_empty());
+    for d in [POTION.dir, GRANITE.dir] {
+        std::fs::create_dir_all(home.join(d)).unwrap();
+    }
+    let clio = MemoryLink::model_dirs(home);
+    assert_eq!(clio, [home.join(GRANITE.dir), home.join(POTION.dir)]);
+    assert_eq!(clio, clio_memory::agent::EmbedModel::of_home(home).dirs());
+}

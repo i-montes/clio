@@ -155,12 +155,11 @@ fn host(dirs: &Dirs, cfg: &Config, project: Option<&str>, run: &Path) -> Res<Too
     for d in [run.clone(), run.join("work"), run.join("scratch")] {
         mkdir_private(&d)?;
     }
-    let model = MemoryLink::model_dir(&dirs.home);
+    let models = MemoryLink::model_dirs(&dirs.home);
     // The vault's filter when the vault runs (its socket is there); if it is there and does not
     // answer, what would leave is withheld.
     let vault_socket = gateway_socket(dirs).ok().filter(|s| s.exists());
-    let mut port = LinkPort::new(&dirs.data, Some(model.as_path()).filter(|m| m.is_dir()))
-        .in_project(project.map(str::to_owned));
+    let mut port = LinkPort::new(&dirs.data, &models).in_project(project.map(str::to_owned));
     if let (Some(jev), Some(socket)) = (jev::client(dirs, &cfg.jev), vault_socket.clone()) {
         let vault = VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
         port = port.with_judge(Arc::new(MemoryJudge::new(

@@ -39,11 +39,12 @@ pub struct LinkPort {
 }
 
 impl LinkPort {
-    /// `model_dir` is the vector model, if there is one; it is only loaded when a search needs it.
-    pub fn new(data: &Path, model_dir: Option<&Path>) -> Self {
+    /// `model_dirs` are the vector models, best first (none: text); one is only loaded when a
+    /// search needs it.
+    pub fn new(data: &Path, model_dirs: &[PathBuf]) -> Self {
         Self {
             data: data.to_path_buf(),
-            model: EmbedModel::new(model_dir.map(Path::to_path_buf)),
+            model: EmbedModel::with_dirs(model_dirs.to_vec()),
             link: Mutex::new(None),
             judge: None,
             project: None,

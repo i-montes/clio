@@ -11,16 +11,17 @@ name = "clio"
 path = "src/main.rs"
 
 [features]
-# Embeddings from the local Model2Vec model; without it (or without the model on disk) the
-# memory still works, by text only.
-default = ["model2vec"]
+# Vectors from the local models: Granite (through the ONNX Runtime installed on the machine) and
+# the static Model2Vec one. Without them (or without a model on disk) the memory works by text.
+default = ["model2vec", "granite"]
 model2vec = ["clio-memory/model2vec"]
+granite = ["clio-memory/granite"]
 # The memory engine's tracing spans (off by default, as before).
 telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-# clio-memory v0.2.2, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "93118e1f9159d40887102eefc180072c7a2aafcb" }
+# clio-memory v0.3.0, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "5ba7f5f892106dbed25ee3a86efbd28bb4c08669" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }

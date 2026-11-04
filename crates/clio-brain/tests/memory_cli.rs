@@ -719,7 +719,7 @@ fn projects_review_due_reviewed_and_timeline() {
             .memory
     };
     // Two proposals of the agent in project alfa, in one session.
-    let alfa = clio_brain::memory_port::LinkPort::new(&data, None).in_project(Some("alfa".into()));
+    let alfa = clio_brain::memory_port::LinkPort::new(&data, &[]).in_project(Some("alfa".into()));
     let draft = |t: &str| clio_toolhost::ProposalDraft {
         text: t.into(),
         title: Some(t.into()),
@@ -1003,7 +1003,7 @@ fn the_person_merges_renames_and_archives_projects() {
     use clio_toolhost::MemoryPort;
     let e = Env::new(true);
     let data = e.home().join(".local/share/clio");
-    let alfa = clio_brain::memory_port::LinkPort::new(&data, None).in_project(Some("alfa".into()));
+    let alfa = clio_brain::memory_port::LinkPort::new(&data, &[]).in_project(Some("alfa".into()));
     let draft = |t: &str| clio_toolhost::ProposalDraft {
         text: t.into(),
         title: None,

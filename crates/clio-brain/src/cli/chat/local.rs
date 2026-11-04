@@ -166,11 +166,8 @@ impl SessionSource for LocalSource {
         // 2. the toolhost
         let exe = std::env::current_exe().map_err(text)?;
         // The service has Pi's HOME, so it cannot find the vector model by itself.
-        let model = MemoryLink::model_dir(&d.home);
-        let memory = Some((
-            d.data.as_path(),
-            Some(model.as_path()).filter(|m| m.is_dir()),
-        ));
+        let models = MemoryLink::model_dirs(&d.home);
+        let memory = Some((d.data.as_path(), models.as_slice()));
         let toolhost = Toolhost::start(
             &exe,
             d.need_runtime()?,

@@ -298,7 +298,7 @@ Además de lo de siempre, cada run guarda `usage.json` (0600): los límites con 
 
 ## La memoria: qué recuerda Clio
 
-Clio recuerda entre runs, **todo en tu PC**: un solo archivo, `~/.local/share/clio/memory.db` (0600, se crea con `clio init` o con el primer run, y en ninguna otra parte). No hay servicio ni red. El modelo de embeddings es opcional: si existe `~/.cache/clio-models/potion-multilingual-128M` (`just setup-model-linux`, o `clio-memory setup model`), la búsqueda usa también el significado; si no, busca solo por texto y la interfaz lo dice en una línea discreta («sin modelo de embeddings: busca solo por texto»). Nunca falla por eso. (Cargar el modelo toma segundos: cada run lo carga una vez, y solo si ya hay algo que recordar.)
+Clio recuerda entre runs, **todo en tu PC**: un solo archivo, `~/.local/share/clio/memory.db` (0600, se crea con `clio init` o con el primer run, y en ninguna otra parte). No hay servicio ni red. El modelo de embeddings es opcional y es el mismo que elige clio-memory: **Granite Embedding 311M** (`clio-memory setup model`, que baja también lo que necesita para correr: en la GPU si hay una tarjeta NVIDIA, si no en el procesador), si no el estático `potion-multilingual-128M` (`clio-memory setup model potion` o `just setup-model-linux`). Con alguno, la búsqueda usa también el significado; si Granite no carga, usa potion; si no hay ninguno, busca solo por texto y la interfaz lo dice en una línea discreta («sin modelo de embeddings: busca solo por texto»). Nunca falla por eso. (Cargar el modelo toma segundos: cada run lo carga una vez, y solo si ya hay algo que recordar.)
 
 **Qué recuerda.**
 
