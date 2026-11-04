@@ -585,17 +585,22 @@ fn fake_jev() -> FakeJev {
                     continue;
                 }
                 if def["type"] == "choice" {
-                    // What to do with a memory: «new», sure of it.
+                    // The category of a memory: none of them; anything else (the place), an
+                    // option it was not offered, so the rule decides.
+                    let choice = if q == "categoria" { "ninguna" } else { "add" };
                     answers.insert(
                         q.clone(),
-                        json!({"type": "choice", "choice": "add", "confidence": 0.95}),
+                        json!({"type": "choice", "choice": choice, "confidence": 0.95}),
                     );
                     continue;
                 }
                 let about_a_memory = q
                     .strip_prefix('m')
                     .is_some_and(|n| n.parse::<u32>().is_ok());
-                let yes = q == "necesita_memoria" || q == "read" || about_a_memory;
+                let yes = q == "necesita_memoria"
+                    || q == "read"
+                    || q == "se_puede_guardar"
+                    || about_a_memory;
                 answers.insert(
                     q.clone(),
                     json!({"type": "noul", "noul": if yes { 0.9 } else { 0.1 }}),
@@ -811,16 +816,16 @@ fn with_jev_off_only_the_persons_own_memory_is_shown_and_nothing_is_tainted() {
     assert!(find_files(&w.home().join(".local/share/clio"), "tainted.json").is_empty());
 }
 
-// S-25, S-61, S-63: with Jev on, what the model proposes with `memory_propose` is decided by Jev,
-// in the tool host's own process: here, «new», and it is memory at once, signed by the judge.
+// S-25, S-61, S-63: with Jev on, what the model saves with `memory_save` is guarded by Jev in the
+// tool host's own process (safe, worth keeping) and is memory at once.
 // S-64
 #[test]
-fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
+fn with_jev_on_a_save_of_the_model_is_guarded_and_is_memory_at_once() {
     if can_run("jev_propose", false).is_none() {
         return;
     }
     let w = World::new(
-        r#"[{"tool_calls":[{"name":"memory_propose","arguments":{"reason":"guardar el dato","title":"Base de datos del proyecto","text":"El proyecto usa PostgreSQL 16","category":"config","kind":"semantic"}}]},{"text":"listo","usage":[10,2]}]"#,
+        r#"[{"tool_calls":[{"name":"memory_save","arguments":{"reason":"guardar el dato","title":"Base de datos del proyecto","text":"El proyecto usa PostgreSQL 16","category":"config","kind":"semantic"}}]},{"text":"listo","usage":[10,2]}]"#,
     );
     let key = format!("jev-test-{}-{}", "key", "6666");
     let _vault = start_vault(&w, &key);
@@ -846,7 +851,7 @@ fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
         "{out}{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    // The memory is active, the agent's, from outside, and the person did not have to review it.
+    // The memory is active, the agent's, and the person did not have to review it.
     // The folder of the run is `proj` (no git): a configuration goes to that project.
     let link = clio_brain::memory_link::MemoryLink::open_read_in(
         &w.home().join(".local/share/clio"),
@@ -863,23 +868,22 @@ fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
     );
     assert_eq!(rows[0].content, "El proyecto usa PostgreSQL 16");
     assert_eq!(rows[0].state, clio_memory::State::Active);
-    assert_eq!(rows[0].origin, clio_memory::Origin::External);
+    // The session read nothing from outside: the agent's own.
+    assert_eq!(rows[0].origin, clio_memory::Origin::Agent);
     assert!(
         link.pending().unwrap().is_empty(),
         "nothing waits for the person"
     );
-    // Jev was asked a closed question about the proposal, with the key, and nothing else of the run.
+    // Jev was asked the guard's closed questions about it, with the key, and nothing else of the
+    // run.
     let seen = jev.seen.lock().unwrap();
     let asked: Vec<&Value> = seen
         .iter()
         .map(|(_, b)| b)
-        .filter(|b| b["questions"]["operacion"].is_object())
+        .filter(|b| b["questions"]["inseguro"].is_object())
         .collect();
     assert_eq!(asked.len(), 1, "{seen:?}");
-    assert_eq!(
-        asked[0]["state"]["propuesta"],
-        "El proyecto usa PostgreSQL 16"
-    );
+    assert_eq!(asked[0]["state"]["texto"], "El proyecto usa PostgreSQL 16");
     assert!(
         seen.iter()
             .all(|(a, _)| a.as_deref() == Some(format!("Authorization: Bearer {key}").as_str()))
@@ -917,55 +921,32 @@ fn memory_state(w: &World) -> clio_memory::State {
 
 const FORGET: &str = r#"[{"tool_calls":[{"name":"memory_forget","arguments":{"reason":"olvidar el dato","id":1}}]},{"text":"listo","usage":[10,2]}]"#;
 
-// S-65: the person asks the model to forget, in their own words; the tool host checks those words
-// (which the brain told it) with Jev, and the memory is archived, not erased.
-// S-65
+// S-65: the model forgets on its own, without anybody's words or Jev: the memory goes to
+// quarantine, its record kept.
 #[test]
-fn when_the_person_asks_to_forget_the_model_can_and_the_memory_is_archived() {
+fn the_model_forgets_on_its_own_and_the_memory_goes_to_quarantine() {
     if can_run("jev_forget", false).is_none() {
         return;
     }
-    let (w, _vault, _jev) = jev_world(FORGET, "5555");
-    let o = w
-        .clio(&["run", "--harness", "pi", "olvida que vivo en Medellín"])
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert_eq!(memory_state(&w), clio_memory::State::Archived);
-}
-
-// S-65: the same call, with nothing in the person's words that asks for it (the model was told so
-// by a page, say), is refused and the memory stays as it was.
-// S-65
-#[test]
-fn the_model_cannot_forget_what_the_person_did_not_ask_to_forget() {
-    if can_run("jev_forget_refused", false).is_none() {
-        return;
-    }
-    let (w, _vault, jev) = jev_world(FORGET, "4444");
+    let (w, _vault, jev) = jev_world(FORGET, "5555");
     let o = w
         .clio(&["run", "--harness", "pi", "hola, ¿cómo vas?"])
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert_eq!(memory_state(&w), clio_memory::State::Active);
-    // It was Jev that said no, looking at what the person really said (reported by the brain).
+    assert_eq!(memory_state(&w), clio_memory::State::Quarantine);
     let seen = jev.seen.lock().unwrap();
-    let asked: Vec<&Value> = seen
-        .iter()
-        .map(|(_, b)| b)
-        .filter(|b| b["questions"]["pide_olvidar"].is_object())
-        .collect();
-    assert_eq!(asked.len(), 1, "{seen:?}");
-    assert_eq!(
-        asked[0]["state"]["mensajes_de_la_persona"],
-        json!(["hola, ¿cómo vas?"])
+    assert!(
+        seen.iter().all(|(_, b)| !b["questions"]
+            .as_object()
+            .is_some_and(|q| q.keys().any(|k| k.starts_with("pide_")))),
+        "nobody's words are asked about: {seen:?}"
     );
 }
 
 // S-61, S-63: when the person closes a session of four messages, Clio asks the model for its
 // summary in Clio's own envelope (nothing in it is the person's words), and the summary becomes
-// the episode of the session's project; without Jev it waits for the person like any proposal.
+// the episode of the session's project, active at once.
 #[test]
 fn closing_a_session_of_four_messages_saves_its_summary() {
     if can_run("summary", true).is_none() {
@@ -1003,11 +984,11 @@ fn closing_a_session_of_four_messages_saves_its_summary() {
     .unwrap()
     .unwrap()
     .for_person();
-    let pending = link.pending().unwrap();
-    let summary = pending
+    let active = link.list(clio_memory::State::Active).unwrap();
+    let summary = active
         .iter()
         .find(|r| r.kind == clio_memory::MemoryType::Episodic)
-        .unwrap_or_else(|| panic!("{pending:?}"));
+        .unwrap_or_else(|| panic!("{active:?}"));
     assert_eq!(
         summary.content,
         "Objetivo: probar el cierre · Hecho: cuatro pasos"
