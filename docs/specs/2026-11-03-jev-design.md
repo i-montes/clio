@@ -99,7 +99,7 @@ El texto de una propuesta lo escribió el modelo, a veces tras leer una página 
 ## Configuración, clave y fallos
 
 - **Clave:** secreto `jev` en el vault, destino `jev:api.typesafe.ai`. El cliente la pide por el socket de la pasarela en cada llamada y no la guarda.
-- **Modelo:** fijar un alias exacto en la configuración (`jev-1.14.0`) en vez de `jev-latest`, para que un cambio de modelo no mueva las decisiones sin que la persona lo sepa. Cambiarlo es una decisión explícita.
+- **Modelo:** `jev-latest`, por decisión de la persona: TypeSafe actualiza el modelo y deja de servir las versiones anteriores, así que fijar una versión terminaría fallando. El riesgo es que una versión nueva mueva las decisiones sin aviso. Se acota así: cada respuesta trae el modelo que contestó (`model`, p. ej. `jev-1.14.0`); el cliente lo anota en el registro de hechos y, cuando cambia, `clio doctor` y la pantalla lo avisan; al cambiar se vuelve a correr `testing/decisiones` (manual, con la clave) antes de confiar en los umbrales. Un alias exacto en la configuración queda como opción para quien lo quiera, no como valor por defecto.
 - **Apagado de fábrica:** Jev viene **apagado**. Encenderlo es una decisión explícita (ajuste de configuración) y exige el secreto en el vault; `clio doctor` dice si está encendido, si hay clave y si responde. Así la entrega 2 se puede publicar sin que nada salga a TypeSafe hasta que la persona lo decida.
 - **Interruptores:** Jev encendido o apagado, y por función (hora siempre encendida; memoria inyectada, sugerencias y operaciones por separado).
 - **Fallos:** tiempo máximo corto por llamada, disyuntor tras fallos seguidos y presupuesto diario de tokens (Jev cobra la entrada); todo falla cerrado hacia las reglas de hoy (S-47).
@@ -135,7 +135,7 @@ Un lector independiente leyó este documento y señaló ocho puntos; cada uno qu
 ## Decisiones tomadas por mí (para que las revises)
 
 - La hora lleva desfase de la zona local del equipo (`-05:00`), en formato fijo; no depende del modelo.
-- Se fija el alias exacto del modelo de Jev, no `latest`.
+- Se usa `jev-latest` (decisión de la persona); el cambio de versión se detecta y se avisa, no se impide.
 - Umbrales iniciales 0,8 y 0,9 (sesión contaminada), afinables.
 - Límite de ritmo en lugar de tope de cantidad; los números van en la configuración.
 - Lo procedimental sigue pidiendo a la persona hasta que decida.
