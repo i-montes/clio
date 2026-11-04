@@ -1030,7 +1030,7 @@ fn forgetting_needs_the_persons_words_and_jev_agreeing_and_archives_never_erases
         port(&w)
             .forget(mine.0, &said(&words, false))
             .unwrap_err()
-            .contains("sin Jev")
+            .contains("por aquí")
     );
     assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
     // After something hostile was read the bar is higher.

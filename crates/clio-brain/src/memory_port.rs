@@ -27,7 +27,7 @@ const NOT_READABLE: &str = "ese recuerdo no existe o no se puede leer";
 const NOT_CONFIRMED: &str =
     "no consta, por lo que la persona dijo, que lo haya pedido: que lo haga con `clio memory`";
 const NO_JUDGE: &str =
-    "esta memoria no puede hacer ese cambio sin Jev: que lo haga la persona con `clio memory`";
+    "esta memoria no puede hacer ese cambio por aquí: que lo haga la persona con `clio memory`";
 const NO_VECTORS: &str = "solo texto: el modelo de vectores no está disponible";
 
 pub struct LinkPort {
@@ -426,7 +426,7 @@ impl MemoryPort for LinkPort {
             judging.tainted,
         ) {
             return Err(
-                "Jev no confirmó que el texto unido diga solo lo que dicen esas memorias".into(),
+                "Clio no confirmó que el texto unido diga solo lo que dicen esas memorias".into(),
             );
         }
         let link = self.writer()?;

@@ -62,7 +62,7 @@ const SUMMARY_PARTS: [(&str, &str); 6] = [
 
 const UPDATE_DESCRIPTION: &str = "Propose a new text for one memory (its id): Clio decides whether it replaces it, like any proposal";
 
-const CONSOLIDATE_DESCRIPTION: &str = "Merge two to five memories into one because the person asked (Jev checks the person's words); the originals are archived, not erased";
+const CONSOLIDATE_DESCRIPTION: &str = "Merge two to five memories into one because the person asked (Clio checks the person's words); the originals are archived, not erased";
 /// How many memories one merge may join.
 const MAX_MERGE: usize = 5;
 
@@ -71,11 +71,10 @@ const TIMELINE_DESCRIPTION: &str =
 const CONTEXT_DESCRIPTION: &str =
     "Read the last session's summary, the pinned memories and the most recent ones (read-only)";
 const FORGET_DESCRIPTION: &str =
-    "Archive a memory because the person asked (it is not erased; Jev checks the person's words)";
-const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Jev checks the person's words)";
-const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context, because the person asked (Jev checks the person's words)";
-const REVERT_DESCRIPTION: &str =
-    "Undo a change Jev made to the memory because the person asked (Jev checks the person's words)";
+    "Archive a memory because the person asked (it is not erased; Clio checks the person's words)";
+const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Clio checks the person's words)";
+const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context, because the person asked (Clio checks the person's words)";
+const REVERT_DESCRIPTION: &str = "Undo a change Clio made to the memory because the person asked (Clio checks the person's words)";
 
 /// Changes a session may ask for through these three tools (S-47, S-65).
 pub(crate) const MAX_CHANGES: u32 = 10;
