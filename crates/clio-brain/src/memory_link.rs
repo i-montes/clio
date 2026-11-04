@@ -25,8 +25,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clio_memory::{
-    ActorId, ActorInfo, ActorKind, ContextOpts, Engine, Error, MemoryId, MemoryRow, MemoryType,
-    OpenMode, Origin, Proposal, Quota, RecallOpts, ScopeId, SearchOpts, Signal, State, SystemClock,
+    ActorId, ActorInfo, ActorKind, ContextOpts, Engine, Error, Judged, MemoryId, MemoryRow,
+    MemoryType, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId, SearchOpts,
+    Signal, State, Sureness, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -58,6 +59,11 @@ pub fn explain(e: &Error) -> String {
         Error::NotFound => "no existe ese recuerdo".into(),
         other => other.to_string(),
     }
+}
+
+/// The id of a line that starts `[m12]`, as the engine's context lines do.
+fn memory_line_id(line: &str) -> Option<i64> {
+    line.strip_prefix("[m")?.split(']').next()?.parse().ok()
 }
 
 /// Control characters, bidi marks and zero-width characters become spaces: a memory is one
@@ -475,10 +481,22 @@ impl MemoryLink {
             Ok(text) if !text.trim().is_empty() => {
                 // One clean line per memory: the model never sees a control character or a
                 // secret, whatever the file holds.
+                // This loop does not mark the run as tainted when it reads memory, so what came from
+                // outside is shown only if the person holds it (accepted it). What the judge made
+                // active from the agent's own proposals is for the Pi chat, which shows it as data
+                // and marks the session (S-63). The loop's own episodes are not from outside.
                 let text = text
                     .lines()
                     .map(|l| clean_text(&scrubber.scrub(l)))
                     .filter(|l| !l.is_empty())
+                    .filter(|l| {
+                        memory_line_id(l).is_none_or(|id| {
+                            self.engine.get(MemoryId(id)).ok().is_some_and(|row| {
+                                row.origin != Origin::External
+                                    || self.engine.held_by_person(&row).unwrap_or(false)
+                            })
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 for l in text.lines() {
@@ -625,23 +643,60 @@ impl MemoryLink {
     /// refused. Returns the id of the candidate.
     pub fn propose_as_agent(&self, text: &str, kind: MemoryType, session: &str) -> Res<MemoryId> {
         self.need_write()?;
-        let session = clip(&clean_text(session), 200);
         self.engine
-            .propose(Proposal {
-                scope: self.scope,
-                actor: self.actors.agente,
-                kind,
-                content: clip(&clean_text(text), 400),
-                topic_key: None,
-                origin: Origin::External,
-                session: Some(session.clone()),
-                episode: None,
-                source: Some(format!("pi:{session}")),
-                valid_from: None,
-                valid_to: None,
-            })
+            .propose(self.agent_proposal(text, kind, session))
             .map(|o| o.memory)
             .map_err(|e| explain(&e))
+    }
+
+    /// The text of an agent's proposal as it is stored: clean, one short line.
+    pub fn agent_text(text: &str) -> String {
+        clip(&clean_text(text), 400)
+    }
+
+    fn agent_proposal(&self, text: &str, kind: MemoryType, session: &str) -> Proposal {
+        let session = clip(&clean_text(session), 200);
+        Proposal {
+            scope: self.scope,
+            actor: self.actors.agente,
+            kind,
+            content: Self::agent_text(text),
+            topic_key: None,
+            origin: Origin::External,
+            session: Some(session.clone()),
+            episode: None,
+            source: Some(format!("pi:{session}")),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    /// The same proposal, decided by the judge (Jev) instead of the rules: new, a replacement or
+    /// already known. The engine still runs the quota and the secret check first, keeps the agent
+    /// as the author and the origin as outside, signs the operation as the judge and refuses to
+    /// replace what the person wrote without the person's confirmation. The error is the engine's
+    /// own so the caller can tell «refused, ask the person» from a failure.
+    pub fn propose_judged_as_agent(
+        &self,
+        text: &str,
+        kind: MemoryType,
+        session: &str,
+        how: Judged,
+        confidence: f32,
+    ) -> std::result::Result<Outcome, Error> {
+        let judge = self.engine.judge()?;
+        self.engine.propose_judged(
+            &judge,
+            self.agent_proposal(text, kind, session),
+            how,
+            Sureness { confidence },
+        )
+    }
+
+    /// Is this memory the person's own (written by them, in a fixed block, or accepted by them)?
+    /// Then only the person's own words replace it. When in doubt (it cannot be read) it is.
+    pub fn is_protected(&self, row: &MemoryRow) -> bool {
+        self.engine.held_by_person(row).unwrap_or(true)
     }
 
     // ---------------------------------------------------------------- the person

@@ -69,6 +69,30 @@ pub type Taint = Arc<dyn Fn() -> bool + Send + Sync>;
 /// What was shown, facts only (ids and counts), for the session's log.
 pub type Log = Arc<dyn Fn(&Prepared) + Send + Sync>;
 
+/// Tells the tool host what the person just said in this session. Only the brain hears it: a
+/// request to change a memory is compared with this, never with what the model says the person
+/// asked.
+pub type Said = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// What the pre-prompt tells the rest of the system.
+#[derive(Clone)]
+pub struct Hooks {
+    pub taint: Taint,
+    pub said: Said,
+    pub log: Log,
+}
+
+impl Hooks {
+    /// Nothing is told to anybody.
+    pub fn none() -> Self {
+        Self {
+            taint: Arc::new(|| true),
+            said: Arc::new(|_| {}),
+            log: Arc::new(|_| {}),
+        }
+    }
+}
+
 /// How long a message may wait for all this before it goes with only the time.
 const WAIT: Duration = Duration::from_secs(8);
 
@@ -79,8 +103,7 @@ struct Inner {
     catalog: Vec<ToolHint>,
     recall: Option<Arc<dyn Recall>>,
     scrub: Scrub,
-    taint: Taint,
-    log: Log,
+    hooks: Hooks,
     settings: Settings,
     first: AtomicBool,
     /// What this session has been shown: ids (never twice) and characters (up to a budget).
@@ -106,8 +129,7 @@ impl PrePrompt {
         catalog: Vec<ToolHint>,
         recall: Option<Arc<dyn Recall>>,
         scrub: Scrub,
-        taint: Taint,
-        log: Log,
+        hooks: Hooks,
         settings: Settings,
     ) -> Self {
         Self(Arc::new(Inner {
@@ -115,8 +137,7 @@ impl PrePrompt {
             catalog,
             recall,
             scrub,
-            taint,
-            log,
+            hooks,
             settings,
             first: AtomicBool::new(true),
             shown: Mutex::new((HashSet::new(), 0)),
@@ -130,8 +151,7 @@ impl PrePrompt {
             Vec::new(),
             None,
             Arc::new(|s| Ok(s.to_owned())),
-            Arc::new(|| true),
-            Arc::new(|_| {}),
+            Hooks::none(),
             Settings {
                 memory: false,
                 tool_hints: false,
@@ -165,6 +185,7 @@ impl PrePrompt {
 impl Inner {
     fn prepare(&self, person_text: &str, stamp: &str) -> Prepared {
         let first = self.first.swap(false, Ordering::SeqCst);
+        (self.hooks.said)(person_text);
         // Cleaned first and cut after: a cut must never leave the front half of a secret.
         let cleaned = (self.scrub)(person_text).ok();
         let message: String = cleaned
@@ -234,7 +255,7 @@ impl Inner {
         }
         if !outside.is_empty() {
             // The mark first: if it cannot be made, what is not the person's is not shown.
-            if (self.taint)() {
+            if (self.hooks.taint)() {
                 out.tainted = true;
             } else {
                 outside.clear();
@@ -249,7 +270,7 @@ impl Inner {
             },
             person_text,
         );
-        (self.log)(&out);
+        (self.hooks.log)(&out);
         out
     }
 
@@ -408,6 +429,7 @@ mod tests {
         can_taint: Arc<AtomicBool>,
         asked: Arc<Mutex<Vec<String>>>,
         logged: Arc<Mutex<Vec<Vec<i64>>>>,
+        said: Arc<Mutex<Vec<String>>>,
         memory: Arc<Memory>,
     }
 
@@ -445,6 +467,7 @@ mod tests {
         let can_taint = Arc::new(AtomicBool::new(true));
         let asked = Arc::new(Mutex::new(Vec::new()));
         let logged = Arc::new(Mutex::new(Vec::new()));
+        let said = Arc::new(Mutex::new(Vec::new()));
         let jev = o.jev.then(|| {
             Arc::new(Jev::new(
                 Config::default(),
@@ -464,17 +487,25 @@ mod tests {
             asked: asked.clone(),
             slow: o.slow,
         });
-        let (t, ct, lg) = (tainted.clone(), can_taint.clone(), logged.clone());
+        let (t, ct, lg, sd) = (
+            tainted.clone(),
+            can_taint.clone(),
+            logged.clone(),
+            said.clone(),
+        );
         let pp = PrePrompt::new(
             jev,
             catalog(),
             Some(memory.clone()),
             Arc::new(|s| Ok(s.replace("SECRETO", "***"))),
-            Arc::new(move || {
-                t.fetch_add(1, Ordering::SeqCst);
-                ct.load(Ordering::SeqCst)
-            }),
-            Arc::new(move |p| lg.lock().unwrap().push(p.memory_ids.clone())),
+            Hooks {
+                taint: Arc::new(move || {
+                    t.fetch_add(1, Ordering::SeqCst);
+                    ct.load(Ordering::SeqCst)
+                }),
+                said: Arc::new(move |m| sd.lock().unwrap().push(m.to_owned())),
+                log: Arc::new(move |p| lg.lock().unwrap().push(p.memory_ids.clone())),
+            },
             Settings {
                 memory: true,
                 tool_hints: true,
@@ -487,6 +518,7 @@ mod tests {
             can_taint,
             asked,
             logged,
+            said,
             memory,
         }
     }
@@ -662,8 +694,7 @@ mod tests {
             catalog(),
             r.pp.0.recall.clone(),
             Arc::new(|_| Err("vault down".into())),
-            Arc::new(|| true),
-            Arc::new(|_| {}),
+            Hooks::none(),
             Settings {
                 memory: true,
                 tool_hints: true,
@@ -713,6 +744,15 @@ mod tests {
         }
         assert!(n > 10 && n < 100, "{n} memories fit in the session budget");
         assert!(r.pp.prepare("d", STAMP).memory_ids.is_empty());
+    }
+
+    // S-61: the brain tells the tool host what the person said, even when nothing else happens.
+    #[test]
+    fn what_the_person_said_is_reported_to_the_host_for_every_message() {
+        let r = rig(opts(false, &[], vec![]));
+        r.pp.prepare("primero", STAMP);
+        r.pp.prepare("segundo", STAMP);
+        assert_eq!(*r.said.lock().unwrap(), ["primero", "segundo"]);
     }
 
     #[test]

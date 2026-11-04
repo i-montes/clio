@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-pub use memory::{Found, MemoryItem, MemoryPort, Origin, ProposalKind};
+pub use memory::{Found, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed, Saved};
 pub use sanitize::sanitize;
 pub use server::Server;
 
@@ -152,6 +152,10 @@ pub struct Config {
     /// `memory_get` and `memory_propose` are not declared and the gateway denies them (S-02): the
     /// loose `clio-toolhost` binary has none.
     pub memory: Option<Arc<dyn MemoryPort>>,
+    /// What the brain must show to tell the service what the person said (`said`): a secret the
+    /// brain made and put in this process's environment, which Pi never gets. Without it nothing
+    /// can be reported, and what is not reported cannot be confirmed.
+    pub said_token: Option<String>,
 }
 
 impl Config {
@@ -165,6 +169,7 @@ impl Config {
             vault: None,
             rules: None,
             memory: None,
+            said_token: None,
         }
     }
 }
@@ -172,7 +177,14 @@ impl Config {
 #[derive(Default)]
 struct Taint {
     sources: Vec<&'static str>,
+    /// The person's last words in this session, as the brain reported them (memory only, never
+    /// kept on disk): what a judge compares a request against.
+    said: std::collections::VecDeque<String>,
 }
+
+/// How many of the person's messages are kept per session, and how long each may be.
+const SAID_KEEP: usize = 5;
+const SAID_CHARS: usize = 2000;
 
 /// An approval for exactly the action the gateway just allowed.
 struct Approved(String);
@@ -197,6 +209,7 @@ pub struct ToolHost {
     exec_status: Result<(), String>,
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
+    said_token: Option<String>,
     /// Where the memory tools keep their budget and their log.
     run_dir: PathBuf,
 }
@@ -333,6 +346,7 @@ impl ToolHost {
             exec_status,
             memory: cfg.memory,
             memory_timeout: memory::MEMORY_TIMEOUT,
+            said_token: cfg.said_token,
             run_dir: cfg.run_dir,
         })
     }
@@ -361,7 +375,10 @@ impl ToolHost {
     }
 
     pub fn is_tainted(&self, session: &str) -> bool {
-        lock(&self.sessions).contains_key(session)
+        // An entry only for what the person said (no sources) is not a taint.
+        lock(&self.sessions)
+            .get(session)
+            .is_some_and(|t| !t.sources.is_empty())
     }
 
     /// One request line in, one response line out. Never panics, never executes on a bad line.
@@ -491,6 +508,9 @@ impl ToolHost {
         }
         if req.tool == "taint" {
             return self.taint(&req);
+        }
+        if req.tool == "said" {
+            return self.said(&req, &map);
         }
         if map
             .get("content")
@@ -723,6 +743,65 @@ impl ToolHost {
             tainted: true,
             external: false,
         }
+    }
+
+    /// The brain reports what the person just said in this session. Only the brain knows it: the
+    /// model's claim about what the person asked is never taken in its place.
+    fn said(&self, req: &Request, args: &Map<String, Value>) -> Response {
+        let tainted = self.is_tainted(&req.session);
+        // Only the brain knows the token: a process that merely reaches the socket cannot put
+        // words in the person's mouth.
+        let known = self.said_token.as_deref();
+        let given = args.get("token").and_then(Value::as_str);
+        if known.is_none() || known != given {
+            return self.refuse(
+                &req.id,
+                "S-65",
+                "the person's words are reported by the brain only".into(),
+                tainted,
+            );
+        }
+        let Some(text) = args.get("text").and_then(Value::as_str) else {
+            return self.refuse(
+                &req.id,
+                "protocol",
+                "\"text\" must be a string".into(),
+                tainted,
+            );
+        };
+        let text: String = sanitize(text).chars().take(SAID_CHARS).collect();
+        {
+            let mut s = lock(&self.sessions);
+            if s.len() >= MAX_SESSIONS && !s.contains_key(&req.session) {
+                return self.refuse(&req.id, "protocol", "too many sessions".into(), tainted);
+            }
+            let t = s.entry(req.session.clone()).or_default();
+            if t.said.len() == SAID_KEEP {
+                t.said.pop_front();
+            }
+            t.said.push_back(text);
+        }
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: String::new(),
+            data: Value::Null,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "said".into(),
+                reason: "keeping the person's words has no effect on the machine".into(),
+            },
+            tainted,
+            external: false,
+        }
+    }
+
+    /// The person's last words in `session`, oldest first.
+    pub(crate) fn person_said(&self, session: &str) -> Vec<String> {
+        lock(&self.sessions)
+            .get(session)
+            .map(|t| t.said.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn filter(&self, req: &Request, args: &Map<String, Value>, tainted: bool) -> Response {

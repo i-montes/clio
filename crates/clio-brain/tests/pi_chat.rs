@@ -573,12 +573,15 @@ fn fake_jev() -> FakeJev {
             let _ = r.read_exact(&mut body);
             let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let mut answers = serde_json::Map::new();
-            for q in req["questions"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, _)| k)
-            {
+            for (q, def) in req["questions"].as_object().into_iter().flatten() {
+                if def["type"] == "choice" {
+                    // What to do with a memory: «new», sure of it.
+                    answers.insert(
+                        q.clone(),
+                        json!({"type": "choice", "choice": "add", "confidence": 0.95}),
+                    );
+                    continue;
+                }
                 let about_a_memory = q
                     .strip_prefix('m')
                     .is_some_and(|n| n.parse::<u32>().is_ok());
@@ -792,4 +795,74 @@ fn with_jev_off_only_the_persons_own_memory_is_shown_and_nothing_is_tainted() {
         "{said}"
     );
     assert!(find_files(&w.home().join(".local/share/clio"), "tainted.json").is_empty());
+}
+
+// S-25, S-61, S-63: with Jev on, what the model proposes with `memory_propose` is decided by Jev,
+// in the tool host's own process: here, «new», and it is memory at once, signed by the judge.
+// S-64
+#[test]
+fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
+    if can_run("jev_propose", false).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"tool_calls":[{"name":"memory_propose","arguments":{"reason":"guardar el dato","text":"El proyecto usa PostgreSQL 16","kind":"semantic"}}]},{"text":"listo","usage":[10,2]}]"#,
+    );
+    let key = format!("jev-test-{}-{}", "key", "6666");
+    let _vault = start_vault(&w, &key);
+    let jev = fake_jev();
+    let cfg_path = w.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["jev"] =
+        json!({"enabled": true, "memory": false, "tool_hints": false, "base_url": jev.base});
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    let o = w
+        .clio(&[
+            "run",
+            "--harness",
+            "pi",
+            "recuerda que el proyecto usa PostgreSQL 16",
+        ])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        o.status.success(),
+        "{out}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    // The memory is active, the agent's, from outside, and the person did not have to review it.
+    let link = clio_brain::memory_link::MemoryLink::open_read(
+        &w.home().join(".local/share/clio"),
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .unwrap();
+    let (rows, _) = link.search("PostgreSQL", 5).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].content, "El proyecto usa PostgreSQL 16");
+    assert_eq!(rows[0].state, clio_memory::State::Active);
+    assert_eq!(rows[0].origin, clio_memory::Origin::External);
+    assert!(
+        link.pending().unwrap().is_empty(),
+        "nothing waits for the person"
+    );
+    // Jev was asked a closed question about the proposal, with the key, and nothing else of the run.
+    let seen = jev.seen.lock().unwrap();
+    let asked: Vec<&Value> = seen
+        .iter()
+        .map(|(_, b)| b)
+        .filter(|b| b["questions"]["operacion"].is_object())
+        .collect();
+    assert_eq!(asked.len(), 1, "{seen:?}");
+    assert_eq!(
+        asked[0]["state"]["propuesta"],
+        "El proyecto usa PostgreSQL 16"
+    );
+    assert!(
+        seen.iter()
+            .all(|(a, _)| a.as_deref() == Some(format!("Authorization: Bearer {key}").as_str()))
+    );
+    w.assert_key_nowhere();
 }

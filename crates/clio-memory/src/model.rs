@@ -40,6 +40,10 @@ pub enum ActorKind {
     /// Internal: signs the operations of background jobs (forgetting). It cannot be registered
     /// through `Engine::register_actor` and has no review powers.
     System,
+    /// Jev, the judge that decides what to do with a proposal (spec `2026-11-03-jev-design.md`).
+    /// It cannot be registered through `Engine::register_actor`; only `Engine::judge` makes it,
+    /// and all it can do is `Engine::propose_judged`: no review powers.
+    Judge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

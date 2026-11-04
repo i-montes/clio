@@ -9,10 +9,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use clio_memory::{MemoryId, MemoryRow, MemoryType, Origin as Written, State};
-use clio_toolhost::{Found, MemoryItem, MemoryPort, Origin, ProposalKind};
+use clio_memory::{
+    Error, Judged, MemoryId, MemoryRow, MemoryType, OpKind, Origin as Written, State,
+};
+use clio_toolhost::{
+    Found, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed, Saved,
+};
 
-use crate::memory_link::{EmbedModel, MemoryLink, Res, kind_label};
+use crate::memory_judge::{Call, MemoryJudge, Neighbor};
+use crate::memory_link::{EmbedModel, MemoryLink, Res, explain, kind_label};
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
@@ -25,6 +30,8 @@ pub struct LinkPort {
     /// Opened on the first call that finds a database, and kept. A failure is never kept: the
     /// person may create the memory (or fix it) while the session runs.
     link: Mutex<Option<MemoryLink>>,
+    /// Jev, who decides what becomes of a proposal. Without it every proposal waits for the person.
+    judge: Option<Arc<MemoryJudge>>,
 }
 
 impl LinkPort {
@@ -34,7 +41,15 @@ impl LinkPort {
             data: data.to_path_buf(),
             model: EmbedModel::new(model_dir.map(Path::to_path_buf)),
             link: Mutex::new(None),
+            judge: None,
         }
+    }
+
+    /// With a judge, a proposal is decided by it (and by the rules of the engine behind it).
+    #[must_use]
+    pub fn with_judge(mut self, judge: Arc<MemoryJudge>) -> Self {
+        self.judge = Some(judge);
+        self
     }
 
     fn with_link<T>(&self, f: impl FnOnce(&MemoryLink) -> Res<T>) -> Res<T> {
@@ -57,18 +72,102 @@ impl LinkPort {
 }
 
 impl MemoryPort for LinkPort {
-    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
+    fn propose(
+        &self,
+        text: &str,
+        kind: ProposalKind,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        let kind = match kind {
+            ProposalKind::Semantic => MemoryType::Semantic,
+            ProposalKind::Procedural => MemoryType::Procedural,
+        };
+        // Jev is asked BEFORE the writer is taken: what it is asked about is read without holding
+        // the lock, so a slow answer never keeps the person's own writes waiting. The engine
+        // re-checks every memory it is told to replace once it holds the lock.
+        let verdict = self.judge.as_ref().map(|judge| {
+            let stored = MemoryLink::agent_text(text);
+            let neighbors: Vec<Neighbor> =
+                match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
+                    Ok(Some(link)) => link
+                        .search(&stored, 3)
+                        .map(|(rows, _)| {
+                            rows.into_iter()
+                                .map(|r| Neighbor {
+                                    id: r.id.0,
+                                    protected: link.is_protected(&r),
+                                    text: r.content,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+            judge.decide(
+                &stored,
+                kind == MemoryType::Procedural,
+                &neighbors,
+                judging.tainted,
+                &judging.person_said,
+            )
+        });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
         let link = MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
             // The detail names a path of the person's: the service's log, not the model.
             eprintln!("clio-toolhost: memory: {why}");
             "la memoria no se puede abrir para escribir ahora".to_owned()
         })?;
-        let kind = match kind {
-            ProposalKind::Semantic => MemoryType::Semantic,
-            ProposalKind::Procedural => MemoryType::Procedural,
-        };
-        link.propose_as_agent(text, kind, session).map(|id| id.0)
+        if let Some(v) = verdict {
+            let how = match v.call {
+                Call::Add => Some(Judged::Add),
+                Call::Update {
+                    old,
+                    person_confirmed,
+                } => Some(Judged::Update {
+                    old: MemoryId(old),
+                    person_confirmed,
+                }),
+                Call::Noop { existing } => Some(Judged::Noop {
+                    existing: MemoryId(existing),
+                }),
+                Call::Review => None,
+            };
+            if let Some(how) = how {
+                match link.propose_judged_as_agent(text, kind, session, how, v.confidence) {
+                    Ok(o) => {
+                        let saved = match (o.kind, o.state) {
+                            (OpKind::Noop, _) => Saved::Known,
+                            (OpKind::Update, State::Active) => Saved::Replaced,
+                            (_, State::Active) => Saved::Active,
+                            _ => Saved::Waiting,
+                        };
+                        return Ok(Proposed {
+                            id: o.memory.0,
+                            saved,
+                        });
+                    }
+                    // A refusal that is the proposal's own (a secret, a quota, too long, empty,
+                    // another writer) is said as it is; anything else the judge asked for and the
+                    // engine could not do (a neighbor that stopped being active, one the person
+                    // owns, a date, a judge that cannot be registered) leaves the proposal to the
+                    // person, as it was before the judge.
+                    Err(
+                        e @ (Error::SecretDetected
+                        | Error::QuotaExceeded
+                        | Error::TooLong
+                        | Error::EmptyContent
+                        | Error::WriterLocked),
+                    ) => return Err(explain(&e)),
+                    Err(_) => {}
+                }
+            }
+        }
+        link.propose_as_agent(text, kind, session)
+            .map(|id| Proposed {
+                id: id.0,
+                saved: Saved::Waiting,
+            })
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

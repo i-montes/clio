@@ -200,7 +200,7 @@ fn agent_mode(
     };
     let provider = one("provider").unwrap_or_else(|| "opencode-go".into());
     let model = one("model").unwrap_or_else(|| "beam-free".into());
-    // Pi runs with the prompt the guard checks (clio-agent@7); --prompt is the builtin loop's.
+    // Pi runs with the prompt the guard checks (clio-agent@8); --prompt is the builtin loop's.
     let (system_prompt, version) = if pi_harness {
         (
             String::new(),

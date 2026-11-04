@@ -379,5 +379,6 @@ fn describe(kind: ActorKind) -> &'static str {
         ActorKind::Session => "a session",
         ActorKind::Importer => "an importer",
         ActorKind::System => "the system",
+        ActorKind::Judge => "the judge",
     }
 }
