@@ -747,6 +747,7 @@ fn projects_review_due_reviewed_and_timeline() {
     let s = clio_toolhost::Judging::default();
     let a = alfa.propose(&draft("usa Postgres"), "s1", &s).unwrap().id;
     let b = alfa.propose(&draft("usa Redis"), "s1", &s).unwrap().id;
+    let other = alfa.propose(&draft("usa Kafka"), "s2", &s).unwrap().id;
     drop(alfa);
     let projects: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();
     assert_eq!(
@@ -754,7 +755,7 @@ fn projects_review_due_reviewed_and_timeline() {
         json!([
             {"place": "personal", "active": 2, "quarantine": 0, "archived": 0},
             {"place": "lecciones", "active": 0, "quarantine": 0, "archived": 0},
-            {"place": "proyecto alfa", "active": 0, "quarantine": 2, "archived": 0},
+            {"place": "proyecto alfa", "active": 0, "quarantine": 3, "archived": 0},
         ]),
         "{projects:#}"
     );
@@ -768,7 +769,11 @@ fn projects_review_due_reviewed_and_timeline() {
     e.clio(&["memory", "reviewed", &old.0.to_string()]);
     let due: Value = serde_json::from_str(&e.clio(&["memory", "review-due", "--json"])).unwrap();
     assert!(due.as_array().unwrap().is_empty(), "{due:#}");
-    for id in [a, b] {
+    // Not active yet: no timeline (said plainly).
+    let o = e.try_clio(&["memory", "timeline", &b.to_string()]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("solo los recuerdos activos"));
+    for id in [a, b, other] {
         e.clio(&["memory", "promote", &id.to_string(), "--yes"]);
     }
     let t: Value =
@@ -779,7 +784,7 @@ fn projects_review_due_reviewed_and_timeline() {
         .iter()
         .map(|r| r["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(ids, [a, b]);
+    assert_eq!(ids, [a, b], "the session, not the place");
     let shown: Value =
         serde_json::from_str(&e.clio(&["memory", "show", &a.to_string(), "--json"])).unwrap();
     assert_eq!(shown["place"], "proyecto alfa");
@@ -797,7 +802,87 @@ fn projects_review_due_reviewed_and_timeline() {
     assert!(
         lines
             .iter()
-            .any(|l| l == "memoria: 4 recuerdos activos; 1 proyecto, lo personal y las lecciones"),
+            .any(|l| l == "memoria: 5 recuerdos activos; 1 proyecto, lo personal y las lecciones"),
         "{lines:#?}"
     );
+}
+
+// What the memory holds is cleaned before the terminal sees it: a title with escape sequences and
+// a line break comes out as one plain line.
+#[test]
+fn a_hostile_title_never_reaches_the_terminal_raw() {
+    use clio_memory::{Engine, MemoryType, OpenMode, Origin, Proposal, SystemClock};
+    let e = Env::new(true);
+    let data = e.home().join(".local/share/clio");
+    e.clio(&["memory", "remember", "algo"]);
+    let (person, scope) = {
+        let l = clio_brain::memory_link::MemoryLink::open_write(
+            &data,
+            &clio_brain::memory_link::EmbedModel::none(),
+        )
+        .unwrap();
+        (l.actors().persona, l.scope())
+    };
+    let id = Engine::open(
+        &data.join("memory.db"),
+        OpenMode::ReadWrite,
+        std::sync::Arc::new(SystemClock),
+    )
+    .unwrap()
+    .propose(Proposal {
+        scope,
+        actor: person,
+        kind: MemoryType::Semantic,
+        content: "texto".into(),
+        topic_key: None,
+        origin: Origin::User,
+        session: None,
+        episode: None,
+        source: None,
+        valid_from: None,
+        valid_to: None,
+        title: Some("\u{1b}]0;pwned\u{7}\u{1b}[31mrojo\nfalso".into()),
+        category: None,
+    })
+    .unwrap()
+    .memory;
+    let n = id.0.to_string();
+    for args in [vec!["memory", "show", n.as_str()], vec!["memory", "list"]] {
+        let out = e.clio(&args);
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{7}'),
+            "{args:?}: {out:?}"
+        );
+    }
+}
+
+// The doctor only looks: a file of the old schema is reported, not upgraded.
+#[test]
+fn the_doctor_does_not_upgrade_an_old_memory_file() {
+    let e = Env::new(true);
+    e.clio(&["memory", "remember", "Marta vive en Medellín"]);
+    let path = e.db();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "DROP INDEX memories_episode; DROP TABLE pins; DROP TABLE reviews; DROP TABLE relations;
+             ALTER TABLE memories DROP COLUMN title; ALTER TABLE memories DROP COLUMN category;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+    let doc: Value = serde_json::from_slice(&e.try_clio(&["doctor", "--json"]).stdout).unwrap();
+    assert!(
+        doc["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["message"].as_str().unwrap().contains("esquema anterior")),
+        "{doc:#}"
+    );
+    let v: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 1, "still the old schema");
 }

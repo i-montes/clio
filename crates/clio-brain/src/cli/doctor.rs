@@ -334,6 +334,22 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
 /// its places, what waits for review and what is past its review cycle.
 fn memory_report(o: &mut Report, dirs: &Dirs) {
     use clio_brain::memory_link::{EmbedModel, MemoryLink};
+    // A look only: an old file is not upgraded from here (that takes the writer and changes it).
+    let db = MemoryLink::db_path(&dirs.data);
+    if db.is_file()
+        && let Err(clio_memory::Error::SchemaTooOld(_)) = clio_memory::Engine::open(
+            &db,
+            clio_memory::OpenMode::ReadOnly,
+            std::sync::Arc::new(clio_memory::SystemClock),
+        )
+    {
+        o.say(
+            Level::Pass,
+            "memoria: guardada con el esquema anterior; se actualiza sola la próxima vez que Clio la use".into(),
+            None,
+        );
+        return;
+    }
     let link = match MemoryLink::open_read(&dirs.data, &EmbedModel::none()) {
         Ok(Some(l)) => l.for_person(),
         Ok(None) => {

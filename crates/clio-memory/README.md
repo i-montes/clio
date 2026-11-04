@@ -103,7 +103,7 @@ $ clio-memory --db restored.db doctor                # ok on every line
 
 ## At scale
 
-`tests/scale.rs` (ignored by default: `cargo test --release -p clio-memory --test scale -- --ignored --nocapture`) fills 10 000 memories in three places (a project, the person's, the lessons) with titles, categories, sessions and 256-dimension vectors, then measures. On the development machine (2026-11-04, release build): filling took 1 ms per memory; a search over the three places 14.7 ms at the median and 15.6 ms at the 95th percentile; the most recent memories of a place 3.7 ms and a timeline 0.5 ms (95th percentile). Its bounds (500 ms, 100 ms) only catch a search that stopped using its indexes.
+`tests/scale.rs` (ignored by default: `cargo test --release -p clio-memory --test scale -- --ignored --nocapture`) fills 10 000 memories in three places (a project, the person's, the lessons) with titles, categories and sessions, makes their 256-dimension vectors through the job queue (a test embedder: the cost of the real model is not in it), then measures. On the development machine (2026-11-04, release build): filling took 0.9 ms per memory and the vectors 0.4 s in all; a search over the three places (text and vectors) 22.5 ms at the median and 37 ms at the 95th percentile; the most recent memories of a place 3.6 ms and a timeline 0.5 ms (95th percentile). Its bounds are about ten times those numbers.
 
 ## Telemetry (optional)
 

@@ -1151,6 +1151,16 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// Is this active memory past its review cycle? (Only its place is looked at.)
+    pub fn is_due(&self, row: &MemoryRow) -> bool {
+        row.state == State::Active
+            && row.category.and_then(Category::review_days).is_some()
+            && self
+                .engine
+                .review_due(row.scope)
+                .is_ok_and(|v| v.iter().any(|r| r.id == row.id))
+    }
+
     /// Is it pinned (first in its place's context)?
     pub fn is_pinned(&self, row: &MemoryRow) -> bool {
         self.engine
@@ -1160,7 +1170,9 @@ impl MemoryLink {
 
     /// The memories around `id` in its session (or its place), as this view can read them.
     pub fn timeline(&self, id: MemoryId, before: usize, after: usize) -> Res<Vec<MemoryRow>> {
-        self.get(id)?;
+        if self.get(id)?.state != State::Active {
+            return Err("solo los recuerdos activos tienen línea de tiempo".into());
+        }
         Ok(self
             .engine
             .timeline(id, before, after)

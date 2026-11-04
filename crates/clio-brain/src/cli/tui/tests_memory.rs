@@ -65,6 +65,7 @@ fn data() -> MemoryData {
             ),
         ],
         archived: 1,
+        active: 2,
         due: 0,
         note: Some("sin modelo de embeddings: busca solo por texto".into()),
         missing: false,

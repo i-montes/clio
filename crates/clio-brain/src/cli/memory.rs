@@ -236,7 +236,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 if link.is_pinned(&m) {
                     println!("{}sí (sale primero en el contexto)", label("fijado:"));
                 }
-                if link.review_due()?.iter().any(|r| r.id == m.id) {
+                if link.is_due(&m) {
                     println!(
                         "{}{}",
                         label("revisar:"),

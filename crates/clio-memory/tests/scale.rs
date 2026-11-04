@@ -4,8 +4,8 @@
 //!
 //! `cargo test --release -p clio-memory --test scale -- --ignored --nocapture`
 //!
-//! The numbers are written to the output; the asserts are generous bounds that only catch a
-//! search that stopped using its indexes.
+//! The numbers are written to the output; the asserts are about ten times what a release build
+//! measured on the development machine.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -79,6 +79,15 @@ fn ten_thousand_memories_in_three_places() {
         f.engine.propose(p).unwrap();
     }
     let fill = t.elapsed();
+    // The vectors are made by the job queue, as in real use: all of them, before measuring.
+    let t = Instant::now();
+    while f.engine.embed_pending(512).unwrap() > 0 {}
+    let embed = t.elapsed();
+    assert_eq!(
+        f.engine.stats().unwrap().vectors,
+        N as u64,
+        "every memory has its vector"
+    );
     let opts = RecallOpts {
         search: SearchOpts {
             limit: 8,
@@ -96,7 +105,8 @@ fn ten_thousand_memories_in_three_places() {
         let t = Instant::now();
         let r = f.engine.recall_many(&scopes, &query, &opts).unwrap();
         search.push(t.elapsed());
-        assert!(!r.hits.is_empty() || r.abstained, "{query}");
+        // Two words every memory text is made of: something is always found.
+        assert!(!r.hits.is_empty(), "{query}");
     }
     let mut recent = Vec::new();
     let mut timeline = Vec::new();
@@ -114,13 +124,19 @@ fn ten_thousand_memories_in_three_places() {
         fill.as_secs_f64(),
         fill.as_secs_f64() * 1000.0 / N as f64
     );
-    println!("scale: search over 3 places p50 {p50:?} p95 {p95:?}");
+    println!(
+        "scale: vectors for all of them in {:.1} s",
+        embed.as_secs_f64()
+    );
+    println!("scale: search over 3 places (text and vectors) p50 {p50:?} p95 {p95:?}");
     println!(
         "scale: recent p95 {:?}, timeline p95 {:?}",
         percentile(&mut recent, 0.95),
         percentile(&mut timeline, 0.95)
     );
-    assert!(p95 < Duration::from_millis(500), "search p95 {p95:?}");
-    assert!(percentile(&mut recent, 0.95) < Duration::from_millis(100));
-    assert!(percentile(&mut timeline, 0.95) < Duration::from_millis(100));
+    // About ten times what a release build measured here: a slower machine passes, a search that
+    // stopped using its indexes does not.
+    assert!(p95 < Duration::from_millis(250), "search p95 {p95:?}");
+    assert!(percentile(&mut recent, 0.95) < Duration::from_millis(40));
+    assert!(percentile(&mut timeline, 0.95) < Duration::from_millis(10));
 }
