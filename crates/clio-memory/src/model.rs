@@ -19,10 +19,12 @@ pub enum Category {
     Discovery,
     Preference,
     Learning,
+    /// Who the person is: name, where they live, what they do.
+    Profile,
 }
 
 impl Category {
-    pub const ALL: [Category; 8] = [
+    pub const ALL: [Category; 9] = [
         Category::Decision,
         Category::Architecture,
         Category::Bugfix,
@@ -31,6 +33,7 @@ impl Category {
         Category::Discovery,
         Category::Preference,
         Category::Learning,
+        Category::Profile,
     ];
 
     /// The lowercase name used by the tools and the command line.
@@ -44,6 +47,7 @@ impl Category {
             Category::Discovery => "discovery",
             Category::Preference => "preference",
             Category::Learning => "learning",
+            Category::Profile => "profile",
         }
     }
 
@@ -54,16 +58,18 @@ impl Category {
     }
 
     /// Days after which a memory of this kind should be looked at again; `None` never. Settings
-    /// change, decisions get revisited, discoveries go stale; a preference, a fixed bug, a pattern
-    /// and a lesson keep.
+    /// change, decisions get revisited, discoveries go stale; who the person is, a preference, a
+    /// fixed bug, a pattern and a lesson keep.
     pub fn review_days(self) -> Option<i64> {
         match self {
             Category::Config => Some(90),
             Category::Discovery => Some(120),
             Category::Decision | Category::Architecture => Some(180),
-            Category::Preference | Category::Bugfix | Category::Pattern | Category::Learning => {
-                None
-            }
+            Category::Profile
+            | Category::Preference
+            | Category::Bugfix
+            | Category::Pattern
+            | Category::Learning => None,
         }
     }
 }

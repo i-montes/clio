@@ -40,8 +40,8 @@ pub const GUARD_TOOLS: [&str; 18] = [
     "memory_revert",
     "memory_pin",
 ];
-pub const PROMPT_NAME: &str = "clio-agent@14";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@14.md");
+pub const PROMPT_NAME: &str = "clio-agent@15";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@15.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -310,6 +310,6 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_one_the_guard_checks() {
-        assert!(PROMPT.starts_with("version: 14\n"));
+        assert!(PROMPT.starts_with("version: 15\n"));
     }
 }

@@ -100,6 +100,13 @@ fn a_category_has_a_name_and_a_review_cycle() {
     assert_eq!(Category::parse("otra"), None);
     assert_eq!(Category::Config.review_days(), Some(90));
     assert_eq!(Category::Preference.review_days(), None);
+    assert_eq!(
+        Category::Profile.review_days(),
+        None,
+        "who the person is keeps"
+    );
+    assert_eq!(Category::parse(" Profile "), Some(Category::Profile));
+    assert_eq!(Category::Profile.label(), "profile");
     for r in Relation::ALL {
         assert_eq!(Relation::parse(r.label()), Some(r));
     }

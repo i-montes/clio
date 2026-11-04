@@ -237,11 +237,12 @@ impl Place {
             .find(|p| p.label() == s.trim())
     }
 
-    /// Where a memory goes when nobody (Jev) says: a preference is the person's, an error or a
+    /// Where a memory goes when nobody (Jev) says: who the person is and what they prefer are the
+    /// person's, an error or a
     /// pattern is a lesson, the rest is the project's (or the person's when there is no project).
     pub fn by_rule(category: Option<Category>, has_project: bool) -> Place {
         match category {
-            Some(Category::Preference) => Place::Personal,
+            Some(Category::Profile | Category::Preference) => Place::Personal,
             Some(Category::Bugfix | Category::Pattern | Category::Learning) => Place::Lessons,
             _ if has_project => Place::Project,
             _ => Place::Personal,

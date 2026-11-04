@@ -18,7 +18,7 @@ Registro de operaciones como fuente de verdad (con REVERT y reconstrucción), PU
 
 ### 1. Memorias estructuradas
 
-- Cada memoria puede llevar **título** (corto, buscable) y **categoría**: `decision`, `architecture`, `bugfix`, `pattern`, `config`, `discovery`, `preference`, `learning`. Ambos opcionales en el motor (lo viejo sigue valiendo) y obligatorios en la herramienta del agente.
+- Cada memoria puede llevar **título** (corto, buscable) y **categoría**: `decision`, `architecture`, `bugfix`, `pattern`, `config`, `discovery`, `preference`, `learning` y, desde el 2026-11-04 a petición de la persona, `profile` (su identidad: nombre, dónde vive, a qué se dedica; `preference` queda para cómo quiere que le respondan, escriban o trabajen). Las dos van a lo personal y no caducan. Ambos opcionales en el motor (lo viejo sigue valiendo) y obligatorios en la herramienta del agente.
 - El contenido del agente pasa de 400 a **1200 caracteres** en una línea con la forma `Qué: … · Por qué: … · Dónde: … · Aprendido: …` (el formato de Engram en una línea: el servicio aplana los saltos para que una memoria no pueda imitar a otra).
 - El índice de texto busca en título y contenido.
 - Esquema 2 con migración desde el 1 (columnas nuevas; la reconstrucción desde el registro lee las filas viejas sin título ni categoría).
