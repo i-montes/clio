@@ -7,5 +7,6 @@ pub mod memory_link;
 pub mod memory_port;
 pub mod models;
 pub mod pi;
+pub mod project;
 pub mod vault_link;
 pub mod verify;

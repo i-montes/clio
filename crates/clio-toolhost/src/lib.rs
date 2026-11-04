@@ -43,7 +43,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-pub use memory::{Found, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed, Saved};
+pub use memory::{
+    CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind,
+    Proposed, Saved,
+};
 pub use sanitize::sanitize;
 pub use server::Server;
 

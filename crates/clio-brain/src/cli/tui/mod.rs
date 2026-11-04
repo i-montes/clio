@@ -412,7 +412,7 @@ impl Ctx {
             ),
             Cmd::MemoryPromote { id } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?.for_person();
                     link.promote(memory_id(&id)?)?;
                     Ok::<_, String>(format!("aprobado: m{id}; desde ahora se recuerda"))
                 },
@@ -420,7 +420,7 @@ impl Ctx {
             ),
             Cmd::MemoryArchive { id } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?.for_person();
                     link.archive(memory_id(&id)?)?;
                     Ok::<_, String>(format!("archivado: m{id}; ya no se recuerda"))
                 },
@@ -428,7 +428,7 @@ impl Ctx {
             ),
             Cmd::MemoryFeedback { id, useful } => self.spawn(
                 move |d, _| {
-                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?;
+                    let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?.for_person();
                     let signal = if useful {
                         Signal::Useful
                     } else {

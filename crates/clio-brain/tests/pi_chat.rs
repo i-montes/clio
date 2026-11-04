@@ -816,7 +816,7 @@ fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
         return;
     }
     let w = World::new(
-        r#"[{"tool_calls":[{"name":"memory_propose","arguments":{"reason":"guardar el dato","text":"El proyecto usa PostgreSQL 16","kind":"semantic"}}]},{"text":"listo","usage":[10,2]}]"#,
+        r#"[{"tool_calls":[{"name":"memory_propose","arguments":{"reason":"guardar el dato","title":"Base de datos del proyecto","text":"El proyecto usa PostgreSQL 16","category":"config","kind":"semantic"}}]},{"text":"listo","usage":[10,2]}]"#,
     );
     let key = format!("jev-test-{}-{}", "key", "6666");
     let _vault = start_vault(&w, &key);
@@ -843,14 +843,20 @@ fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
         String::from_utf8_lossy(&o.stderr)
     );
     // The memory is active, the agent's, from outside, and the person did not have to review it.
-    let link = clio_brain::memory_link::MemoryLink::open_read(
+    // The folder of the run is `proj` (no git): a configuration goes to that project.
+    let link = clio_brain::memory_link::MemoryLink::open_read_in(
         &w.home().join(".local/share/clio"),
         &clio_brain::memory_link::EmbedModel::none(),
+        Some("proj"),
     )
     .unwrap()
     .unwrap();
-    let (rows, _) = link.search("PostgreSQL", 5).unwrap();
+    let (rows, _) = link.search_all("PostgreSQL", 5).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        link.place_of(rows[0].scope),
+        Some(clio_brain::memory_link::Place::Project)
+    );
     assert_eq!(rows[0].content, "El proyecto usa PostgreSQL 16");
     assert_eq!(rows[0].state, clio_memory::State::Active);
     assert_eq!(rows[0].origin, clio_memory::Origin::External);

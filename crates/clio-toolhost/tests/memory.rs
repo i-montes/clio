@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
 use clio_toolhost::{
-    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed,
-    Request, Response, Saved, ToolHost,
+    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind,
+    Proposed, Request, Response, Saved, ToolHost,
 };
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
@@ -38,6 +38,8 @@ struct FakePort {
     proposals: Mutex<Vec<(String, ProposalKind, String)>>,
     /// What the port was told to judge each proposal by.
     judging: Mutex<Vec<Judging>>,
+    /// The drafts as the port got them.
+    drafts: Mutex<Vec<ProposalDraft>>,
     /// What the fake memory says became of a proposal.
     saved: Mutex<Saved>,
     /// Changes asked for: the tool, the number and what the port was told to judge it by.
@@ -68,6 +70,7 @@ impl FakePort {
             last_search: Mutex::new(None),
             proposals: Mutex::new(Vec::new()),
             judging: Mutex::new(Vec::new()),
+            drafts: Mutex::new(Vec::new()),
             saved: Mutex::new(Saved::Waiting),
             changes: Mutex::new(Vec::new()),
         })
@@ -102,15 +105,15 @@ impl FakePort {
 impl MemoryPort for FakePort {
     fn propose(
         &self,
-        text: &str,
-        kind: ProposalKind,
+        draft: &ProposalDraft,
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
         self.proposals
             .lock()
             .unwrap()
-            .push((text.to_owned(), kind, session.to_owned()));
+            .push((draft.text.clone(), draft.kind, session.to_owned()));
+        self.drafts.lock().unwrap().push(draft.clone());
         self.judging.lock().unwrap().push(judging.clone());
         self.behave()?;
         Ok(Proposed {
@@ -118,6 +121,17 @@ impl MemoryPort for FakePort {
             saved: *self.saved.lock().unwrap(),
             change: Some(41),
         })
+    }
+
+    fn timeline(&self, id: i64, before: usize, after: usize) -> Result<Vec<MemoryItem>, String> {
+        *self.last_search.lock().unwrap() = Some((format!("timeline {id}"), before * 10 + after));
+        self.behave()?;
+        Ok(self.items.clone())
+    }
+
+    fn context(&self) -> Result<Vec<MemoryItem>, String> {
+        self.behave()?;
+        Ok(self.items.clone())
     }
 
     fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
@@ -153,13 +167,7 @@ impl MemoryPort for FakePort {
 }
 
 fn item(id: i64, origin: Origin, text: &str) -> MemoryItem {
-    MemoryItem {
-        id,
-        kind: "hecho".into(),
-        origin,
-        date: "2026-10-30".into(),
-        text: text.into(),
-    }
+    MemoryItem::plain(id, "hecho", origin, "2026-10-30", text)
 }
 
 struct Env {
@@ -908,7 +916,7 @@ fn a_tainted_session_may_still_propose_and_stays_tainted() {
 fn a_bad_kind_or_text_is_refused_before_the_port() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
-    let long = "x".repeat(401);
+    let long = "x".repeat(1201);
     // Five refusals, because a refused call spends one of the session's five proposals too.
     for (text, kind) in [
         ("algo", "episodic"),
@@ -921,9 +929,9 @@ fn a_bad_kind_or_text_is_refused_before_the_port() {
         assert!(!r.ok && !r.external, "{text:?}/{kind}: {r:?}");
     }
     assert_eq!(port.proposals.lock().unwrap().len(), 0);
-    // Exactly 400 is fine, and a text of only blanks is empty.
+    // Exactly 1200 is fine, and a text of only blanks is empty.
     let e = env(&port);
-    assert!(propose(&e, "s2", &"y".repeat(400), "semantic").ok);
+    assert!(propose(&e, "s2", &"y".repeat(1200), "semantic").ok);
     assert!(!propose(&e, "s2", "  \n\t ", "semantic").ok);
     assert_eq!(port.proposals.lock().unwrap().len(), 1);
 }
@@ -1199,13 +1207,7 @@ fn a_refused_change_says_why_and_a_port_without_a_judge_sends_the_person_to_the_
     // A port that does not implement the change (the default).
     struct Plain;
     impl MemoryPort for Plain {
-        fn propose(
-            &self,
-            _: &str,
-            _: ProposalKind,
-            _: &str,
-            _: &Judging,
-        ) -> Result<Proposed, String> {
+        fn propose(&self, _: &ProposalDraft, _: &str, _: &Judging) -> Result<Proposed, String> {
             Err("no".into())
         }
         fn search(&self, _: &str, _: usize) -> Result<Found, String> {
@@ -1338,4 +1340,150 @@ fn a_proposal_that_waits_tells_the_model_its_number_and_an_undo_is_logged_as_a_c
     let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
     assert_eq!(last["change"], 77);
     assert_eq!(last["ids"], json!([]), "a change number is not a memory id");
+}
+
+// ---- schema 2: titles, categories, places, timeline, context ----
+
+#[test]
+fn a_proposal_carries_its_title_and_category_checked_like_the_text() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = call(
+        &e,
+        "s1",
+        "memory_propose",
+        json!({"text": "Qué: Postgres 16 · Por qué: lo pide el cliente", "kind": "semantic",
+               "title": "Base  de\ndatos", "category": "Decision"}),
+    );
+    assert!(r.ok, "{r:?}");
+    let d = port.drafts.lock().unwrap()[0].clone();
+    assert_eq!(d.title.as_deref(), Some("Base de datos"), "one line");
+    assert_eq!(
+        d.category.as_deref(),
+        Some("decision"),
+        "its canonical name"
+    );
+    for (args, why) in [
+        (
+            json!({"text": "x", "kind": "semantic", "category": "otra"}),
+            "unknown category",
+        ),
+        (
+            json!({"text": "x", "kind": "semantic", "title": "t".repeat(121)}),
+            "long title",
+        ),
+        (
+            json!({"text": "y".repeat(1201), "kind": "semantic"}),
+            "long text",
+        ),
+    ] {
+        assert!(!call(&e, "s2", "memory_propose", args).ok, "{why}");
+    }
+    assert!(
+        call(
+            &e,
+            "s3",
+            "memory_propose",
+            json!({"text": "y".repeat(1200), "kind": "semantic"})
+        )
+        .ok
+    );
+}
+
+#[test]
+fn a_title_with_a_secret_is_not_proposed() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+    let r = call(
+        &e,
+        "s1",
+        "memory_propose",
+        json!({"text": "algo", "kind": "semantic", "title": format!("clave {value}")}),
+    );
+    assert!(!r.ok && !r.content.contains(value), "{r:?}");
+    assert!(port.drafts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_memory_line_says_its_category_place_and_title_and_a_full_read_is_longer() {
+    let mut it = item(7, Origin::Agent, &"z".repeat(1000));
+    it.title = Some("Despliegue".into());
+    it.category = Some("bugfix".into());
+    it.place = "lección de otro".into();
+    let port = FakePort::new(vec![it], Mode::Items);
+    let e = env(&port);
+    let s = search(&e, "s1", "despliegue");
+    assert!(
+        s.content.contains(
+            "[m7] hecho · agente · 2026-10-30 · bugfix · lección de otro: Despliegue — zzz"
+        ),
+        "{}",
+        s.content
+    );
+    let preview = s
+        .content
+        .lines()
+        .find(|l| l.starts_with("[m7]"))
+        .unwrap()
+        .chars()
+        .count();
+    let g = call(&e, "s2", "memory_get", json!({"id": 7}));
+    let full = g
+        .content
+        .lines()
+        .find(|l| l.starts_with("[m7]"))
+        .unwrap()
+        .chars()
+        .count();
+    assert!(preview <= 600 && full > preview, "{preview} {full}");
+}
+
+#[test]
+fn the_timeline_and_the_context_are_reads_with_the_same_budget_and_taint() {
+    let port = FakePort::new(vec![item(1, Origin::External, "de fuera")], Mode::Items);
+    let e = env(&port);
+    let t = call(
+        &e,
+        "s1",
+        "memory_timeline",
+        json!({"id": 1, "before": 9, "after": 1}),
+    );
+    assert!(t.ok && t.tainted, "{t:?}");
+    // At most five on each side, whatever was asked.
+    assert_eq!(port.last_search.lock().unwrap().clone().unwrap().1, 51);
+    let c = call(&e, "s2", "memory_context", json!({}));
+    assert!(
+        c.ok && c.content.contains("[m1]") && c.content.contains("last session"),
+        "{c:?}"
+    );
+    assert!(!call(&e, "s3", "memory_timeline", json!({"id": 0})).ok);
+    assert!(
+        !call(&e, "s3", "memory_context", json!({"x": 1})).ok,
+        "no arguments"
+    );
+}
+
+// S-60: the timeline and the context spend the same 20 calls as a search.
+#[test]
+fn the_timeline_and_the_context_spend_the_session_budget() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
+    let e = env(&port);
+    for i in 0..20 {
+        let r = if i % 2 == 0 {
+            call(&e, "s", "memory_timeline", json!({"id": 1}))
+        } else {
+            call(&e, "s", "memory_context", json!({}))
+        };
+        assert!(r.ok, "{i}: {r:?}");
+    }
+    assert!(denied_by_budget(&call(
+        &e,
+        "s",
+        "memory_context",
+        json!({})
+    )));
+    assert!(denied_by_budget(&search(&e, "s", "dato")));
 }

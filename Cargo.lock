@@ -245,6 +245,7 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]

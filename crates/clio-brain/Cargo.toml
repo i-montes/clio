@@ -18,6 +18,7 @@ model2vec = ["clio-memory/model2vec"]
 
 [dependencies]
 clio-memory = { path = "../clio-memory" }
+unicode-normalization = "0.1.26"
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }

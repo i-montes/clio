@@ -118,6 +118,16 @@ fn seed(w: &World) -> Ids {
     }
 }
 
+/// A proposal with no title or category.
+fn draft(text: &str, kind: ProposalKind) -> clio_toolhost::ProposalDraft {
+    clio_toolhost::ProposalDraft {
+        text: text.to_owned(),
+        title: None,
+        category: None,
+        kind,
+    }
+}
+
 /// What these tests need of a proposal: the id, with no judge and nothing known about the session.
 trait ProposeId {
     fn propose_id(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String>;
@@ -127,8 +137,7 @@ impl ProposeId for clio_brain::memory_port::LinkPort {
     fn propose_id(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
         MemoryPort::propose(
             self,
-            text,
-            kind,
+            &draft(text, kind),
             session,
             &clio_toolhost::Judging::default(),
         )
@@ -676,7 +685,7 @@ fn ask(p: &LinkPort, text: &str, kind: ProposalKind, said: &[&str]) -> clio_tool
         person_said: said.iter().map(|s| (*s).to_owned()).collect(),
         session: "sess-1".into(),
     };
-    MemoryPort::propose(p, text, kind, "sess-1", &judging).unwrap()
+    MemoryPort::propose(p, &draft(text, kind), "sess-1", &judging).unwrap()
 }
 
 // S-25, S-61: the judge turns a proposal into memory; the author, the origin and the signature say
@@ -835,8 +844,7 @@ fn the_engines_checks_still_come_first() {
     let key = format!("{}{}", "sk-", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6");
     let e = MemoryPort::propose(
         &p,
-        &format!("mi clave es {key}"),
-        ProposalKind::Semantic,
+        &draft(&format!("mi clave es {key}"), ProposalKind::Semantic),
         "s",
         &Judging::default(),
     )
@@ -876,8 +884,7 @@ fn the_writer_is_not_held_while_jev_answers() {
     let proposing = std::thread::spawn(move || {
         MemoryPort::propose(
             &*q,
-            "El proyecto usa PostgreSQL 16",
-            ProposalKind::Semantic,
+            &draft("El proyecto usa PostgreSQL 16", ProposalKind::Semantic),
             "s",
             &Judging::default(),
         )
@@ -1172,4 +1179,256 @@ fn a_memory_file_of_the_old_schema_is_upgraded_when_it_is_first_read() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(v, 2);
+}
+
+// ---- projects, the person's and the lessons (spec 2026-11-04-memory-engram-design.md) ----
+
+fn in_project(w: &World, project: &str) -> LinkPort {
+    LinkPort::new(&w.data, None).in_project(Some(project.into()))
+}
+
+fn titled(text: &str, title: &str, category: &str) -> clio_toolhost::ProposalDraft {
+    clio_toolhost::ProposalDraft {
+        text: text.to_owned(),
+        title: Some(title.to_owned()),
+        category: Some(category.to_owned()),
+        kind: ProposalKind::Semantic,
+    }
+}
+
+fn promote_all(w: &World) {
+    let link = open(w);
+    for r in link.engine().scopes().unwrap() {
+        for m in link
+            .engine()
+            .list(r.id, Some(State::Quarantine), None)
+            .unwrap()
+        {
+            link.engine().promote(m.id, link.actors().persona).unwrap();
+        }
+    }
+}
+
+// Without Jev the rule decides: a preference is the person's, an error is a lesson, a decision is
+// the project's. A lesson is seen from another project, marked with where it was learned; the
+// project's own memories are not.
+#[test]
+fn memories_go_to_their_place_and_lessons_are_seen_from_other_projects() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let s = Judging::default();
+    for d in [
+        titled("Qué: usa Postgres 16", "Base de datos de alfa", "decision"),
+        titled(
+            "Prefiere respuestas cortas",
+            "Respuestas cortas",
+            "preference",
+        ),
+        titled(
+            "Qué: el healthcheck faltaba · Aprendido: compose no espera",
+            "Compose sin healthcheck",
+            "bugfix",
+        ),
+    ] {
+        MemoryPort::propose(&alfa, &d, "s1", &s).unwrap();
+    }
+    promote_all(&w);
+    let beta = in_project(&w, "beta");
+    let seen = |q: &str| -> Vec<(String, String)> {
+        beta.search(q, 8)
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| (i.title.clone().unwrap_or_default(), i.place.clone()))
+            .collect()
+    };
+    assert_eq!(
+        seen("healthcheck"),
+        [(
+            "Compose sin healthcheck".to_owned(),
+            "lección de alfa".to_owned()
+        )]
+    );
+    assert_eq!(
+        seen("respuestas cortas"),
+        [("Respuestas cortas".to_owned(), "personal".to_owned())]
+    );
+    assert!(
+        seen("postgres").is_empty(),
+        "another project's decision is not seen"
+    );
+    let own = alfa.search("postgres", 8).unwrap();
+    assert_eq!(own.items[0].place, "proyecto");
+    assert_eq!(own.items[0].category.as_deref(), Some("decision"));
+    // And another project's memory cannot be read by id either.
+    assert!(beta.get(own.items[0].id).is_err());
+}
+
+// With Jev, it says where a memory goes (a lesson the rule would have kept in the project).
+#[test]
+fn jev_chooses_the_place_when_there_is_a_project() {
+    struct Place(&'static str);
+    impl Transport for Place {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            let choice = if name == "lugar" { self.0 } else { "add" };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
+        }
+    }
+    let w = world();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Place("leccion")),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    let alfa = in_project(&w, "alfa").with_judge(Arc::new(judge));
+    let d = MemoryPort::propose(
+        &alfa,
+        &titled(
+            "Rust: un Mutex envenenado se recupera con into_inner",
+            "Mutex envenenado",
+            "discovery",
+        ),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    assert_eq!(d.saved, Saved::Active);
+    let row = open(&w).get(clio_memory::MemoryId(d.id)).unwrap();
+    let lessons = open(&w)
+        .engine()
+        .scopes()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "lecciones")
+        .unwrap()
+        .id;
+    assert_eq!(row.scope, lessons);
+    assert_eq!(row.source.as_deref(), Some("proyecto:alfa"));
+}
+
+#[test]
+fn the_timeline_is_the_session_and_the_context_starts_with_its_summary_and_pins() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let s = Judging::default();
+    let mut ids = Vec::new();
+    for n in 0..3 {
+        let d = MemoryPort::propose(
+            &alfa,
+            &titled(&format!("paso {n}"), &format!("Paso {n}"), "decision"),
+            "sesion-1",
+            &s,
+        )
+        .unwrap();
+        ids.push(d.id);
+    }
+    promote_all(&w);
+    let t = alfa.timeline(ids[1], 1, 1).unwrap();
+    assert_eq!(t.iter().map(|i| i.id).collect::<Vec<_>>(), ids);
+    // A pin of the person's (in any place) comes after the summary and before the recent ones.
+    let mine = {
+        let link = open(&w);
+        let mine = link
+            .remember("Marta prefiere el modo oscuro", None)
+            .unwrap();
+        link.engine().pin(mine, link.actors().persona).unwrap();
+        mine
+    };
+    {
+        let link = MemoryLink::open_write_in(&w.data, &EmbedModel::none(), Some("alfa")).unwrap();
+        link.propose_draft_as_agent(
+            &clio_brain::memory_link::Draft {
+                text: "Objetivo: X · Hecho: Y".into(),
+                title: Some("Resumen de la sesión".into()),
+                category: None,
+                kind: clio_memory::MemoryType::Episodic,
+            },
+            "sesion-1",
+            clio_brain::memory_link::Place::Project,
+        )
+        .unwrap();
+    }
+    promote_all(&w);
+    let c = alfa.context().unwrap();
+    assert_eq!(c[0].title.as_deref(), Some("Resumen de la sesión"), "{c:?}");
+    assert_eq!(c[1].id, mine.0);
+    assert!(c.iter().any(|i| i.id == ids[2]));
+}
+
+// What the agent saved in a project is the person's to see and to decide on: their view (the CLI
+// and the TUI) lists it, opens it, accepts it, finds it and counts it; a link without that
+// project (what the builtin loop reads) still does not.
+#[test]
+fn the_person_sees_and_controls_what_was_saved_in_any_project() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let d = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Postgres 16", "Base de datos", "decision"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    assert_eq!(d.saved, Saved::Waiting);
+    let id = clio_memory::MemoryId(d.id);
+    {
+        let plain = open(&w);
+        assert!(plain.get(id).is_err(), "not the agent's loop's to read");
+        assert!(plain.pending().unwrap().iter().all(|r| r.id != id));
+    }
+    let person = open(&w).for_person();
+    assert!(person.pending().unwrap().iter().any(|r| r.id == id));
+    let row = person.get(id).unwrap();
+    assert_eq!(person.place_label(&row), "proyecto alfa");
+    person.promote(id).unwrap();
+    let (found, _) = person.search("Postgres", 5).unwrap();
+    assert_eq!(found.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
+    assert_eq!(person.counts().unwrap().0, 1);
+    person.archive(id).unwrap();
+    assert_eq!(person.counts().unwrap(), (0, 0, 1));
+}
+
+// A read before the first proposal (the prompt asks for `memory_context` first) must not leave
+// the service blind to the project's place once a proposal makes it.
+#[test]
+fn a_read_before_the_place_exists_does_not_hide_what_is_saved_in_it_later() {
+    struct Add;
+    impl Transport for Add {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            let choice = if name == "lugar" { "proyecto" } else { "add" };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
+        }
+    }
+    let w = world();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Add),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    // The memory exists (with only the person's place) when the session first reads it.
+    open(&w).remember("Marta usa Linux", None).unwrap();
+    let beta = in_project(&w, "beta").with_judge(Arc::new(judge));
+    assert!(beta.context().is_ok());
+    assert!(beta.search("nada", 3).is_ok());
+    let d = MemoryPort::propose(
+        &beta,
+        &titled("Qué: despliega con compose", "Despliegue", "config"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    assert_eq!(d.saved, Saved::Active);
+    assert_eq!(beta.get(d.id).unwrap().place, "proyecto");
+    assert_eq!(beta.search("compose", 3).unwrap().items[0].id, d.id);
+    assert_eq!(beta.context().unwrap()[0].id, d.id);
 }

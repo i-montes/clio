@@ -46,7 +46,9 @@ impl MemoryData {
     /// Reads the file read-only. An error comes back as text for the screen.
     pub fn load(dirs: &Dirs) -> Result<Self, String> {
         // Listing needs no embeddings: the model is not loaded here, only looked for.
-        let Some(link) = MemoryLink::open_read(&dirs.data, &EmbedModel::none())? else {
+        let Some(link) =
+            MemoryLink::open_read(&dirs.data, &EmbedModel::none())?.map(MemoryLink::for_person)
+        else {
             return Ok(Self {
                 missing: true,
                 ..Self::default()

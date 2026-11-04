@@ -25,9 +25,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clio_memory::{
-    ActorId, ActorInfo, ActorKind, ContextOpts, Engine, Error, Judged, MemoryId, MemoryRow,
-    MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId, SearchOpts,
-    Signal, State, Sureness, SystemClock,
+    ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, Judged, MemoryId,
+    MemoryRow, MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId,
+    SearchOpts, Signal, State, Sureness, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -196,9 +196,83 @@ pub struct Recalled {
     pub debug: Vec<String>,
 }
 
+/// The scope of the lessons: what was learned in one project and is worth knowing in any.
+pub const LESSONS: &str = "lecciones";
+/// A project's scope is this and the project's name.
+pub const PROJECT_PREFIX: &str = "proyecto:";
+/// The longest text of an agent's memory (`Qué: … · Por qué: … · Dónde: … · Aprendido: …`).
+pub const AGENT_TEXT_CHARS: usize = 1200;
+/// The longest title.
+pub const TITLE_CHARS: usize = 120;
+
+/// Where a memory lives (spec `2026-11-04-memory-engram-design.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// This project's: decisions, architecture, settings.
+    Project,
+    /// The person's, in every project: who they are, what they prefer.
+    Personal,
+    /// Learned somewhere, worth knowing anywhere: errors, root causes, patterns, traps.
+    Lessons,
+}
+
+impl Place {
+    pub fn label(self) -> &'static str {
+        match self {
+            Place::Project => "proyecto",
+            Place::Personal => "personal",
+            Place::Lessons => "leccion",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Place> {
+        [Place::Project, Place::Personal, Place::Lessons]
+            .into_iter()
+            .find(|p| p.label() == s.trim())
+    }
+
+    /// Where a memory goes when nobody (Jev) says: a preference is the person's, an error or a
+    /// pattern is a lesson, the rest is the project's (or the person's when there is no project).
+    pub fn by_rule(category: Option<Category>, has_project: bool) -> Place {
+        match category {
+            Some(Category::Preference) => Place::Personal,
+            Some(Category::Bugfix | Category::Pattern | Category::Learning) => Place::Lessons,
+            _ if has_project => Place::Project,
+            _ => Place::Personal,
+        }
+    }
+}
+
+/// What the agent proposes: the text, and optionally a title and a category.
+#[derive(Debug, Clone)]
+pub struct Draft {
+    pub text: String,
+    pub title: Option<String>,
+    pub category: Option<Category>,
+    pub kind: MemoryType,
+}
+
+impl Draft {
+    pub fn plain(text: &str, kind: MemoryType) -> Self {
+        Self {
+            text: text.to_owned(),
+            title: None,
+            category: None,
+            kind,
+        }
+    }
+}
+
 pub struct MemoryLink {
     engine: Engine,
+    /// The person's scope (`clio`).
     scope: ScopeId,
+    /// The project of the session and its scope, when there is one (and, reading, when it exists).
+    project: Option<(String, Option<ScopeId>)>,
+    lessons: Option<ScopeId>,
+    /// The person's view (`for_person`): every other project's scope and its name.
+    others: Vec<(ScopeId, String)>,
+    person_view: bool,
     actors: Actors,
     writable: bool,
     embeddings: bool,
@@ -298,6 +372,11 @@ impl MemoryLink {
     /// actors and the fixed blocks in place. `model` is the embedding model directory, if it
     /// should be used. Waits a little for another writer (a run closing while the screen acts).
     pub fn open_write(data: &Path, model: &EmbedModel) -> Res<Self> {
+        Self::open_write_in(data, model, None)
+    }
+
+    /// For writing, in a project: its scope and the lessons' are made if they do not exist yet.
+    pub fn open_write_in(data: &Path, model: &EmbedModel, project: Option<&str>) -> Res<Self> {
         let path = Self::db_path(data);
         if !data.is_dir() {
             private_dir(data)?;
@@ -316,14 +395,21 @@ impl MemoryLink {
         let engine = engine.ok_or_else(|| explain(&Error::WriterLocked))?;
         let (engine, embeddings, embed_error) = with_model(engine, model);
         let m = |e: Error| explain(&e);
-        let scope = match engine
-            .scopes()
-            .map_err(m)?
-            .into_iter()
-            .find(|s| s.name == SCOPE)
-        {
-            Some(s) => s.id,
-            None => engine.create_scope(SCOPE, "es").map_err(m)?,
+        let scopes = engine.scopes().map_err(m)?;
+        let find_or_make = |name: &str| -> Res<ScopeId> {
+            match scopes.iter().find(|s| s.name == name) {
+                Some(s) => Ok(s.id),
+                None => engine.create_scope(name, "es").map_err(m),
+            }
+        };
+        let scope = find_or_make(SCOPE)?;
+        let lessons = Some(find_or_make(LESSONS)?);
+        let project = match project {
+            Some(p) => Some((
+                p.to_owned(),
+                Some(find_or_make(&format!("{PROJECT_PREFIX}{p}"))?),
+            )),
+            None => None,
         };
         let have = engine.actors().map_err(m)?;
         let get = |name: &str, kind: ActorKind, max: u32| -> Res<ActorId> {
@@ -349,6 +435,10 @@ impl MemoryLink {
         Ok(Self {
             engine,
             scope,
+            project,
+            lessons,
+            others: Vec::new(),
+            person_view: false,
             actors,
             writable: true,
             embeddings,
@@ -359,6 +449,15 @@ impl MemoryLink {
     /// Opens for reading when the file exists and was set up; `None` otherwise. Never creates or
     /// changes anything, and does not wait for the writer.
     pub fn open_read(data: &Path, model: &EmbedModel) -> Res<Option<Self>> {
+        Self::open_read_in(data, model, None)
+    }
+
+    /// For reading, in a project (whose scope may not exist yet: then nothing of it is found).
+    pub fn open_read_in(
+        data: &Path,
+        model: &EmbedModel,
+        project: Option<&str>,
+    ) -> Res<Option<Self>> {
         let path = Self::db_path(data);
         if !path.is_file() {
             return Ok(None);
@@ -377,15 +476,13 @@ impl MemoryLink {
         .map_err(|e| format!("{}: {}", path.display(), explain(&e)))?;
         let (engine, embeddings, embed_error) = with_model(engine, model);
         let m = |e: Error| explain(&e);
-        let Some(scope) = engine
-            .scopes()
-            .map_err(m)?
-            .into_iter()
-            .find(|s| s.name == SCOPE)
-            .map(|s| s.id)
-        else {
+        let scopes = engine.scopes().map_err(m)?;
+        let find = |name: &str| scopes.iter().find(|s| s.name == name).map(|s| s.id);
+        let Some(scope) = find(SCOPE) else {
             return Ok(None);
         };
+        let lessons = find(LESSONS);
+        let project = project.map(|p| (p.to_owned(), find(&format!("{PROJECT_PREFIX}{p}"))));
         let have = engine.actors().map_err(m)?;
         let id = |name: &str| have.iter().find(|a| a.name == name).map(|a| a.id);
         let (Some(persona), Some(agente), Some(sesion), Some(importador)) =
@@ -396,6 +493,10 @@ impl MemoryLink {
         Ok(Some(Self {
             engine,
             scope,
+            project,
+            lessons,
+            others: Vec::new(),
+            person_view: false,
             actors: Actors {
                 persona,
                 agente,
@@ -654,9 +755,20 @@ impl MemoryLink {
     /// agent and the cap on the quarantine (S-27) still apply; the message says which one
     /// refused. Returns the id of the candidate.
     pub fn propose_as_agent(&self, text: &str, kind: MemoryType, session: &str) -> Res<MemoryId> {
+        self.propose_draft_as_agent(&Draft::plain(text, kind), session, Place::Personal)
+    }
+
+    /// The same for a draft (title, category) in a place. A place this link has no scope for
+    /// (a project when there is none) is the person's.
+    pub fn propose_draft_as_agent(
+        &self,
+        draft: &Draft,
+        session: &str,
+        place: Place,
+    ) -> Res<MemoryId> {
         self.need_write()?;
         self.engine
-            .propose(self.agent_proposal(text, kind, session))
+            .propose(self.agent_proposal(draft, session, place))
             .map(|o| o.memory)
             .map_err(|e| explain(&e))
     }
@@ -676,27 +788,37 @@ impl MemoryLink {
             .map(|a| a.id)
     }
 
-    /// The text of an agent's proposal as it is stored: clean, one short line.
+    /// The text of an agent's proposal as it is stored: clean, one line.
     pub fn agent_text(text: &str) -> String {
-        clip(&clean_text(text), 400)
+        clip(&clean_text(text), AGENT_TEXT_CHARS)
     }
 
-    fn agent_proposal(&self, text: &str, kind: MemoryType, session: &str) -> Proposal {
+    fn agent_proposal(&self, draft: &Draft, session: &str, place: Place) -> Proposal {
         let session = Self::agent_session(session);
+        // Where it was learned: the project, when there is one (what a lesson shows elsewhere).
+        let source = match self.project_name() {
+            Some(p) => format!("{PROJECT_PREFIX}{p}"),
+            None => format!("pi:{session}"),
+        };
         Proposal {
-            scope: self.scope,
+            scope: self.scope_of(place).unwrap_or(self.scope),
             actor: self.actors.agente,
-            kind,
-            content: Self::agent_text(text),
+            kind: draft.kind,
+            content: Self::agent_text(&draft.text),
             topic_key: None,
             origin: Origin::External,
             session: Some(session.clone()),
-            episode: None,
-            source: Some(format!("pi:{session}")),
+            // The session is the episode: the timeline groups by it.
+            episode: Some(session),
+            source: Some(source),
             valid_from: None,
             valid_to: None,
-            title: None,
-            category: None,
+            title: draft
+                .title
+                .as_deref()
+                .map(|t| clip(&clean_text(t), TITLE_CHARS))
+                .filter(|t| !t.is_empty()),
+            category: draft.category,
         }
     }
 
@@ -713,10 +835,28 @@ impl MemoryLink {
         how: Judged,
         confidence: f32,
     ) -> std::result::Result<Outcome, Error> {
+        self.propose_judged_draft(
+            &Draft::plain(text, kind),
+            session,
+            Place::Personal,
+            how,
+            confidence,
+        )
+    }
+
+    /// The same for a draft in a place.
+    pub fn propose_judged_draft(
+        &self,
+        draft: &Draft,
+        session: &str,
+        place: Place,
+        how: Judged,
+        confidence: f32,
+    ) -> std::result::Result<Outcome, Error> {
         let judge = self.engine.judge()?;
         self.engine.propose_judged(
             &judge,
-            self.agent_proposal(text, kind, session),
+            self.agent_proposal(draft, session, place),
             how,
             Sureness { confidence },
         )
@@ -728,7 +868,7 @@ impl MemoryLink {
         self.need_write()?;
         let judge = self.engine.judge().map_err(|e| explain(&e))?;
         let done = self.engine.operation(op).map_err(|e| explain(&e))?;
-        if done.actor != judge.actor() || done.scope != self.scope {
+        if done.actor != judge.actor() || self.place_of(done.scope).is_none() {
             return Err("ese cambio no lo hizo Jev: no se puede deshacer por aquí".into());
         }
         self.engine
@@ -846,19 +986,146 @@ impl MemoryLink {
 
     pub fn get(&self, id: MemoryId) -> Res<MemoryRow> {
         let row = self.engine.get(id).map_err(|e| explain(&e))?;
-        if row.scope == self.scope {
+        if self.place_of(row.scope).is_some() {
             Ok(row)
         } else {
             Err("no existe ese recuerdo".into())
         }
     }
 
+    /// The person's own view (the CLI and the TUI): every place, every project's memories, so
+    /// what the agent saved in a project can be seen, accepted, archived or purged. Never for what
+    /// a model reads.
+    #[must_use]
+    pub fn for_person(mut self) -> Self {
+        let own = self.scope_of(Place::Project);
+        self.others = self
+            .engine
+            .scopes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| Some(s.id) != own)
+            .filter_map(|s| {
+                let name = s.name.strip_prefix(PROJECT_PREFIX)?.to_owned();
+                Some((s.id, name))
+            })
+            .collect();
+        self.person_view = true;
+        self
+    }
+
+    /// The scopes the person's commands see: all of them in the person's view, else the person's.
+    fn person_scopes(&self) -> Vec<ScopeId> {
+        if !self.person_view {
+            return vec![self.scope];
+        }
+        let mut v = self.reading_scopes();
+        v.extend(self.others.iter().map(|(id, _)| *id));
+        v
+    }
+
+    /// The project of this link, if it has one.
+    pub fn project_name(&self) -> Option<&str> {
+        self.project.as_ref().map(|(p, _)| p.as_str())
+    }
+
+    /// Which of this link's places a scope is (`None`: another project's, or unknown).
+    pub fn place_of(&self, scope: ScopeId) -> Option<Place> {
+        if scope == self.scope {
+            Some(Place::Personal)
+        } else if Some(scope) == self.lessons {
+            Some(Place::Lessons)
+        } else if self.project.as_ref().and_then(|(_, s)| *s) == Some(scope)
+            || self.others.iter().any(|(id, _)| *id == scope)
+        {
+            Some(Place::Project)
+        } else {
+            None
+        }
+    }
+
+    /// The scope of a place, if it exists.
+    pub fn scope_of(&self, place: Place) -> Option<ScopeId> {
+        match place {
+            Place::Personal => Some(self.scope),
+            Place::Lessons => self.lessons,
+            Place::Project => self.project.as_ref().and_then(|(_, s)| *s),
+        }
+    }
+
+    /// What a session reads: its project first, then the person's, then the lessons.
+    pub fn reading_scopes(&self) -> Vec<ScopeId> {
+        [Place::Project, Place::Personal, Place::Lessons]
+            .into_iter()
+            .filter_map(|p| self.scope_of(p))
+            .collect()
+    }
+
+    /// `search` over every place the session reads.
+    pub fn search_all(&self, query: &str, limit: usize) -> Res<(Vec<MemoryRow>, bool)> {
+        let opts = RecallOpts {
+            search: SearchOpts {
+                limit,
+                ..SearchOpts::default()
+            },
+            ..RecallOpts::default()
+        };
+        let r = self
+            .engine
+            .recall_many(&self.reading_scopes(), &clean_text(query), &opts)
+            .map_err(|e| explain(&e))?;
+        Ok((r.hits.into_iter().map(|h| h.memory).collect(), r.abstained))
+    }
+
+    /// `search` in one place (where a proposal would go: its neighbors).
+    pub fn search_in(&self, place: Place, query: &str, limit: usize) -> Res<Vec<MemoryRow>> {
+        let Some(scope) = self.scope_of(place) else {
+            return Ok(Vec::new());
+        };
+        let opts = RecallOpts {
+            search: SearchOpts {
+                limit,
+                ..SearchOpts::default()
+            },
+            ..RecallOpts::default()
+        };
+        self.engine
+            .recall(scope, &clean_text(query), &opts)
+            .map(|r| r.hits.into_iter().map(|h| h.memory).collect())
+            .map_err(|e| explain(&e))
+    }
+
+    /// A label for where a memory lives, for the model: `proyecto`, `personal`, `lección de X`.
+    pub fn place_label(&self, row: &MemoryRow) -> String {
+        match self.place_of(row.scope) {
+            Some(Place::Project) => match self.others.iter().find(|(id, _)| *id == row.scope) {
+                Some((_, name)) => format!("proyecto {name}"),
+                None => "proyecto".into(),
+            },
+            Some(Place::Personal) => "personal".into(),
+            Some(Place::Lessons) => match Self::learned_in(row) {
+                Some(p) => format!("lección de {p}"),
+                None => "lección".into(),
+            },
+            None => String::new(),
+        }
+    }
+
+    /// The project a lesson was learned in (its `source`), if it says.
+    pub fn learned_in(row: &MemoryRow) -> Option<&str> {
+        row.source.as_deref()?.strip_prefix(PROJECT_PREFIX)
+    }
+
     /// Newest first.
     pub fn list(&self, state: State) -> Res<Vec<MemoryRow>> {
-        let mut v = self
-            .engine
-            .list(self.scope, Some(state), None)
-            .map_err(|e| explain(&e))?;
+        let mut v = Vec::new();
+        for scope in self.person_scopes() {
+            v.extend(
+                self.engine
+                    .list(scope, Some(state), None)
+                    .map_err(|e| explain(&e))?,
+            );
+        }
         v.sort_by_key(|r| std::cmp::Reverse(r.id));
         Ok(v)
     }
@@ -879,19 +1146,22 @@ impl MemoryLink {
         };
         let r = self
             .engine
-            .recall(self.scope, &clean_text(query), &opts)
+            .recall_many(&self.person_scopes(), &clean_text(query), &opts)
             .map_err(|e| explain(&e))?;
         Ok((r.hits.into_iter().map(|h| h.memory).collect(), r.abstained))
     }
 
-    /// (active, quarantine, archived) of the scope.
+    /// (active, quarantine, archived) of the scope (of every place, in the person's view).
     pub fn counts(&self) -> Res<(u64, u64, u64)> {
         let st = self.engine.stats().map_err(|e| explain(&e))?;
+        let scopes = self.person_scopes();
         Ok(st
             .scopes
             .iter()
-            .find(|s| s.scope == self.scope)
-            .map_or((0, 0, 0), |s| (s.active, s.quarantine, s.archived)))
+            .filter(|s| scopes.contains(&s.scope))
+            .fold((0, 0, 0), |(a, q, r), s| {
+                (a + s.active, q + s.quarantine, r + s.archived)
+            }))
     }
 
     pub fn actor_name(&self, id: ActorId) -> String {

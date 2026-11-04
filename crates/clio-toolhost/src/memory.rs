@@ -29,9 +29,11 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 6] = [
+pub(crate) const MEMORY_OPS: [&str; 8] = [
     "memory_search",
     "memory_get",
+    "memory_timeline",
+    "memory_context",
     "memory_propose",
     "memory_forget",
     "memory_promote",
@@ -42,6 +44,10 @@ const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories on
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
 const PROPOSE_DESCRIPTION: &str = "Propose a memory: Clio decides whether it is kept, replaces another, was known, or waits for the person's review";
 
+const TIMELINE_DESCRIPTION: &str =
+    "Read the memories around one, of its session (or its place), in order (read-only)";
+const CONTEXT_DESCRIPTION: &str =
+    "Read the last session's summary, the pinned memories and the most recent ones (read-only)";
 const FORGET_DESCRIPTION: &str =
     "Archive a memory because the person asked (it is not erased; Jev checks the person's words)";
 const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Jev checks the person's words)";
@@ -53,8 +59,25 @@ pub(crate) const MAX_CHANGES: u32 = 10;
 const NO_CHANGES: &str =
     "this memory cannot make that change: the person can do it with `clio memory`";
 
-/// Longest proposal, in characters, after cleaning.
-const MAX_PROPOSAL_CHARS: usize = 400;
+/// Longest proposal, in characters, after cleaning (`Qué: … · Por qué: … · Dónde: … · Aprendido: …`).
+const MAX_PROPOSAL_CHARS: usize = 1200;
+/// Longest title.
+const MAX_TITLE_CHARS: usize = 120;
+/// The categories a proposal may have (the same names as the memory's).
+pub const CATEGORIES: [&str; 8] = [
+    "decision",
+    "architecture",
+    "bugfix",
+    "pattern",
+    "config",
+    "discovery",
+    "preference",
+    "learning",
+];
+/// How many memories a timeline may show on each side.
+const MAX_AROUND: usize = 5;
+/// A memory read in full (`memory_get`) may be this long; a search shows a preview.
+const MAX_FULL_LINE_CHARS: usize = 1600;
 /// Proposals a TAINTED session may make (S-47, S-61): what it read may be hostile, and what it
 /// proposes is the model's own words after reading it.
 pub(crate) const MAX_PROPOSALS: u32 = 5;
@@ -107,6 +130,36 @@ pub struct MemoryItem {
     pub origin: Origin,
     pub date: String,
     pub text: String,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    /// Where it lives: `proyecto`, `personal`, `lección de X`; empty when it does not say.
+    pub place: String,
+}
+
+impl MemoryItem {
+    /// An item with no title, category or place.
+    pub fn plain(id: i64, kind: &str, origin: Origin, date: &str, text: &str) -> Self {
+        Self {
+            id,
+            kind: kind.to_owned(),
+            origin,
+            date: date.to_owned(),
+            text: text.to_owned(),
+            title: None,
+            category: None,
+            place: String::new(),
+        }
+    }
+}
+
+/// What the agent proposes, checked and cleaned by the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalDraft {
+    pub text: String,
+    pub title: Option<String>,
+    /// One of `CATEGORIES`.
+    pub category: Option<String>,
+    pub kind: ProposalKind,
 }
 
 #[derive(Debug, Clone)]
@@ -167,11 +220,18 @@ pub trait MemoryPort: Send + Sync {
     /// the record. Returns the id and what became of it.
     fn propose(
         &self,
-        text: &str,
-        kind: ProposalKind,
+        draft: &ProposalDraft,
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String>;
+    /// The memories around `id` (its session, else its place), oldest first, `id` included.
+    fn timeline(&self, _id: i64, _before: usize, _after: usize) -> Result<Vec<MemoryItem>, String> {
+        Err("this memory has no timeline".into())
+    }
+    /// The last session's summary, the pinned memories and the most recent ones.
+    fn context(&self) -> Result<Vec<MemoryItem>, String> {
+        Err("this memory has no context".into())
+    }
     /// Archives memory `id` (reversible, not an erasure) because the person asked. The port checks
     /// the person's words in `judging`; the model's claim is not evidence.
     fn forget(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
@@ -205,7 +265,15 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
         "memory_propose" => vec![
             a("text", ArgKind::Text, true),
             a("kind", ArgKind::Text, true),
+            a("title", ArgKind::Text, false),
+            a("category", ArgKind::Text, false),
         ],
+        "memory_timeline" => vec![
+            a("id", ArgKind::Int, true),
+            a("before", ArgKind::Int, false),
+            a("after", ArgKind::Int, false),
+        ],
+        "memory_context" => vec![],
         "memory_revert" => vec![a("change", ArgKind::Int, true)],
         _ => vec![a("id", ArgKind::Int, true)],
     }
@@ -216,6 +284,8 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
     [
         ("memory_search", SEARCH_DESCRIPTION),
         ("memory_get", GET_DESCRIPTION),
+        ("memory_timeline", TIMELINE_DESCRIPTION),
+        ("memory_context", CONTEXT_DESCRIPTION),
         ("memory_propose", PROPOSE_DESCRIPTION),
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_promote", PROMOTE_DESCRIPTION),
@@ -226,7 +296,10 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         name: name.into(),
         version: "1".into(),
         // A proposal changes the memory file, but only by adding a candidate nobody trusts.
-        effect: if matches!(name, "memory_search" | "memory_get") {
+        effect: if matches!(
+            name,
+            "memory_search" | "memory_get" | "memory_timeline" | "memory_context"
+        ) {
             Effect::Read
         } else {
             Effect::LocalReversible
@@ -576,13 +649,58 @@ impl ToolHost {
                 &format!("the text must have 1 to {MAX_PROPOSAL_CHARS} characters"),
             );
         }
+        // The title is checked like the text: cleaned by the vault, refused if it had a secret.
+        let title = match args.get("title").and_then(Value::as_str) {
+            None => None,
+            Some(typed) => {
+                let flat = one_line(typed);
+                let Some(cleaned) = self.try_clean(&flat) else {
+                    return self.memory_failed(req, out, "the vault could not filter the title");
+                };
+                if count_masks(&cleaned) > count_masks(&flat) {
+                    return self.memory_failed(
+                        req,
+                        out,
+                        "the title had a secret in it: nothing was proposed",
+                    );
+                }
+                // The memory also caps a title at 256 bytes: a title of wide characters can reach it.
+                if cleaned.chars().count() > MAX_TITLE_CHARS || cleaned.len() > 256 {
+                    return self.memory_failed(
+                        req,
+                        out,
+                        &format!("the title must have at most {MAX_TITLE_CHARS} characters"),
+                    );
+                }
+                Some(cleaned).filter(|t| !t.is_empty())
+            }
+        };
+        let category = match args.get("category").and_then(Value::as_str) {
+            None => None,
+            Some(c) => match CATEGORIES.iter().find(|k| k.eq_ignore_ascii_case(c.trim())) {
+                Some(k) => Some((*k).to_owned()),
+                None => {
+                    return self.memory_failed(
+                        req,
+                        out,
+                        &format!("category must be one of {}", CATEGORIES.join(", ")),
+                    );
+                }
+            },
+        };
+        let draft = ProposalDraft {
+            text,
+            title,
+            category,
+            kind,
+        };
         let session = req.session.clone();
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
             person_said: self.person_said(&req.session),
             session: req.session.clone(),
         };
-        match self.ask_port(&port, move |p| p.propose(&text, kind, &session, &judging)) {
+        match self.ask_port(&port, move |p| p.propose(&draft, &session, &judging)) {
             Ok(done) => {
                 facts.ids.push(done.id);
                 let (content, how) = match done.saved {
@@ -682,16 +800,39 @@ impl ToolHost {
                 usize::try_from(n.clamp(1, MAX_LIMIT as i64)).unwrap_or(MAX_LIMIT)
             });
             self.ask_port(&port, move |p| p.search(&query, limit))
+        } else if req.tool == "memory_context" {
+            self.ask_port(&port, |p| p.context()).map(|items| Found {
+                items,
+                abstained: false,
+                note: Some(
+                    "the last session's summary, then what is pinned, then the most recent".into(),
+                ),
+            })
         } else {
             // The gateway checked it is an integer; a u64 past i64::MAX is not an id.
             let Some(id) = args.get("id").and_then(Value::as_i64).filter(|id| *id > 0) else {
                 return self.memory_failed(req, out, "the id must be a positive integer");
             };
-            self.ask_port(&port, move |p| p.get(id)).map(|item| Found {
-                items: vec![item],
-                abstained: false,
-                note: None,
-            })
+            if req.tool == "memory_timeline" {
+                let side = |k: &str| {
+                    args.get(k).and_then(Value::as_i64).map_or(2, |n| {
+                        usize::try_from(n.clamp(0, MAX_AROUND as i64)).unwrap_or(MAX_AROUND)
+                    })
+                };
+                let (before, after) = (side("before"), side("after"));
+                self.ask_port(&port, move |p| p.timeline(id, before, after))
+                    .map(|items| Found {
+                        items,
+                        abstained: false,
+                        note: None,
+                    })
+            } else {
+                self.ask_port(&port, move |p| p.get(id)).map(|item| Found {
+                    items: vec![item],
+                    abstained: false,
+                    note: None,
+                })
+            }
         };
         let found = match found {
             Ok(f) => f,
@@ -742,13 +883,31 @@ impl ToolHost {
             None => false,
         });
         let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
+        // A memory read on its own is shown whole (within the cap); a list shows previews.
+        let max_line = if req.tool == "memory_get" {
+            MAX_FULL_LINE_CHARS
+        } else {
+            MAX_LINE_CHARS
+        };
         for it in &found.items {
             let (kind, date) = (self.tidy(&it.kind, 32), self.tidy(&it.date, 32));
-            let cleaned = self.clean(&it.text);
-            let head = format!("[m{}] {kind} · {} · {date}: ", it.id, it.origin.label());
+            let mut head = format!("[m{}] {kind} · {} · {date}", it.id, it.origin.label());
+            if let Some(c) = it.category.as_deref() {
+                head.push_str(&format!(" · {}", self.tidy(c, 32)));
+            }
+            if !it.place.is_empty() {
+                head.push_str(&format!(" · {}", self.tidy(&it.place, 100)));
+            }
+            head.push_str(": ");
+            // The title goes before the text, in the same line, cleaned like it.
+            let body = match it.title.as_deref() {
+                Some(t) => format!("{} — {}", self.tidy(t, MAX_TITLE_CHARS), it.text),
+                None => it.text.clone(),
+            };
+            let cleaned = self.clean(&body);
             let text = cut(
                 &one_line(&cleaned),
-                MAX_LINE_CHARS.saturating_sub(head.chars().count()),
+                max_line.saturating_sub(head.chars().count()),
             );
             let line = format!("{head}{text}");
             if used + line.len() + 1 > room {
@@ -756,7 +915,7 @@ impl ToolHost {
             }
             used += line.len() + 1;
             // Only memories that are shown: one left out was never in front of the model.
-            masked += count_masks(&cleaned).saturating_sub(count_masks(&it.text));
+            masked += count_masks(&cleaned).saturating_sub(count_masks(&body));
             ids.push(it.id);
             lines.push(line);
         }
