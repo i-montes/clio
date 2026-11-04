@@ -330,6 +330,79 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
 
 /// A vault made before the cost of the passphrase was raised still opens, but its passphrase is
 /// cheaper to guess for whoever gets the file.
+/// The memory as the person sees it: whether it opens (an old file is upgraded on first open),
+/// its places, what waits for review and what is past its review cycle.
+fn memory_report(o: &mut Report, dirs: &Dirs) {
+    use clio_brain::memory_link::{EmbedModel, MemoryLink};
+    // A look only: an old file is not upgraded from here (that takes the writer and changes it).
+    let db = MemoryLink::db_path(&dirs.data);
+    if db.is_file()
+        && let Err(clio_memory::Error::SchemaTooOld(_)) = clio_memory::Engine::open(
+            &db,
+            clio_memory::OpenMode::ReadOnly,
+            std::sync::Arc::new(clio_memory::SystemClock),
+        )
+    {
+        o.say(
+            Level::Pass,
+            "memoria: guardada con el esquema anterior; se actualiza sola la próxima vez que Clio la use".into(),
+            None,
+        );
+        return;
+    }
+    let link = match MemoryLink::open_read(&dirs.data, &EmbedModel::none()) {
+        Ok(Some(l)) => l.for_person(),
+        Ok(None) => {
+            o.say(Level::Pass, "memoria: todavía no existe".into(), None);
+            return;
+        }
+        Err(e) => {
+            o.say(
+                Level::Warn,
+                format!("memoria: no se puede abrir ({})", sanitize::line(&e)),
+                Some(
+                    "Si otro proceso la está actualizando, vuelve a intentarlo en un momento."
+                        .into(),
+                ),
+            );
+            return;
+        }
+    };
+    let places = link.places().unwrap_or_default();
+    let active: u64 = places.iter().map(|p| p.1).sum();
+    let pending = link.pending().map(|v| v.len()).unwrap_or(0);
+    let due = link.review_due().map(|v| v.len()).unwrap_or(0);
+    let projects = places
+        .iter()
+        .filter(|p| p.0.starts_with("proyecto"))
+        .count();
+    o.say(
+        Level::Pass,
+        format!(
+            "memoria: {active} recuerdos activos; {projects} proyecto{}, lo personal y las lecciones",
+            if projects == 1 { "" } else { "s" }
+        ),
+        None,
+    );
+    if pending > 0 {
+        o.say(
+            Level::Warn,
+            format!("memoria: {pending} esperan tu revisión"),
+            Some("`clio memory list --pending`, y `clio memory promote ID` o `archive ID`.".into()),
+        );
+    }
+    if due > 0 {
+        o.say(
+            Level::Warn,
+            format!("memoria: {due} pasaron su plazo de revisión (siguen activos)"),
+            Some(
+                "`clio memory review-due`; si siguen siendo ciertos, `clio memory reviewed ID`."
+                    .into(),
+            ),
+        );
+    }
+}
+
 fn kdf_warning(status: &serde_json::Value) -> Option<String> {
     (status["kdf_current"] == false).then(|| {
         format!(
@@ -557,6 +630,7 @@ pub fn collect(dirs: &Dirs) -> Report {
         );
     }
     data_audit(&mut o, &dirs.data);
+    memory_report(&mut o, dirs);
     vault_audit(&mut o, dirs);
     match Config::load(dirs) {
         Ok(c) => {

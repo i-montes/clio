@@ -26,6 +26,9 @@ pub struct MRow {
     pub actor: String,
     pub content: String,
     pub source: Option<String>,
+    /// Where it lives: `personal`, `proyecto X`, `lección de X` (empty when it does not say).
+    pub place: String,
+    pub title: Option<String>,
 }
 
 /// What the worker found in the memory file.
@@ -36,6 +39,10 @@ pub struct MemoryData {
     /// Active, newest first.
     pub recent: Vec<MRow>,
     pub archived: u64,
+    /// Active, all of them (the list shows the newest only).
+    pub active: u64,
+    /// Active, but past their review cycle (decisions, configuration…).
+    pub due: usize,
     /// About the embedding model, when it is not in use.
     pub note: Option<String>,
     /// The file does not exist yet.
@@ -62,6 +69,8 @@ impl MemoryData {
             actor: link.actor_name(m.actor),
             content: m.content.clone(),
             source: m.source.clone(),
+            place: link.place_label(m),
+            title: m.title.clone(),
         };
         let mut pending: Vec<MRow> = link.pending()?.iter().map(row).collect();
         let mut recent: Vec<MRow> = link.list(State::Active)?.iter().map(row).collect();
@@ -72,6 +81,8 @@ impl MemoryData {
             pending,
             recent,
             archived: link.counts()?.2,
+            active: link.counts()?.0,
+            due: link.review_due()?.len(),
             note: (!MemoryLink::model_dir(&dirs.home).is_dir())
                 .then(|| "sin modelo de embeddings: busca solo por texto".to_owned()),
             missing: false,
@@ -263,7 +274,15 @@ fn row_line(app: &App, r: &MRow, pending: bool, selected: bool, width: usize) ->
     };
     let fixed = 2 + 6 + 11 + 14 + 9;
     let room = width.saturating_sub(fixed);
-    let text: String = clean(&r.content).chars().take(room).collect();
+    let mut shown = String::new();
+    if !r.place.is_empty() {
+        shown.push_str(&format!("{} · ", r.place));
+    }
+    if let Some(title) = &r.title {
+        shown.push_str(&format!("{title} — "));
+    }
+    shown.push_str(&r.content);
+    let text: String = clean(&shown).chars().take(room).collect();
     Line::from(vec![
         Span::styled(
             if selected {
@@ -301,7 +320,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     };
     let mut state = format!(
         "{} {} {} {} {}",
-        plural(d.recent.len(), "recuerdo activo", "recuerdos activos"),
+        plural(
+            usize::try_from(d.active)
+                .unwrap_or(usize::MAX)
+                .max(d.recent.len()),
+            "recuerdo activo",
+            "recuerdos activos"
+        ),
         t.dot(),
         plural(d.pending.len(), "pendiente", "pendientes"),
         t.dot(),
@@ -311,6 +336,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             "archivados"
         ),
     );
+    if d.due > 0 {
+        state = format!(
+            "{state} {} {}",
+            t.dot(),
+            plural(d.due, "por revisar", "por revisar")
+        );
+    }
     if let Some(n) = &d.note {
         state = format!("{state} {} {n}", t.dot());
     }

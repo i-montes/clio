@@ -25,6 +25,8 @@ fn mrow(id: i64, kind: &str, state: State, origin: &str, content: &str) -> MRow 
         actor: "sesion".into(),
         content: content.into(),
         source: Some(format!("run:{ID1}")),
+        place: String::new(),
+        title: None,
     }
 }
 
@@ -63,6 +65,8 @@ fn data() -> MemoryData {
             ),
         ],
         archived: 1,
+        active: 2,
+        due: 0,
         note: Some("sin modelo de embeddings: busca solo por texto".into()),
         missing: false,
     }
@@ -278,6 +282,25 @@ fn an_empty_or_missing_memory_says_so() {
 }
 
 // S-25: whatever is in the memory file, the screen shows it as plain text.
+// Each row says where the memory lives and its title; the state line counts what is past its
+// review cycle (and says nothing when there is none).
+#[test]
+fn a_row_says_its_place_and_title_and_the_state_counts_what_to_review() {
+    let mut d = data();
+    d.recent[0].place = "proyecto alfa".into();
+    d.recent[0].title = Some("Puerto".into());
+    d.due = 2;
+    let mut a = memory_app();
+    a = update(a, Input::Bg(Bg::Memory(Ok(Box::new(d))))).0;
+    let t = screen_text(&a, 120, 30);
+    assert!(
+        t.contains("proyecto alfa · Puerto — Mi proyecto usa Rust"),
+        "{t}"
+    );
+    assert!(t.contains("2 por revisar"), "{t}");
+    assert!(!screen_text(&memory_app(), 120, 30).contains("por revisar"));
+}
+
 #[test]
 fn hostile_memory_text_is_cleaned_before_it_is_drawn() {
     let mut d = data();

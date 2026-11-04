@@ -25,6 +25,10 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory purge <id> [--reason \"motivo\"] [--yes]
                                               borra el contenido PARA SIEMPRE (texto, vector, historial);
                                               deja una lápida sin contenido. No se puede deshacer
+  clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
+  clio memory review-due [--json]             lo que pasó su plazo de revisión (decisiones, configuración…)
+  clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
+  clio memory timeline <id> [--json]          lo que se guardó antes y después, en la misma sesión
   clio memory pin|unpin <id>                  fija un recuerdo (sale primero en el contexto) o lo suelta
   clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
   clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
@@ -65,6 +69,8 @@ fn row_json(link: &MemoryLink, m: &MemoryRow) -> Value {
         "title": m.title,
         "category": m.category.map(|c| c.label()),
         "place": link.place_label(m),
+        "pinned": link.is_pinned(m),
+        "relations": link.relation_notes(m),
         "valid_from": m.valid_from,
         "known_since": m.known_since,
     })
@@ -216,6 +222,30 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 if let Some(s) = &m.source {
                     println!("{}{}", label("fuente:"), sanitize::line(s));
                 }
+                println!(
+                    "{}{}",
+                    label("sitio:"),
+                    sanitize::line(&link.place_label(&m))
+                );
+                if let Some(t) = &m.title {
+                    println!("{}{}", label("título:"), sanitize::line(t));
+                }
+                if let Some(c) = m.category {
+                    println!("{}{}", label("categoría:"), c.label());
+                }
+                if link.is_pinned(&m) {
+                    println!("{}sí (sale primero en el contexto)", label("fijado:"));
+                }
+                if link.is_due(&m) {
+                    println!(
+                        "{}{}",
+                        label("revisar:"),
+                        st.yellow("pasó su plazo de revisión: ¿sigue siendo cierto? (clio memory reviewed)")
+                    );
+                }
+                for n in link.relation_notes(&m) {
+                    println!("{}{}", label("relación:"), sanitize::line(&n));
+                }
                 if m.state == State::Quarantine {
                     println!(
                         "{}{}",
@@ -268,6 +298,71 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 link.archive(id)?;
             }
             println!("{verb}: m{}", id.0);
+        }
+        "projects" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let places = link.places()?;
+            if json {
+                let v: Vec<Value> = places
+                    .iter()
+                    .map(|(l, a, q, r)| json!({"place": l, "active": a, "quarantine": q, "archived": r}))
+                    .collect();
+                print_json(&Value::Array(v))?;
+            } else {
+                for (l, a, q, r) in places {
+                    println!(
+                        "{} {a} activos · {q} en cuarentena · {r} archivados",
+                        st.bold(&ui::pad(&sanitize::line(&l), 28))
+                    );
+                }
+            }
+        }
+        "review-due" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let due = link.review_due()?;
+            if json {
+                let v: Vec<Value> = due.iter().map(|m| row_json(&link, m)).collect();
+                print_json(&Value::Array(v))?;
+            } else {
+                print_rows(st, &due, "nada pasó su plazo de revisión");
+            }
+        }
+        "reviewed" => {
+            let rest = args.rest()?;
+            let [id] = rest.as_slice() else {
+                return Err("falta el id: clio memory reviewed <id>".into());
+            };
+            let id = id_of(id)?;
+            open_write(dirs)?.reviewed(id)?;
+            println!("revisado: m{} (su plazo vuelve a empezar)", id.0);
+        }
+        "timeline" => {
+            let json = args.flag("--json");
+            let rest = args.rest()?;
+            let [id] = rest.as_slice() else {
+                return Err("falta el id: clio memory timeline <id>".into());
+            };
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let rows = link.timeline(id_of(id)?, 5, 5)?;
+            if json {
+                let v: Vec<Value> = rows.iter().map(|m| row_json(&link, m)).collect();
+                print_json(&Value::Array(v))?;
+            } else {
+                print_rows(st, &rows, "nada alrededor");
+            }
         }
         // Pinned: first in the context of its place. Undoes what the model pinned when asked.
         "pin" | "unpin" => {

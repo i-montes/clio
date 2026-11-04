@@ -1089,6 +1089,99 @@ impl MemoryLink {
         v
     }
 
+    /// Each place this view knows, with what it holds: `(label, active, quarantine, archived)`,
+    /// the person's first, then the lessons, then every project.
+    pub fn places(&self) -> Res<Vec<(String, u64, u64, u64)>> {
+        let st = self.engine.stats().map_err(|e| explain(&e))?;
+        let mut out: Vec<(u8, String, u64, u64, u64)> = self
+            .person_scopes()
+            .into_iter()
+            .map(|scope| {
+                let (order, label) = match self.place_of(scope) {
+                    Some(Place::Personal) => (0, "personal".to_owned()),
+                    Some(Place::Lessons) => (1, "lecciones".to_owned()),
+                    _ => (2, self.project_label(scope)),
+                };
+                let s = st.scopes.iter().find(|s| s.scope == scope);
+                let n = |f: fn(&clio_memory::ScopeStats) -> u64| s.map_or(0, f);
+                (
+                    order,
+                    label,
+                    n(|s| s.active),
+                    n(|s| s.quarantine),
+                    n(|s| s.archived),
+                )
+            })
+            .collect();
+        out.sort();
+        Ok(out
+            .into_iter()
+            .map(|(_, l, a, q, r)| (l, a, q, r))
+            .collect())
+    }
+
+    /// `proyecto X` for a project's scope (the session's own, or another in the person's view).
+    fn project_label(&self, scope: ScopeId) -> String {
+        match self.others.iter().find(|(id, _)| *id == scope) {
+            Some((_, name)) => format!("proyecto {name}"),
+            None => match self.project_name() {
+                Some(p) => format!("proyecto {p}"),
+                None => "proyecto".into(),
+            },
+        }
+    }
+
+    /// What is past its review cycle, in every place this view knows, the oldest first: still
+    /// active, only due for a look.
+    pub fn review_due(&self) -> Res<Vec<MemoryRow>> {
+        let mut due = Vec::new();
+        for scope in self.person_scopes() {
+            due.extend(self.engine.review_due(scope).map_err(|e| explain(&e))?);
+        }
+        due.sort_by_key(|r| (r.known_since, r.id));
+        Ok(due)
+    }
+
+    /// The person looked at it again: its review cycle starts over.
+    pub fn reviewed(&self, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        self.get(id)?;
+        self.engine
+            .mark_reviewed(id, self.actors.persona)
+            .map_err(|e| explain(&e))
+    }
+
+    /// Is this active memory past its review cycle? (Only its place is looked at.)
+    pub fn is_due(&self, row: &MemoryRow) -> bool {
+        row.state == State::Active
+            && row.category.and_then(Category::review_days).is_some()
+            && self
+                .engine
+                .review_due(row.scope)
+                .is_ok_and(|v| v.iter().any(|r| r.id == row.id))
+    }
+
+    /// Is it pinned (first in its place's context)?
+    pub fn is_pinned(&self, row: &MemoryRow) -> bool {
+        self.engine
+            .pinned(row.scope)
+            .is_ok_and(|v| v.iter().any(|r| r.id == row.id))
+    }
+
+    /// The memories around `id` in its session (or its place), as this view can read them.
+    pub fn timeline(&self, id: MemoryId, before: usize, after: usize) -> Res<Vec<MemoryRow>> {
+        if self.get(id)?.state != State::Active {
+            return Err("solo los recuerdos activos tienen línea de tiempo".into());
+        }
+        Ok(self
+            .engine
+            .timeline(id, before, after)
+            .map_err(|e| explain(&e))?
+            .into_iter()
+            .filter(|r| self.place_of(r.scope).is_some())
+            .collect())
+    }
+
     /// The project of this link, if it has one.
     pub fn project_name(&self) -> Option<&str> {
         self.project.as_ref().map(|(p, _)| p.as_str())
