@@ -156,14 +156,25 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        let draft = Draft {
-            text: draft.text.clone(),
-            title: draft.title.clone(),
-            category: draft.category.as_deref().and_then(Category::parse),
-            kind: match draft.kind {
-                ProposalKind::Semantic => MemoryType::Semantic,
-                ProposalKind::Procedural => MemoryType::Procedural,
-            },
+        let summary = draft.kind == ProposalKind::Session;
+        let draft = if summary {
+            // A session's summary is named here, has no category and is never a lesson.
+            Draft {
+                text: draft.text.clone(),
+                title: Some(format!("Sesión {}", civil_date(now_secs()))),
+                category: None,
+                kind: MemoryType::Episodic,
+            }
+        } else {
+            Draft {
+                text: draft.text.clone(),
+                title: draft.title.clone(),
+                category: draft.category.as_deref().and_then(Category::parse),
+                kind: match draft.kind {
+                    ProposalKind::Procedural => MemoryType::Procedural,
+                    _ => MemoryType::Semantic,
+                },
+            }
         };
         let (text, kind) = (draft.text.as_str(), draft.kind);
         let has_project = self.project.is_some();
@@ -175,7 +186,7 @@ impl MemoryPort for LinkPort {
         let place = self
             .judge
             .as_ref()
-            .filter(|_| has_project)
+            .filter(|_| has_project && !summary)
             .and_then(|j| {
                 j.place(
                     &stored,
@@ -184,39 +195,51 @@ impl MemoryPort for LinkPort {
                 )
             })
             .and_then(Place::parse)
-            .unwrap_or_else(|| Place::by_rule(draft.category, has_project));
-        let verdict = self.judge.as_ref().map(|judge| {
-            let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
-                &self.data,
-                &EmbedModel::none(),
-                self.project.as_deref(),
-            ) {
-                Ok(Some(link)) => link
-                    .search_in(place, &stored, 3)
-                    .map(|rows| {
-                        rows.into_iter()
-                            .map(|r| Neighbor {
-                                id: r.id.0,
-                                // A lesson learned in another project is not this session's to
-                                // replace: only the person's words would (as with their own).
-                                protected: link.is_protected(&r)
-                                    || (place == Place::Lessons
-                                        && MemoryLink::learned_in(&r) != self.project.as_deref()),
-                                text: r.content,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            judge.decide(
-                &stored,
-                kind == MemoryType::Procedural,
-                &neighbors,
-                judging.tainted,
-                &judging.person_said,
-            )
-        });
+            .unwrap_or_else(|| match (summary, has_project) {
+                (true, true) => Place::Project,
+                (true, false) => Place::Personal,
+                _ => Place::by_rule(draft.category, has_project),
+            });
+        // A summary with no project would be the person's and show up everywhere: the person
+        // decides on it, never Jev.
+        let verdict = self
+            .judge
+            .as_ref()
+            .filter(|_| !summary || has_project)
+            .map(|judge| {
+                // A summary is about its own session: nothing to replace or to have known already.
+                let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
+                    &self.data,
+                    &EmbedModel::none(),
+                    self.project.as_deref(),
+                ) {
+                    Ok(Some(link)) if !summary => link
+                        .search_in(place, &stored, 3)
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(|r| Neighbor {
+                                    id: r.id.0,
+                                    // A lesson learned in another project is not this session's to
+                                    // replace: only the person's words would (as with their own).
+                                    protected: link.is_protected(&r)
+                                        || (place == Place::Lessons
+                                            && MemoryLink::learned_in(&r)
+                                                != self.project.as_deref()),
+                                    text: r.content,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                judge.decide(
+                    &stored,
+                    kind == MemoryType::Procedural,
+                    &neighbors,
+                    judging.tainted,
+                    &judging.person_said,
+                )
+            });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
         let link = self.writer()?;
         if let Some(v) = verdict {
@@ -427,6 +450,12 @@ fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
         category: row.category.map(|c| c.label().to_owned()),
         place: link.place_label(row),
     }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
 /// `YYYY-MM-DD` (UTC) of seconds since the epoch. Days to a civil date as in H. Hinnant's

@@ -117,6 +117,9 @@ pub trait Session: Send + Sync {
     /// Adds a message to the run in progress.
     fn steer(&self, text: &str) -> Result<(), PiError>;
     fn refresh(&self) -> Result<Refresh, PiError>;
+    /// Before closing a session the person worked in: asks the model, under a short cap, to save
+    /// the session's summary. Nothing when it does not apply. Runs once.
+    fn summarize(&self) {}
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
 }

@@ -233,6 +233,13 @@ pub fn said_to_host(socket: &Path, session: &str, token: &str, text: &str) {
     let _ = ask_host(socket, &req);
 }
 
+/// Tells the tool host the person closed the session: its last turn may only save the summary,
+/// and their earlier words no longer back any change. `false` if the host did not take it.
+pub fn closing_to_host(socket: &Path, session: &str, token: &str) -> bool {
+    let req = json!({"id": "closing", "tool": "closing", "args": {"token": token}, "session": session, "call_id": "closing"});
+    ask_host(socket, &req).is_some_and(|r| r["ok"] == json!(true))
+}
+
 /// Everything that goes in front of a message in this chat.
 pub fn preprompt(
     dirs: &Dirs,

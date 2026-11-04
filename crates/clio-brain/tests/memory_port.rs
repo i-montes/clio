@@ -1432,3 +1432,67 @@ fn a_read_before_the_place_exists_does_not_hide_what_is_saved_in_it_later() {
     assert_eq!(beta.search("compose", 3).unwrap().items[0].id, d.id);
     assert_eq!(beta.context().unwrap()[0].id, d.id);
 }
+
+// A session's summary is the project's episode, named by the port; Jev is not asked where it goes
+// (only whether it is new or doubtful), and it is what the context of the project starts with.
+#[test]
+fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
+    struct Asked(Arc<std::sync::Mutex<Vec<String>>>);
+    impl Transport for Asked {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            self.0.lock().unwrap().push(name.clone());
+            let choice = if name == "lugar" { "leccion" } else { "add" };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
+        }
+    }
+    let w = world();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Asked(asked.clone())),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = Arc::new(MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned()))));
+    let alfa = in_project(&w, "alfa").with_judge(judge.clone());
+    let summary = clio_toolhost::ProposalDraft {
+        text: "Objetivo: migrar · Hecho: esquema 2".into(),
+        title: Some("lo que diga el modelo".into()),
+        category: Some("bugfix".into()),
+        kind: ProposalKind::Session,
+    };
+    let d = MemoryPort::propose(&alfa, &summary, "sesion-9", &Judging::default()).unwrap();
+    assert_eq!(d.saved, Saved::Active);
+    assert!(
+        !asked.lock().unwrap().iter().any(|q| q == "lugar"),
+        "{:?}",
+        asked.lock().unwrap()
+    );
+    let link = MemoryLink::open_read_in(&w.data, &EmbedModel::none(), Some("alfa"))
+        .unwrap()
+        .unwrap();
+    let row = link.get(clio_memory::MemoryId(d.id)).unwrap();
+    assert_eq!(row.kind, clio_memory::MemoryType::Episodic);
+    assert_eq!(row.episode.as_deref(), Some("sesion-9"));
+    assert_eq!(row.category, None);
+    let title = row.title.clone().unwrap();
+    assert!(
+        title.starts_with("Sesión 20") && title.len() == "Sesión 2026-11-04".len(),
+        "{title}"
+    );
+    assert_eq!(
+        link.place_of(row.scope),
+        Some(clio_brain::memory_link::Place::Project)
+    );
+    drop(link);
+    assert_eq!(alfa.context().unwrap()[0].id, d.id);
+    // Without a project it is the person's and it waits for them, even with Jev.
+    let plain = LinkPort::new(&w.data, None).with_judge(judge);
+    let d = MemoryPort::propose(&plain, &summary, "sesion-10", &Judging::default()).unwrap();
+    assert_eq!(d.saved, Saved::Waiting);
+    let l = open(&w);
+    assert_eq!(l.get(clio_memory::MemoryId(d.id)).unwrap().scope, l.scope());
+}

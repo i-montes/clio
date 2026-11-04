@@ -39,6 +39,7 @@ El proyecto lo detecta el cerebro (no el modelo) desde la carpeta de trabajo: no
 - **Al compactar:** el cerebro ve el evento de compactación de Pi y, en el turno siguiente, el sobre `<clio-contexto>` le pide al modelo que guarde el resumen antes de seguir.
 - **Al cerrar:** cuando la persona sale del chat de una sesión con al menos 4 mensajes suyos, el cerebro manda un último turno corto pidiendo el resumen (con el tope de tiempo y de coste de cualquier turno). Desactivable en la configuración (`memory.session_summary`). *(Decisión mía: el umbral de 4 mensajes.)*
 - Los mensajes de la persona **no** se guardan aparte.
+- *Decisiones mías al construirlo:* el resumen cabe en 1200 caracteres como cualquier propuesta del agente (así `memory_get` lo devuelve entero); cuenta entre las propuestas de la sesión; Jev no elige su sitio (siempre el proyecto, o lo personal sin proyecto) y no se le ofrecen vecinos (un resumen no reemplaza a otro); el turno de cierre tiene cuatro pasos y 30 s, no se manda si hay un turno en marcha, y al salir de la TUI se espera a los cierres pendientes diciéndolo en la terminal.
 
 ### 4. Revelación progresiva
 

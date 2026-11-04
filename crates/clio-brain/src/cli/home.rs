@@ -129,6 +129,25 @@ pub struct Config {
     pub workspace: WorkspaceLimits,
     #[serde(default)]
     pub jev: JevCfg,
+    #[serde(default)]
+    pub memory: MemoryCfg,
+}
+
+/// The memory of the Pi sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCfg {
+    /// Ask the model for the session's summary when the conversation is compacted and when the
+    /// person closes a session of at least four messages.
+    #[serde(default = "yes")]
+    pub session_summary: bool,
+}
+
+impl Default for MemoryCfg {
+    fn default() -> Self {
+        Self {
+            session_summary: true,
+        }
+    }
 }
 
 impl Config {
@@ -153,6 +172,7 @@ impl Config {
                 max_bytes: 200 * 1024 * 1024,
             },
             jev: JevCfg::default(),
+            memory: MemoryCfg::default(),
         }
     }
 

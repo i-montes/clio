@@ -1487,3 +1487,118 @@ fn the_timeline_and_the_context_spend_the_session_budget() {
     )));
     assert!(denied_by_budget(&search(&e, "s", "dato")));
 }
+
+// ---- memory_session_summary (stage 3) ----
+
+fn summary(e: &Env, session: &str, args: Value) -> Response {
+    call(e, session, "memory_session_summary", args)
+}
+
+// S-61
+#[test]
+fn a_session_summary_is_one_episodic_line_in_a_fixed_order() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = summary(
+        &e,
+        "s1",
+        json!({"goal": "Migrar  la base\nde datos", "accomplished": "esquema 2",
+               "files": "a.rs, b.rs", "discoveries": "el índice\tera lento",
+               "next_steps": "medir", "instructions": "sin dependencias nuevas"}),
+    );
+    assert!(r.ok && !r.external && !r.tainted, "{r:?}");
+    assert!(r.content.starts_with("proposed"), "{r:?}");
+    let d = port.drafts.lock().unwrap()[0].clone();
+    assert_eq!(d.kind, ProposalKind::Session);
+    assert_eq!(
+        d.text,
+        "Objetivo: Migrar la base de datos · Instrucciones: sin dependencias nuevas · \
+         Descubrimientos: el índice era lento · Hecho: esquema 2 · Siguiente: medir · \
+         Archivos: a.rs, b.rs"
+    );
+    assert_eq!((d.title, d.category), (None, None), "the port names it");
+    // Only what was given, in the same order.
+    assert!(summary(&e, "s1", json!({"goal": "g", "accomplished": "h"})).ok);
+    assert_eq!(
+        port.drafts.lock().unwrap()[1].text,
+        "Objetivo: g · Hecho: h"
+    );
+}
+
+#[test]
+fn a_summary_without_its_goal_or_what_was_done_or_too_long_is_refused_before_the_port() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for args in [
+        json!({"accomplished": "h"}),
+        json!({"goal": "g"}),
+        json!({"goal": " ", "accomplished": "h"}),
+        json!({"goal": "g", "accomplished": "h", "kind": "semantic"}),
+        json!({"goal": "g", "accomplished": "x".repeat(1200)}),
+    ] {
+        assert!(!summary(&e, "s", args.clone()).ok, "{args}");
+    }
+    assert_eq!(port.calls(), 0);
+}
+
+#[test]
+fn a_summary_with_a_secret_is_not_proposed_and_it_counts_as_a_proposal() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
+    let r = summary(
+        &e,
+        "s",
+        json!({"goal": "g", "accomplished": "h", "files": format!("la clave {key}")}),
+    );
+    assert!(!r.ok && r.content.contains("secret"), "{r:?}");
+    assert_eq!(port.calls(), 0);
+    // Thirty in a clean session, summaries and proposals together (the refused one counted).
+    for i in 0..29 {
+        assert!(propose(&e, "s", &format!("dato {i}"), "semantic").ok, "{i}");
+    }
+    let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
+    assert!(denied_by_budget(&r), "{r:?}");
+}
+
+// When the brain closes a session, its last turn may only save the summary: every other tool is
+// refused (a change cannot use the person's earlier words), and nobody but the brain can do it.
+#[test]
+fn a_closed_session_only_saves_its_summary() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
+    let e = env(&port);
+    call(
+        &e,
+        "s",
+        "said",
+        json!({ "text": "olvida el dato", "token": TOKEN }),
+    );
+    assert!(!call(&e, "s", "closing", json!({ "token": "otro" })).ok);
+    assert!(!call(&e, "s", "closing", json!({})).ok);
+    assert!(search(&e, "s", "dato").ok, "not closed by a stranger");
+    assert!(call(&e, "s", "closing", json!({ "token": TOKEN })).ok);
+    for (tool, args) in [
+        ("memory_forget", json!({"id": 1})),
+        ("memory_search", json!({"query": "dato"})),
+        ("memory_propose", json!({"text": "x", "kind": "semantic"})),
+        ("ls", json!({"path": "."})),
+    ] {
+        let r = call(&e, "s", tool, args);
+        assert!(!r.ok, "{tool}: {r:?}");
+        assert_eq!(r.decision.rule, "closing", "{tool}: {r:?}");
+    }
+    assert!(port.changes.lock().unwrap().is_empty());
+    let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
+    assert!(r.ok, "{r:?}");
+    assert!(
+        port.judging
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .person_said
+            .is_empty()
+    );
+    // Another session is not closed.
+    assert!(search(&e, "otra", "dato").ok);
+}

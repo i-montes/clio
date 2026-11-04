@@ -15,7 +15,7 @@
 //! process is killed with `SIGKILL`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clio_core::SystemClock;
@@ -215,6 +215,7 @@ impl SessionSource for LocalSource {
             &run_dir,
             project.as_deref(),
         );
+        pre.set_summaries(cfg.memory.session_summary);
         // A session that was marked before (the service leaves the mark in the run folder) is
         // marked again in the new service: the mark does not go away by closing the chat.
         let taint_file = run_dir.join("toolhost/tainted.json");
@@ -232,6 +233,8 @@ impl SessionSource for LocalSource {
             assessor: Assessor::new(Arc::new(SystemClock)),
             pre,
             taint_file,
+            summarized: AtomicBool::new(false),
+            busy: Mutex::new(()),
         };
         let refresh = s.refresh().ok();
         Ok(Opened {
@@ -285,7 +288,17 @@ struct ChatSession {
     pre: PrePrompt,
     /// Where the service leaves the mark when it saw (or was told of) what is not the person's.
     taint_file: PathBuf,
+    /// The closing summary was asked for (or skipped): once per session.
+    summarized: AtomicBool,
+    /// Held while a turn runs: the closing turn never runs beside one (both would read Pi's events).
+    busy: Mutex<()>,
 }
+
+/// A session with fewer messages of the person than this closes without a summary.
+const SUMMARY_AFTER_PROMPTS: u64 = 4;
+/// The closing turn is short: a few steps and this long at most.
+const SUMMARY_STEPS: u32 = 4;
+const SUMMARY_MS: i64 = 30_000;
 
 impl Session for ChatSession {
     fn run_prompt(
@@ -294,6 +307,10 @@ impl Session for ChatSession {
         cancel: &Cancel,
         on_event: &mut dyn FnMut(&Event),
     ) -> Result<RunSummary, PiError> {
+        let _turn = self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = self.prompts.fetch_add(1, Ordering::Relaxed);
         let mut guard = RunGuard::new(
             Arc::new(SystemClock),
@@ -337,6 +354,49 @@ impl Session for ChatSession {
             egress_denied,
             masked,
         })
+    }
+
+    fn summarize(&self) {
+        if self.summarized.swap(true, Ordering::SeqCst)
+            || self.prompts.load(Ordering::Relaxed) < SUMMARY_AFTER_PROMPTS
+            || self.down.lock().map_or(true, |d| *d)
+        {
+            return;
+        }
+        // A turn still running (the person left in the middle of one): no summary.
+        let Ok(_turn) = self.busy.try_lock() else {
+            return;
+        };
+        let Some(text) = self
+            .pre
+            .closing_text(&clio_brain::pi::envelope::stamp_now())
+        else {
+            return;
+        };
+        // The service first narrows the session to the summary: a closing turn that cannot be
+        // narrowed is not run (the model would have every tool and nobody watching).
+        if !jev::closing_to_host(
+            &self.toolhost.socket,
+            &self.pi.session_id,
+            &self.toolhost.said_token,
+        ) {
+            return;
+        }
+        let mut budget = self.budget;
+        budget.max_steps = budget.max_steps.min(SUMMARY_STEPS);
+        budget.max_ms = budget.max_ms.min(SUMMARY_MS);
+        let mut guard = RunGuard::new(
+            Arc::new(SystemClock),
+            &format!("{}-cierre", self.pi.session_id),
+            budget,
+            self.day.clone(),
+        );
+        // Best effort: a Pi still busy with a turn, or a model that does not answer in time, closes
+        // the session without a summary.
+        let _ = self
+            .pi
+            .client
+            .run_prompt_limited(&text, &Cancel::new(), &mut guard, &mut |_| {});
     }
 
     fn shutdown(&self) {

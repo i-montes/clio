@@ -95,7 +95,19 @@ pub fn run_assessed(
     // What goes in front of the message (the time, memories, tool suggestions) is decided now; the
     // level above was judged without any of it.
     let prepared = pre.prepare_within(text, &super::envelope::stamp_now());
-    let mut summary = client.run_prompt_limited(&prepared.text, cancel, guard, on_event)?;
+    // A compaction that went through: the next message asks for the session's summary first.
+    let mut watch = |e: &Event| {
+        if let Event::CompactionEnd {
+            aborted: false,
+            error: None,
+            ..
+        } = e
+        {
+            pre.compacted();
+        }
+        on_event(e);
+    };
+    let mut summary = client.run_prompt_limited(&prepared.text, cancel, guard, &mut watch)?;
     summary.assessment = Some(assessment);
     Ok(summary)
 }

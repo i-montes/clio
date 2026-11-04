@@ -148,6 +148,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         debug: DebugCtl::new(debug, false),
+        closing: Arc::default(),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -209,6 +210,28 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
             }
         }
     }
+    // Leaving on purpose (not by a signal): the session's summary first, on the normal screen so
+    // the wait is said; a signal or a panic skips it.
+    if ended.load(Ordering::SeqCst) == 0 {
+        let open = ctx.current_chat();
+        let closing: Vec<_> = ctx
+            .closing
+            .lock()
+            .map(|mut v| v.drain(..).filter(|h| !h.is_finished()).collect())
+            .unwrap_or_default();
+        if open.is_some() || !closing.is_empty() {
+            restore_terminal();
+            eprintln!(
+                "clio: cerrando la sesión de Pi y guardando su resumen (unos 35 s como mucho; Ctrl-C para no esperar)…"
+            );
+            if let Some(s) = open {
+                s.summarize();
+            }
+            for h in closing {
+                let _ = h.join();
+            }
+        }
+    }
     // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
     ctx.stop_chat_now();
     // The shell convention for a process ended by a signal.
@@ -251,6 +274,24 @@ struct Ctx {
     cancel: Mutex<Arc<AtomicBool>>,
     /// The debug switch the agent reads at every call; `Ctrl-D` flips it.
     debug: DebugCtl,
+    /// Sessions being closed on their own thread (each may first save its summary): waited for
+    /// when the person leaves, so leaving right after closing a chat does not cut it short.
+    closing: Closing,
+}
+
+/// The threads closing a session (and saving its summary).
+type Closing = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+
+/// Waits for every session being closed: a session is never opened again (two Pi on one file and
+/// one working copy) while its last turn still runs.
+fn wait_closing(closing: &Closing) {
+    let pending: Vec<_> = closing
+        .lock()
+        .map(|mut v| v.drain(..).collect())
+        .unwrap_or_default();
+    for h in pending {
+        let _ = h.join();
+    }
 }
 
 /// Sends what the agent does to the screen.
@@ -344,7 +385,14 @@ impl Ctx {
     /// Stops the session on its own thread (shutting down can take a moment).
     fn stop_chat_later(&self, latest: u64) {
         if let Some(s) = self.take_chat(latest) {
-            std::thread::spawn(move || s.shutdown());
+            let h = std::thread::spawn(move || {
+                s.summarize();
+                s.shutdown();
+            });
+            if let Ok(mut v) = self.closing.lock() {
+                v.retain(|h| !h.is_finished());
+                v.push(h);
+            }
         }
     }
 
@@ -456,8 +504,10 @@ impl Ctx {
             Cmd::ChatOpen { seq, target } => {
                 self.stop_chat_later(seq);
                 let (sources, slot) = (self.sources.clone(), self.chat.clone());
+                let closing = self.closing.clone();
                 self.spawn(
                     move |d, _| -> Result<Box<ChatInfo>, String> {
+                        wait_closing(&closing);
                         let target = match target {
                             OpenTarget::New { project } => Target::New {
                                 project: expand(&project, &d.home),

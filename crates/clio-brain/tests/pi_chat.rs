@@ -958,3 +958,56 @@ fn the_model_cannot_forget_what_the_person_did_not_ask_to_forget() {
         json!(["hola, ¿cómo vas?"])
     );
 }
+
+// S-61, S-63: when the person closes a session of four messages, Clio asks the model for its
+// summary in Clio's own envelope (nothing in it is the person's words), and the summary becomes
+// the episode of the session's project; without Jev it waits for the person like any proposal.
+#[test]
+fn closing_a_session_of_four_messages_saves_its_summary() {
+    if can_run("summary", true).is_none() {
+        return;
+    }
+    let mut script: Vec<Value> = (1..=4)
+        .map(|i| json!({"text": format!("respuesta {i}"), "usage": [10, 2]}))
+        .collect();
+    // Slow on purpose: the person leaves at once, and leaving must wait for the close.
+    script.push(
+        json!({"delay_ms": 3000, "tool_calls": [{"name": "memory_session_summary", "arguments": {
+        "reason": "Clio lo pidió", "goal": "probar el cierre", "accomplished": "cuatro pasos"}}]}),
+    );
+    script.push(json!({"text": "guardado", "usage": [10, 2]}));
+    let w = World::new(&Value::Array(script).to_string());
+    let v = w.pty("summary");
+    ok(&v, &["opened", "answered", "back_in_selector"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    let log = std::fs::read_to_string(&w._provider.log).unwrap();
+    let told: Vec<String> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|e| e["last_user"].as_str().map(str::to_owned))
+        .collect();
+    let closing = told
+        .iter()
+        .find(|t| t.contains("pedido de Clio: la persona cerró esta sesión"))
+        .unwrap_or_else(|| panic!("{told:#?}"));
+    assert_eq!(clio_brain::pi::envelope::strip(closing), "", "{closing}");
+    let link = clio_brain::memory_link::MemoryLink::open_read(
+        &w.home().join(".local/share/clio"),
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .unwrap()
+    .for_person();
+    let pending = link.pending().unwrap();
+    let summary = pending
+        .iter()
+        .find(|r| r.kind == clio_memory::MemoryType::Episodic)
+        .unwrap_or_else(|| panic!("{pending:?}"));
+    assert_eq!(
+        summary.content,
+        "Objetivo: probar el cierre · Hecho: cuatro pasos"
+    );
+    assert_eq!(link.place_label(summary), "proyecto proj");
+    assert!(summary.title.as_deref().unwrap().starts_with("Sesión "));
+}
