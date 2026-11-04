@@ -67,7 +67,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists twelve tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists fourteen tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -97,7 +97,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        12,
+        14,
         "{:?}",
         declared_tools(&model)
     );
@@ -120,7 +120,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_twelve_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_fourteen_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -639,7 +639,7 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        12,
+        14,
         "{:?}",
         declared_tools(&model)
     );
@@ -656,7 +656,9 @@ fn attack_60() -> Option<bool> {
     for (name, own) in [
         ("memory_search", vec!["limit", "query"]),
         ("memory_get", vec!["id"]),
-        ("memory_propose", vec!["kind", "text"]),
+        ("memory_propose", vec!["category", "kind", "text", "title"]),
+        ("memory_timeline", vec!["after", "before", "id"]),
+        ("memory_context", vec![]),
         ("memory_forget", vec!["id"]),
         ("memory_promote", vec!["id"]),
         ("memory_revert", vec!["change"]),
@@ -714,11 +716,11 @@ fn attack_60() -> Option<bool> {
         ("memory_get", json!({"id":person,"scope":"otro"})),
         (
             "memory_propose",
-            json!({"text":"x","kind":"semantic","origin":"user"}),
+            json!({"title":"x","text":"x","category":"config","kind":"semantic","origin":"user"}),
         ),
         (
             "memory_propose",
-            json!({"text":"x","kind":"semantic","actor":"persona"}),
+            json!({"title":"x","text":"x","category":"config","kind":"semantic","actor":"persona"}),
         ),
     ] {
         let r = ask_host(
@@ -752,7 +754,7 @@ fn attack_61() -> Option<bool> {
     let propose_turn = |text: &str, kind: &str| {
         call(
             "memory_propose",
-            json!({"text": text, "kind": kind, "reason": REASON}),
+            json!({"title": "dato", "text": text, "category": "discovery", "kind": kind, "reason": REASON}),
         )
     };
     let model = FakeModel::scripted(vec![

@@ -82,7 +82,7 @@ Migración probada desde una base del esquema 1; doctor con las comprobaciones n
 ## Etapas (cada una un PR, apiladas sobre #28)
 
 1. **Motor:** esquema 2 y migración, título y categoría, `pinned`, plazos de revisión, tabla `relations`, línea de tiempo, búsqueda en varios ámbitos.
-2. **Proyecto y estructura en el agente:** detección del proyecto, ámbitos en el servicio de Pi, `memory_propose` con título/categoría/topic_key, Jev elige el ámbito, búsqueda y contexto juntando los tres, `memory_timeline`, `memory_context`, prompt @10.
+2. **Proyecto y estructura en el agente:** detección del proyecto, ámbitos en el servicio de Pi, `memory_propose` con título y categoría (sin `topic_key`: el reemplazo que decide Jev entre las memorias parecidas cubre el «mismo tema, dato nuevo»; *decisión mía*), Jev elige el ámbito, búsqueda y contexto juntando los tres, `memory_timeline`, `memory_context`, prompt @10.
 3. **Sesiones:** `memory_session_summary`, resumen al compactar y al cerrar.
 4. **Relaciones** juzgadas por Jev y anotaciones en la búsqueda; `memory_pin`.
 5. **MCP.**

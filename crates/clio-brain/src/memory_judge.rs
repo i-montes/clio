@@ -65,6 +65,9 @@ pub enum Request {
     Undo,
 }
 
+/// Confidence needed to choose where a memory goes (a wrong place hides it, it does not harm).
+const PLACE: f64 = 0.6;
+
 /// Confidence needed to do, on the model's say-so, what the person asked for: more than for a
 /// fact, because it acts on what the person has.
 const REQUEST: f32 = 0.9;
@@ -242,6 +245,49 @@ impl MemoryJudge {
             .ok()
             .and_then(|a| a.noul(name))
             .is_some_and(|p| p as f32 >= need)
+    }
+
+    /// Where a memory belongs, when there is a project: `proyecto`, `personal` or `leccion`; `None`
+    /// when Jev cannot say or is not sure (then the rule decides).
+    pub fn place(
+        &self,
+        text: &str,
+        title: Option<&str>,
+        category: Option<&str>,
+    ) -> Option<&'static str> {
+        let qs = Questions::new()
+            .choice(
+                "lugar",
+                "Decide dónde debe guardarse `propuesta`.",
+                &[
+                    (
+                        "proyecto",
+                        "Es de este proyecto: una decisión, su arquitectura, su configuración o algo que solo vale aquí.",
+                    ),
+                    (
+                        "personal",
+                        "Es de la persona y vale en cualquier proyecto: quién es, cómo trabaja, qué prefiere.",
+                    ),
+                    (
+                        "leccion",
+                        "Es una lección que sirve en otros proyectos: un error y su causa, un patrón, una trampa, algo aprendido.",
+                    ),
+                ],
+            )
+            .ok()?;
+        let state = Clean::try_new(
+            json!({ "propuesta": text, "titulo": title.unwrap_or(""), "categoria": category.unwrap_or("") }),
+            &*self.scrub,
+        )
+        .ok()?;
+        match self.jev.ask(&state, &qs).ok()?.get("lugar")? {
+            Answer::Choice { choice, confidence } if *confidence >= PLACE => {
+                ["proyecto", "personal", "leccion"]
+                    .into_iter()
+                    .find(|p| *p == choice)
+            }
+            _ => None,
+        }
     }
 
     /// Do the person's own last words in the session say what the proposal says?

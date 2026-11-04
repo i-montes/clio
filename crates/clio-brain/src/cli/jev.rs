@@ -12,6 +12,7 @@ use std::time::Duration;
 use clio_brain::memory_judge::MemoryJudge;
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::preprompt::{Candidate, Hooks, PrePrompt, Prepared, Recall, Scrub, Settings};
+use clio_brain::pi::session::Toolhost;
 use clio_core::SystemClock;
 use clio_jev::{Config as JevConfig, Jev, Process, ToolHint, parse_catalog};
 use clio_memory::{Origin, State};
@@ -121,18 +122,21 @@ pub fn judge_from_env() -> Option<Arc<MemoryJudge>> {
 pub struct MemoryRecall {
     data: PathBuf,
     model: Arc<EmbedModel>,
+    /// The session's project: its memories are read with the person's and the lessons.
+    project: Option<String>,
 }
 
 impl MemoryRecall {
-    pub fn new(data: &Path, model_dir: Option<&Path>) -> Self {
+    pub fn new(data: &Path, model_dir: Option<&Path>, project: Option<&str>) -> Self {
         Self {
             data: data.to_path_buf(),
             model: EmbedModel::new(model_dir.map(Path::to_path_buf)),
+            project: project.map(str::to_owned),
         }
     }
 
     fn with_link<T>(&self, f: impl FnOnce(&MemoryLink) -> Option<T>) -> Option<T> {
-        match MemoryLink::open_read(&self.data, &self.model) {
+        match MemoryLink::open_read_in(&self.data, &self.model, self.project.as_deref()) {
             Ok(Some(link)) => f(&link),
             _ => None,
         }
@@ -164,7 +168,7 @@ impl Recall for MemoryRecall {
 
     fn candidates(&self, query: &str, limit: usize) -> Vec<Candidate> {
         self.with_link(|link| {
-            let (rows, abstained) = link.search(query, limit).ok()?;
+            let (rows, abstained) = link.search_all(query, limit).ok()?;
             if abstained {
                 return Some(Vec::new()); // the memory says nothing here is relevant
             }
@@ -234,15 +238,16 @@ pub fn preprompt(
     dirs: &Dirs,
     cfg: &JevCfg,
     entries: &Value,
-    toolhost_socket: &Path,
-    said_token: &str,
+    toolhost: &Toolhost,
     session: &str,
     run_dir: &Path,
+    project: Option<&str>,
 ) -> PrePrompt {
     let model = MemoryLink::model_dir(&dirs.home);
     let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(
         &dirs.data,
         Some(model.as_path()).filter(|m| m.is_dir()),
+        project,
     ));
     let vault = gateway_socket(dirs)
         .ok()
@@ -253,8 +258,8 @@ pub fn preprompt(
         Some(v) => v.scrub(t).map_err(|e| e.to_string()),
         None => Err("sin baúl".into()),
     });
-    let (socket, id) = (toolhost_socket.to_path_buf(), session.to_owned());
-    let (socket2, id2, token) = (socket.clone(), id.clone(), said_token.to_owned());
+    let (socket, id) = (toolhost.socket.clone(), session.to_owned());
+    let (socket2, id2, token) = (socket.clone(), id.clone(), toolhost.said_token.clone());
     let log_file = run_dir.join("memory-inject.jsonl");
     PrePrompt::new(
         client(dirs, cfg),

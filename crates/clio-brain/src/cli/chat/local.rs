@@ -153,6 +153,15 @@ impl SessionSource for LocalSource {
         };
         let run_dir = d.runs.join(&id);
         let work = self.copy_of(&id);
+        // The project of the session, for the memory: decided here from the person's own folder
+        // (the copy has no history), never by the model.
+        let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))
+            .ok()
+            .and_then(|m| clio_brain::project::detect(Path::new(&m.workspace)));
+        let mut service_env = jev::toolhost_env(d, &cfg.jev);
+        if let Some(p) = &project {
+            service_env.push(("CLIO_MEMORY_PROJECT".into(), p.clone()));
+        }
         // 2. the toolhost
         let exe = std::env::current_exe().map_err(text)?;
         // The service has Pi's HOME, so it cannot find the vector model by itself.
@@ -170,9 +179,9 @@ impl SessionSource for LocalSource {
             &key,
             ToolhostOpts {
                 memory,
-                // Jev, if the person turned it on: the service that handles the model's proposals
-                // asks it what to do with each (the key stays in the vault).
-                extra_env: &jev::toolhost_env(d, &cfg.jev),
+                // Jev, if the person turned it on (the service that handles the model's proposals
+                // asks it what to do with each; the key stays in the vault), and the project.
+                extra_env: &service_env,
             },
         )?;
         // 3. Pi
@@ -201,10 +210,10 @@ impl SessionSource for LocalSource {
             d,
             &cfg.jev,
             &entries,
-            &toolhost.socket,
-            &toolhost.said_token,
+            &toolhost,
             &pi.session_id,
             &run_dir,
+            project.as_deref(),
         );
         // A session that was marked before (the service leaves the mark in the run folder) is
         // marked again in the new service: the mark does not go away by closing the chat.

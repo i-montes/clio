@@ -44,7 +44,7 @@ fn use_when(src: &str) -> Vec<(String, String)> {
 fn every_tool_the_guard_registers_has_a_use_when_in_the_same_order() {
     let src = guard();
     let names = tool_names(&src);
-    assert_eq!(names.len(), 12, "{names:?}");
+    assert_eq!(names.len(), 14, "{names:?}");
     let got: Vec<String> = use_when(&src).into_iter().map(|(n, _)| n).collect();
     assert_eq!(got, names);
 }

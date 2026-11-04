@@ -10,14 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clio_memory::{
-    Error, Judged, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, State,
+    Category, Error, Judged, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written,
+    State,
 };
 use clio_toolhost::{
-    Found, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed, Saved,
+    Found, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind, Proposed, Saved,
 };
 
 use crate::memory_judge::{Call, MemoryJudge, Neighbor, Request};
-use crate::memory_link::{EmbedModel, MemoryLink, Res, explain, kind_label};
+use crate::memory_link::{Draft, EmbedModel, MemoryLink, Place, Res, explain, kind_label};
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
@@ -37,6 +38,9 @@ pub struct LinkPort {
     link: Mutex<Option<MemoryLink>>,
     /// Jev, who decides what becomes of a proposal. Without it every proposal waits for the person.
     judge: Option<Arc<MemoryJudge>>,
+    /// The project of the session, decided by the brain: its scope is read with the person's and
+    /// the lessons', and what belongs to it is written there.
+    project: Option<String>,
 }
 
 impl LinkPort {
@@ -47,7 +51,15 @@ impl LinkPort {
             model: EmbedModel::new(model_dir.map(Path::to_path_buf)),
             link: Mutex::new(None),
             judge: None,
+            project: None,
         }
+    }
+
+    /// In a project (the brain's, never the model's).
+    #[must_use]
+    pub fn in_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
+        self
     }
 
     /// With a judge, a proposal is decided by it (and by the rules of the engine behind it).
@@ -61,7 +73,7 @@ impl LinkPort {
         // A panic in an earlier call leaves nothing half-done in a read-only link.
         let mut slot = self.link.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
-            match MemoryLink::open_read(&self.data, &self.model) {
+            match MemoryLink::open_read_in(&self.data, &self.model, self.project.as_deref()) {
                 Ok(Some(link)) => *slot = Some(link),
                 Ok(None) => return Err("la memoria no existe todavía".into()),
                 Err(why) => {
@@ -79,16 +91,18 @@ impl LinkPort {
 impl LinkPort {
     /// Opened for writing for this one call (it waits a few seconds for another writer).
     fn writer(&self) -> Result<MemoryLink, String> {
-        MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
-            eprintln!("clio-toolhost: memory: {why}");
-            "la memoria no se puede abrir para escribir ahora".to_owned()
-        })
+        MemoryLink::open_write_in(&self.data, &EmbedModel::none(), self.project.as_deref()).map_err(
+            |why| {
+                eprintln!("clio-toolhost: memory: {why}");
+                "la memoria no se puede abrir para escribir ahora".to_owned()
+            },
+        )
     }
 
     /// Reads without holding the writer: what Jev is asked about must not keep the person's own
     /// writes waiting.
     fn reader(&self) -> Result<MemoryLink, String> {
-        match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
+        match MemoryLink::open_read_in(&self.data, &EmbedModel::none(), self.project.as_deref()) {
             Ok(Some(link)) => Ok(link),
             _ => Err(NOT_READABLE.to_owned()),
         }
@@ -132,36 +146,59 @@ impl LinkPort {
 impl MemoryPort for LinkPort {
     fn propose(
         &self,
-        text: &str,
-        kind: ProposalKind,
+        draft: &ProposalDraft,
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        let kind = match kind {
-            ProposalKind::Semantic => MemoryType::Semantic,
-            ProposalKind::Procedural => MemoryType::Procedural,
+        let draft = Draft {
+            text: draft.text.clone(),
+            title: draft.title.clone(),
+            category: draft.category.as_deref().and_then(Category::parse),
+            kind: match draft.kind {
+                ProposalKind::Semantic => MemoryType::Semantic,
+                ProposalKind::Procedural => MemoryType::Procedural,
+            },
         };
-        // Jev is asked BEFORE the writer is taken: what it is asked about is read without holding
-        // the lock, so a slow answer never keeps the person's own writes waiting. The engine
-        // re-checks every memory it is told to replace once it holds the lock.
+        let (text, kind) = (draft.text.as_str(), draft.kind);
+        let has_project = self.project.is_some();
+        // Where it goes and what Jev makes of it are asked BEFORE the writer is taken: what Jev is
+        // asked about is read without holding the lock, so a slow answer never keeps the person's
+        // own writes waiting. The engine re-checks every memory it is told to replace once it
+        // holds the lock.
+        let stored = MemoryLink::agent_text(text);
+        let place = self
+            .judge
+            .as_ref()
+            .filter(|_| has_project)
+            .and_then(|j| {
+                j.place(
+                    &stored,
+                    draft.title.as_deref(),
+                    draft.category.map(Category::label),
+                )
+            })
+            .and_then(Place::parse)
+            .unwrap_or_else(|| Place::by_rule(draft.category, has_project));
         let verdict = self.judge.as_ref().map(|judge| {
-            let stored = MemoryLink::agent_text(text);
-            let neighbors: Vec<Neighbor> =
-                match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
-                    Ok(Some(link)) => link
-                        .search(&stored, 3)
-                        .map(|(rows, _)| {
-                            rows.into_iter()
-                                .map(|r| Neighbor {
-                                    id: r.id.0,
-                                    protected: link.is_protected(&r),
-                                    text: r.content,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
+            let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
+                &self.data,
+                &EmbedModel::none(),
+                self.project.as_deref(),
+            ) {
+                Ok(Some(link)) => link
+                    .search_in(place, &stored, 3)
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(|r| Neighbor {
+                                id: r.id.0,
+                                protected: link.is_protected(&r),
+                                text: r.content,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
             judge.decide(
                 &stored,
                 kind == MemoryType::Procedural,
@@ -171,11 +208,7 @@ impl MemoryPort for LinkPort {
             )
         });
         // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
-        let link = MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
-            // The detail names a path of the person's: the service's log, not the model.
-            eprintln!("clio-toolhost: memory: {why}");
-            "la memoria no se puede abrir para escribir ahora".to_owned()
-        })?;
+        let link = self.writer()?;
         if let Some(v) = verdict {
             let how = match v.call {
                 Call::Add => Some(Judged::Add),
@@ -192,7 +225,7 @@ impl MemoryPort for LinkPort {
                 Call::Review => None,
             };
             if let Some(how) = how {
-                match link.propose_judged_as_agent(text, kind, session, how, v.confidence) {
+                match link.propose_judged_draft(&draft, session, place, how, v.confidence) {
                     Ok(o) => {
                         let saved = match (o.kind, o.state) {
                             (OpKind::Noop, _) => Saved::Known,
@@ -223,7 +256,7 @@ impl MemoryPort for LinkPort {
                 }
             }
         }
-        link.propose_as_agent(text, kind, session)
+        link.propose_draft_as_agent(&draft, session, place)
             .map(|id| Proposed {
                 id: id.0,
                 saved: Saved::Waiting,
@@ -271,7 +304,7 @@ impl MemoryPort for LinkPort {
                 .map_err(|_| NOT_READABLE.to_owned())?;
             let by_judge = link.judge_actor().is_some_and(|j| j == op.actor);
             if !by_judge
-                || op.scope != link.scope()
+                || link.place_of(op.scope).is_none()
                 || !matches!(op.kind, OpKind::Add | OpKind::Update)
             {
                 return Err(NOT_READABLE.to_owned());
@@ -297,10 +330,10 @@ impl MemoryPort for LinkPort {
         self.with_link(|link| {
             // The engine's own message may repeat the query; the model gets a fixed one.
             let (rows, abstained) = link
-                .search(query, limit)
+                .search_all(query, limit)
                 .map_err(|_| "la búsqueda en la memoria falló".to_owned())?;
             Ok(Found {
-                items: rows.iter().map(item).collect(),
+                items: rows.iter().map(|r| item(link, r)).collect(),
                 abstained,
                 note: (!link.has_embeddings()).then(|| NO_VECTORS.to_owned()),
             })
@@ -311,16 +344,65 @@ impl MemoryPort for LinkPort {
         self.with_link(|link| {
             // `MemoryLink::get` already refuses another scope; its text is dropped with the rest.
             match link.get(MemoryId(id)) {
-                Ok(row) if row.state == State::Active && row.scope == link.scope() => {
-                    Ok(item(&row))
+                Ok(row) if row.state == State::Active && link.place_of(row.scope).is_some() => {
+                    Ok(item(link, &row))
                 }
                 _ => Err(NOT_READABLE.into()),
             }
         })
     }
+
+    fn timeline(&self, id: i64, before: usize, after: usize) -> Result<Vec<MemoryItem>, String> {
+        self.with_link(|link| {
+            match link.get(MemoryId(id)) {
+                Ok(row) if row.state == State::Active && link.place_of(row.scope).is_some() => {}
+                _ => return Err(NOT_READABLE.into()),
+            }
+            let rows = link
+                .engine()
+                .timeline(MemoryId(id), before, after)
+                .map_err(|_| NOT_READABLE.to_owned())?;
+            Ok(rows
+                .iter()
+                .filter(|r| link.place_of(r.scope).is_some())
+                .map(|r| item(link, r))
+                .collect())
+        })
+    }
+
+    /// The last session's summary of the project (or the person's place), what is pinned in any
+    /// place, and the most recent of the project: what a model needs after a compaction.
+    fn context(&self) -> Result<Vec<MemoryItem>, String> {
+        self.with_link(|link| {
+            let engine = link.engine();
+            let home = link
+                .scope_of(Place::Project)
+                .unwrap_or_else(|| link.scope());
+            let recent = engine
+                .recent(home, 30)
+                .map_err(|_| "la memoria no se pudo leer".to_owned())?;
+            let mut out: Vec<MemoryRow> = Vec::new();
+            if let Some(summary) = recent.iter().find(|r| r.kind == MemoryType::Episodic) {
+                out.push(summary.clone());
+            }
+            for scope in link.reading_scopes() {
+                for r in engine.pinned(scope).unwrap_or_default() {
+                    if !out.iter().any(|o| o.id == r.id) {
+                        out.push(r);
+                    }
+                }
+            }
+            for r in recent.into_iter().take(8) {
+                if !out.iter().any(|o| o.id == r.id) {
+                    out.push(r);
+                }
+            }
+            Ok(out.iter().map(|r| item(link, r)).collect())
+        })
+    }
 }
 
-fn item(row: &MemoryRow) -> MemoryItem {
+fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
     MemoryItem {
         id: row.id.0,
         kind: kind_label(row.kind).to_owned(),
@@ -331,6 +413,9 @@ fn item(row: &MemoryRow) -> MemoryItem {
         },
         date: civil_date(row.valid_from),
         text: row.content.clone(),
+        title: row.title.clone(),
+        category: row.category.map(|c| c.label().to_owned()),
+        place: link.place_label(row),
     }
 }
 
