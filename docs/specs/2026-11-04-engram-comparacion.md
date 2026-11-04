@@ -1,6 +1,6 @@
 # Clio frente a Engram, punto por punto
 
-Comparación hecha el 2026-11-04 contra `DOCS.md` y `README.md` de [Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram) (las 27 herramientas MCP y todos los subcomandos de la CLI, leídos completos), sobre las ramas `feat/memory-*` (PRs #29 a #39). «Persona» marca lo que en Clio solo hace la persona por decisión de seguridad (S-25, S-65): el modelo no puede borrar, fusionar sin permiso ni tocar lo que ella escribió. Cada fila nombra dónde está y qué lo prueba.
+Comparación hecha el 2026-11-04 contra `DOCS.md` (sus 27 encabezados `### mem_*`, comprobados literalmente con `grep` sobre el archivo descargado) y `README.md` de [Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram) (las 27 herramientas MCP y todos los subcomandos de la CLI, leídos completos), sobre las ramas `feat/memory-*` (PRs #29 a #39). «Persona» marca lo que en Clio solo hace la persona por decisión de seguridad (S-25, S-65): el modelo no puede borrar, fusionar sin permiso ni tocar lo que ella escribió. Cada fila nombra dónde está y qué lo prueba.
 
 ## Herramientas MCP de Engram
 
@@ -20,7 +20,7 @@ Comparación hecha el 2026-11-04 contra `DOCS.md` y `README.md` de [Gentleman-Pr
 | `mem_timeline` | `memory_timeline` | #30; `the_timeline_is_the_session_*` |
 | `mem_get_observation` (+ versiones) | `memory_get`; versiones: `clio memory history ID` (persona) | #38 |
 | `mem_session_summary` | `memory_session_summary` | #31 |
-| `mem_session_start` / `_end` / `_finalize` | El cerebro abre y cierra la sesión: pide el resumen al compactar y al cerrar, y el servicio solo deja guardarlo en el cierre | #31; `closing_a_session_*` |
+| `mem_session_start` / `mem_session_end` / `mem_session_finalize` | El cerebro abre y cierra la sesión: pide el resumen al compactar y al cerrar, y el servicio solo deja guardarlo en el cierre | #31; `closing_a_session_*` |
 | `mem_capture_passive` | No: lo cubren el resumen de sesión y las propuestas con su forma `Qué · Por qué · Dónde · Aprendido` | — |
 | `mem_merge_projects` | `clio memory projects merge DE EN` (persona): una operación `Move` del registro por memoria, deshacible con `revert` | #39; `a_person_moves_a_memory_*`, `the_person_merges_*` |
 | `mem_current_project` | `memory_current_project` (MCP) y `clio memory project` | #33, #35 |
