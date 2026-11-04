@@ -15,6 +15,8 @@ Clio es un agente autónomo y la memoria está hecha para agentes autónomos: la
 5. **Repositorio aparte y público:** `github.com/i-montes/clio-memory`, con su README, su diagrama de la estructura de clio-memory y su licencia (MIT o Apache-2.0, como Clio).
 6. **Una sola memoria compartida:** Claude Code y Clio usan el mismo archivo; lo que uno aprende lo sabe el otro.
 7. **El riesgo se acepta** (lo hostil que el agente lea y guarde queda activo) y se compensa con **instrucciones al modelo**: el MCP trae una skill que hace de clio-memory la memoria principal de Claude Code y explica sus medidas de seguridad.
+8. **La memoria es global** (decidido después de la entrega 1): toda sesión lee todos los proyectos; el proyecto es una marca del recuerdo (sale primero el de la sesión), no un muro. Lo nuevo se guarda en el proyecto de la sesión, y corregir un recuerdo de otro proyecto lo corrige en su proyecto.
+9. **Leer los recuerdos del propio agente sigue contaminando la sesión**, como hasta ahora (decidido después de la entrega 1).
 
 ## Objetivos
 

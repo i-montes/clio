@@ -1000,10 +1000,10 @@ fn titled(text: &str, title: &str, category: &str) -> clio_toolhost::ProposalDra
 }
 
 // Without Jev the rule decides: a preference is the person's, an error is a lesson, a decision is
-// the project's. A lesson is seen from another project, marked with where it was learned; the
-// project's own memories are not.
+// the project's. The memory is global: every session reads every place, each marked (a lesson with
+// where it was learned, another project's memory with its name).
 #[test]
-fn memories_go_to_their_place_and_lessons_are_seen_from_other_projects() {
+fn memories_go_to_their_place_and_every_session_reads_them_all() {
     let w = world();
     let alfa = in_project(&w, "alfa");
     let s = Judging::default();
@@ -1042,15 +1042,23 @@ fn memories_go_to_their_place_and_lessons_are_seen_from_other_projects() {
         seen("respuestas cortas"),
         [("Respuestas cortas".to_owned(), "personal".to_owned())]
     );
-    assert!(
-        seen("postgres").is_empty(),
-        "another project's decision is not seen"
+    // The memory is global: another project's decision is seen too, marked with its project.
+    assert_eq!(
+        seen("postgres"),
+        [(
+            "Base de datos de alfa".to_owned(),
+            "proyecto alfa".to_owned()
+        )]
     );
     let own = alfa.search("postgres", 8).unwrap();
     assert_eq!(own.items[0].place, "proyecto");
     assert_eq!(own.items[0].category.as_deref(), Some("decision"));
-    // And another project's memory cannot be read by id either.
-    assert!(beta.get(own.items[0].id).is_err());
+    // And read by id; with no project at all, too.
+    assert_eq!(beta.get(own.items[0].id).unwrap().place, "proyecto alfa");
+    assert_eq!(
+        port(&w).get(own.items[0].id).unwrap().place,
+        "proyecto alfa"
+    );
 }
 
 // With Jev, it says where a memory goes (a lesson the rule would have kept in the project).
@@ -1164,7 +1172,7 @@ fn the_person_sees_and_controls_what_was_saved_in_any_project() {
     .unwrap();
     assert_eq!(d.saved, Saved::Active);
     let id = clio_memory::MemoryId(d.id);
-    assert!(open(&w).get(id).is_err(), "not the agent's loop's to read");
+    assert!(open(&w).get(id).is_ok(), "the memory is global");
     let person = open(&w).for_person();
     let row = person.get(id).unwrap();
     assert_eq!(person.place_label(&row), "proyecto alfa");
@@ -1317,10 +1325,10 @@ fn a_new_memory_next_to_one_it_does_not_replace_is_related_by_jev() {
     assert!(notes(d.id).is_empty());
 }
 
-// A relation with a memory of another project is kept, but a session of this project is never
-// told of it: the line names only what the session can read.
+// A relation with a memory of another project is named too: the memory is global, and the line
+// names only what the session can read (and that is still active).
 #[test]
-fn a_relation_with_another_projects_memory_is_not_named() {
+fn a_relation_with_another_projects_memory_is_named_with_it() {
     let w = world();
     let alfa = in_project(&w, "alfa");
     let beta = in_project(&w, "beta");
@@ -1347,8 +1355,15 @@ fn a_relation_with_another_projects_memory_is_not_named() {
             0.9,
         )
         .unwrap();
-    assert!(beta.get(b.id).unwrap().notes.is_empty());
-    assert!(alfa.get(a.id).unwrap().notes.is_empty());
+    // The memory is global: the other project's memory is readable, so the note names it.
+    assert_eq!(
+        beta.get(b.id).unwrap().notes,
+        [format!("contradice a m{}", a.id)]
+    );
+    assert_eq!(
+        alfa.get(a.id).unwrap().notes,
+        [format!("contradice a m{}", b.id)]
+    );
 }
 
 // With nothing next to it, or Jev unsure of the relation, no relation is noted (and Jev was asked).
@@ -1532,7 +1547,7 @@ fn an_update_replaces_one_memory_and_keeps_what_was_left_out() {
         .unwrap();
     assert_eq!(u.saved, Saved::Replaced);
     assert_eq!(p.get(u.id).unwrap().kind, "procedimental");
-    // Another project's memory cannot be reached.
+    // Another project's memory is corrected in its own project (the memory is global).
     let alfa = in_project(&w, "alfa");
     let theirs = MemoryPort::propose(
         &alfa,
@@ -1542,24 +1557,25 @@ fn an_update_replaces_one_memory_and_keeps_what_was_left_out() {
     )
     .unwrap();
     let beta = in_project(&w, "beta");
-    let e = beta
+    let fixed = beta
         .update(
             theirs.id,
-            &draft("usa Valkey", ProposalKind::Semantic),
+            &draft("Qué: usa Valkey en vez de Redis", ProposalKind::Semantic),
             "s",
             &judging(false),
         )
-        .unwrap_err();
-    assert_eq!(
-        e,
+        .unwrap();
+    assert_eq!(beta.get(fixed.id).unwrap().place, "proyecto alfa");
+    assert!(
         beta.update(
             999_999,
             &draft("x", ProposalKind::Semantic),
             "s",
             &judging(false)
         )
-        .unwrap_err()
+        .is_err()
     );
+    let theirs = fixed;
     // Title and category stay when the model leaves them out.
     let u = alfa
         .update(

@@ -280,7 +280,7 @@ pub struct MemoryLink {
     /// The project of the session and its scope, when there is one (and, reading, when it exists).
     project: Option<(String, Option<ScopeId>)>,
     lessons: Option<ScopeId>,
-    /// The person's view (`for_person`): every other project's scope and its name.
+    /// Every other project's scope and its name: the memory is global, a session reads them too.
     others: Vec<(ScopeId, String)>,
     person_view: bool,
     actors: Actors,
@@ -460,7 +460,8 @@ impl MemoryLink {
             writable: true,
             embeddings,
             embed_error,
-        })
+        }
+        .with_others())
     }
 
     /// Opens for reading when the file exists and was set up; `None` otherwise. Never creates or
@@ -507,23 +508,26 @@ impl MemoryLink {
         else {
             return Ok(None);
         };
-        Ok(Some(Self {
-            engine,
-            scope,
-            project,
-            lessons,
-            others: Vec::new(),
-            person_view: false,
-            actors: Actors {
-                persona,
-                agente,
-                sesion,
-                importador,
-            },
-            writable: false,
-            embeddings,
-            embed_error,
-        }))
+        Ok(Some(
+            Self {
+                engine,
+                scope,
+                project,
+                lessons,
+                others: Vec::new(),
+                person_view: false,
+                actors: Actors {
+                    persona,
+                    agente,
+                    sesion,
+                    importador,
+                },
+                writable: false,
+                embeddings,
+                embed_error,
+            }
+            .with_others(),
+        ))
     }
 
     pub fn engine(&self) -> &Engine {
@@ -799,6 +803,8 @@ impl MemoryLink {
             .place_of(row.scope)
             .ok_or("esa memoria no es de este lugar")?;
         let mut p = self.agent_proposal(draft, session, place, tainted);
+        // In the old one's own scope (another project's, too) and of its kind.
+        p.scope = row.scope;
         p.kind = row.kind;
         self.engine.replace(old, p).map_err(|e| explain(&e))
     }
@@ -1041,11 +1047,16 @@ impl MemoryLink {
         }
     }
 
-    /// The person's own view (the CLI and the TUI): every place, every project's memories, so
-    /// what the agent saved in a project can be seen, accepted, archived or purged. Never for what
-    /// a model reads.
+    /// The person's own view (the CLI and the TUI): their commands act on every place too.
     #[must_use]
     pub fn for_person(mut self) -> Self {
+        self.person_view = true;
+        self
+    }
+
+    /// Every other project, read after the session's own places (the memory is global; the
+    /// project is a mark).
+    fn with_others(mut self) -> Self {
         let own = self.scope_of(Place::Project);
         self.others = self
             .engine
@@ -1058,7 +1069,6 @@ impl MemoryLink {
                 Some((s.id, name))
             })
             .collect();
-        self.person_view = true;
         self
     }
 
@@ -1067,9 +1077,7 @@ impl MemoryLink {
         if !self.person_view {
             return vec![self.scope];
         }
-        let mut v = self.reading_scopes();
-        v.extend(self.others.iter().map(|(id, _)| *id));
-        v
+        self.reading_scopes()
     }
 
     /// Each place this view knows, with what it holds: `(label, active, quarantine, archived)`,
@@ -1287,11 +1295,13 @@ impl MemoryLink {
         }
     }
 
-    /// What a session reads: its project first, then the person's, then the lessons.
+    /// What a session reads: its project first, then the person's, the lessons and every other
+    /// project (the memory is global).
     pub fn reading_scopes(&self) -> Vec<ScopeId> {
         [Place::Project, Place::Personal, Place::Lessons]
             .into_iter()
             .filter_map(|p| self.scope_of(p))
+            .chain(self.others.iter().map(|(id, _)| *id))
             .collect()
     }
 
