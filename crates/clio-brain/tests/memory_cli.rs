@@ -687,3 +687,117 @@ fn the_person_pins_and_unpins_a_memory() {
     assert!(!e.try_clio(&["memory", "pin"]).status.success());
     assert!(!e.try_clio(&["memory", "pin", "99"]).status.success());
 }
+
+// The person's commands see every place: what each holds, what is past its review cycle (and
+// starts it over when looked at again), the timeline of a session, and a memory with its place.
+#[test]
+fn projects_review_due_reviewed_and_timeline() {
+    use clio_memory::{Category, Engine, FixedClock, MemoryType, OpenMode, Origin, Proposal};
+    use clio_toolhost::MemoryPort;
+    let e = Env::new(true);
+    let data = e.home().join(".local/share/clio");
+    e.clio(&["memory", "remember", "Marta usa Linux"]);
+    let (person, scope) = {
+        let l = clio_brain::memory_link::MemoryLink::open_write(
+            &data,
+            &clio_brain::memory_link::EmbedModel::none(),
+        )
+        .unwrap();
+        (l.actors().persona, l.scope())
+    };
+    // A configuration the person wrote 200 days ago: past its 90 days.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let old = {
+        let engine = Engine::open(
+            &data.join("memory.db"),
+            OpenMode::ReadWrite,
+            std::sync::Arc::new(FixedClock::new(now - 200 * 86_400)),
+        )
+        .unwrap();
+        engine
+            .propose(Proposal {
+                scope,
+                actor: person,
+                kind: MemoryType::Semantic,
+                content: "el servidor escucha en el puerto 8080".into(),
+                topic_key: None,
+                origin: Origin::User,
+                session: None,
+                episode: None,
+                source: Some("persona".into()),
+                valid_from: None,
+                valid_to: None,
+                title: Some("Puerto".into()),
+                category: Some(Category::Config),
+            })
+            .unwrap()
+            .memory
+    };
+    // Two proposals of the agent in project alfa, in one session.
+    let alfa = clio_brain::memory_port::LinkPort::new(&data, None).in_project(Some("alfa".into()));
+    let draft = |t: &str| clio_toolhost::ProposalDraft {
+        text: t.into(),
+        title: Some(t.into()),
+        category: Some("decision".into()),
+        kind: clio_toolhost::ProposalKind::Semantic,
+    };
+    let s = clio_toolhost::Judging::default();
+    let a = alfa.propose(&draft("usa Postgres"), "s1", &s).unwrap().id;
+    let b = alfa.propose(&draft("usa Redis"), "s1", &s).unwrap().id;
+    drop(alfa);
+    let projects: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();
+    assert_eq!(
+        projects,
+        json!([
+            {"place": "personal", "active": 2, "quarantine": 0, "archived": 0},
+            {"place": "lecciones", "active": 0, "quarantine": 0, "archived": 0},
+            {"place": "proyecto alfa", "active": 0, "quarantine": 2, "archived": 0},
+        ]),
+        "{projects:#}"
+    );
+    let due: Value = serde_json::from_str(&e.clio(&["memory", "review-due", "--json"])).unwrap();
+    assert_eq!(due.as_array().unwrap().len(), 1, "{due:#}");
+    assert_eq!(due[0]["id"], json!(old.0));
+    assert!(
+        e.clio(&["memory", "show", &old.0.to_string()])
+            .contains("revisar:")
+    );
+    e.clio(&["memory", "reviewed", &old.0.to_string()]);
+    let due: Value = serde_json::from_str(&e.clio(&["memory", "review-due", "--json"])).unwrap();
+    assert!(due.as_array().unwrap().is_empty(), "{due:#}");
+    for id in [a, b] {
+        e.clio(&["memory", "promote", &id.to_string(), "--yes"]);
+    }
+    let t: Value =
+        serde_json::from_str(&e.clio(&["memory", "timeline", &b.to_string(), "--json"])).unwrap();
+    let ids: Vec<i64> = t
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [a, b]);
+    let shown: Value =
+        serde_json::from_str(&e.clio(&["memory", "show", &a.to_string(), "--json"])).unwrap();
+    assert_eq!(shown["place"], "proyecto alfa");
+    assert_eq!(shown["category"], "decision");
+    assert_eq!(shown["pinned"], false);
+    // The doctor counts them and says what waits for the person.
+    // (Its exit code depends on the machine: a test HOME has no vault and no model key.)
+    let doc: Value = serde_json::from_slice(&e.try_clio(&["doctor", "--json"]).stdout).unwrap();
+    let lines: Vec<String> = doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["message"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "memoria: 4 recuerdos activos; 1 proyecto, lo personal y las lecciones"),
+        "{lines:#?}"
+    );
+}

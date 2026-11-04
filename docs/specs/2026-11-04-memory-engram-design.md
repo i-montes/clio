@@ -77,6 +77,8 @@ La pantalla de memoria de la TUI gana: tablero (cifras por ámbito y estado), b�
 
 Migración probada desde una base del esquema 1; doctor con las comprobaciones nuevas; medición de búsqueda con 10 000 memorias; documentación al día; reglas nuevas en `docs/security.md` con su cobertura.
 
+*Decisiones mías al construir la etapa 6:* la CLI gana `projects`, `review-due`, `reviewed`, `timeline` y `pin`/`unpin`, y `show` dice sitio, título, categoría, fijado, plazo y relaciones; la pantalla de memoria de la TUI no gana un tablero aparte: cada fila dice su sitio y su título y la línea de estado cuenta lo que hay por revisar (el tablero por sitio es `clio memory projects`). El doctor dice cuántos recuerdos activos hay, en cuántos proyectos, cuántos esperan revisión y cuántos pasaron su plazo. Medición con 10 000 memorias: ver «At scale» en `crates/clio-memory/README.md`.
+
 ## Qué no se hace (por decisión o por diseño)
 
 - Sincronizar entre máquinas, nube, Obsidian.

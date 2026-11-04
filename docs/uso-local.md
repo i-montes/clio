@@ -355,7 +355,15 @@ clio memory archive <id> [--yes]            lo archiva: ya no se recuerda (pregu
 clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
 clio memory export [archivo]                JSON Lines sin cifrar; con archivo, 0600 y nunca sobreescribe
 clio memory stats [--json]                  conteos y tamaño
+clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
+clio memory review-due [--json]             lo que pasó su plazo de revisión (sigue activo)
+clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
+clio memory timeline <id> [--json]          lo que se guardó antes y después, en la misma sesión
+clio memory pin|unpin <id>                  fija un recuerdo (sale primero en el contexto) o lo suelta
+clio memory mcp                             servidor MCP para otros agentes (leer y proponer)
 ```
+
+`clio memory show` dice además el sitio, el título, la categoría, si está fijado, si pasó su plazo de revisión y cómo se relaciona con otros recuerdos. **Plazos de revisión:** `config` 90 días, `discovery` 120, `decision` y `architecture` 180; `preference`, `bugfix`, `pattern` y `learning` no caducan. Pasado el plazo el recuerdo sigue activo; `clio doctor` y la pantalla de memoria dicen cuántos hay, y `clio memory reviewed ID` reinicia el plazo (o `archive` si ya no es cierto). En la pantalla de memoria cada fila dice su sitio y su título.
 
 **La pantalla Memoria** (`m` desde el inicio): lo pendiente de revisión arriba y lo reciente abajo, sin recuadros, con la barra de uso y contexto de siempre en la última línea. `/` busca (filtra la lista), `Enter` muestra el recuerdo completo con su origen, `p` aprueba y `a` archiva (los dos preguntan antes y solo `y` sigue; si el texto del recuerdo no cabe en el recuadro, lo dice y te manda a `clio memory show`, para que no apruebes sin haberlo leído entero), `r` refresca, `?` ayuda, `Esc` vuelve.
 
