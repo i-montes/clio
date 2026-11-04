@@ -796,6 +796,13 @@ impl ToolHost {
         }
     }
 
+    /// The person's words in `session` were used for a change: a next change needs new ones.
+    pub(crate) fn forget_said(&self, session: &str) {
+        if let Some(t) = lock(&self.sessions).get_mut(session) {
+            t.said.clear();
+        }
+    }
+
     /// The person's last words in `session`, oldest first.
     pub(crate) fn person_said(&self, session: &str) -> Vec<String> {
         lock(&self.sessions)

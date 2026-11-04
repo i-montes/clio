@@ -104,20 +104,27 @@ impl LinkPort {
         id: i64,
         judging: &Judging,
         what: Request,
+        allowed: impl Fn(&MemoryRow) -> bool,
         act: impl FnOnce(&MemoryLink, &MemoryRow) -> Res<()>,
     ) -> Result<(), String> {
         let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        // Checked on the read-only view BEFORE Jev is asked: a memory this change cannot reach is
+        // the same answer as one that does not exist, and its text never leaves.
         let seen = self
             .reader()?
             .get(MemoryId(id))
-            .map_err(|_| NOT_READABLE.to_owned())?;
+            .ok()
+            .filter(|r| allowed(r))
+            .ok_or_else(|| NOT_READABLE.to_owned())?;
         if !judge.confirm(what, &seen.content, &judging.person_said, judging.tainted) {
             return Err(NOT_CONFIRMED.to_owned());
         }
         let link = self.writer()?;
         let row = link
             .get(MemoryId(id))
-            .map_err(|_| NOT_READABLE.to_owned())?;
+            .ok()
+            .filter(|r| allowed(r))
+            .ok_or_else(|| NOT_READABLE.to_owned())?;
         act(&link, &row)
     }
 }
@@ -225,31 +232,50 @@ impl MemoryPort for LinkPort {
     }
 
     fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        self.change(id, judging, Request::Forget, |link, row| {
-            if row.state != State::Active {
-                return Err(NOT_READABLE.to_owned());
-            }
-            link.archive(row.id)
-        })
+        self.change(
+            id,
+            judging,
+            Request::Forget,
+            |r| r.state == State::Active,
+            |link, row| link.archive(row.id),
+        )
     }
 
+    /// Only what the model proposed in THIS session and the person could hear about, and never a
+    /// procedure: the model cannot read the quarantine, so it could not show the person anything
+    /// else, and a procedure acts as an instruction later (S-26). Those go through `clio memory`.
     fn promote(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        self.change(id, judging, Request::Promote, |link, row| {
-            if row.state != State::Quarantine {
-                return Err(NOT_READABLE.to_owned());
-            }
-            link.promote(row.id)
-        })
+        let here = MemoryLink::agent_session(&judging.session);
+        self.change(
+            id,
+            judging,
+            Request::Promote,
+            |r| {
+                r.state == State::Quarantine
+                    && r.kind != MemoryType::Procedural
+                    && r.session.as_deref() == Some(here.as_str())
+            },
+            |link, row| link.promote(row.id),
+        )
     }
 
     fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
         let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        // Read-only, and BEFORE Jev: only a change the judge made (an add or a replacement) in
+        // this scope; anything else is the same answer as a change that does not exist.
         let content = {
             let link = self.reader()?;
             let op = link
                 .engine()
                 .operation(OpId(change))
                 .map_err(|_| NOT_READABLE.to_owned())?;
+            let by_judge = link.judge_actor().is_some_and(|j| j == op.actor);
+            if !by_judge
+                || op.scope != link.scope()
+                || !matches!(op.kind, OpKind::Add | OpKind::Update)
+            {
+                return Err(NOT_READABLE.to_owned());
+            }
             let memory = op.memory.ok_or_else(|| NOT_READABLE.to_owned())?;
             link.get(memory)
                 .map_err(|_| NOT_READABLE.to_owned())?

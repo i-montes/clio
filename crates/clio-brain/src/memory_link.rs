@@ -649,13 +649,28 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// The session of an agent's proposal as it is stored.
+    pub fn agent_session(session: &str) -> String {
+        clip(&clean_text(session), 200)
+    }
+
+    /// The judge's actor, if it was ever registered (read-only: it never registers it).
+    pub fn judge_actor(&self) -> Option<ActorId> {
+        self.engine
+            .actors()
+            .ok()?
+            .into_iter()
+            .find(|a| a.kind == ActorKind::Judge)
+            .map(|a| a.id)
+    }
+
     /// The text of an agent's proposal as it is stored: clean, one short line.
     pub fn agent_text(text: &str) -> String {
         clip(&clean_text(text), 400)
     }
 
     fn agent_proposal(&self, text: &str, kind: MemoryType, session: &str) -> Proposal {
-        let session = clip(&clean_text(session), 200);
+        let session = Self::agent_session(session);
         Proposal {
             scope: self.scope,
             actor: self.actors.agente,

@@ -153,6 +153,8 @@ pub struct Proposed {
 pub struct Judging {
     pub tainted: bool,
     pub person_said: Vec<String>,
+    /// The Pi session the call comes from.
+    pub session: String,
 }
 
 /// What the tool host needs from the memory: active memories of the person's scope to read, and
@@ -298,6 +300,8 @@ impl Budget {
 #[derive(Default)]
 struct Facts {
     ids: Vec<i64>,
+    /// The change (operation) an undo was about: not a memory id.
+    change: Option<i64>,
     /// This call marked the session (a memory that is not the person's).
     marked: bool,
     query_hash: Option<String>,
@@ -334,13 +338,22 @@ impl ToolHost {
         port: &Arc<dyn MemoryPort>,
         f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
+        self.ask_port_for(port, f, self.memory_timeout)
+    }
+
+    fn ask_port_for<T: Send + 'static>(
+        &self,
+        port: &Arc<dyn MemoryPort>,
+        f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,
+        timeout: Duration,
+    ) -> Result<T, String> {
         let (tx, rx) = mpsc::channel();
         let port = Arc::clone(port);
         std::thread::spawn(move || {
             let ran = catch_unwind(AssertUnwindSafe(|| f(port.as_ref())));
             let _ = tx.send(ran.unwrap_or_else(|_| Err("the memory tool panicked".into())));
         });
-        rx.recv_timeout(self.memory_timeout)
+        rx.recv_timeout(timeout)
             .unwrap_or_else(|_| Err("the memory did not answer in time".into()))
     }
 
@@ -441,17 +454,30 @@ impl ToolHost {
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
             person_said: self.person_said(&req.session),
+            session: req.session.clone(),
         };
         let tool = req.tool.clone();
-        let done = self.ask_port(&port, move |p| match tool.as_str() {
-            "memory_forget" => p.forget(n, &judging),
-            "memory_promote" => p.promote(n, &judging),
-            _ => p.undo(n, &judging),
-        });
+        // Longer than a read: Jev, the vault and the writer may all take their time, and a change
+        // reported as failed must not happen afterwards in the background.
+        let done = self.ask_port_for(
+            &port,
+            move |p| match tool.as_str() {
+                "memory_forget" => p.forget(n, &judging),
+                "memory_promote" => p.promote(n, &judging),
+                _ => p.undo(n, &judging),
+            },
+            self.memory_timeout * 3,
+        );
         let mut facts = Facts::default();
         let resp = match done {
             Ok(()) => {
-                facts.ids.push(n);
+                // One request of the person is one change: the next one needs new words.
+                self.forget_said(&req.session);
+                if req.tool == "memory_revert" {
+                    facts.change = Some(n);
+                } else {
+                    facts.ids.push(n);
+                }
                 let content = match req.tool.as_str() {
                     "memory_forget" => {
                         "forgotten: it is archived, not erased; the person can restore it"
@@ -554,6 +580,7 @@ impl ToolHost {
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
             person_said: self.person_said(&req.session),
+            session: req.session.clone(),
         };
         match self.ask_port(&port, move |p| p.propose(&text, kind, &session, &judging)) {
             Ok(done) => {
@@ -572,6 +599,10 @@ impl ToolHost {
                 };
                 // The change number is only for undoing, if the person asks: `memory_revert`.
                 let content = match done.change {
+                    _ if done.saved == Saved::Waiting => format!(
+                        "proposed (m{}): it waits for the person's review and is not memory until they accept it",
+                        done.id
+                    ),
                     Some(c) if matches!(done.saved, Saved::Active | Saved::Replaced) => {
                         format!(
                             "{content} (change {c}: if the person asks you to undo it, use memory_revert with it)"
@@ -602,6 +633,7 @@ impl ToolHost {
             "tool": req.tool,
             "results": facts.ids.len(),
             "ids": facts.ids,
+            "change": facts.change,
             "bytes": bytes,
             "tainted": facts.marked,
             "query_hash": facts.query_hash,

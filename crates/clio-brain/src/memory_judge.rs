@@ -216,7 +216,7 @@ impl MemoryJudge {
             ),
             Request::Promote => (
                 "pide_guardar",
-                "En `mensajes_de_la_persona`, la persona pide aceptar o guardar exactamente la memoria `memoria`.",
+                "En `mensajes_de_la_persona`, la persona pide aceptar o guardar exactamente la memoria `memoria` (la escribió el agente, no ella).",
             ),
             Request::Undo => (
                 "pide_deshacer",

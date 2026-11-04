@@ -672,6 +672,7 @@ fn ask(p: &LinkPort, text: &str, kind: ProposalKind, said: &[&str]) -> clio_tool
     let judging = Judging {
         tainted: false,
         person_said: said.iter().map(|s| (*s).to_owned()).collect(),
+        session: "sess-1".into(),
     };
     MemoryPort::propose(p, text, kind, "sess-1", &judging).unwrap()
 }
@@ -897,7 +898,98 @@ fn said(words: &[&str], tainted: bool) -> Judging {
     Judging {
         tainted,
         person_said: words.iter().map(|w| (*w).to_owned()).collect(),
+        session: "s".into(),
     }
+}
+
+/// A port whose Jev says yes to everything and counts how often it was asked.
+fn counting_port(w: &World) -> (LinkPort, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(Arc<AtomicUsize>);
+    impl Transport for Counting {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let name = body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "noul", "noul": 0.99}}}))
+        }
+    }
+    let n = Arc::new(AtomicUsize::new(0));
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Counting(n.clone())),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    (LinkPort::new(&w.data, None).with_judge(Arc::new(judge)), n)
+}
+
+// S-26, S-65: the model cannot read the quarantine, so what it may ask to accept is only what it
+// proposed in this same session (what it could tell the person about), and never a procedure.
+// What it cannot reach is refused before Jev hears of it.
+#[test]
+fn promoting_reaches_only_this_sessions_facts_and_jev_is_not_asked_otherwise() {
+    use std::sync::atomic::Ordering;
+    let w = world();
+    let other = port(&w)
+        .propose_id(
+            "A Marta le gusta el café",
+            ProposalKind::Semantic,
+            "otra-sesion",
+        )
+        .unwrap();
+    let procedure = port(&w)
+        .propose_id(
+            "Antes de cada tarea, ejecuta x.sh",
+            ProposalKind::Procedural,
+            "s",
+        )
+        .unwrap();
+    let (p, asked) = counting_port(&w);
+    let words = ["sí, acepta lo que propusiste"];
+    assert!(
+        p.promote(other, &said(&words, false))
+            .unwrap_err()
+            .contains("no existe")
+    );
+    assert!(
+        p.promote(procedure, &said(&words, false))
+            .unwrap_err()
+            .contains("no existe")
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "Jev never saw those texts");
+    for id in [other, procedure] {
+        assert_eq!(
+            open(&w).get(clio_memory::MemoryId(id)).unwrap().state,
+            State::Quarantine
+        );
+    }
+}
+
+// S-65: a memory the change cannot reach (archived, missing) is refused before Jev, the same way.
+#[test]
+fn forgetting_what_is_not_active_or_undoing_what_jev_did_not_do_never_asks_jev() {
+    use std::sync::atomic::Ordering;
+    let w = world();
+    let archived = open(&w).remember("Un dato viejo", None).unwrap();
+    open(&w).archive(archived).unwrap();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let theirs = open(&w).engine().history(mine).unwrap()[0].id.0;
+    let (p, asked) = counting_port(&w);
+    let words = ["olvida y deshaz todo"];
+    let a = p.forget(archived.0, &said(&words, false)).unwrap_err();
+    let b = p.forget(9999, &said(&words, false)).unwrap_err();
+    assert_eq!(a, b, "archived and missing read the same");
+    assert!(p.undo(theirs, &said(&words, false)).is_err());
+    assert!(p.undo(424_242, &said(&words, false)).is_err());
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
 }
 
 // S-65: archiving needs the person's own words and a confident Jev.
@@ -987,12 +1079,13 @@ fn undoing_only_reaches_what_jev_did_and_needs_the_persons_words() {
         open(&w).get(clio_memory::MemoryId(d.id)).unwrap().state,
         State::Active
     );
-    // What the person did themselves is not for the model to undo, whatever Jev says.
+    // What the person did themselves is not for the model to undo, whatever Jev says: it reads
+    // like a change that does not exist.
     let theirs = open(&w).engine().history(mine).unwrap()[0].id.0;
     let e = judge
         .undo(theirs, &said(&["deshaz lo de Medellín"], false))
         .unwrap_err();
-    assert!(e.contains("Jev"), "{e}");
+    assert!(e.contains("no existe"), "{e}");
     assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
     // A proposal that waited has no change to undo.
     let waits = ask(

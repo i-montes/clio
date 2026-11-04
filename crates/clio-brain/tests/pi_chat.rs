@@ -932,11 +932,23 @@ fn the_model_cannot_forget_what_the_person_did_not_ask_to_forget() {
     if can_run("jev_forget_refused", false).is_none() {
         return;
     }
-    let (w, _vault, _jev) = jev_world(FORGET, "4444");
+    let (w, _vault, jev) = jev_world(FORGET, "4444");
     let o = w
         .clio(&["run", "--harness", "pi", "hola, ¿cómo vas?"])
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(memory_state(&w), clio_memory::State::Active);
+    // It was Jev that said no, looking at what the person really said (reported by the brain).
+    let seen = jev.seen.lock().unwrap();
+    let asked: Vec<&Value> = seen
+        .iter()
+        .map(|(_, b)| b)
+        .filter(|b| b["questions"]["pide_olvidar"].is_object())
+        .collect();
+    assert_eq!(asked.len(), 1, "{seen:?}");
+    assert_eq!(
+        asked[0]["state"]["mensajes_de_la_persona"],
+        json!(["hola, ¿cómo vas?"])
+    );
 }
