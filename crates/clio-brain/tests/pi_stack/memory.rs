@@ -67,7 +67,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists fifteen tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists sixteen tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -97,7 +97,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        15,
+        16,
         "{:?}",
         declared_tools(&model)
     );
@@ -120,7 +120,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_fifteen_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_sixteen_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -639,7 +639,7 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        15,
+        16,
         "{:?}",
         declared_tools(&model)
     );
@@ -673,6 +673,7 @@ fn attack_60() -> Option<bool> {
         ("memory_forget", vec!["id"]),
         ("memory_promote", vec!["id"]),
         ("memory_revert", vec!["change"]),
+        ("memory_pin", vec!["id"]),
     ] {
         let schema = schema_of(&model, name);
         let mut keys: Vec<String> = schema["properties"]
@@ -715,6 +716,7 @@ fn attack_60() -> Option<bool> {
         ("memory_promote", json!({"id": person})),
         ("memory_forget", json!({"id": person})),
         ("memory_revert", json!({"change": 1})),
+        ("memory_pin", json!({"id": person})),
     ] {
         let r = ask_host(
             &host.socket,

@@ -29,7 +29,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 9] = [
+pub(crate) const MEMORY_OPS: [&str; 10] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
@@ -39,6 +39,7 @@ pub(crate) const MEMORY_OPS: [&str; 9] = [
     "memory_forget",
     "memory_promote",
     "memory_revert",
+    "memory_pin",
 ];
 
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
@@ -63,6 +64,7 @@ const CONTEXT_DESCRIPTION: &str =
 const FORGET_DESCRIPTION: &str =
     "Archive a memory because the person asked (it is not erased; Jev checks the person's words)";
 const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Jev checks the person's words)";
+const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context, because the person asked (Jev checks the person's words)";
 const REVERT_DESCRIPTION: &str =
     "Undo a change Jev made to the memory because the person asked (Jev checks the person's words)";
 
@@ -146,6 +148,8 @@ pub struct MemoryItem {
     pub category: Option<String>,
     /// Where it lives: `proyecto`, `personal`, `lección de X`; empty when it does not say.
     pub place: String,
+    /// How it stands to other memories, as Jev judged it or as it replaced one: `contradice a m12`.
+    pub notes: Vec<String>,
 }
 
 impl MemoryItem {
@@ -160,6 +164,7 @@ impl MemoryItem {
             title: None,
             category: None,
             place: String::new(),
+            notes: Vec::new(),
         }
     }
 }
@@ -255,6 +260,10 @@ pub trait MemoryPort: Send + Sync {
     fn promote(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
     }
+    /// Pins memory `id` (it comes first in the context), because the person asked.
+    fn pin(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
+        Err(NO_CHANGES.into())
+    }
     /// Undoes `change`, one the judge made, because the person asked.
     fn undo(&self, _change: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
@@ -315,6 +324,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_promote", PROMOTE_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
+        ("memory_pin", PIN_DESCRIPTION),
     ]
     .into_iter()
     .map(|(name, description)| ToolDecl {
@@ -498,7 +508,7 @@ impl ToolHost {
         }
         if matches!(
             req.tool.as_str(),
-            "memory_forget" | "memory_promote" | "memory_revert"
+            "memory_forget" | "memory_promote" | "memory_revert" | "memory_pin"
         ) {
             return self.change_call(req, args, out);
         }
@@ -581,6 +591,7 @@ impl ToolHost {
             move |p| match tool.as_str() {
                 "memory_forget" => p.forget(n, &judging),
                 "memory_promote" => p.promote(n, &judging),
+                "memory_pin" => p.pin(n, &judging),
                 _ => p.undo(n, &judging),
             },
             self.memory_timeout * 3,
@@ -600,6 +611,9 @@ impl ToolHost {
                         "forgotten: it is archived, not erased; the person can restore it"
                     }
                     "memory_promote" => "promoted: it is part of the person's memory now",
+                    "memory_pin" => {
+                        "pinned: it comes first in the context; the person can unpin it with `clio memory`"
+                    }
                     _ => "undone: the change was reverted",
                 };
                 Response {
@@ -753,7 +767,13 @@ impl ToolHost {
             person_said: self.person_said(&req.session),
             session: req.session.clone(),
         };
-        match self.ask_port(&port, move |p| p.propose(&draft, &session, &judging)) {
+        // Up to four questions to Jev (place, decision, the person's words, relation) and the
+        // writer: a proposal reported as failed must not be saved afterwards in the background.
+        match self.ask_port_for(
+            &port,
+            move |p| p.propose(&draft, &session, &judging),
+            self.memory_timeout * 3,
+        ) {
             Ok(done) => {
                 facts.ids.push(done.id);
                 let (content, how) = match done.saved {
@@ -950,6 +970,9 @@ impl ToolHost {
             }
             if !it.place.is_empty() {
                 head.push_str(&format!(" · {}", self.tidy(&it.place, 100)));
+            }
+            for n in it.notes.iter().take(4) {
+                head.push_str(&format!(" · {}", self.tidy(n, 60)));
             }
             head.push_str(": ");
             // The title goes before the text, in the same line, cleaned like it.

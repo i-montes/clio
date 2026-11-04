@@ -661,3 +661,29 @@ fn memory_purge_asks_first_deletes_for_good_and_leaves_only_a_tombstone() {
             .success()
     );
 }
+
+// The person pins and unpins from the command line: what the model pinned when asked is undone
+// here (a pin is not an operation of the log, so `revert` cannot).
+#[test]
+fn the_person_pins_and_unpins_a_memory() {
+    let e = Env::new(true);
+    e.clio(&["memory", "remember", "Marta prefiere respuestas cortas"]);
+    let pinned = |e: &Env| -> usize {
+        let link = clio_brain::memory_link::MemoryLink::open_read(
+            &e.home().join(".local/share/clio"),
+            &clio_brain::memory_link::EmbedModel::none(),
+        )
+        .unwrap()
+        .unwrap();
+        link.engine().pinned(link.scope()).unwrap().len()
+    };
+    assert!(e.clio(&["memory", "pin", "m1"]).contains("fijado: m1"));
+    assert_eq!(pinned(&e), 1);
+    assert!(
+        e.clio(&["memory", "unpin", "1"])
+            .contains("ya no está fijado: m1")
+    );
+    assert_eq!(pinned(&e), 0);
+    assert!(!e.try_clio(&["memory", "pin"]).status.success());
+    assert!(!e.try_clio(&["memory", "pin", "99"]).status.success());
+}

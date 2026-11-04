@@ -25,6 +25,7 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory purge <id> [--reason \"motivo\"] [--yes]
                                               borra el contenido PARA SIEMPRE (texto, vector, historial);
                                               deja una lápida sin contenido. No se puede deshacer
+  clio memory pin|unpin <id>                  fija un recuerdo (sale primero en el contexto) o lo suelta
   clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
   clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
   clio memory stats [--json]                  conteos y tamaño";
@@ -258,6 +259,23 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 link.archive(id)?;
             }
             println!("{verb}: m{}", id.0);
+        }
+        // Pinned: first in the context of its place. Undoes what the model pinned when asked.
+        "pin" | "unpin" => {
+            let rest = args.rest()?;
+            let [id] = rest.as_slice() else {
+                return Err(format!("falta el id: clio memory {sub} <id>"));
+            };
+            let id = id_of(id)?;
+            let link = open_write(dirs)?;
+            link.get(id)?;
+            if sub == "pin" {
+                link.pin(id)?;
+                println!("fijado: m{}", id.0);
+            } else {
+                link.unpin(id)?;
+                println!("ya no está fijado: m{}", id.0);
+            }
         }
         "feedback" => {
             let rest = args.rest()?;

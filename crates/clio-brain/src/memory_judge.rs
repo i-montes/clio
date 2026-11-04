@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use clio_jev::{Answer, Clean, Jev, Questions};
+use clio_memory::Relation;
 use serde_json::json;
 
 use crate::pi::preprompt::Scrub;
@@ -63,10 +64,14 @@ pub enum Request {
     Forget,
     Promote,
     Undo,
+    Pin,
 }
 
 /// Confidence needed to choose where a memory goes (a wrong place hides it, it does not harm).
 const PLACE: f64 = 0.6;
+
+/// Confidence needed to note how two memories stand (a note, not a change of either).
+const RELATION: f64 = 0.7;
 
 /// Confidence needed to do, on the model's say-so, what the person asked for: more than for a
 /// fact, because it acts on what the person has.
@@ -221,6 +226,10 @@ impl MemoryJudge {
                 "pide_guardar",
                 "En `mensajes_de_la_persona`, la persona pide aceptar o guardar exactamente la memoria `memoria` (la escribió el agente, no ella).",
             ),
+            Request::Pin => (
+                "pide_fijar",
+                "En `mensajes_de_la_persona`, la persona pide fijar, tener siempre presente o no olvidar exactamente la memoria `memoria`.",
+            ),
             Request::Undo => (
                 "pide_deshacer",
                 "En `mensajes_de_la_persona`, la persona pide deshacer que se haya guardado o cambiado exactamente la memoria `memoria`.",
@@ -245,6 +254,35 @@ impl MemoryJudge {
             .ok()
             .and_then(|a| a.noul(name))
             .is_some_and(|p| p as f32 >= need)
+    }
+
+    /// How a new memory stands to the most similar one it does not replace; `None` when they have
+    /// nothing to do with each other, Jev is not sure, or it cannot be asked.
+    pub fn relation(&self, text: &str, other: &str) -> Option<(Relation, f32)> {
+        let qs = Questions::new()
+            .choice(
+                "relacion",
+                "Decide cómo se relaciona `propuesta` con `otra`.",
+                &[
+                    ("conflicts_with", "Se contradicen: no pueden ser ciertas a la vez."),
+                    (
+                        "scoped",
+                        "`propuesta` vale en un caso más concreto que `otra` (este proyecto, este caso).",
+                    ),
+                    ("compatible", "Hablan de lo mismo y pueden ser ciertas a la vez."),
+                    ("related", "Tratan un tema cercano, sin más."),
+                    ("ninguna", "No tienen que ver."),
+                ],
+            )
+            .ok()?;
+        let state =
+            Clean::try_new(json!({ "propuesta": text, "otra": other }), &*self.scrub).ok()?;
+        match self.jev.ask(&state, &qs).ok()?.get("relacion")? {
+            Answer::Choice { choice, confidence } if *confidence >= RELATION => {
+                Relation::parse(choice).map(|r| (r, *confidence as f32))
+            }
+            _ => None,
+        }
     }
 
     /// Where a memory belongs, when there is a project: `proyecto`, `personal` or `leccion`; `None`

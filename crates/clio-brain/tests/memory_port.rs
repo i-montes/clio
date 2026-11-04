@@ -655,10 +655,18 @@ impl Transport for Scripted {
             "pide_olvidar",
             "pide_guardar",
             "pide_deshacer",
+            "pide_fijar",
         ] {
             if q.contains_key(name) {
                 answers.insert(name.into(), json!({"type": "noul", "noul": self.said}));
             }
+        }
+        // Two memories next to each other contradict each other, as sure as the operation.
+        if q.contains_key("relacion") {
+            answers.insert(
+                "relacion".into(),
+                json!({"type": "choice", "choice": "conflicts_with", "confidence": self.confidence}),
+            );
         }
         Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
     }
@@ -1495,4 +1503,201 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
     assert_eq!(d.saved, Saved::Waiting);
     let l = open(&w);
     assert_eq!(l.get(clio_memory::MemoryId(d.id)).unwrap().scope, l.scope());
+}
+
+// ---- relations and pins (stage 4) ----
+
+// What Jev saves next to a memory it does not replace carries how the two stand, and both say it
+// when read; once the other is not readable (archived), nothing names it.
+#[test]
+fn a_new_memory_next_to_one_it_does_not_replace_is_related_by_jev() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let old = ask(
+        &p,
+        "El proyecto usa PostgreSQL 15",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let d = ask(
+        &p,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!((old.saved, d.saved), (Saved::Active, Saved::Active));
+    let rels = open(&w)
+        .engine()
+        .relations(clio_memory::MemoryId(d.id))
+        .unwrap();
+    assert_eq!(rels.len(), 1, "{rels:?}");
+    assert_eq!(
+        (
+            rels[0].source.0,
+            rels[0].target.0,
+            rels[0].relation,
+            rels[0].by.as_str()
+        ),
+        (d.id, old.id, clio_memory::Relation::ConflictsWith, "jev")
+    );
+    let notes = |id: i64| p.get(id).unwrap().notes;
+    assert_eq!(notes(d.id), [format!("contradice a m{}", old.id)]);
+    assert_eq!(notes(old.id), [format!("contradice a m{}", d.id)]);
+    open(&w).archive(clio_memory::MemoryId(old.id)).unwrap();
+    assert!(notes(d.id).is_empty());
+}
+
+// The model chose the text of its proposal, so it could choose which memory it lands next to:
+// what the person holds never gets a relation from it.
+#[test]
+fn a_memory_the_person_holds_gets_no_relation_from_a_proposal() {
+    let w = world();
+    let mine = open(&w)
+        .remember("El proyecto usa PostgreSQL 15", None)
+        .unwrap();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let d = ask(
+        &p,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(d.saved, Saved::Active);
+    assert!(open(&w).engine().relations(mine).unwrap().is_empty());
+    assert!(p.get(mine.0).unwrap().notes.is_empty());
+}
+
+// A relation with a memory of another project is kept, but a session of this project is never
+// told of it: the line names only what the session can read.
+#[test]
+fn a_relation_with_another_projects_memory_is_not_named() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    let beta = in_project(&w, "beta");
+    let a = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Postgres 15", "Base de alfa", "decision"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    let b = MemoryPort::propose(
+        &beta,
+        &titled("Qué: usa Postgres 16", "Base de beta", "decision"),
+        "s2",
+        &Judging::default(),
+    )
+    .unwrap();
+    promote_all(&w);
+    MemoryLink::open_write(&w.data, &EmbedModel::none())
+        .unwrap()
+        .relate_judged(
+            clio_memory::MemoryId(b.id),
+            clio_memory::MemoryId(a.id),
+            clio_memory::Relation::ConflictsWith,
+            0.9,
+        )
+        .unwrap();
+    assert!(beta.get(b.id).unwrap().notes.is_empty());
+    assert!(alfa.get(a.id).unwrap().notes.is_empty());
+}
+
+// With nothing next to it, or Jev unsure of the relation, no relation is noted (and Jev was asked).
+#[test]
+fn no_neighbor_or_an_unsure_jev_notes_no_relation() {
+    struct Unsure(Arc<std::sync::atomic::AtomicUsize>);
+    impl Transport for Unsure {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            let (choice, sure) = if name == "relacion" {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ("conflicts_with", 0.6)
+            } else {
+                ("add", 0.95)
+            };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "choice", "choice": choice, "confidence": sure}}}))
+        }
+    }
+    let w = world();
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Unsure(asked.clone())),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let p = LinkPort::new(&w.data, None).with_judge(Arc::new(MemoryJudge::new(
+        jev,
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    let first = ask(
+        &p,
+        "El proyecto usa PostgreSQL 15",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no neighbor, no question"
+    );
+    let d = ask(
+        &p,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!((first.saved, d.saved), (Saved::Active, Saved::Active));
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "asked, and unsure"
+    );
+    assert!(
+        open(&w)
+            .engine()
+            .relations(clio_memory::MemoryId(d.id))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// S-65: the model pins only what the person asked to pin, with their own words, and Jev agreeing.
+#[test]
+fn a_pin_needs_the_persons_words_and_puts_the_memory_first_in_the_context() {
+    let w = world();
+    let id = open(&w)
+        .remember("Marta prefiere respuestas cortas", None)
+        .unwrap();
+    for _ in 0..3 {
+        open(&w)
+            .remember(&format!("otro dato {}", id.0), None)
+            .unwrap();
+    }
+    let said = |words: &[&str]| Judging {
+        tainted: false,
+        person_said: words.iter().map(|s| (*s).to_owned()).collect(),
+        session: "s".into(),
+    };
+    let unsure = judged_port(&w, "add", 0.95, 0.5);
+    assert!(
+        unsure
+            .pin(id.0, &said(&["fija lo de las respuestas cortas"]))
+            .is_err()
+    );
+    let sure = judged_port(&w, "add", 0.95, 0.97);
+    assert!(sure.pin(id.0, &said(&[])).is_err(), "no words, no pin");
+    assert!(
+        LinkPort::new(&w.data, None)
+            .pin(id.0, &said(&["fíjalo"]))
+            .is_err(),
+        "no judge"
+    );
+    sure.pin(id.0, &said(&["fija lo de las respuestas cortas"]))
+        .unwrap();
+    assert_eq!(sure.context().unwrap()[0].id, id.0);
+    let link = open(&w);
+    assert_eq!(link.engine().pinned(link.scope()).unwrap()[0].id, id);
 }

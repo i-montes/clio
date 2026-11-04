@@ -104,7 +104,7 @@ fn bench(tmp: &Path, base_url: &str) -> AgentBenchConfig {
         provider: "fake".into(),
         model: "replay-1".into(),
         system_prompt: String::new(),
-        prompt_version: "clio-agent@11".into(),
+        prompt_version: "clio-agent@12".into(),
         program: String::new(),
         args: vec![],
         repeats: 1,
