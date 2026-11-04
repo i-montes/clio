@@ -25,6 +25,8 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory purge <id> [--reason \"motivo\"] [--yes]
                                               borra el contenido PARA SIEMPRE (texto, vector, historial);
                                               deja una lápida sin contenido. No se puede deshacer
+  clio memory project [set <nombre>]          el proyecto de esta carpeta y de dónde sale; set lo fija (.clio-project)
+  clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
   clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
   clio memory review-due [--json]             lo que pasó su plazo de revisión (decisiones, configuración…)
   clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
@@ -34,6 +36,28 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
   clio memory stats [--json]                  conteos y tamaño
   clio memory mcp                             servidor MCP para otros agentes (leer y proponer; nada más)";
+
+const SETUP_AGENTS: [&str; 5] = ["claude-code", "cursor", "codex", "gemini", "opencode"];
+
+/// What to run or paste so `agent` reaches `clio memory mcp`. Clio does not edit another tool's
+/// configuration: the person sees it and decides.
+fn setup_text(agent: &str) -> Res<String> {
+    let json =
+        r#"{ "mcpServers": { "clio-memory": { "command": "clio", "args": ["memory", "mcp"] } } }"#;
+    Ok(match agent {
+        "claude-code" => "Ejecuta:\n  claude mcp add clio-memory -- clio memory mcp".into(),
+        "cursor" => format!("Añade a ~/.cursor/mcp.json (o .cursor/mcp.json del proyecto):\n  {json}"),
+        "gemini" => format!("Añade a ~/.gemini/settings.json:\n  {json}"),
+        "codex" => "Añade a ~/.codex/config.toml:\n  [mcp_servers.clio-memory]\n  command = \"clio\"\n  args = [\"memory\", \"mcp\"]".into(),
+        "opencode" => "Añade a opencode.json:\n  { \"mcp\": { \"clio-memory\": { \"type\": \"local\", \"command\": [\"clio\", \"memory\", \"mcp\"] } } }".into(),
+        other => {
+            return Err(format!(
+                "no conozco {other:?}: {}. Cualquier agente con MCP sirve con el comando `clio memory mcp` por la entrada estándar",
+                SETUP_AGENTS.join(", ")
+            ));
+        }
+    } + "\nEl agente arranca el servidor en la carpeta del proyecto: lee y propone ahí (nada más).")
+}
 
 fn id_of(s: &str) -> Res<MemoryId> {
     s.trim_start_matches('m')
@@ -298,6 +322,39 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 link.archive(id)?;
             }
             println!("{verb}: m{}", id.0);
+        }
+        // The project of this folder: which one and from where, or name it by hand.
+        "project" => {
+            let rest = args.rest()?;
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            match rest.as_slice() {
+                [] => match clio_brain::project::resolve(&cwd) {
+                    Some((name, from)) => println!("{name} ({})", from.label()),
+                    None => println!("ninguno: lo que se guarde aquí va a lo personal"),
+                },
+                [set, name] if set == "set" => {
+                    let n = clio_brain::project::normal(name);
+                    if n.is_empty() {
+                        return Err(format!("{name:?} no sirve como nombre de proyecto"));
+                    }
+                    let file = cwd.join(clio_brain::project::PROJECT_FILE);
+                    std::fs::write(&file, format!("{n}\n"))
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    println!("proyecto de esta carpeta: {n} (en {})", file.display());
+                }
+                _ => return Err("uso: clio memory project [set <nombre>]".into()),
+            }
+        }
+        // How to plug another agent into the memory (MCP): printed, never written for it.
+        "setup" => {
+            let rest = args.rest()?;
+            let [agent] = rest.as_slice() else {
+                return Err(format!(
+                    "uso: clio memory setup <agente>  ({})",
+                    SETUP_AGENTS.join(", ")
+                ));
+            };
+            println!("{}", setup_text(agent)?);
         }
         "projects" => {
             let json = args.flag("--json");

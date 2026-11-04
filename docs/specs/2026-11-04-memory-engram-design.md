@@ -79,6 +79,10 @@ Migración probada desde una base del esquema 1; doctor con las comprobaciones n
 
 *Decisiones mías al construir la etapa 6:* la CLI gana `projects`, `review-due`, `reviewed`, `timeline` y `pin`/`unpin`, y `show` dice sitio, título, categoría, fijado, plazo y relaciones; la pantalla de memoria de la TUI no gana un tablero aparte: cada fila dice su sitio y su título y la línea de estado cuenta lo que hay por revisar (el tablero por sitio es `clio memory projects`). El doctor dice cuántos recuerdos activos hay, en cuántos proyectos, cuántos esperan revisión y cuántos pasaron su plazo. Medición con 10 000 memorias (con vectores): búsqueda en los tres sitios p50 22,5 ms, p95 37 ms; ver «At scale» en `crates/clio-memory/README.md`.
 
+### Lo que faltaba frente a Engram (revisado contra su README el 2026-11-04)
+
+Hecho después de las seis etapas: el proyecto se puede fijar a mano (`CLIO_PROJECT`, `.clio-project`, `clio memory project set`; orden: variable, archivo, detección), y `clio apply` nunca aplica un `.clio-project` de una sesión; `clio memory setup <agente>` imprime la configuración MCP de Claude Code, Cursor, Codex, Gemini y OpenCode sin escribirla; el modelo ve lo vencido (nota «revisar» en la línea y hasta tres en `memory_context`) en vez de una herramienta `mem_review` aparte. Queda, a la espera de la persona: que el agente edite o fusione memorias (`mem_update`, `mem_consolidate`: hoy lo cubre el reemplazo que decide Jev), la guarda de Engram que se detiene si la identidad git cambia el proyecto, copiar al portapapeles en la TUI, y la API HTTP (se eligió MCP).
+
 ## Qué no se hace (por decisión o por diseño)
 
 - Sincronizar entre máquinas, nube, Obsidian.

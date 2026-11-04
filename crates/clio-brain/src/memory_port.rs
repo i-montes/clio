@@ -458,6 +458,17 @@ impl MemoryPort for LinkPort {
                     out.push(r);
                 }
             }
+            // What is past its review cycle in the places the session reads: a few, so the model
+            // can say so to the person (they review it with `clio memory review-due`).
+            let mut due: Vec<MemoryRow> = Vec::new();
+            for scope in link.reading_scopes() {
+                due.extend(engine.review_due(scope).unwrap_or_default());
+            }
+            for r in due.into_iter().take(3) {
+                if !out.iter().any(|o| o.id == r.id) {
+                    out.push(r);
+                }
+            }
             Ok(out.iter().map(|r| item(link, r)).collect())
         })
     }
@@ -477,7 +488,14 @@ fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
         title: row.title.clone(),
         category: row.category.map(|c| c.label().to_owned()),
         place: link.place_label(row),
-        notes: link.relation_notes(row),
+        notes: {
+            let mut n = link.relation_notes(row);
+            // Still active, but old enough that it may no longer hold: the model checks it.
+            if link.is_due(row) {
+                n.insert(0, "revisar: pasó su plazo, puede estar desfasado".into());
+            }
+            n
+        },
     }
 }
 

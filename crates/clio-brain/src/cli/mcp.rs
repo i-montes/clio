@@ -62,7 +62,8 @@ pub fn serve(dirs: &Dirs) -> Res<i32> {
     let cfg = Config::load(dirs)?;
     let project = std::env::current_dir()
         .ok()
-        .and_then(|d| clio_brain::project::detect(&d));
+        .and_then(|d| clio_brain::project::resolve(&d))
+        .map(|(name, _)| name);
     // Its own folder in the runtime directory (budget, taint, effect log), gone when it ends:
     // never among the person's runs.
     let run = Scratch(

@@ -9,6 +9,65 @@ use std::path::{Path, PathBuf};
 /// The longest project name kept (a scope name is `proyecto:` and this).
 const MAX_NAME: usize = 80;
 
+/// The file that names a folder's project by hand (`clio memory project set NAME`).
+pub const PROJECT_FILE: &str = ".clio-project";
+/// The variable that names it for one process.
+pub const PROJECT_ENV: &str = "CLIO_PROJECT";
+
+/// Where a project name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Env,
+    File,
+    Detected,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::Env => "CLIO_PROJECT",
+            Source::File => PROJECT_FILE,
+            Source::Detected => "detectado de la carpeta",
+        }
+    }
+}
+
+/// The project of `dir` as Clio uses it: `CLIO_PROJECT`, else a `.clio-project` in the folder or
+/// above it (up to the repository's root), else what [`detect`] finds. A name that is empty
+/// once normalized is skipped.
+pub fn resolve(dir: &Path) -> Option<(String, Source)> {
+    resolve_with(dir, std::env::var(PROJECT_ENV).ok().as_deref())
+}
+
+pub fn resolve_with(dir: &Path, env: Option<&str>) -> Option<(String, Source)> {
+    if let Some(n) = env.map(normal).filter(|n| !n.is_empty()) {
+        return Some((n, Source::Env));
+    }
+    let top = git_root(dir);
+    for d in dir.ancestors() {
+        if let Some(n) = read_name(&d.join(PROJECT_FILE)) {
+            return Some((n, Source::File));
+        }
+        if top.as_deref() == Some(d) {
+            break;
+        }
+    }
+    detect(dir).map(|n| (n, Source::Detected))
+}
+
+/// The first line of a project file, normalized; at most 4 KiB are read.
+fn read_name(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
+    let n = normal(text.lines().next().unwrap_or_default());
+    (!n.is_empty()).then_some(n)
+}
+
 /// The project of `dir`, or `None` when there is nothing to call it.
 pub fn detect(dir: &Path) -> Option<String> {
     let root = git_root(dir);
@@ -171,6 +230,34 @@ mod tests {
         );
         assert_eq!(normal(&"a".repeat(200)).len(), MAX_NAME);
         assert_eq!(normal("..."), "");
+    }
+
+    #[test]
+    fn the_variable_then_the_file_then_the_folder() {
+        let t = repo(Some("git@github.com:me/clio.git"));
+        let root = t.path().join("Mi Proyecto");
+        let deep = root.join("src/deep");
+        assert_eq!(
+            resolve_with(&deep, None),
+            Some(("clio".into(), Source::Detected))
+        );
+        std::fs::write(root.join(PROJECT_FILE), "  Clio Web \nlo demás se ignora\n").unwrap();
+        assert_eq!(
+            resolve_with(&deep, None),
+            Some(("clio-web".into(), Source::File))
+        );
+        assert_eq!(
+            resolve_with(&deep, Some("Otro")),
+            Some(("otro".into(), Source::Env))
+        );
+        // An empty name is skipped, not a project called "".
+        assert_eq!(resolve_with(&deep, Some(" ")).unwrap().1, Source::File);
+        std::fs::write(root.join(PROJECT_FILE), "...\n").unwrap();
+        assert_eq!(resolve_with(&deep, None).unwrap().1, Source::Detected);
+        // A file above the repository's root is not this repository's.
+        std::fs::remove_file(root.join(PROJECT_FILE)).unwrap();
+        std::fs::write(t.path().join(PROJECT_FILE), "fuera\n").unwrap();
+        assert_eq!(resolve_with(&deep, None).unwrap().0, "clio");
     }
 
     #[test]

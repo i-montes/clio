@@ -1701,3 +1701,92 @@ fn a_pin_needs_the_persons_words_and_puts_the_memory_first_in_the_context() {
     let link = open(&w);
     assert_eq!(link.engine().pinned(link.scope()).unwrap()[0].id, id);
 }
+
+// Something past its review cycle says so in its line, and the context brings it up: the model can
+// tell the person, who reviews it (`clio memory review-due`, `reviewed`).
+#[test]
+fn what_is_past_its_review_cycle_says_so_and_comes_up_in_the_context() {
+    use clio_memory::{Category, Engine, FixedClock, OpenMode};
+    let w = world();
+    let (person, project) = {
+        let l = MemoryLink::open_write_in(&w.data, &EmbedModel::none(), Some("alfa")).unwrap();
+        (
+            l.actors().persona,
+            l.scope_of(clio_brain::memory_link::Place::Project).unwrap(),
+        )
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let old = {
+        let e = Engine::open(
+            &MemoryLink::db_path(&w.data),
+            OpenMode::ReadWrite,
+            Arc::new(FixedClock::new(now - 200 * 86_400)),
+        )
+        .unwrap();
+        let mut p = Proposal {
+            scope: project,
+            actor: person,
+            kind: MemoryType::Semantic,
+            content: "el servidor escucha en el puerto 8080".into(),
+            topic_key: None,
+            origin: MOrigin::User,
+            session: None,
+            episode: None,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            title: Some("Puerto".into()),
+            category: Some(Category::Config),
+        };
+        let old = e.propose(p.clone()).unwrap().memory;
+        p.content = "el servidor usa TLS".into();
+        p.category = Some(Category::Preference);
+        e.propose(p).unwrap();
+        old
+    };
+    // Nine newer memories in the project: the old one is not among the eight most recent.
+    {
+        let e = Engine::open(
+            &MemoryLink::db_path(&w.data),
+            OpenMode::ReadWrite,
+            Arc::new(clio_memory::SystemClock),
+        )
+        .unwrap();
+        for i in 0..9 {
+            e.propose(Proposal {
+                scope: project,
+                actor: person,
+                kind: MemoryType::Semantic,
+                content: format!("dato reciente número {i}"),
+                topic_key: None,
+                origin: MOrigin::User,
+                session: None,
+                episode: None,
+                source: None,
+                valid_from: None,
+                valid_to: None,
+                title: None,
+                category: None,
+            })
+            .unwrap();
+        }
+    }
+    let alfa = in_project(&w, "alfa");
+    let notes = |q: &str| alfa.search(q, 3).unwrap().items[0].notes.clone();
+    assert_eq!(
+        notes("puerto 8080")[0],
+        "revisar: pasó su plazo, puede estar desfasado"
+    );
+    assert!(notes("TLS").is_empty(), "a preference keeps");
+    assert!(alfa.context().unwrap().iter().any(|i| i.id == old.0));
+    // Reviewed by the person: no more mark.
+    MemoryLink::open_write(&w.data, &EmbedModel::none())
+        .unwrap()
+        .for_person()
+        .reviewed(old)
+        .unwrap();
+    assert!(notes("puerto 8080").is_empty());
+}

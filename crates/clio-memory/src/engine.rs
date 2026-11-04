@@ -1886,6 +1886,15 @@ impl Engine {
         now >= since.saturating_add(days.saturating_mul(86_400))
     }
 
+    /// Is this active memory due for a look now? One lookup, for a single line.
+    pub fn due(&self, row: &MemoryRow) -> Result<bool> {
+        if row.state != State::Active || row.category.and_then(Category::review_days).is_none() {
+            return Ok(false);
+        }
+        let at = self.store.reviewed_at(row.id)?;
+        Ok(Self::is_due(row, at, self.clock.now()))
+    }
+
     /// The active memories of a scope that are due for a look, oldest first. They stay active:
     /// this is a list for the person, not a state.
     pub fn review_due(&self, scope: ScopeId) -> Result<Vec<MemoryRow>> {

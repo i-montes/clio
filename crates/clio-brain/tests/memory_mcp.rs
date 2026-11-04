@@ -20,6 +20,7 @@ fn session(e: &common::Env, msgs: &[Value], raw: &[&str]) -> Vec<Value> {
         .env("HOME", e.tmp.path().join("home"))
         .env("XDG_RUNTIME_DIR", e.tmp.path().join("run"))
         .env("CLIO_SKIP_PI_INSTALL", "1")
+        .env_remove("CLIO_PROJECT")
         .current_dir(e.proj())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
