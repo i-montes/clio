@@ -889,6 +889,7 @@ fn the_writer_is_not_held_while_jev_answers() {
         t.elapsed()
     );
     assert_eq!(proposing.join().unwrap().unwrap().saved, Saved::Active);
+}
 
 // ---- changes the person asks for through the model (entrega 4) ----
 
@@ -1001,4 +1002,52 @@ fn undoing_only_reaches_what_jev_did_and_needs_the_persons_words() {
         &[],
     );
     assert_eq!((waits.saved, waits.change), (Saved::Waiting, None));
+}
+
+// While Jev checks the person's words the writer is not held either.
+#[test]
+fn the_writer_is_not_held_while_jev_checks_a_request() {
+    use std::sync::Mutex;
+    struct Slow(Mutex<mpsc::Sender<()>>);
+    impl Transport for Slow {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let _ = self.0.lock().unwrap().send(());
+            std::thread::sleep(Duration::from_millis(1500));
+            let name = body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "noul", "noul": 0.95}}}))
+        }
+    }
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Slow(Mutex::new(tx))),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    let p = Arc::new(LinkPort::new(&w.data, None).with_judge(Arc::new(judge)));
+    let q = p.clone();
+    let forgetting = std::thread::spawn(move || {
+        q.forget(mine.0, &said(&["olvida que vivo en Medellín"], false))
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("Jev was asked");
+    let t = Instant::now();
+    let other = open(&w).remember("Marta usa Neovim", None);
+    assert!(
+        other.is_ok() && t.elapsed() < Duration::from_millis(1200),
+        "{other:?} {:?}",
+        t.elapsed()
+    );
+    forgetting.join().unwrap().unwrap();
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Archived);
 }

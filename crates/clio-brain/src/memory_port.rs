@@ -85,9 +85,20 @@ impl LinkPort {
         })
     }
 
+    /// Reads without holding the writer: what Jev is asked about must not keep the person's own
+    /// writes waiting.
+    fn reader(&self) -> Result<MemoryLink, String> {
+        match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
+            Ok(Some(link)) => Ok(link),
+            _ => Err(NOT_READABLE.to_owned()),
+        }
+    }
+
     /// A change the person asked for through the model: the memory must be there, the judge must
     /// confirm from the person's own words that they asked for exactly this about exactly it, and
-    /// only then is it done (by the person's actor, like `clio memory` would).
+    /// only then is it done (by the person's actor, like `clio memory` would). The judge is asked
+    /// first, with a read-only view; the writer is taken only to do it, and the memory is read
+    /// again under it.
     fn change(
         &self,
         id: i64,
@@ -96,13 +107,17 @@ impl LinkPort {
         act: impl FnOnce(&MemoryLink, &MemoryRow) -> Res<()>,
     ) -> Result<(), String> {
         let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        let seen = self
+            .reader()?
+            .get(MemoryId(id))
+            .map_err(|_| NOT_READABLE.to_owned())?;
+        if !judge.confirm(what, &seen.content, &judging.person_said, judging.tainted) {
+            return Err(NOT_CONFIRMED.to_owned());
+        }
         let link = self.writer()?;
         let row = link
             .get(MemoryId(id))
             .map_err(|_| NOT_READABLE.to_owned())?;
-        if !judge.confirm(what, &row.content, &judging.person_said, judging.tainted) {
-            return Err(NOT_CONFIRMED.to_owned());
-        }
         act(&link, &row)
     }
 }
@@ -229,22 +244,27 @@ impl MemoryPort for LinkPort {
 
     fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
         let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
-        let link = self.writer()?;
-        let op = link
-            .engine()
-            .operation(OpId(change))
-            .map_err(|_| NOT_READABLE.to_owned())?;
-        let memory = op.memory.ok_or_else(|| NOT_READABLE.to_owned())?;
-        let row = link.get(memory).map_err(|_| NOT_READABLE.to_owned())?;
+        let content = {
+            let link = self.reader()?;
+            let op = link
+                .engine()
+                .operation(OpId(change))
+                .map_err(|_| NOT_READABLE.to_owned())?;
+            let memory = op.memory.ok_or_else(|| NOT_READABLE.to_owned())?;
+            link.get(memory)
+                .map_err(|_| NOT_READABLE.to_owned())?
+                .content
+        };
         if !judge.confirm(
             Request::Undo,
-            &row.content,
+            &content,
             &judging.person_said,
             judging.tainted,
         ) {
             return Err(NOT_CONFIRMED.to_owned());
         }
-        link.revert_judged(OpId(change))
+        // The writer only now; `revert_judged` checks again that the judge made the change.
+        self.writer()?.revert_judged(OpId(change))
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

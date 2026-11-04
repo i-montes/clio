@@ -1165,7 +1165,7 @@ fn a_change_the_person_asked_for_reaches_the_port_with_their_words_and_is_told_i
         &e,
         "s1",
         "said",
-        json!({ "text": "olvida que vivo en Medellín" }),
+        json!({ "text": "olvida que vivo en Medellín", "token": TOKEN }),
     );
     for (tool, starts, what) in [
         ("memory_forget", "forgotten", "forget"),
