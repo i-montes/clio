@@ -86,6 +86,40 @@ fn replace(old: &MemoryRow, new: &MemoryRow) -> Result<Vec<Change>> {
     }])
 }
 
+/// The name of the judge's actor: nobody else can be called that.
+const JUDGE: &str = "jev";
+
+/// The pen of the judge. Only [`Engine::judge`] makes one, and it does not carry any power by
+/// itself: it names who signs a judged operation.
+#[derive(Debug, Clone, Copy)]
+pub struct Judge {
+    actor: ActorId,
+}
+
+/// What the judge decided about a proposal (spec `2026-11-03-jev-design.md`). A review is not here:
+/// it is an ordinary `propose`, which the rules send to quarantine for the person.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Judged {
+    /// New: active, even where the rules would hold it for the person (outside origin, a
+    /// procedure). An exact copy of something active is still a no-op.
+    Add,
+    /// Replaces `old`, which must be active, of the same scope and kind. What the person wrote, or
+    /// holds in a fixed block, is replaced only with `person_confirmed`: the caller has checked
+    /// that the person's own words say the new fact.
+    Update {
+        old: MemoryId,
+        person_confirmed: bool,
+    },
+    /// Already known as `existing`: nothing is written.
+    Noop { existing: MemoryId },
+}
+
+/// How sure the judge was, for the decision log.
+#[derive(Debug, Clone, Copy)]
+pub struct Sureness {
+    pub confidence: f32,
+}
+
 /// The memory engine: one write path (`propose`), reads, and reversible changes.
 pub struct Engine {
     store: Box<dyn Store>,
@@ -989,6 +1023,16 @@ impl Engine {
         }
     }
 
+    /// Is `id` in a fixed block of the scope (who the person is, rules, preferences)?
+    fn in_block(&self, scope: ScopeId, id: MemoryId) -> Result<bool> {
+        for b in self.store.blocks(scope)? {
+            if self.store.block_memories(b.id)?.contains(&id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Promote, archive and revert are review powers: only a person may use them.
     fn require_person(&self, actor: ActorId) -> Result<()> {
         match self.store.actor_kind(actor)? {
@@ -1005,12 +1049,51 @@ impl Engine {
     }
 
     pub fn register_actor(&self, name: &str, kind: ActorKind, quota: Quota) -> Result<ActorId> {
-        if kind == ActorKind::System || name.starts_with("clio-memory:") {
-            return Err(Error::NotAllowed); // internal only: it signs background operations
+        if kind == ActorKind::System
+            || kind == ActorKind::Judge
+            || name == JUDGE
+            || name.starts_with("clio-memory:")
+        {
+            return Err(Error::NotAllowed); // internal only: background jobs and the judge sign these
         }
         let _g = self.write_guard();
         self.check_name(name)?;
         self.store.register_actor(name, kind, quota)
+    }
+
+    /// The judge's pen, registering its actor the first time (a read-only engine cannot).
+    pub fn judge(&self) -> Result<Judge> {
+        let _g = self.write_guard();
+        if let Some(a) = self
+            .store
+            .actors()?
+            .into_iter()
+            .find(|a| a.name == JUDGE && a.kind == ActorKind::Judge)
+        {
+            return Ok(Judge { actor: a.id });
+        }
+        let actor = self.store.register_actor(
+            JUDGE,
+            ActorKind::Judge,
+            Quota {
+                max: u32::MAX,
+                window_secs: 3600,
+            },
+        )?;
+        Ok(Judge { actor })
+    }
+
+    /// A proposal the judge decided: the same checks as `propose` (quota of the proposer, size,
+    /// secrets), then what the judge said instead of what the rules say. The operation is signed
+    /// by the judge; the memory keeps its author. Every judged change can be reverted.
+    pub fn propose_judged(
+        &self,
+        judge: &Judge,
+        p: Proposal,
+        how: Judged,
+        sure: Sureness,
+    ) -> Result<Outcome> {
+        self.propose_inner(p, Some((judge, how, sure)))
     }
 
     /// The only way content enters the memory.
@@ -1024,12 +1107,16 @@ impl Engine {
             outcome = ::tracing::field::Empty,
             state = ::tracing::field::Empty,
         );
-        let result = self.propose_inner(p);
+        let result = self.propose_inner(p, None);
         finish_propose!(span, result);
         result
     }
 
-    fn propose_inner(&self, p: Proposal) -> Result<Outcome> {
+    fn propose_inner(
+        &self,
+        p: Proposal,
+        judged: Option<(&Judge, Judged, Sureness)>,
+    ) -> Result<Outcome> {
         let _g = self.write_guard();
         if p.content.trim().is_empty() {
             return Err(Error::EmptyContent);
@@ -1088,10 +1175,44 @@ impl Engine {
         let actor_kind = self.store.actor_kind(p.actor)?;
         let origin = effective_origin(actor_kind, p.origin);
         let by_hash = self.store.find_active_by_hash(p.scope, &hash)?;
-        let by_topic = match p.topic_key.as_deref() {
+        if judged.is_some() && actor_kind == ActorKind::Judge {
+            return Err(Error::NotAllowed); // the judge decides; it does not propose
+        }
+        let mut by_topic = match p.topic_key.as_deref() {
             Some(t) => self.store.find_active_by_topic(p.scope, p.kind, t)?,
             None => None,
         };
+        // A judged update names the memory it replaces, whatever its topic key.
+        let mut topic_key = p.topic_key;
+        match &judged {
+            Some((
+                _,
+                Judged::Update {
+                    old,
+                    person_confirmed,
+                },
+                _,
+            )) => {
+                let row = self.store.get(*old)?;
+                if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
+                    return Err(Error::InvalidState);
+                }
+                if !person_confirmed
+                    && (row.origin == Origin::User || self.in_block(p.scope, row.id)?)
+                {
+                    return Err(Error::NotAllowed); // what the person wrote is replaced by the person
+                }
+                topic_key = row.topic_key.clone();
+                by_topic = Some(row);
+            }
+            Some((_, Judged::Noop { existing }, _)) => {
+                let row = self.store.get(*existing)?;
+                if row.state != State::Active || row.scope != p.scope {
+                    return Err(Error::InvalidState);
+                }
+            }
+            _ => {}
+        }
         let existing = Existing {
             by_hash: by_hash.as_ref(),
             by_topic: by_topic.as_ref(),
@@ -1104,7 +1225,7 @@ impl Engine {
             kind: p.kind,
             content,
             content_hash: hash,
-            topic_key: p.topic_key,
+            topic_key,
             origin,
             actor: p.actor,
             session: p.session,
@@ -1120,6 +1241,18 @@ impl Engine {
         let verdict = {
             let _s = span!("rules");
             decide(p.kind, origin, existing)
+        };
+        // What the judge decided replaces what the rules say; the checks above (quota, size,
+        // secrets) already ran, and an exact copy of something active is a no-op either way.
+        let verdict = match (&judged, by_hash.as_ref()) {
+            (Some(_), Some(dup)) => Verdict::Noop(dup.id),
+            (Some((_, Judged::Add, _)), None) => Verdict::Add {
+                state: State::Active,
+                supersedes: None,
+            },
+            (Some((_, Judged::Update { old, .. }, _)), None) => Verdict::Update { old: *old },
+            (Some((_, Judged::Noop { existing }, _)), None) => Verdict::Noop(*existing),
+            (None, _) => verdict,
         };
         // The same untrusted text twice is one candidate: a second copy neither adds a row to
         // review nor spends the cap. Only when this proposal would wait itself: a person's text
@@ -1139,13 +1272,15 @@ impl Engine {
         };
         let mut decisions: Vec<NewDecision> = Vec::new();
         let mut review_by: Option<String> = None;
-        if matches!(
-            verdict,
-            Verdict::Add {
-                state: State::Active,
-                supersedes: None
-            }
-        ) && !self.deciders.is_empty()
+        if judged.is_none()
+            && matches!(
+                verdict,
+                Verdict::Add {
+                    state: State::Active,
+                    supersedes: None
+                }
+            )
+            && !self.deciders.is_empty()
         {
             let question = Question {
                 candidate: Candidate {
@@ -1166,6 +1301,23 @@ impl Engine {
             if let Some((Choice::Review, who)) = applied {
                 review_by = Some(who);
             }
+        }
+        if let Some((_, how, sure)) = &judged {
+            decisions.push(NewDecision {
+                scope: p.scope,
+                provider: JUDGE.to_owned(),
+                mode: DeciderMode::Active,
+                status: DecisionStatus::Decided,
+                choice: Some(Choice::Add),
+                confidence: Some(sure.confidence.clamp(0.0, 1.0)),
+                reason: Some(match how {
+                    Judged::Add => "judged: add".to_owned(),
+                    Judged::Update { old, .. } => format!("judged: update m{}", old.0),
+                    Judged::Noop { existing } => format!("judged: noop m{}", existing.0),
+                }),
+                acted: true,
+                at: now,
+            });
         }
         let (kind, memory, changes, reason) = match verdict {
             Verdict::Noop(existing_id) => {
@@ -1235,7 +1387,7 @@ impl Engine {
                 kind,
                 memory: Some(memory),
                 changes,
-                actor: p.actor,
+                actor: judged.as_ref().map_or(p.actor, |(j, _, _)| j.actor),
                 reason,
                 at: now,
                 reverts: None,

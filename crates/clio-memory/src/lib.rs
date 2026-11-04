@@ -38,7 +38,7 @@ mod vector;
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use decider::{Decider, NearDuplicateDecider};
 pub use embed::Embedder;
-pub use engine::Engine;
+pub use engine::{Engine, Judge, Judged, Sureness};
 pub use error::{Error, Result};
 pub use model::*;
 #[cfg(feature = "model2vec")]
