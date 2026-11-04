@@ -150,6 +150,21 @@ impl MemoryPort for FakePort {
         self.change("pin", id, judging)
     }
 
+    fn consolidate(
+        &self,
+        ids: &[i64],
+        draft: &ProposalDraft,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        self.changes.lock().unwrap().push((
+            format!("consolidate {ids:?}"),
+            ids[0],
+            judging.clone(),
+        ));
+        self.propose(draft, session, judging)
+    }
+
     fn update(
         &self,
         id: i64,
@@ -1726,4 +1741,79 @@ fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() 
         "memory_propose",
         json!({"text": "x", "kind": "semantic"})
     )));
+}
+
+// ---- memory_consolidate ----
+
+// A merge names 2 to 5 memories, carries the person's words to the port, is checked like a
+// proposal, and spends those words: the next change needs new ones.
+#[test]
+fn a_merge_reaches_the_port_with_the_persons_words_and_spends_them() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for ids in ["12", "12, 12", "1,2,3,4,5,6", "doce, trece", "0, 3", ""] {
+        let r = call(
+            &e,
+            "s",
+            "memory_consolidate",
+            json!({"ids": ids, "text": "x"}),
+        );
+        assert!(!r.ok, "{ids:?}: {r:?}");
+    }
+    assert!(port.changes.lock().unwrap().is_empty());
+    call(
+        &e,
+        "s",
+        "said",
+        json!({ "text": "une lo de Postgres", "token": TOKEN }),
+    );
+    let r = call(
+        &e,
+        "s",
+        "memory_consolidate",
+        json!({"ids": "m12, 15", "text": "usa  Postgres\n16", "category": "decision"}),
+    );
+    assert!(r.ok && r.content.starts_with("merged into m"), "{r:?}");
+    let seen = port.changes.lock().unwrap().last().unwrap().clone();
+    assert_eq!(seen.0, "consolidate [12, 15]");
+    assert_eq!(seen.2.person_said, ["une lo de Postgres"]);
+    assert_eq!(
+        port.drafts.lock().unwrap().last().unwrap().text,
+        "usa Postgres 16"
+    );
+    // Spent: a second merge reaches the port with no words.
+    call(
+        &e,
+        "s",
+        "memory_consolidate",
+        json!({"ids": "1, 2", "text": "y"}),
+    );
+    assert!(
+        port.changes
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .2
+            .person_said
+            .is_empty()
+    );
+}
+
+// A merge is also one of the session's ten changes.
+#[test]
+fn a_merge_counts_among_the_ten_changes() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for _ in 0..10 {
+        change(&e, "s", "memory_forget", 3);
+    }
+    let r = call(
+        &e,
+        "s",
+        "memory_consolidate",
+        json!({"ids": "1, 2", "text": "x"}),
+    );
+    assert!(denied_by_budget(&r), "{r:?}");
+    assert!(port.drafts.lock().unwrap().is_empty());
 }

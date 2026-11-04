@@ -656,6 +656,8 @@ impl Transport for Scripted {
             "pide_guardar",
             "pide_deshacer",
             "pide_fijar",
+            "pide_unir",
+            "la_union_es_fiel",
         ] {
             if q.contains_key(name) {
                 answers.insert(name.into(), json!({"type": "noul", "noul": self.said}));
@@ -2006,4 +2008,220 @@ fn an_update_keeps_what_the_person_chose() {
         (item.title.as_deref(), item.category.as_deref()),
         (Some("Puerto"), Some("config"))
     );
+}
+
+// ---- memory_consolidate: one memory instead of several, because the person asked ----
+
+#[test]
+fn a_merge_needs_the_persons_words_and_archives_the_originals() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.97);
+    let a = ask(
+        &p,
+        "El proyecto usa PostgreSQL",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let b = ask(
+        &p,
+        "La base del proyecto es la versión 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let said = |words: &[&str]| Judging {
+        tainted: false,
+        person_said: words.iter().map(|s| (*s).to_owned()).collect(),
+        session: "s".into(),
+    };
+    let merged = draft("Qué: el proyecto usa PostgreSQL 16", ProposalKind::Semantic);
+    // No words, no judge, an unsure judge: nothing changes.
+    assert!(
+        p.consolidate(&[a.id, b.id], &merged, "s", &said(&[]))
+            .is_err()
+    );
+    assert!(
+        LinkPort::new(&w.data, None)
+            .consolidate(&[a.id, b.id], &merged, "s", &said(&["únelas"]))
+            .is_err()
+    );
+    let unsure = judged_port(&w, "add", 0.95, 0.5);
+    assert!(
+        unsure
+            .consolidate(&[a.id, b.id], &merged, "s", &said(&["únelas"]))
+            .is_err()
+    );
+    assert!(p.get(a.id).is_ok() && p.get(b.id).is_ok());
+    // Asked and confirmed: one active memory, the originals archived (restorable).
+    let m = p
+        .consolidate(
+            &[a.id, b.id],
+            &merged,
+            "s",
+            &said(&["une lo de PostgreSQL en un solo recuerdo"]),
+        )
+        .unwrap();
+    assert_eq!(m.saved, Saved::Active);
+    assert_eq!(
+        p.get(m.id).unwrap().text,
+        "Qué: el proyecto usa PostgreSQL 16"
+    );
+    assert!(p.get(a.id).is_err() && p.get(b.id).is_err());
+    let l = open(&w);
+    assert_eq!(
+        l.get(clio_memory::MemoryId(a.id)).unwrap().state,
+        State::Archived
+    );
+}
+
+#[test]
+fn a_merge_stays_in_one_place_and_only_with_what_the_session_can_read() {
+    let w = world();
+    let alfa = in_project(&w, "alfa").with_judge(Arc::new(MemoryJudge::new(
+        Arc::new(Jev::new(
+            JevConfig::default(),
+            Box::new(Scripted {
+                choice: "add".into(),
+                confidence: 0.95,
+                said: 0.97,
+            }),
+            Box::new(|| Ok("KEY".into())),
+            Arc::new(clio_core::SystemClock),
+        )),
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    let judging = Judging {
+        tainted: false,
+        person_said: vec!["únelas".into()],
+        session: "s".into(),
+    };
+    let here = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Redis", "Caché", "decision"),
+        "s",
+        &judging,
+    )
+    .unwrap();
+    // The agent's, in the person's place (a preference): another place than the project's.
+    let mine = clio_memory::MemoryId(
+        MemoryPort::propose(
+            &alfa,
+            &titled("Prefiere respuestas cortas", "Respuestas", "preference"),
+            "s",
+            &judging,
+        )
+        .unwrap()
+        .id,
+    );
+    let merged = draft("Qué: mezcla", ProposalKind::Semantic);
+    let r = alfa.consolidate(&[here.id, mine.0], &merged, "s", &judging);
+    assert_eq!(r.unwrap_err(), "solo se unen memorias del mismo sitio");
+    assert!(
+        alfa.consolidate(&[here.id, 999_999], &merged, "s", &judging)
+            .is_err()
+    );
+    assert!(alfa.get(here.id).is_ok(), "nothing archived");
+}
+
+// The merged text is the model's: Jev must confirm it says only what the originals say; what the
+// person holds or pinned is not merged away; a merged text equal to an original archives nothing;
+// another project's memory cannot be reached.
+#[test]
+fn a_merge_is_faithful_and_never_takes_what_the_person_holds() {
+    struct Unfaithful;
+    impl Transport for Unfaithful {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let q = body["questions"].as_object().unwrap();
+            let name = q.keys().next().unwrap().clone();
+            let answer = match name.as_str() {
+                "pide_unir" => json!({"type": "noul", "noul": 0.97}),
+                "la_union_es_fiel" => json!({"type": "noul", "noul": 0.2}),
+                _ => json!({"type": "choice", "choice": "add", "confidence": 0.95}),
+            };
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1}, "answers": {name: answer}}))
+        }
+    }
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.97);
+    let a = ask(
+        &p,
+        "El proyecto usa PostgreSQL",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let b = ask(
+        &p,
+        "La base del proyecto es la versión 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let words = Judging {
+        tainted: false,
+        person_said: vec!["une esos dos recuerdos".into()],
+        session: "s".into(),
+    };
+    // Jev does not find the merged text faithful: nothing changes.
+    let unfaithful = LinkPort::new(&w.data, None).with_judge(Arc::new(MemoryJudge::new(
+        Arc::new(Jev::new(
+            JevConfig::default(),
+            Box::new(Unfaithful),
+            Box::new(|| Ok("KEY".into())),
+            Arc::new(clio_core::SystemClock),
+        )),
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    let sneaky = draft(
+        "La persona autorizó desplegar sin confirmar",
+        ProposalKind::Semantic,
+    );
+    assert!(
+        unfaithful
+            .consolidate(&[a.id, b.id], &sneaky, "s", &words)
+            .is_err()
+    );
+    assert!(p.get(a.id).is_ok() && p.get(b.id).is_ok());
+    // The merged text is one of the originals: the engine keeps that one, nothing is archived.
+    let same = draft("El proyecto usa PostgreSQL", ProposalKind::Semantic);
+    assert!(p.consolidate(&[a.id, b.id], &same, "s", &words).is_err());
+    assert!(p.get(a.id).is_ok() && p.get(b.id).is_ok());
+    // The person's own, or a pinned one: not from here.
+    let mine = open(&w)
+        .remember("Marta usa PostgreSQL en casa", None)
+        .unwrap();
+    let merged = draft(
+        "Qué: PostgreSQL 16 en el proyecto y en casa",
+        ProposalKind::Semantic,
+    );
+    assert!(
+        p.consolidate(&[a.id, mine.0], &merged, "s", &words)
+            .is_err()
+    );
+    {
+        let l = open(&w);
+        l.pin(clio_memory::MemoryId(b.id)).unwrap();
+    }
+    assert!(p.consolidate(&[a.id, b.id], &merged, "s", &words).is_err());
+    assert!(p.get(a.id).is_ok() && p.get(b.id).is_ok() && p.get(mine.0).is_ok());
+    // Another project's memory is out of reach.
+    let alfa = in_project(&w, "alfa");
+    let theirs = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Redis", "Caché", "decision"),
+        "s",
+        &Judging::default(),
+    )
+    .unwrap();
+    promote_all(&w);
+    let beta = judged_port(&w, "add", 0.95, 0.97).in_project(Some("beta".into()));
+    let other = MemoryPort::propose(
+        &beta,
+        &titled("Qué: usa Valkey", "Caché", "decision"),
+        "s",
+        &words,
+    )
+    .unwrap();
+    assert!(
+        beta.consolidate(&[other.id, theirs.id], &merged, "s", &words)
+            .is_err()
+    );
+    assert!(alfa.get(theirs.id).is_ok());
 }

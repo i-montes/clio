@@ -58,6 +58,8 @@ pub enum OpenTarget {
 pub enum Cmd {
     LoadHome,
     RunDoctor,
+    /// Puts text on the terminal's clipboard (OSC 52): the terminal does it, nothing is run.
+    Clipboard(String),
     Check {
         dir: String,
         seq: u64,

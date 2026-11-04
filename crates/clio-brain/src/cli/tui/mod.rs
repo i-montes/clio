@@ -100,6 +100,33 @@ fn install_panic_hook() {
     }));
 }
 
+/// The terminal's "set clipboard" sequence (OSC 52) for `text`, at most 64 KiB of it: base64, so
+/// nothing in the text can end the sequence or reach the terminal as a command.
+pub fn osc52(text: &str) -> String {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut end = text.len().min(64 * 1024);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let bytes = &text.as_bytes()[..end];
+    let mut out = String::from("\x1b]52;c;");
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out.push('\x07');
+    out
+}
+
 /// Restores the terminal when dropped, on every way out of `run`.
 struct Guard;
 
@@ -440,6 +467,12 @@ impl Ctx {
                     Err(e) => Bg::Done(Err(e)),
                 },
             ),
+            Cmd::Clipboard(text) => {
+                use std::io::Write;
+                let mut out = std::io::stdout();
+                let _ = write!(out, "{}", osc52(&text));
+                let _ = out.flush();
+            }
             Cmd::RunDoctor => self.spawn(
                 |d, _| super::doctor::collect(d),
                 |r| match r {

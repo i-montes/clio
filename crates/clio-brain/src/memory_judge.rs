@@ -65,6 +65,7 @@ pub enum Request {
     Promote,
     Undo,
     Pin,
+    Consolidate,
 }
 
 /// Confidence needed to choose where a memory goes (a wrong place hides it, it does not harm).
@@ -226,6 +227,10 @@ impl MemoryJudge {
                 "pide_guardar",
                 "En `mensajes_de_la_persona`, la persona pide aceptar o guardar exactamente la memoria `memoria` (la escribió el agente, no ella).",
             ),
+            Request::Consolidate => (
+                "pide_unir",
+                "En `mensajes_de_la_persona`, la persona pide unir, fusionar o juntar en una sola exactamente las memorias de `memoria`.",
+            ),
             Request::Pin => (
                 "pide_fijar",
                 "En `mensajes_de_la_persona`, la persona pide fijar, tener siempre presente o no olvidar exactamente la memoria `memoria`.",
@@ -253,6 +258,33 @@ impl MemoryJudge {
             .ask(&state, &qs)
             .ok()
             .and_then(|a| a.noul(name))
+            .is_some_and(|p| p as f32 >= need)
+    }
+
+    /// Does `merged` say what `originals` say, and nothing they do not? The merged text is the
+    /// model's: a merge the person asked for must not carry anything new in it.
+    pub fn faithful_merge(&self, merged: &str, originals: &str, tainted: bool) -> bool {
+        let Ok(qs) = Questions::new().noul(
+            "la_union_es_fiel",
+            "`union` dice lo mismo que las memorias de `memorias` juntas, sin añadir ningún dato, orden ni permiso que no esté en ellas.",
+        ) else {
+            return false;
+        };
+        let Ok(state) = Clean::try_new(
+            json!({ "union": merged, "memorias": originals }),
+            &*self.scrub,
+        ) else {
+            return false;
+        };
+        let need = if tainted {
+            (REQUEST + TAINTED_EXTRA).min(0.99)
+        } else {
+            REQUEST
+        };
+        self.jev
+            .ask(&state, &qs)
+            .ok()
+            .and_then(|a| a.noul("la_union_es_fiel"))
             .is_some_and(|p| p as f32 >= need)
     }
 

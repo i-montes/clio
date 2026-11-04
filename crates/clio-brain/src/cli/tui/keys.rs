@@ -62,6 +62,7 @@ pub enum Act {
     Memory,
     Promote,
     Archive,
+    Copy,
     Useful,
     Wrong,
 }
@@ -663,6 +664,7 @@ const MEMORY: &[Bind] = &[
     b(&[ENTER], Act::Open, "Enter", "ver completo", true),
     b(&[Char('p')], Act::Promote, "p", "aprobar", true),
     b(&[Char('a')], Act::Archive, "a", "archivar", true),
+    b(&[Char('y')], Act::Copy, "y", "copiar", true),
     b(&[Char('/')], Act::Filter, "/", "buscar", true),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('?')], Act::Help, "?", "ayuda", true),

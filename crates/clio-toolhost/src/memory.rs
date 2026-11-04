@@ -30,7 +30,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 11] = [
+pub(crate) const MEMORY_OPS: [&str; 12] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
@@ -38,6 +38,7 @@ pub(crate) const MEMORY_OPS: [&str; 11] = [
     "memory_propose",
     "memory_session_summary",
     "memory_update",
+    "memory_consolidate",
     "memory_forget",
     "memory_promote",
     "memory_revert",
@@ -60,6 +61,10 @@ const SUMMARY_PARTS: [(&str, &str); 6] = [
 ];
 
 const UPDATE_DESCRIPTION: &str = "Propose a new text for one memory (its id): Clio decides whether it replaces it, like any proposal";
+
+const CONSOLIDATE_DESCRIPTION: &str = "Merge two to five memories into one because the person asked (Jev checks the person's words); the originals are archived, not erased";
+/// How many memories one merge may join.
+const MAX_MERGE: usize = 5;
 
 const TIMELINE_DESCRIPTION: &str =
     "Read the memories around one, of its session (or its place), in order (read-only)";
@@ -257,6 +262,17 @@ pub trait MemoryPort: Send + Sync {
     ) -> Result<Proposed, String> {
         Err("this memory cannot update; propose a new one".into())
     }
+    /// One memory instead of `ids` (same place, facts), because the person asked: the port checks
+    /// their words with the judge, saves the merged one and archives the originals.
+    fn consolidate(
+        &self,
+        _ids: &[i64],
+        _draft: &ProposalDraft,
+        _session: &str,
+        _judging: &Judging,
+    ) -> Result<Proposed, String> {
+        Err(NO_CHANGES.into())
+    }
     /// The memories around `id` (its session, else its place), oldest first, `id` included.
     fn timeline(&self, _id: i64, _before: usize, _after: usize) -> Result<Vec<MemoryItem>, String> {
         Err("this memory has no timeline".into())
@@ -321,6 +337,12 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("title", ArgKind::Text, false),
             a("category", ArgKind::Text, false),
         ],
+        "memory_consolidate" => vec![
+            a("ids", ArgKind::Text, true),
+            a("text", ArgKind::Text, true),
+            a("title", ArgKind::Text, false),
+            a("category", ArgKind::Text, false),
+        ],
         "memory_timeline" => vec![
             a("id", ArgKind::Int, true),
             a("before", ArgKind::Int, false),
@@ -357,6 +379,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_propose", PROPOSE_DESCRIPTION),
         ("memory_session_summary", SUMMARY_DESCRIPTION),
         ("memory_update", UPDATE_DESCRIPTION),
+        ("memory_consolidate", CONSOLIDATE_DESCRIPTION),
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_promote", PROMOTE_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
@@ -380,6 +403,26 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         args: arg_specs(name),
     })
     .collect()
+}
+
+/// `"12, m15 18"` as distinct positive ids, 2 to `MAX_MERGE` of them.
+fn merge_ids(s: &str) -> Option<Vec<i64>> {
+    let mut ids = Vec::new();
+    for part in s
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+    {
+        let n: i64 = part
+            .trim_start_matches('m')
+            .parse()
+            .ok()
+            .filter(|n| *n > 0)?;
+        if ids.contains(&n) {
+            return None;
+        }
+        ids.push(n);
+    }
+    (2..=MAX_MERGE).contains(&ids.len()).then_some(ids)
 }
 
 /// The parts of a summary that were given, as typed, each after its label: the vault and the
@@ -538,7 +581,7 @@ impl ToolHost {
     ) -> Response {
         if matches!(
             req.tool.as_str(),
-            "memory_propose" | "memory_session_summary" | "memory_update"
+            "memory_propose" | "memory_session_summary" | "memory_update" | "memory_consolidate"
         ) {
             return self.propose_call(req, args, out);
         }
@@ -671,6 +714,24 @@ impl ToolHost {
     }
 
     fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
+        // A merge archives memories: it is also one of the session's ten changes (S-65).
+        if req.tool == "memory_consolidate" {
+            let path = self.run_dir.join("memory-changes.json");
+            let mut changes = match Budget::load(&path) {
+                Ok(b) => b,
+                Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
+            };
+            if changes.calls >= MAX_CHANGES {
+                return self.budget_denied(
+                    req,
+                    &format!("this session asked for its memory changes ({MAX_CHANGES}); the person can use `clio memory`"),
+                );
+            }
+            changes.calls += 1;
+            if let Err(why) = changes.save(&path) {
+                return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
+            }
+        }
         let path = self.run_dir.join("memory-proposals.json");
         let mut budget = match Budget::load(&path) {
             Ok(b) => b,
@@ -714,7 +775,7 @@ impl ToolHost {
                 Ok(t) => (t, ProposalKind::Session),
                 Err(why) => return self.memory_failed(req, out, why),
             }
-        } else if req.tool == "memory_update" {
+        } else if matches!(req.tool.as_str(), "memory_update" | "memory_consolidate") {
             let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
             (text.to_owned(), ProposalKind::Semantic)
         } else {
@@ -800,6 +861,25 @@ impl ToolHost {
             category,
             kind,
         };
+        // A merge names two to five memories ("12, m15"), each once.
+        let merge: Option<Vec<i64>> = if req.tool == "memory_consolidate" {
+            let ids = merge_ids(args.get("ids").and_then(Value::as_str).unwrap_or_default());
+            match ids {
+                Some(v) => Some(v),
+                None => {
+                    return self.memory_failed(
+                        req,
+                        out,
+                        &format!(
+                            "ids must be 2 to {MAX_MERGE} different memory numbers, like \"12, 15\""
+                        ),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let merged_ids = merge.clone().unwrap_or_default();
         // An update names the memory it is for; a bad id is refused before anyone is asked.
         let target = if req.tool == "memory_update" {
             match args.get("id").and_then(Value::as_i64).filter(|n| *n > 0) {
@@ -819,12 +899,31 @@ impl ToolHost {
         // writer: a proposal reported as failed must not be saved afterwards in the background.
         match self.ask_port_for(
             &port,
-            move |p| match target {
-                Some(id) => p.update(id, &draft, &session, &judging),
-                None => p.propose(&draft, &session, &judging),
+            move |p| match (merge, target) {
+                (Some(ids), _) => p.consolidate(&ids, &draft, &session, &judging),
+                (None, Some(id)) => p.update(id, &draft, &session, &judging),
+                (None, None) => p.propose(&draft, &session, &judging),
             },
             self.memory_timeout * 3,
         ) {
+            Ok(done) if req.tool == "memory_consolidate" => {
+                facts.ids.push(done.id);
+                facts.ids.extend(merged_ids.iter().copied());
+                // One request of the person is one change: the next one needs new words.
+                self.forget_said(&req.session);
+                Response {
+                    id: req.id.clone(),
+                    ok: true,
+                    content: format!(
+                        "merged into m{}: the originals are archived, not erased (the person can restore them)",
+                        done.id
+                    ),
+                    data: json!({ "proposed": true, "result": "merged", "change": done.change }),
+                    decision: out,
+                    tainted: self.is_tainted(&req.session),
+                    external: false,
+                }
+            }
             Ok(done) => {
                 facts.ids.push(done.id);
                 let (content, how) = match done.saved {
