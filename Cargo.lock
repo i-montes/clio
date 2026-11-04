@@ -301,6 +301,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clio-jev"
+version = "0.0.0"
+dependencies = [
+ "clio-core",
+ "serde_json",
+]
+
+[[package]]
 name = "clio-memory"
 version = "0.0.0"
 dependencies = [

@@ -173,7 +173,8 @@ pub fn read_session(path: &Path) -> Result<SessionInfo, String> {
                 .filter(|n| !n.is_empty())
         }
         Some("message") if first_user.is_none() && v["message"]["role"] == "user" => {
-            let t = text::line(&message_text(&v["message"]), TITLE_CHARS);
+            let typed = message_text(&v["message"]);
+            let t = text::line(super::envelope::strip(&typed), TITLE_CHARS);
             if !t.is_empty() {
                 first_user = Some(t);
             }

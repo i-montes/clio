@@ -29,7 +29,20 @@ let deaf = false;
 const usage = (i, o) => ({ input: i, output: o, cacheRead: 0, cacheWrite: 0, totalTokens: i + o, cost: { total: 0.01 } });
 const settle = (aborted) => { out({ type: "agent_end", messages: [], willRetry: false }); out({ type: "agent_settled", aborted }); };
 
-function prompt(id, msg) {
+// The brain puts an envelope (the time) in front of what the person typed; the scripted commands
+// below are matched on what was typed, and `echo` shows what Pi really received.
+const ENVELOPE = /^<clio-contexto>\nhora: [^\n]*\n<\/clio-contexto>\n\n/;
+function prompt(id, raw) {
+  const msg = raw.replace(ENVELOPE, "");
+  if (msg === "echo") {
+    resp(id, "prompt", { disposition: "started" });
+    out({ type: "agent_start" });
+    out({ type: "turn_start" });
+    out({ type: "message_start", message: { role: "assistant", content: [] } });
+    out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: raw }], usage: usage(10, 5), stopReason: "stop" } });
+    out({ type: "turn_end" });
+    return settle(false);
+  }
   if (msg === "fail") return resp(id, "prompt", null, false, "\u001b[31mrejected\u001b[0m");
   if (msg === "crash") {
     process.stderr.write("boom \u001b[31mred\u001b[0m \u001b]0;title\u0007 end\n");

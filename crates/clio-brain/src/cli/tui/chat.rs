@@ -217,7 +217,13 @@ impl Chat {
     fn add_history(&mut self, m: &Value) {
         let text = content_text(&m["content"]);
         match m["role"].as_str() {
-            Some("user") if !text.is_empty() => self.items.push(Item::User(text)),
+            Some("user") if !text.is_empty() => {
+                // What the person sees is what they typed: the brain's envelope stays out.
+                let typed = clio_brain::pi::envelope::strip(&text);
+                if !typed.is_empty() {
+                    self.items.push(Item::User(typed.to_owned()));
+                }
+            }
             Some("assistant") => {
                 if !text.is_empty() {
                     self.items.push(Item::Assistant { text, live: false });
@@ -1133,6 +1139,19 @@ mod tests {
         });
         assert!(
             matches!(&c.items[..], [Item::Assistant { text, .. }] if text == "hola, esto cabe")
+        );
+    }
+
+    #[test]
+    fn history_shows_what_the_person_typed_without_the_envelope() {
+        let mut c = Chat::opening(1, 0);
+        let wrapped = clio_brain::pi::envelope::wrap("2026-11-03 18:42 -05:00", "hola, Clio");
+        let h = vec![json!({"role":"user","content":[{"type":"text","text":wrapped}]})];
+        c.opened("sid".into(), String::new(), &h, None, 0);
+        assert!(
+            matches!(&c.items[..], [Item::User(t)] if t == "hola, Clio"),
+            "{:?}",
+            c.items.len()
         );
     }
 

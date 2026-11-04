@@ -44,6 +44,22 @@ const MASKED = "clio-guard.masked";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_propose"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
+/**
+ * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
+ * tool, and a tool added to TOOL_NAMES without one does not compile. The catalog below reaches the
+ * brain at the start of every session, so Jev's questions come from here and from no other list.
+ */
+export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
+	read: "leer archivos del equipo",
+	write: "crear un archivo nuevo o reescribirlo entero",
+	edit: "cambiar un trecho de un archivo que ya existe",
+	bash: "ejecutar comandos en una terminal",
+	find: "buscar archivos por su nombre",
+	ls: "ver qué hay dentro de una carpeta",
+	memory_search: "consultar lo que se recuerda de esta persona o de conversaciones pasadas",
+	memory_get: "leer una memoria concreta de la persona por su número",
+	memory_propose: "guardar un dato estable que la persona acaba de contar o enseñar",
+};
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
 const MEMORY_TOOLS = new Set<string>(["memory_search", "memory_get", "memory_propose"]);
@@ -305,6 +321,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		pi.appendEntry(TOOLS_ENTRY, {
 			active: pi.getActiveTools(),
 			all: pi.getAllTools().map((t) => ({ name: t.name, source: t.sourceInfo?.path ?? null })),
+			catalog: TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),
 			prompt: prompt.version,
 		});
 	});
