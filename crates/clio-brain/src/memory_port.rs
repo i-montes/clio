@@ -242,7 +242,11 @@ impl MemoryPort for LinkPort {
                 // Something new next to a memory it does not replace: how the two stand (asked
                 // now, before the writer, like everything Jev is asked).
                 let relation = match (&v.call, neighbors.first()) {
-                    (Call::Add, Some(n)) => judge.relation(&stored, &n.text).map(|r| (n.id, r)),
+                    // Never on what the person holds: the model chose the text, so it could choose
+                    // which of their memories gets a «contradice».
+                    (Call::Add, Some(n)) if !n.protected => {
+                        judge.relation(&stored, &n.text).map(|r| (n.id, r))
+                    }
                     _ => None,
                 };
                 (v, relation)

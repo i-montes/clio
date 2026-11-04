@@ -31,6 +31,9 @@ use clio_memory::{
 };
 use clio_vault::Scrubber;
 
+/// How many relation notes a memory's line carries.
+const MAX_NOTES: usize = 4;
+
 /// The name the judge (Jev) signs its relations with, as the engine names its actor.
 const JUDGE_NAME: &str = "jev";
 
@@ -1000,7 +1003,8 @@ impl MemoryLink {
     }
 
     /// What the relations of `row` say, for the model and the person: only those with a memory
-    /// this link can read and that is active (a note pointing at nothing readable says nothing).
+    /// this link can read and that is active (a note pointing at nothing readable says nothing),
+    /// the newest four.
     pub fn relation_notes(&self, row: &MemoryRow) -> Vec<String> {
         let Ok(rels) = self.engine.relations(row.id) else {
             return Vec::new();
@@ -1023,6 +1027,7 @@ impl MemoryLink {
                     (Relation::NotConflict, _) => return None,
                 })
             })
+            .take(MAX_NOTES)
             .collect()
     }
 

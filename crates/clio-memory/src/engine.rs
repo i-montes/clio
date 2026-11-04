@@ -1927,7 +1927,7 @@ impl Engine {
         })
     }
 
-    /// Every judged relation that names this memory.
+    /// Every judged relation that names this memory, the newest first.
     pub fn relations(&self, id: MemoryId) -> Result<Vec<RelationRow>> {
         self.store.relations_of(id)
     }

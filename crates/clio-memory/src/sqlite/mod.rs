@@ -1772,7 +1772,7 @@ impl Store for SqliteStore {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(
             "SELECT source, target, relation, by, confidence, at FROM relations
-             WHERE source = ?1 OR target = ?1 ORDER BY at, source, target",
+             WHERE source = ?1 OR target = ?1 ORDER BY at DESC, source, target",
         )?;
         let rows = stmt.query_map([memory.0], |r| {
             Ok(RelationRow {

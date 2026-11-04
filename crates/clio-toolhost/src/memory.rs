@@ -767,7 +767,13 @@ impl ToolHost {
             person_said: self.person_said(&req.session),
             session: req.session.clone(),
         };
-        match self.ask_port(&port, move |p| p.propose(&draft, &session, &judging)) {
+        // Up to four questions to Jev (place, decision, the person's words, relation) and the
+        // writer: a proposal reported as failed must not be saved afterwards in the background.
+        match self.ask_port_for(
+            &port,
+            move |p| p.propose(&draft, &session, &judging),
+            self.memory_timeout * 3,
+        ) {
             Ok(done) => {
                 facts.ids.push(done.id);
                 let (content, how) = match done.saved {
