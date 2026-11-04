@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 
 pub use memory::{
     CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind,
-    Proposed, Saved,
+    Proposed, Saved, memory_args,
 };
 pub use sanitize::sanitize;
 pub use server::Server;
