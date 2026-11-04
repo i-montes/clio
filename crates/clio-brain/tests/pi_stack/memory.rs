@@ -43,6 +43,8 @@ fn seed(data: &Path, with_agent: bool) -> i64 {
                 source: None,
                 valid_from: None,
                 valid_to: None,
+                title: None,
+                category: None,
             })
             .unwrap();
     }
@@ -156,6 +158,8 @@ fn propose(link: &MemoryLink, scope: ScopeId, origin: MOrigin, text: &str) -> i6
             source: None,
             valid_from: None,
             valid_to: None,
+            title: None,
+            category: None,
         })
         .unwrap()
         .memory

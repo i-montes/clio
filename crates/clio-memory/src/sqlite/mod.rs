@@ -17,8 +17,8 @@ use crate::idle::{DEFAULT_IDLE, IdleCache};
 use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Change, Check, DecisionRecord, ExportSummary,
     Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow, MemoryType, NewOperation, OpId, OpKind,
-    OpenMode, Operation, Origin, QueueStats, Quota, ScopeId, ScopeInfo, ScopeStats, SearchOpts,
-    Signal, State, Stats, Tombstone,
+    OpenMode, Operation, Origin, QueueStats, Quota, RelationRow, ScopeId, ScopeInfo, ScopeStats,
+    SearchOpts, Signal, State, Stats, Tombstone,
 };
 use crate::normalize::{content_hash, normalize};
 use crate::platform::{self, WriterLock};
@@ -35,7 +35,7 @@ mod schema;
 mod tests;
 
 const MEM_COLS: &str = "id, scope, kind, content, content_hash, topic_key, origin, actor, session, \
-    episode, source, state, valid_from, valid_to, known_since, replaced_by, supersedes";
+    episode, source, state, valid_from, valid_to, known_since, replaced_by, supersedes, title, category";
 const OP_COLS: &str = "id, scope, kind, memory, changes, actor, reason, at, reverts, trace_id";
 
 /// Enums are stored as their bare variant name.
@@ -314,6 +314,43 @@ fn export_all(
             })
         },
         f,
+    )?;
+    stream(
+        conn,
+        "SELECT memory, at FROM pins ORDER BY memory",
+        |r| {
+            Ok(ExportRecord::Pin {
+                memory: MemoryId(r.get(0)?),
+                at: r.get(1)?,
+            })
+        },
+        f,
+    )?;
+    stream(
+        conn,
+        "SELECT memory, at FROM reviews ORDER BY memory",
+        |r| {
+            Ok(ExportRecord::Review {
+                memory: MemoryId(r.get(0)?),
+                at: r.get(1)?,
+            })
+        },
+        f,
+    )?;
+    stream(
+        conn,
+        "SELECT source, target, relation, by, confidence, at FROM relations ORDER BY source, target",
+        |r| {
+            Ok(ExportRecord::Relation {
+                source: MemoryId(r.get(0)?),
+                target: MemoryId(r.get(1)?),
+                relation: dec_at(r, 2)?,
+                by: r.get(3)?,
+                confidence: r.get::<_, f64>(4)? as f32,
+                at: r.get(5)?,
+            })
+        },
+        f,
     )
 }
 
@@ -327,6 +364,7 @@ fn row_has_secret(m: &MemoryRow) -> bool {
         m.session.as_ref(),
         m.episode.as_ref(),
         m.source.as_ref(),
+        m.title.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -562,6 +600,39 @@ fn restore_record(
                 params![id, memory.0, actor.0, enc(signal), at, spent],
             )?;
         }
+        ExportRecord::Pin { memory, at } | ExportRecord::Review { memory, at } => {
+            if purged.contains(&memory.0) {
+                return bad("a pin or review of a memory that was purged");
+            }
+            let table = if matches!(record, ExportRecord::Pin { .. }) {
+                "pins"
+            } else {
+                "reviews"
+            };
+            tx.execute(
+                &format!("INSERT INTO {table}(memory, at) VALUES (?1, ?2)"),
+                params![memory.0, at],
+            )?;
+        }
+        ExportRecord::Relation {
+            source,
+            target,
+            relation,
+            by,
+            confidence,
+            at,
+        } => {
+            if purged.contains(&source.0) || purged.contains(&target.0) {
+                return bad("a relation of a memory that was purged");
+            }
+            if !(0.0..=1.0).contains(confidence) || find_secret(by) {
+                return bad("a relation that is not valid");
+            }
+            tx.execute(
+                "INSERT INTO relations(source, target, relation, by, confidence, at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![source.0, target.0, enc(relation), by, f64::from(*confidence), at],
+            )?;
+        }
     }
     Ok(())
 }
@@ -613,6 +684,11 @@ fn memory_from(r: &Row<'_>) -> rusqlite::Result<MemoryRow> {
         known_since: r.get(14)?,
         replaced_by: r.get::<_, Option<i64>>(15)?.map(MemoryId),
         supersedes: r.get::<_, Option<i64>>(16)?.map(MemoryId),
+        title: r.get(17)?,
+        category: match r.get::<_, Option<String>>(18)? {
+            Some(c) => Some(dec(&c).map_err(|e| conv_err(18, e))?),
+            None => None,
+        },
     })
 }
 
@@ -832,6 +908,9 @@ impl SqliteStore {
             }
             if version == 0 {
                 return Err(Error::NotFound); // empty or never initialised
+            }
+            if version < schema::VERSION {
+                return Err(Error::SchemaTooOld(version)); // a reader never upgrades the file
             }
             return Ok(Self {
                 path: path.to_path_buf(),
@@ -1559,12 +1638,24 @@ impl Store for SqliteStore {
                  WHERE op IN (SELECT op FROM operation_memories WHERE memory = ?1)",
                 [memory.0],
             )?;
-            for table in ["vectors", "usage", "feedback", "block_memories"] {
+            for table in [
+                "vectors",
+                "usage",
+                "feedback",
+                "block_memories",
+                "pins",
+                "reviews",
+            ] {
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE memory = ?1"),
                     [memory.0],
                 )?;
             }
+            // A relation names both memories: it goes when either does.
+            tx.execute(
+                "DELETE FROM relations WHERE source = ?1 OR target = ?1",
+                [memory.0],
+            )?;
             // A failed job keeps the error it got, and an embedder's error can quote the texts it
             // was given. The queue does not say which memory an error is about, so they all go;
             // what a job did and when stays.
@@ -1611,6 +1702,147 @@ impl Store for SqliteStore {
     fn vacuum(&self) -> Result<()> {
         self.writer()?.execute_batch("VACUUM")?;
         Ok(())
+    }
+
+    fn set_pin(&self, memory: MemoryId, at: Option<i64>) -> Result<()> {
+        let conn = self.writer()?;
+        match at {
+            Some(at) => conn.execute(
+                "INSERT INTO pins(memory, at) SELECT ?1, ?2 WHERE EXISTS(SELECT 1 FROM memories WHERE id = ?1)
+                 ON CONFLICT(memory) DO NOTHING",
+                params![memory.0, at],
+            )?,
+            None => conn.execute("DELETE FROM pins WHERE memory = ?1", [memory.0])?,
+        };
+        Ok(())
+    }
+
+    fn pinned(&self, scope: ScopeId) -> Result<Vec<MemoryRow>> {
+        let cols = prefixed(MEM_COLS, "m");
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {cols} FROM pins p JOIN memories m ON m.id = p.memory
+             WHERE m.scope = ?1 AND m.state = 'Active' ORDER BY p.at, m.id"
+        ))?;
+        let rows = stmt.query_map([scope.0], memory_from)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn set_reviewed(&self, memory: MemoryId, at: i64) -> Result<()> {
+        self.writer()?.execute(
+            "INSERT INTO reviews(memory, at) SELECT ?1, ?2 WHERE EXISTS(SELECT 1 FROM memories WHERE id = ?1)
+             ON CONFLICT(memory) DO UPDATE SET at = MAX(at, ?2)",
+            params![memory.0, at],
+        )?;
+        Ok(())
+    }
+
+    fn review_candidates(&self, scope: ScopeId) -> Result<Vec<(MemoryRow, Option<i64>)>> {
+        let cols = prefixed(MEM_COLS, "m");
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {cols}, r.at FROM memories m LEFT JOIN reviews r ON r.memory = m.id
+             WHERE m.scope = ?1 AND m.state = 'Active' AND m.category IS NOT NULL ORDER BY m.id"
+        ))?;
+        let rows = stmt.query_map([scope.0], |r| {
+            Ok((memory_from(r)?, r.get::<_, Option<i64>>(19)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn put_relation(&self, rel: &RelationRow) -> Result<()> {
+        self.writer()?.execute(
+            "INSERT INTO relations(source, target, relation, by, confidence, at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS(SELECT 1 FROM memories WHERE id = ?1) AND EXISTS(SELECT 1 FROM memories WHERE id = ?2)
+             ON CONFLICT(source, target) DO UPDATE SET relation = ?3, by = ?4, confidence = ?5, at = ?6",
+            params![
+                rel.source.0,
+                rel.target.0,
+                enc(&rel.relation),
+                rel.by,
+                f64::from(rel.confidence),
+                rel.at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn relations_of(&self, memory: MemoryId) -> Result<Vec<RelationRow>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT source, target, relation, by, confidence, at FROM relations
+             WHERE source = ?1 OR target = ?1 ORDER BY at, source, target",
+        )?;
+        let rows = stmt.query_map([memory.0], |r| {
+            Ok(RelationRow {
+                source: MemoryId(r.get(0)?),
+                target: MemoryId(r.get(1)?),
+                relation: dec_at(r, 2)?,
+                by: r.get(3)?,
+                confidence: r.get::<_, f64>(4)? as f32,
+                at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn timeline(&self, around: &MemoryRow, before: usize, after: usize) -> Result<Vec<MemoryRow>> {
+        let conn = self.reader()?;
+        // The same episode (a session) when there is one, else the whole scope; active only, in
+        // the order they became known.
+        let filter = if around.episode.is_some() {
+            "m.scope = :scope AND m.episode = :episode AND m.state = 'Active'"
+        } else {
+            "m.scope = :scope AND m.state = 'Active'"
+        };
+        let cols = prefixed(MEM_COLS, "m");
+        let older = format!(
+            "SELECT {cols} FROM memories m WHERE {filter}
+             AND (m.known_since < :at OR (m.known_since = :at AND m.id < :id))
+             ORDER BY m.known_since DESC, m.id DESC LIMIT :n"
+        );
+        let newer = format!(
+            "SELECT {cols} FROM memories m WHERE {filter}
+             AND (m.known_since > :at OR (m.known_since = :at AND m.id > :id))
+             ORDER BY m.known_since, m.id LIMIT :n"
+        );
+        let run = |sql: &str, n: usize| -> Result<Vec<MemoryRow>> {
+            let mut stmt = conn.prepare(sql)?;
+            let n = i64::try_from(n).unwrap_or(i64::MAX);
+            let rows = if let Some(ep) = &around.episode {
+                stmt.query_map(
+                    named_params! {":scope": around.scope.0, ":episode": ep, ":at": around.known_since, ":id": around.id.0, ":n": n},
+                    memory_from,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            } else {
+                stmt.query_map(
+                    named_params! {":scope": around.scope.0, ":at": around.known_since, ":id": around.id.0, ":n": n},
+                    memory_from,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            Ok(rows)
+        };
+        let mut out = run(&older, before)?;
+        out.reverse();
+        out.push(around.clone());
+        out.extend(run(&newer, after)?);
+        Ok(out)
+    }
+
+    fn recent(&self, scope: ScopeId, limit: usize) -> Result<Vec<MemoryRow>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {MEM_COLS} FROM memories WHERE scope = ?1 AND state = 'Active'
+             ORDER BY known_since DESC, id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            params![scope.0, i64::try_from(limit).unwrap_or(i64::MAX)],
+            memory_from,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     fn record_usages(&self, uses: &[(MemoryId, i64)]) -> Result<()> {
@@ -2028,7 +2260,7 @@ impl Store for SqliteStore {
             |r| {
                 Ok(Hit {
                     memory: memory_from(r)?,
-                    score: r.get(17)?,
+                    score: r.get(19)?,
                 })
             },
         )?;

@@ -2,8 +2,8 @@ use crate::error::Result;
 use crate::model::{
     ActorId, ActorInfo, ActorKind, Block, BlockId, Check, Choice, DeciderMode, DecisionRecord,
     DecisionStatus, ExportSummary, Hit, JobKind, JobRecord, JobState, MemoryId, MemoryRow,
-    MemoryType, NewOperation, OpId, Operation, QueueStats, Quota, ScopeId, ScopeInfo, SearchOpts,
-    Signal, State, Stats, Tombstone,
+    MemoryType, NewOperation, OpId, Operation, QueueStats, Quota, RelationRow, ScopeId, ScopeInfo,
+    SearchOpts, Signal, State, Stats, Tombstone,
 };
 use crate::transfer::ExportRecord;
 use crate::vector::VectorIndex;
@@ -165,6 +165,23 @@ pub trait Store: VectorIndex + Send + Sync {
     fn tombstone(&self, id: MemoryId) -> Result<Option<Tombstone>>;
 
     /// For each `(memory, at)`: `uses + 1` and `last_used = max(old, at)`, in one transaction.
+    /// Pins (`Some(at)`) or unpins (`None`) a memory. Not part of the log.
+    fn set_pin(&self, memory: MemoryId, at: Option<i64>) -> Result<()>;
+    /// The active pinned memories of a scope, in the order they were pinned.
+    fn pinned(&self, scope: ScopeId) -> Result<Vec<MemoryRow>>;
+    /// Marks a memory as looked at again (its review cycle starts over). Not part of the log.
+    fn set_reviewed(&self, memory: MemoryId, at: i64) -> Result<()>;
+    /// The active memories of a scope that have a category, with when they were last reviewed.
+    fn review_candidates(&self, scope: ScopeId) -> Result<Vec<(MemoryRow, Option<i64>)>>;
+    /// Records (or revises) the judged relation between two memories. Not part of the log.
+    fn put_relation(&self, rel: &RelationRow) -> Result<()>;
+    /// Every judged relation that names this memory, as source or target.
+    fn relations_of(&self, memory: MemoryId) -> Result<Vec<RelationRow>>;
+    /// Up to `before` and `after` active memories of the same episode (else scope) around one,
+    /// in the order they became known, with it in the middle.
+    fn timeline(&self, around: &MemoryRow, before: usize, after: usize) -> Result<Vec<MemoryRow>>;
+    /// The most recently known active memories of a scope.
+    fn recent(&self, scope: ScopeId, limit: usize) -> Result<Vec<MemoryRow>>;
     fn record_usages(&self, uses: &[(MemoryId, i64)]) -> Result<()>;
     /// `(useful, unspent wrong)` signals of a memory.
     fn feedback_counts(&self, memory: MemoryId) -> Result<(u32, u32)>;

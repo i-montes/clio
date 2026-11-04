@@ -64,6 +64,8 @@ mod tests {
             known_since: 1_773_532_800,
             replaced_by: None,
             supersedes: None,
+            title: None,
+            category: None,
         }
     }
 

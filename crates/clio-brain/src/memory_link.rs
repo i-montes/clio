@@ -363,8 +363,18 @@ impl MemoryLink {
         if !path.is_file() {
             return Ok(None);
         }
-        let engine = Engine::open(&path, OpenMode::ReadOnly, Arc::new(SystemClock))
-            .map_err(|e| format!("{}: {}", path.display(), explain(&e)))?;
+        let open = || Engine::open(&path, OpenMode::ReadOnly, Arc::new(SystemClock));
+        let engine = match open() {
+            // A file of an older schema: a reader never changes it, so it is opened once for
+            // writing (which upgrades it, in one transaction) and then read. If another writer
+            // holds it, that writer has already upgraded it or will: the read is tried again.
+            Err(Error::SchemaTooOld(_)) => {
+                drop(Self::open_write(data, &EmbedModel::none())?);
+                open()
+            }
+            other => other,
+        }
+        .map_err(|e| format!("{}: {}", path.display(), explain(&e)))?;
         let (engine, embeddings, embed_error) = with_model(engine, model);
         let m = |e: Error| explain(&e);
         let Some(scope) = engine
@@ -623,6 +633,8 @@ impl MemoryLink {
             source: Some(format!("{who}:{run}")),
             valid_from: None,
             valid_to: None,
+            title: None,
+            category: None,
         });
         match r {
             Ok(o) => rep.saved.push(Saved {
@@ -683,6 +695,8 @@ impl MemoryLink {
             source: Some(format!("pi:{session}")),
             valid_from: None,
             valid_to: None,
+            title: None,
+            category: None,
         }
     }
 
@@ -773,6 +787,8 @@ impl MemoryLink {
                 source: Some("persona".into()),
                 valid_from: None,
                 valid_to: None,
+                title: None,
+                category: None,
             })
             .map_err(|e| explain(&e))?;
         if let Some(b) = block {

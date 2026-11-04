@@ -35,6 +35,8 @@ fn row(id: i64, scope: ScopeId, actor: ActorId, content: &str, from: i64) -> Mem
         known_since: from,
         replaced_by: None,
         supersedes: None,
+        title: None,
+        category: None,
     }
 }
 

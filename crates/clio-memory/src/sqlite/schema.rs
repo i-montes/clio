@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 
 const DDL: &str = "
 CREATE TABLE scopes(
@@ -31,7 +31,8 @@ CREATE TABLE memories(
     content TEXT NOT NULL, content_hash TEXT NOT NULL, topic_key TEXT, origin TEXT NOT NULL,
     actor INTEGER NOT NULL REFERENCES actors(id), session TEXT, episode TEXT, source TEXT,
     state TEXT NOT NULL, valid_from INTEGER NOT NULL, valid_to INTEGER,
-    known_since INTEGER NOT NULL, replaced_by INTEGER, supersedes INTEGER);
+    known_since INTEGER NOT NULL, replaced_by INTEGER, supersedes INTEGER,
+    title TEXT, category TEXT);
 -- Derived data (embeddings), not part of the log: rebuilt by re-embedding, untouched by rebuild_projection.
 CREATE TABLE vectors(
     memory INTEGER NOT NULL, model TEXT NOT NULL, dim INTEGER NOT NULL, vec BLOB NOT NULL,
@@ -70,6 +71,26 @@ CREATE INDEX jobs_ready ON jobs(state, run_after, priority);
 CREATE INDEX memories_hash ON memories(scope, content_hash);
 CREATE INDEX memories_topic ON memories(scope, kind, topic_key);
 CREATE VIRTUAL TABLE memories_fts USING fts5(text, tokenize='unicode61 remove_diacritics 2');
+"; // the tables of schema 2 (V2_TABLES) are created after this, on a fresh file and on an upgrade
+
+/// What schema 2 adds: the person's pins and reviews, and judged relations between memories.
+/// Choices and judgments, like feedback: not part of the log, untouched by rebuilds.
+const V2_TABLES: &str = "
+CREATE TABLE pins(memory INTEGER PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE reviews(memory INTEGER PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE relations(
+    source INTEGER NOT NULL, target INTEGER NOT NULL, relation TEXT NOT NULL,
+    by TEXT NOT NULL, confidence REAL NOT NULL, at INTEGER NOT NULL,
+    PRIMARY KEY(source, target)) WITHOUT ROWID;
+CREATE INDEX relations_target ON relations(target);
+CREATE INDEX memories_episode ON memories(scope, episode);
+";
+
+/// From schema 1: the memory gains a title and a category (old rows have neither; the log's
+/// snapshots read them as absent), and the tables above appear.
+const V1_TO_V2: &str = "
+ALTER TABLE memories ADD COLUMN title TEXT;
+ALTER TABLE memories ADD COLUMN category TEXT;
 ";
 
 /// Creates the schema on a fresh file; refuses files written by a newer version.
@@ -81,6 +102,14 @@ pub fn init(conn: &mut Connection) -> Result<()> {
     if found == 0 {
         let tx = conn.transaction()?;
         tx.execute_batch(DDL)?;
+        tx.execute_batch(V2_TABLES)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+        tx.commit()?;
+    } else if found == 1 {
+        // One transaction: an upgrade that fails leaves the file as it was.
+        let tx = conn.transaction()?;
+        tx.execute_batch(V1_TO_V2)?;
+        tx.execute_batch(V2_TABLES)?;
         tx.pragma_update(None, "user_version", VERSION)?;
         tx.commit()?;
     }

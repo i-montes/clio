@@ -25,6 +25,8 @@ fn main() -> Result<()> {
             source: None,
             valid_from: None,
             valid_to: None,
+            title: None,
+            category: None,
         })
     };
     propose(ana, Origin::User, "Vive en Medellín", Some("residencia"))?;

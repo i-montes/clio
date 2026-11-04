@@ -27,6 +27,17 @@ engine.revert(out.op, actor)?;
 
 The file is created with mode 0600 and refused if group or others can reach it. The path must be the file itself: a symbolic link is refused (`NotRegularFile`), because in a shared directory a link planted beforehand could redirect the write. The directory it lives in may be a link.
 
+## Titles, categories, pins, reviews, relations (schema 2)
+
+A memory may carry a **title** (short, searched with the content, checked for size and secrets like the content) and a **category** (`decision`, `architecture`, `bugfix`, `pattern`, `config`, `discovery`, `preference`, `learning`). Both are optional, so everything written before still reads. On top of the log, as configuration-like tables (not operations, untouched by `rebuild_projection`, exported since format 1.1):
+
+- **Pins** (`pin`, `unpin`, `pinned`): a person's choice; pinned memories come first in a context.
+- **Reviews** (`review_due`, `mark_reviewed`): each category has a cycle (`config` 90 days, `discovery` 120, `decision` and `architecture` 180; the rest keep). A memory past its cycle stays active and is listed for the person; reviewing it starts the cycle over.
+- **Relations** (`relate`, `relations`): a judged verdict (`related`, `compatible`, `scoped`, `conflicts_with`, `not_conflict`) between two memories, by whoever judged it (`jev`, a person), revisable. Replacing is not a relation: the engine records it itself.
+- `timeline(id, before, after)`: the active memories of the same episode (a session), or of the scope when there is none, around one. `recent(scope, n)`. `recall_many(scopes, ...)`: one recall over several scopes (a project, the person's, the lessons), by score.
+
+PURGE also removes a memory's pin, review and relations. A file of schema 1 is upgraded in one transaction by the first process that opens it for writing; a read-only open of it fails with `SchemaTooOld` and never changes it. Exports of schema 1 (format 1.0) still restore.
+
 ## Remembering and purging
 
 - **`clio-memory remember SCOPE TEXT... [--kind K] [--topic T] [--source S]`** builds a `Proposal` and sends it through `propose`, so it meets the actor's quota, the secret detector and the rules like any other write (in code it *is* `propose`; there is no separate method). Without `--actor` it is a person's memory (`cli:$USER`, origin `User`); with `--actor NAME` it is an agent's (origin `Agent`, an agent quota, and a procedure proposed by an agent waits in quarantine). It prints the outcome, the memory id, the operation id and the state, e.g. `Add m3 (op 7) · Active`.

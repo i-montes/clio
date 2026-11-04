@@ -325,8 +325,8 @@ fn export_writes_a_versioned_header_then_typed_lines_in_order() {
     assert_eq!(kind(header), "header");
     assert_eq!(header["format"], "clio-memory-export");
     assert_eq!(header["format_version"], EXPORT_FORMAT_VERSION);
-    assert_eq!(EXPORT_FORMAT_VERSION, "1.0.0");
-    assert_eq!(header["schema_version"], 1);
+    assert_eq!(EXPORT_FORMAT_VERSION, "1.1.0");
+    assert_eq!(header["schema_version"], 2);
     assert_eq!(header["exported_at"], 1000);
 
     let order = [
@@ -621,18 +621,19 @@ fn import_rejects_a_different_major_a_newer_minor_and_a_different_schema_version
     let text = export_text(&f.engine);
     for (from, to) in [
         (
-            "\"format_version\":\"1.0.0\"",
+            "\"format_version\":\"1.1.0\"",
             "\"format_version\":\"2.0.0\"",
         ),
         (
-            "\"format_version\":\"1.0.0\"",
             "\"format_version\":\"1.1.0\"",
+            "\"format_version\":\"1.2.0\"",
         ),
         (
-            "\"format_version\":\"1.0.0\"",
+            "\"format_version\":\"1.1.0\"",
             "\"format_version\":\"banana\"",
         ),
-        ("\"schema_version\":1", "\"schema_version\":2"),
+        ("\"schema_version\":2", "\"schema_version\":3"),
+        ("\"schema_version\":2", "\"schema_version\":0"),
         ("clio-memory-export", "something-else"),
     ] {
         assert!(text.contains(from), "{from}");
@@ -642,14 +643,23 @@ fn import_rejects_a_different_major_a_newer_minor_and_a_different_schema_version
         bad_import(restored.import(&mut changed.as_bytes()));
         assert_eq!(before, dump_all(&tpath), "{to} left traces");
     }
-    // a newer patch of the same minor is fine
+    // a newer patch of the same minor is fine, and so is an export of the schema before (1.0)
     let patched = text.replacen(
-        "\"format_version\":\"1.0.0\"",
-        "\"format_version\":\"1.0.7\"",
+        "\"format_version\":\"1.1.0\"",
+        "\"format_version\":\"1.1.7\"",
         1,
     );
     let (_dir, _p, restored, _) = target();
     restored.import(&mut patched.as_bytes()).unwrap();
+    let older = text
+        .replacen(
+            "\"format_version\":\"1.1.0\"",
+            "\"format_version\":\"1.0.0\"",
+            1,
+        )
+        .replacen("\"schema_version\":2", "\"schema_version\":1", 1);
+    let (_dir, _p, restored, _) = target();
+    restored.import(&mut older.as_bytes()).unwrap();
 }
 
 #[test]
@@ -1033,7 +1043,10 @@ fn t21_no_telemetry_table_exists_and_the_schema_is_the_expected_set() {
             "memories_fts",
             "operation_memories",
             "operations",
+            "pins",
             "quota_counter",
+            "relations",
+            "reviews",
             "scopes",
             "usage",
             "vectors",
