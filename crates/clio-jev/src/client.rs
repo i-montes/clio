@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use clio_core::Clock;
 use serde_json::{Value, json};
 
-use crate::wire::{Answers, Questions};
+use crate::wire::{Answers, Clean, Questions};
 
 const MAX_STATE_BYTES: usize = 32 * 1024;
 const MAX_REPLY_BYTES: u64 = 1 << 20;
@@ -137,7 +137,7 @@ impl Transport for Process {
         };
         if !status.success() {
             let msg = String::from_utf8_lossy(&err).replace(key, "***");
-            return Err(msg.trim().chars().take(300).collect());
+            return Err(clean_line(&msg));
         }
         if out.len() as u64 > MAX_REPLY_BYTES {
             return Err("respuesta demasiado grande".into());
@@ -146,8 +146,26 @@ impl Transport for Process {
     }
 }
 
+/// One short line of remote text: no control characters (an escape sequence, a line break), at most
+/// 300 characters.
+fn clean_line(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(300)
+        .collect()
+}
+
+/// What a call costs when the reply does not say: about one token per three bytes of request.
+fn estimate(state: &Value, questions: &Questions) -> u64 {
+    let bytes = state.to_string().len() + questions.to_json().to_string().len();
+    u64::try_from(bytes / 3).unwrap_or(u64::MAX).max(1)
+}
+
 #[derive(Default)]
 struct State {
+    /// One call is making the try after a pause; the others wait for its result.
+    probing: bool,
     fails: u32,
     open_until: i64,
     day: i64,
@@ -187,20 +205,26 @@ impl Jev {
 
     /// Asks `questions` about `state`. Any error means "no answer": the caller goes on with its
     /// own rules.
-    pub fn ask(&self, state: &Value, questions: &Questions) -> Result<Answers, JevError> {
+    pub fn ask(&self, state: &Clean, questions: &Questions) -> Result<Answers, JevError> {
+        let state = state.as_value();
         if questions.is_empty() {
             return Err(JevError::Bad("no questions".into()));
         }
         if state.to_string().len() > MAX_STATE_BYTES {
             return Err(JevError::Bad("the state is too large".into()));
         }
+        let cost = estimate(state, questions);
         let now = self.clock.now_ms();
         {
             let mut s = self.st();
+            if s.probing {
+                return Err(JevError::Open);
+            }
             if s.open_until != 0 && now >= s.open_until {
-                // One more try after the pause: a single failure closes it again.
+                // One more try after the pause (this call): a single failure closes it again.
                 s.open_until = 0;
                 s.fails = self.cfg.breaker_fails.saturating_sub(1);
+                s.probing = true;
             }
             if now < s.open_until {
                 return Err(JevError::Open);
@@ -210,15 +234,27 @@ impl Jev {
                 s.tokens = 0;
             }
             if s.tokens >= self.cfg.daily_tokens {
+                s.probing = false;
                 return Err(JevError::Budget);
             }
+            // Reserved before the call so that calls made at the same time cannot overshoot;
+            // settled below with what it really cost.
+            s.tokens = s.tokens.saturating_add(cost);
         }
         let result = self.call(state, questions);
         let mut s = self.st();
+        s.probing = false;
+        // Charged: the input of an answer, or the estimate when it does not say or when Jev
+        // answered something unusable (it billed for it); nothing for a call that never got there.
+        let charged = match &result {
+            Ok(a) if a.input_tokens > 0 => a.input_tokens,
+            Ok(_) | Err(JevError::Bad(_)) => cost,
+            Err(_) => 0,
+        };
+        s.tokens = s.tokens.saturating_sub(cost).saturating_add(charged);
         match &result {
             Ok(a) => {
                 s.fails = 0;
-                s.tokens = s.tokens.saturating_add(a.input_tokens);
                 s.first_model.get_or_insert_with(|| a.model.clone());
                 s.last_model = Some(a.model.clone());
             }
@@ -243,7 +279,7 @@ impl Jev {
         let reply = self
             .transport
             .call(&key, &body, self.cfg.timeout)
-            .map_err(|e| JevError::Call(e.replace(&key, "***")))?;
+            .map_err(|e| JevError::Call(clean_line(&e.replace(&key, "***"))))?;
         Answers::parse(questions, &reply).map_err(JevError::Bad)
     }
 
@@ -321,12 +357,17 @@ mod tests {
         }
     }
 
+    fn clean(v: Value) -> Clean {
+        Clean::new(v, &|s| s.to_owned())
+    }
+
     fn q() -> Questions {
         Questions::new().noul("x", "¿Sí?").unwrap()
     }
 
     fn ask(r: &Rig) -> Result<Answers, JevError> {
-        r.jev.ask(&json!({"mensaje_de_la_persona": "hola"}), &q())
+        r.jev
+            .ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q())
     }
 
     #[test]
@@ -423,11 +464,106 @@ mod tests {
     fn no_questions_and_a_huge_state_are_refused_before_any_call() {
         let r = rig(Config::default(), Ok("KEY".into()));
         assert!(matches!(
-            r.jev.ask(&json!({}), &Questions::new()),
+            r.jev.ask(&clean(json!({})), &Questions::new()),
             Err(JevError::Bad(_))
         ));
-        let big = json!({"mensaje_de_la_persona": "x".repeat(40_000)});
+        let big = clean(json!({"mensaje_de_la_persona": "x".repeat(40_000)}));
         assert!(matches!(r.jev.ask(&big, &q()), Err(JevError::Bad(_))));
         assert_eq!(r.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_reply_without_usage_is_charged_by_estimate_and_so_is_an_unusable_one() {
+        struct NoUsage(bool);
+        impl Transport for NoUsage {
+            fn call(&self, _k: &str, _b: &Value, _t: Duration) -> Result<Value, String> {
+                if self.0 {
+                    return Ok(json!({"model": "m", "answers": {}}));
+                }
+                Ok(json!({"model": "m", "answers": {"x": {"type":"noul","noul":0.5}}}))
+            }
+        }
+        for unusable in [false, true] {
+            let jev = Jev::new(
+                Config {
+                    daily_tokens: 1,
+                    ..Config::default()
+                },
+                Box::new(NoUsage(unusable)),
+                Box::new(|| Ok("KEY".into())),
+                Arc::new(FixedClock::new(1_000)),
+            );
+            let first = jev.ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q());
+            assert_eq!(first.is_err(), unusable);
+            assert_eq!(
+                jev.ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q()),
+                Err(JevError::Budget),
+                "the first call spent the budget (unusable: {unusable})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_that_never_got_there_costs_nothing() {
+        let r = rig(
+            Config {
+                daily_tokens: 1,
+                ..Config::default()
+            },
+            Ok("KEY".into()),
+        );
+        *r.fail.lock().unwrap() = true;
+        assert!(ask(&r).is_err());
+        *r.fail.lock().unwrap() = false;
+        assert!(ask(&r).is_ok(), "the failed call was refunded");
+    }
+
+    #[test]
+    fn only_one_call_makes_the_try_after_the_pause() {
+        struct Slow(Arc<AtomicU32>, Arc<std::sync::Barrier>);
+        impl Transport for Slow {
+            fn call(&self, _k: &str, _b: &Value, _t: Duration) -> Result<Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                self.1.wait(); // the try is still running while the others arrive
+                Err("down".into())
+            }
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let clock = Arc::new(FixedClock::new(1_000));
+        let jev = Arc::new(Jev::new(
+            Config::default(),
+            Box::new(Slow(calls.clone(), gate.clone())),
+            Box::new(|| Ok("KEY".into())),
+            clock.clone(),
+        ));
+        // Open the breaker with three failures, each releasing its own barrier wait.
+        for _ in 0..3 {
+            let (j, g) = (jev.clone(), gate.clone());
+            let t = std::thread::spawn(move || j.ask(&clean(json!({"m": "hola"})), &q()));
+            g.wait();
+            assert!(t.join().unwrap().is_err());
+        }
+        clock.advance(60_000);
+        let (j, g) = (jev.clone(), gate.clone());
+        let trying = std::thread::spawn(move || j.ask(&clean(json!({"m": "hola"})), &q()));
+        while calls.load(Ordering::SeqCst) < 4 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for _ in 0..5 {
+            assert_eq!(
+                jev.ask(&clean(json!({"m": "hola"})), &q()),
+                Err(JevError::Open)
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "nobody else got through");
+        g.wait();
+        assert!(trying.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn remote_error_text_is_one_clean_line() {
+        assert_eq!(clean_line("  a\u{1b}[31mb\nc\td  "), "a [31mb c d");
+        assert_eq!(clean_line(&"x".repeat(500)).chars().count(), 300);
     }
 }

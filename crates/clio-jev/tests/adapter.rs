@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
-use clio_jev::{Config, Jev, JevError, Process, Questions};
+use clio_jev::{Clean, Config, Jev, JevError, Process, Questions};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -73,7 +73,10 @@ fn questions() -> Questions {
 }
 
 fn ask(j: &Jev) -> Result<clio_jev::Answers, JevError> {
-    j.ask(&json!({"mensaje_de_la_persona": "hola"}), &questions())
+    j.ask(
+        &Clean::new(json!({"mensaje_de_la_persona": "hola"}), &|s| s.to_owned()),
+        &questions(),
+    )
 }
 
 fn good() -> String {
@@ -232,4 +235,21 @@ fn the_transport_alone_does_not_leak_the_key_in_an_error() {
         )
         .unwrap_err();
     assert!(e.contains("401") && !e.contains(KEY), "{e}");
+}
+
+// A server that repeats the request's header in its error body must not leak even a part of the key:
+// the adapter reports the status and its reason, nothing the server said.
+// S-62
+#[test]
+fn a_part_of_the_key_echoed_by_the_server_does_not_reach_the_error() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+    let (tx, _rx) = mpsc::channel();
+    let echo = format!("{}Authorization: Bearer {}", "x".repeat(50), &KEY[..12]);
+    serve_once(l, respond("401 Unauthorized", "", &echo), tx);
+    let e = ask(&jev(&base, Duration::from_secs(5)))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("401"), "{e}");
+    assert!(!e.contains(&KEY[..8]) && !e.contains("Bearer"), "{e}");
 }

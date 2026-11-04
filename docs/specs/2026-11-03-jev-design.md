@@ -117,6 +117,8 @@ El benchmark (`testing/decisiones/`: `cases.py` con los casos y las preguntas, `
 4. **Herramientas `memory_forget`, `memory_promote` y `memory_revert`** con la confirmación contra el mensaje de la persona.
 5. (Más adelante) Jev como decisor del triaje.
 
+Pendientes de la revisión de la entrega 1, para la entrega 2: un identificador (nonce) por sesión en el sobre `<clio-contexto>` o neutralizar el literal en lo que lee el modelo, y enseñarle en el prompt qué es el sobre; los mensajes de `steer` van sin sobre; el disyuntor y el presupuesto usan el reloj de pared (un reloj que retrocede los alarga o los reinicia: valorar un reloj monótono); y una prueba del camino TLS real con `env_clear`.
+
 Cada entrega agrega reglas a `docs/security.md`, casos de ataque nuevos (manipular una propuesta para forzar ADD, decir «la persona lo pidió», sugerencias que pidan quitar un control) y su cobertura en `scripts/rule-coverage.sh`.
 
 ## Cómo se construye (decidido tras la revisión del diseño)

@@ -9,6 +9,33 @@ use serde_json::{Map, Value, json};
 const MAX_OPTIONS: usize = 255;
 const MAX_NAME: usize = 64;
 
+/// What is sent to Jev as the `state`: every string in it has been through the scrubber of the vault
+/// (S-44). The only way to make one is [`Clean::new`], so a call cannot be written that skips it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clean(Value);
+
+impl Clean {
+    /// `scrub` is the vault's scrubber (`Scrubber::scrub`); it is applied to every string at any
+    /// depth. Object keys are the caller's own fixed names and are not text of the person.
+    pub fn new(state: Value, scrub: &dyn Fn(&str) -> String) -> Self {
+        fn walk(v: Value, scrub: &dyn Fn(&str) -> String) -> Value {
+            match v {
+                Value::String(s) => Value::String(scrub(&s)),
+                Value::Array(a) => Value::Array(a.into_iter().map(|x| walk(x, scrub)).collect()),
+                Value::Object(o) => {
+                    Value::Object(o.into_iter().map(|(k, x)| (k, walk(x, scrub))).collect())
+                }
+                other => other,
+            }
+        }
+        Self(walk(state, scrub))
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Question {
     Noul {
@@ -254,6 +281,17 @@ mod tests {
                 .is_err()
         );
         assert!(Questions::new().choice("c", "x", &[("A b", "")]).is_err());
+    }
+
+    #[test]
+    fn clean_scrubs_every_string_at_any_depth() {
+        let dirty =
+            json!({"a": "tengo SECRETO", "b": ["x SECRETO", {"c": "SECRETO"}], "n": 3, "t": true});
+        let c = Clean::new(dirty, &|s| s.replace("SECRETO", "***"));
+        assert_eq!(
+            c.as_value(),
+            &json!({"a": "tengo ***", "b": ["x ***", {"c": "***"}], "n": 3, "t": true})
+        );
     }
 
     #[test]

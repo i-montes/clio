@@ -64,8 +64,9 @@ try:
     with urllib.request.build_opener(NoRedirect).open(http, timeout=TIMEOUT) as response:
         answer = response.read(MAX_BYTES + 1)
 except urllib.error.HTTPError as e:
-    # The status and a short piece of what it said; never the request.
-    fail(f"HTTP {e.code}: {e.read(300).decode(errors='replace')}")
+    # The status and its reason, nothing the server said: an answer may repeat the request's
+    # header, and a part of the key is as good as the key (S-62).
+    fail(f"HTTP {e.code} {e.reason}")
 except Exception as e:  # network down, timeout
     fail(f"{type(e).__name__}")
 if len(answer) > MAX_BYTES:

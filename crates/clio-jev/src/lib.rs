@@ -15,4 +15,4 @@ pub mod wire;
 
 pub use catalog::{ToolHint, parse_catalog, suggested, tool_questions};
 pub use client::{Config, Jev, JevError, Process, Transport};
-pub use wire::{Answer, Answers, Question, Questions};
+pub use wire::{Answer, Answers, Clean, Question, Questions};

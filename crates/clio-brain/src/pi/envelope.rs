@@ -7,7 +7,7 @@
 //! that first one, so text of the person that looks like an envelope is left alone.
 
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OPEN: &str = "<clio-contexto>\n";
 const CLOSE: &str = "</clio-contexto>\n\n";
@@ -28,21 +28,33 @@ pub fn strip(s: &str) -> &str {
 /// the zone and the daylight saving rules; if it cannot be run or says something else, UTC from the
 /// clock (`+00:00`) is the honest fallback.
 pub fn stamp_now() -> String {
-    let local = Command::new("date")
-        .arg("+%Y-%m-%d %H:%M %z")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| local_stamp(s.trim()));
+    let local = date_output(Duration::from_millis(500)).and_then(|s| local_stamp(s.trim()));
     local.unwrap_or_else(|| {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
         utc_stamp(secs)
     })
+}
+
+/// What `date` prints, or nothing if it does not finish within `limit`: this runs before every
+/// message, and a `date` that hangs must not freeze the chat.
+fn date_output(limit: Duration) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            Command::new("date")
+                .arg("+%Y-%m-%d %H:%M %z")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output(),
+        );
+    });
+    rx.recv_timeout(limit)
+        .ok()?
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
 }
 
 /// `2026-11-03 18:42 -0500` (what `date` prints) as `2026-11-03 18:42 -05:00`; anything that is
@@ -152,6 +164,12 @@ mod tests {
         assert_eq!(utc_stamp(951_782_400), "2000-02-29 00:00 +00:00");
         assert_eq!(utc_stamp(1_793_755_634), "2026-11-04 01:27 +00:00");
         assert_eq!(utc_stamp(-1), "1969-12-31 23:59 +00:00");
+    }
+
+    #[test]
+    fn a_date_that_does_not_answer_in_time_is_given_up_on() {
+        assert_eq!(date_output(Duration::ZERO), None);
+        assert!(date_output(Duration::from_secs(5)).is_some());
     }
 
     #[test]
