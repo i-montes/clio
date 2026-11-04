@@ -542,12 +542,10 @@ fn recall_context_and_jobs_emit_spans() {
 #[test]
 fn review_actions_emit_their_spans() {
     let f = fixture();
-    let mut ext = prop(f.scope, f.agent, "dato de fuera");
-    ext.origin = Origin::External;
-    let quarantined = f.engine.propose(ext).unwrap();
+    let forgotten = quarantined(&f, "dato de fuera");
     let active = add(&f, "vive en Medellín");
     let (_, seen) = capture(|| {
-        f.engine.promote(quarantined.memory, f.person).unwrap();
+        f.engine.promote(forgotten, f.person).unwrap();
         f.engine.feedback(active, Signal::Useful, f.agent).unwrap();
         let archive = f.engine.archive(active, f.person).unwrap();
         f.engine.revert(archive, f.person).unwrap();

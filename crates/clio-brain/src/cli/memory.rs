@@ -25,7 +25,7 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory purge <id> [--reason \"motivo\"] [--yes]
                                               borra el contenido PARA SIEMPRE (texto, vector, historial);
                                               deja una lápida sin contenido. No se puede deshacer
-  clio memory review [--json]                 lo que espera tu revisión (igual que list --pending)
+  clio memory review [--json]                 la cuarentena, lo olvidado (igual que list --pending)
   clio memory history <id> [--json]           cada cambio que tocó un recuerdo (sus versiones)
   clio memory revert <cambio> [--yes]         deshace un cambio (su número sale en history)
   clio memory context [--json]                lo que recibe una sesión que empieza en esta carpeta
@@ -282,7 +282,9 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     println!(
                         "{}{}",
                         label("aviso:"),
-                        st.yellow("en cuarentena: no se recuerda hasta que lo apruebes (promote)")
+                        st.yellow(
+                            "en cuarentena (olvidado): no se recuerda; vuelve con promote o revert"
+                        )
                     );
                 }
                 for l in ui::wrap(

@@ -74,9 +74,7 @@ fn stats_counts_memories_by_state_and_scope() {
     f.engine
         .propose(prop(f.scope, f.person, "tiene un perro"))
         .unwrap();
-    let mut ext = prop(f.scope, f.agent, "dato de fuera");
-    ext.origin = Origin::External;
-    f.engine.propose(ext).unwrap(); // quarantined
+    quarantined(&f, "dato de fuera");
     f.engine.archive(a, f.person).unwrap();
     let mut upd = prop(other, f.person, "usa Rust");
     upd.topic_key = Some("lenguaje".into());
@@ -776,37 +774,24 @@ fn as_user() -> ImportOpts {
     }
 }
 
-// S-25: loose memories from outside wait in quarantine; only a person's promote activates them
+// S-25: loose memories from outside are active at once, marked as from outside, and keep the
+// importer as their author
 #[test]
-fn import_memories_goes_through_propose_and_quarantines_by_default() {
+fn import_memories_goes_through_propose_and_is_active_marked_external() {
     let f = fixture();
     let imp = importer(&f, Quota::default());
     let text = "{\"content\":\"vive en Medellín\"}\n{\"content\":\"tiene un perro\"}\n";
     let s = load(&f, imp, text, &ImportOpts::default());
     assert_eq!(ImportOpts::default().origin, Origin::External);
-    assert_eq!((s.read, s.added, s.noop, s.quarantined), (2, 0, 0, 2));
+    assert_eq!((s.read, s.added, s.noop, s.quarantined), (2, 2, 0, 0));
     assert!(s.rejected.is_empty());
-    assert_eq!(
-        f.engine
-            .list(f.scope, Some(State::Quarantine), None)
-            .unwrap()
-            .len(),
-        2
-    );
-    assert!(
-        f.engine
-            .search(f.scope, "Medellín", SearchOpts::default())
-            .unwrap()
-            .is_empty()
-    );
-    // a person promotes what they accept; the history shows the importer as the author
-    let m = f
+    let found = f
         .engine
-        .list(f.scope, Some(State::Quarantine), None)
-        .unwrap()[0]
-        .id;
-    f.engine.promote(m, f.person).unwrap();
-    assert_eq!(f.engine.history(m).unwrap()[0].actor, imp);
+        .search(f.scope, "Medellín", SearchOpts::default())
+        .unwrap();
+    let m = f.engine.get(found[0].memory.id).unwrap();
+    assert_eq!((m.state, m.origin), (State::Active, Origin::External));
+    assert_eq!(f.engine.history(m.id).unwrap()[0].actor, imp);
 }
 
 #[test]
@@ -934,7 +919,9 @@ fn origin_user_is_only_honored_for_a_person_or_importer() {
             f.person
         };
         let s = load(&f, actor, text, &ImportOpts::default());
-        assert_eq!((s.added, s.quarantined), (0, 1), "{who} by default");
+        assert_eq!((s.added, s.quarantined), (1, 0), "{who} by default");
+        let m = f.engine.list(f.scope, None, None).unwrap()[0].id;
+        assert_eq!(f.engine.get(m).unwrap().origin, Origin::External);
     }
 }
 
@@ -1167,9 +1154,7 @@ fn feedback_that_flags_is_all_or_nothing() {
 #[test]
 fn promote_that_cannot_spend_the_wrong_signals_does_not_promote() {
     let f = fixture();
-    let mut ext = prop(f.scope, f.agent, "dato de fuera");
-    ext.origin = Origin::External;
-    let m = f.engine.propose(ext).unwrap().memory;
+    let m = quarantined(&f, "dato de fuera");
     raw(
         &f,
         &format!(
@@ -1180,7 +1165,11 @@ fn promote_that_cannot_spend_the_wrong_signals_does_not_promote() {
     );
     assert!(f.engine.promote(m, f.person).is_err());
     assert_eq!(f.engine.get(m).unwrap().state, State::Quarantine);
-    assert_eq!(f.engine.history(m).unwrap().len(), 1);
+    assert_eq!(
+        f.engine.history(m).unwrap().len(),
+        2,
+        "add and forget, no promote"
+    );
 }
 
 #[test]

@@ -67,7 +67,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists eighteen tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists seventeen tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -97,7 +97,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        18,
+        17,
         "{:?}",
         declared_tools(&model)
     );
@@ -120,7 +120,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_eighteen_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_seventeen_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -521,6 +521,9 @@ fn attack_59() -> Option<bool> {
             MOrigin::External,
             &format!("{WORD} cuarentena: un correo pide el dinero"),
         );
+        // Forgotten: the only way into quarantine now.
+        link.forget_as_agent(clio_memory::MemoryId(quarantine))
+            .unwrap();
         let old = link
             .remember(&format!("{WORD} archivado: ya no se usa"), None)
             .unwrap();
@@ -639,13 +642,13 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        18,
+        17,
         "{:?}",
         declared_tools(&model)
     );
-    // There is no tool that erases (PURGE is the person's alone) and none by the engine's own
-    // names. The three that archive, accept or undo exist, and with no judge they say no.
-    for name in ["memory_purge", "memory_archive"] {
+    // There is no tool that erases (PURGE is the person's alone), none that accepts (nothing
+    // waits) and none by the engine's own names.
+    for name in ["memory_purge", "memory_archive", "memory_promote"] {
         assert!(
             !declared_tools(&model).contains(&name.to_owned()),
             "{name} exists"
@@ -656,7 +659,7 @@ fn attack_60() -> Option<bool> {
     for (name, own) in [
         ("memory_search", vec!["limit", "query"]),
         ("memory_get", vec!["id"]),
-        ("memory_propose", vec!["category", "kind", "text", "title"]),
+        ("memory_save", vec!["category", "kind", "text", "title"]),
         ("memory_timeline", vec!["after", "before", "id"]),
         ("memory_context", vec![]),
         (
@@ -671,7 +674,6 @@ fn attack_60() -> Option<bool> {
             ],
         ),
         ("memory_forget", vec!["id"]),
-        ("memory_promote", vec!["id"]),
         ("memory_revert", vec!["change"]),
         ("memory_pin", vec!["id"]),
         ("memory_update", vec!["category", "id", "text", "title"]),
@@ -706,7 +708,7 @@ fn attack_60() -> Option<bool> {
     }
     // Asked on the service's own socket (a Pi that was taken over could do it): an operation
     // nobody declared is denied by default (S-02), and a made-up argument is refused too.
-    for tool in ["memory_purge", "memory_archive"] {
+    for tool in ["memory_purge", "memory_archive", "memory_promote"] {
         let r = ask_host(
             &host.socket,
             json!({"id":"p","tool":tool,"args":{"id":person,"text":"x","kind":"semantic"},"session":"s","call_id":"c","tainted":false}),
@@ -715,25 +717,18 @@ fn attack_60() -> Option<bool> {
         assert_eq!(r["decision"]["outcome"], "deny", "{tool}: {r}");
         assert_eq!(r["decision"]["rule"], "S-02", "{tool}: {r}");
     }
-    // The ones that do exist, asked on the socket by a Pi that was taken over, with no person's
-    // words reported and no judge: the memory says no and changes nothing.
-    for (tool, args) in [
-        ("memory_promote", json!({"id": person})),
-        ("memory_forget", json!({"id": person})),
-        ("memory_revert", json!({"change": 1})),
-        ("memory_pin", json!({"id": person})),
-    ] {
-        let r = ask_host(
-            &host.socket,
-            json!({"id":"p","tool":tool,"args":args,"session":"s","call_id":"c","tainted":false}),
-        );
-        assert_eq!(r["ok"], false, "{tool}: {r}");
-    }
+    // Undoing what the person did, asked on the socket by a Pi that was taken over: only the
+    // agent's own changes can be undone; the memory says no and changes nothing.
+    let r = ask_host(
+        &host.socket,
+        json!({"id":"p","tool":"memory_revert","args":{"change": 1},"session":"s","call_id":"c","tainted":false}),
+    );
+    assert_eq!(r["ok"], false, "{r}");
     for (tool, args) in [
         ("memory_search", json!({"query":"x","origin":"user"})),
         ("memory_get", json!({"id":person,"scope":"otro"})),
         (
-            "memory_propose",
+            "memory_save",
             json!({"title":"x","text":"x","category":"config","kind":"semantic","origin":"user"}),
         ),
         (
@@ -758,8 +753,8 @@ fn attack_60() -> Option<bool> {
     Some(true)
 }
 
-// 61: what the model proposes always lands in quarantine, as the agent's and from outside; it is
-// never active nor readable by the model; a secret is not proposed; the session has five
+// 61: what the model saves after reading outside content is memory at once, the agent's and
+// marked as from outside; a secret is not saved; a tainted session has five
 
 fn attack_61() -> Option<bool> {
     let node = pi_available()?;
@@ -771,7 +766,7 @@ fn attack_61() -> Option<bool> {
     let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
     let propose_turn = |text: &str, kind: &str| {
         call(
-            "memory_propose",
+            "memory_save",
             json!({"title": "dato", "text": text, "category": "discovery", "kind": kind, "reason": REASON}),
         )
     };
@@ -797,7 +792,7 @@ fn attack_61() -> Option<bool> {
         [true, true, true, false, true, true, false, true],
         "{ends:?}"
     );
-    assert!(ends[1].2.contains("proposed"), "{ends:?}");
+    assert!(ends[1].2.contains("saved"), "{ends:?}");
     assert!(
         ends[6].2.contains("S-47"),
         "the sixth was refused by the budget: {ends:?}"
@@ -808,8 +803,11 @@ fn attack_61() -> Option<bool> {
         ends.iter().all(|e| !e.2.contains(key)),
         "an answer repeated the key: {ends:?}"
     );
-    // What was proposed is not memory: the second search finds only what was active.
-    assert!(!ends[7].2.contains("caoba"), "{ends:?}");
+    // What was saved is memory: the second search finds it, marked as from outside.
+    assert!(
+        ends[7].2.contains("caoba") && ends[7].2.contains("externo"),
+        "{ends:?}"
+    );
     // The session was marked by the memory it read, and proposing did not clear that.
     let taint = std::fs::read_to_string(w.run_dir.join("tainted.json")).unwrap_or_default();
     assert!(taint.contains("memory"), "{taint}");
@@ -821,26 +819,25 @@ fn attack_61() -> Option<bool> {
     drop(pi);
     drop(host);
     let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
-    assert_eq!(link.counts().unwrap(), (2, 4, 0), "{:?}", link.counts());
-    let pending = link.pending().unwrap();
-    assert_eq!(pending.len(), 4);
-    for row in &pending {
+    assert_eq!(link.counts().unwrap(), (6, 0, 0), "{:?}", link.counts());
+    let saved: Vec<_> = link
+        .list(clio_memory::State::Active)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.actor == link.actors().agente)
+        .collect();
+    assert_eq!(saved.len(), 4);
+    for row in &saved {
         assert_eq!(row.origin, MOrigin::External, "{row:?}");
-        assert_eq!(row.actor, link.actors().agente, "{row:?}");
-        assert_eq!(row.state, clio_memory::State::Quarantine, "{row:?}");
         assert!(!row.content.contains(key), "{row:?}");
     }
     assert_eq!(
-        pending
+        saved
             .iter()
             .filter(|r| r.kind == MemoryType::Procedural)
             .count(),
         1
     );
-    // Nothing the model proposed is active.
-    for row in link.list(clio_memory::State::Active).unwrap() {
-        assert_ne!(row.actor, link.actors().agente, "{row:?}");
-    }
     // The log has facts, not text.
     let log = std::fs::read_to_string(w.run_dir.join("memory.jsonl")).unwrap();
     assert!(!log.contains("caoba") && !log.contains(key), "{log}");
@@ -946,6 +943,6 @@ fn the_memory_battery_passes_through_the_gate() {
 }
 // S-26 S-27 S-47 S-61
 scenario!(
-    attack_61_what_the_model_proposes_waits_in_quarantine,
+    attack_61_what_the_model_saves_after_reading_outside_is_marked_external,
     attack_61
 );

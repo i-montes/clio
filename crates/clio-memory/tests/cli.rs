@@ -52,9 +52,7 @@ fn populated() -> Fixture {
     f.engine
         .propose(prop(f.scope, f.person, "vive en Medellín"))
         .unwrap();
-    let mut ext = prop(f.scope, f.agent, "dato de fuera");
-    ext.origin = Origin::External;
-    f.engine.propose(ext).unwrap();
+    quarantined(&f, "dato de fuera");
     f
 }
 
@@ -293,7 +291,7 @@ fn terminal_escapes_in_memories_are_not_printed_raw() {
 // ---- write commands ----
 
 /// `populated()` with the engine closed, so the CLI can take the writer lock.
-/// Memory 1 is active, memory 2 is quarantined; operations 1 and 2 added them.
+/// Memory 1 is active, memory 2 is quarantined; operations 1 and 2 added them, 3 forgot memory 2.
 fn closed() -> (tempfile::TempDir, std::path::PathBuf) {
     let Fixture {
         engine, path, _dir, ..
@@ -328,8 +326,8 @@ fn promote_archive_revert_work_as_a_person() {
     let o = run(Some(&db), &["archive", "1"]);
     assert_eq!(code(&o), 0, "{}", err(&o));
     assert_eq!(state_of(&db, "1"), "Archived");
-    // operations 1 and 2 were the adds, 3 the promote, 4 the archive
-    let o = run(Some(&db), &["revert", "4"]);
+    // operations 1 and 2 were the adds, 3 the forget, 4 the promote, 5 the archive
+    let o = run(Some(&db), &["revert", "5"]);
     assert_eq!(code(&o), 0, "{}", err(&o));
     assert_eq!(state_of(&db, "1"), "Active");
 
@@ -502,12 +500,12 @@ fn import_memories_reports_rejected_lines_and_exits_1() {
     assert_eq!(code(&o), 1, "{}", err(&o));
     assert!(out(&o).contains("line 2"), "{}", out(&o));
     assert!(
-        out(&o).contains("read 3") && out(&o).contains("quarantined 2"),
+        out(&o).contains("read 3") && out(&o).contains("added 2"),
         "{}",
         out(&o)
     );
-    let review = out(&run(Some(&db), &["review", "main"]));
-    assert!(review.contains("usa Rust") && review.contains("tiene un perro"));
+    let list = out(&run(Some(&db), &["list", "main", "--state", "active"]));
+    assert!(list.contains("usa Rust") && list.contains("tiene un perro"));
     let actors = out(&run(Some(&db), &["--json", "stats"]));
     assert!(!actors.is_empty());
 

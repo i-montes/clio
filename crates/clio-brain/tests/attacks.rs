@@ -1163,16 +1163,16 @@ fn attack_10() -> bool {
     assert!(!memory_dir(&w).exists(), "the loop never touches memory");
     let (l, report) = close_into_memory(&w, &a, &out, "resume el README", "atk-10");
 
-    // At the close the model's words became a PROPOSAL: pending, never active (S-26).
+    // At the close the model's words became a memory marked as from outside (S-26): the agent
+    // owns its memory, and what a tainted run keeps is read back as data, never as the person's.
     let proc_row = all_rows(&l)
         .into_iter()
         .find(|m| m.kind == MemoryType::Procedural)
         .expect("the proposal was made: the attack was really attempted");
-    assert_eq!(proc_row.state, MState::Quarantine);
-    assert_eq!(proc_row.origin, Origin::External);
+    assert_eq!(proc_row.state, MState::Active);
     assert!(
-        l.list(MState::Active).unwrap().is_empty(),
-        "nothing from a tainted run is active: {report:?}"
+        all_rows(&l).iter().all(|m| m.origin == Origin::External),
+        "everything a tainted run keeps is marked as from outside: {report:?}"
     );
     // It does not come back in the next run, whatever the next request is.
     for q in [
@@ -1182,18 +1182,13 @@ fn attack_10() -> bool {
         let ctx = next_context(&w, &a, q);
         assert!(!ctx.contains("sin preguntar"), "{q}: {ctx}");
     }
-    // The agent's own actors cannot approve it; only the person's can.
-    assert_eq!(
-        l.pending().unwrap().len(),
-        2,
-        "the episode and the procedure wait"
-    );
+    // The agent's own actors have no review powers over it; only the person's do.
     drop(l);
     let lw = writer(&w);
     let acts = lw.actors();
     for actor in [acts.agente, acts.sesion, acts.importador] {
         assert!(matches!(
-            lw.engine().promote(proc_row.id, actor),
+            lw.engine().archive(proc_row.id, actor),
             Err(clio_memory::Error::NotAllowed)
         ));
     }
@@ -1230,6 +1225,20 @@ fn attack_11() -> bool {
     // The close: at most MAX_AGENT_PROPOSALS lines of the model count, the rest are dropped.
     let (l, first) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
     assert_eq!(first.dropped, 100 - MAX_AGENT_PROPOSALS);
+    // The agent's hour holds 500 (a brake on a loop): filled up to the brim, as many runs would.
+    {
+        let lw = writer(&w);
+        let agent = lw.actors().agente;
+        let used = all_rows(&lw).iter().filter(|m| m.actor == agent).count();
+        for i in used..500 {
+            let d = clio_brain::memory_link::Draft::plain(
+                &format!("relleno {i}"),
+                MemoryType::Semantic,
+            );
+            lw.save_as_agent(&d, "s", clio_brain::memory_link::Place::Personal, true)
+                .unwrap();
+        }
+    }
     let mut refused = 0;
     for n in 1..8 {
         let mut o = out.clone();
@@ -1237,19 +1246,19 @@ fn attack_11() -> bool {
         let (_, r) = close_into_memory(&w, &a, &o, "resume el README", &format!("atk-11-{n}"));
         refused += r.rejected.len();
     }
-    // The agent actor's quota (20 per hour) stopped it: everything else was refused and said so.
+    // The agent actor's quota (500 per hour) stopped it: everything else was refused and said so.
     assert!(refused > 0, "the quota never spoke");
     let agent = l.actors().agente;
     let stored = all_rows(&l)
         .into_iter()
         .filter(|m| m.actor == agent)
         .count();
-    assert_eq!(stored, 20);
+    assert_eq!(stored, 500);
     assert!(
         all_rows(&l)
             .iter()
             .filter(|m| m.actor == agent)
-            .all(|m| m.state == MState::Quarantine)
+            .all(|m| m.origin == Origin::External)
     );
     // One actor's flood does not use up the others' quotas: the person still writes, and so does
     // the session actor's own record of the run.
@@ -1295,9 +1304,8 @@ fn attack_35() -> bool {
             m.id.0
         );
         assert_ne!(l.actor_name(m.actor), "persona");
-        assert_eq!(m.state, MState::Quarantine, "m{}: {}", m.id.0, m.content);
+        assert_eq!(m.origin, Origin::External, "m{}: {}", m.id.0, m.content);
     }
-    assert!(l.list(MState::Active).unwrap().is_empty());
     assert!(!next_context(&w, &a, "qué autorizó la persona para desplegar").contains("autorizó"));
     true
 }
@@ -1380,10 +1388,19 @@ fn attack_37() -> bool {
     c.assert_clean("debug lines", &report.debug_lines().join("\n"));
     drop(l);
     let w_link = writer(&w);
-    // Even after the person approves everything, the next context holds no decoy.
-    for m in w_link.pending().unwrap() {
-        w_link.promote(m.id).unwrap();
-    }
+    // Even when the person holds everything (a fixed block), the next context holds no decoy.
+    let person = w_link.actors().persona;
+    let ids: Vec<_> = w_link
+        .list(MState::Active)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    let block = w_link
+        .engine()
+        .create_block(w_link.scope(), "todo", 2000, person)
+        .unwrap();
+    w_link.engine().block_set(block, &ids, person).unwrap();
     drop(w_link);
     let ctx = next_context(&w, &a, "la clave de github para publicar");
     assert!(
@@ -1651,7 +1668,7 @@ fn a_34_test_output_is_data_and_cannot_close_the_contract_or_order_anything() {
 
 // S-26
 #[test]
-fn a_10_a_procedure_the_agent_wants_to_keep_waits_for_the_person() {
+fn a_10_a_procedure_from_a_tainted_run_is_marked_and_not_shown_to_the_loop() {
     assert!(attack_10());
 }
 

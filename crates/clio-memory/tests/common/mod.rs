@@ -299,3 +299,16 @@ pub fn job_rows(path: &std::path::Path) -> Vec<(String, String)> {
         .collect::<std::result::Result<_, _>>()
         .unwrap()
 }
+
+/// A memory in quarantine: written, then forgotten by the agent (the one way in, now).
+pub fn quarantined(f: &Fixture, text: &str) -> MemoryId {
+    let id = f
+        .engine
+        .propose(prop(f.scope, f.agent, text))
+        .unwrap()
+        .memory;
+    f.engine
+        .forget(id, f.agent, "olvidado para la prueba")
+        .unwrap();
+    id
+}

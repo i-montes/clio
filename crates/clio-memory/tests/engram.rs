@@ -138,13 +138,15 @@ fn the_person_pins_and_a_pin_goes_with_a_purge() {
         .map(|r| r.id)
         .collect();
     assert_eq!(ids, [b, a], "in the order they were pinned");
+    let importer = f
+        .engine
+        .register_actor("importador", ActorKind::Importer, Quota::default())
+        .unwrap();
     assert!(matches!(
-        f.engine.pin(a, f.agent).unwrap_err(),
+        f.engine.pin(a, importer).unwrap_err(),
         Error::NotAllowed
     ));
-    let mut ext = prop(f.scope, f.agent, "de fuera");
-    ext.origin = Origin::External;
-    let waiting = f.engine.propose(ext).unwrap().memory;
+    let waiting = quarantined(&f, "de fuera");
     assert!(matches!(
         f.engine.pin(waiting, f.person).unwrap_err(),
         Error::InvalidState

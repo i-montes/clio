@@ -108,16 +108,15 @@
 <text class="s11" x="46" y="480">puede abstenerse</text>
 <rect class="gate" x="34" y="506" width="202" height="48" rx="8"/>
 <text class="h2" x="46" y="527">Cuarentena</text>
-<g class="jv"><rect x="130" y="516" width="58" height="15" rx="7.5"/><text x="159.0" y="527" text-anchor="middle">Jev opc.</text></g>
-<text class="s11" x="46" y="540">lo de fuera; sale con PROMOTE</text>
+<text class="s11" x="46" y="540">lo olvidado; vuelve con REVERT</text>
 <rect class="core" x="34" y="566" width="202" height="122" rx="10"/>
 <text class="h2" x="46" y="587">Gestor de memoria</text>
 <g class="jv"><rect x="172" y="576" width="58" height="15" rx="7.5"/><text x="201.0" y="587" text-anchor="middle">Jev opc.</text></g>
-<text class="s11" x="46" y="602">ADD, UPDATE, DELETE, NOOP,</text>
-<text class="s11" x="46" y="617">PROMOTE, REVERT, PURGE</text>
-<text class="s11" x="46" y="632">decide: reglas y heurísticas;</text>
-<text class="s11" x="46" y="647">Jev o LLM solo si están</text>
-<text class="s11" x="46" y="662">antes: detector de secretos;</text>
+<text class="s11" x="46" y="602">ADD, UPDATE, FORGET, NOOP,</text>
+<text class="s11" x="46" y="617">REVERT; PURGE, de la persona</text>
+<text class="s11" x="46" y="632">del agente: todo activo ya;</text>
+<text class="s11" x="46" y="647">antes: Jev (seguro, categoría)</text>
+<text class="s11" x="46" y="662">y el detector de secretos;</text>
 <text class="s11" x="46" y="677">parecidos distintos conviven</text>
 <g transform="translate(176,704)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
 <g transform="translate(196,704)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
@@ -230,7 +229,7 @@
 <text class="s11" x="672" y="542">contaminada + destino nuevo: pregunta</text>
 <text class="s11" x="672" y="557">irreversible sin política: passkey;</text>
 <text class="s11" x="672" y="572">ausente: aparta y sigue con lo reversible</text>
-<text class="s11" x="672" y="587">Jev no ve salidas ni contenido externo</text>
+<text class="s11" x="672" y="587">Jev: preguntas cerradas, texto limpio</text>
 <text class="s11" x="672" y="602">registro de efectos, idempotente</text>
 <text class="s11" x="672" y="617">niega una vez, con razón; N bloqueos: pregunta</text>
 <text class="s11" x="672" y="632">falla cerrada: sin pasarela, nada corre</text>

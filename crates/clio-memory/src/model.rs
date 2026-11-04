@@ -175,6 +175,8 @@ pub enum OpKind {
     Purge,
     /// A memory moved to another scope by a person (projects merged or renamed). Revertible.
     Move,
+    /// A memory the agent forgot: to quarantine, where its record stays. Revertible.
+    Forget,
 }
 
 /// What is left of a purged memory: that it existed and who erased it, when and why. Never its

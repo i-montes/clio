@@ -17,6 +17,13 @@ fn external(f: &Fixture, content: &str) -> Proposal {
     p
 }
 
+/// A memory of the topic that was written and then forgotten (in quarantine).
+fn forgotten(f: &Fixture, content: &str) -> MemoryId {
+    let id = f.engine.propose(topical(f, content)).unwrap().memory;
+    f.engine.forget(id, f.agent, "olvidado").unwrap();
+    id
+}
+
 #[test]
 fn update_replaces_and_closes_validity() {
     let f = fixture();
@@ -58,48 +65,29 @@ fn update_with_earlier_valid_from_is_rejected() {
     assert_eq!(f.engine.history(first.memory).unwrap().len(), 1);
 }
 
-// S-25: untrusted updates cannot replace trusted memories directly
+// S-25: an update from outside replaces at once; the log keeps the old one and revert restores it
 #[test]
-fn s25_external_update_waits_in_quarantine_until_promoted() {
+fn s25_external_update_replaces_at_once_and_reverts() {
     let f = fixture();
     f.clock.set(100);
     let old = f.engine.propose(topical(&f, "vive en Medellín")).unwrap();
     f.clock.set(200);
-    let cand = f.engine.propose(external(&f, "vive en Bogotá")).unwrap();
-    assert_eq!(cand.state, State::Quarantine);
-    assert_eq!(
-        f.engine.get(cand.memory).unwrap().supersedes,
-        Some(old.memory)
-    );
-    assert_eq!(f.engine.get(old.memory).unwrap().state, State::Active);
-
-    f.engine.promote(cand.memory, f.person).unwrap();
+    let new = f.engine.propose(external(&f, "vive en Bogotá")).unwrap();
+    assert_eq!((new.kind, new.state), (OpKind::Update, State::Active));
     assert_eq!(f.engine.get(old.memory).unwrap().state, State::Replaced);
-    assert_eq!(f.engine.get(cand.memory).unwrap().state, State::Active);
+    f.engine.revert(new.op, f.person).unwrap();
+    assert_eq!(f.engine.get(old.memory).unwrap().state, State::Active);
 }
 
 #[test]
 fn promote_requires_person() {
     let f = fixture();
-    let cand = f.engine.propose(external(&f, "dato externo")).unwrap();
+    let cand = forgotten(&f, "dato externo");
     assert!(matches!(
-        f.engine.promote(cand.memory, f.agent),
+        f.engine.promote(cand, f.agent),
         Err(Error::NotAllowed)
     ));
-    assert_eq!(f.engine.get(cand.memory).unwrap().state, State::Quarantine);
-}
-
-#[test]
-fn promote_with_stale_target_only_activates() {
-    let f = fixture();
-    f.clock.set(100);
-    let old = f.engine.propose(topical(&f, "vive en Medellín")).unwrap();
-    f.clock.set(200);
-    let cand = f.engine.propose(external(&f, "vive en Bogotá")).unwrap();
-    f.engine.archive(old.memory, f.person).unwrap();
-    f.engine.promote(cand.memory, f.person).unwrap();
-    assert_eq!(f.engine.get(old.memory).unwrap().state, State::Archived);
-    assert_eq!(f.engine.get(cand.memory).unwrap().state, State::Active);
+    assert_eq!(f.engine.get(cand).unwrap().state, State::Quarantine);
 }
 
 #[test]
@@ -136,19 +124,17 @@ fn archive_hides_from_search() {
 #[test]
 fn promote_older_candidate_never_leaves_two_active_for_one_topic() {
     let f = fixture();
-    f.clock.set(100);
-    f.engine.propose(topical(&f, "vive en Medellín")).unwrap();
     f.clock.set(200);
-    let cand = f.engine.propose(external(&f, "vive en Bogotá")).unwrap();
+    let cand = forgotten(&f, "vive en Bogotá");
     f.clock.set(300);
     let cur = f.engine.propose(topical(&f, "vive en Cali")).unwrap();
-    f.engine.promote(cand.memory, f.person).unwrap();
+    f.engine.promote(cand, f.person).unwrap();
     let active = f.engine.list(f.scope, Some(State::Active), None).unwrap();
     assert_eq!(
         active.iter().map(|r| r.id).collect::<Vec<_>>(),
         [cur.memory]
     );
-    let c = f.engine.get(cand.memory).unwrap();
+    let c = f.engine.get(cand).unwrap();
     assert_eq!(
         (c.state, c.valid_to, c.replaced_by),
         (State::Replaced, Some(300), Some(cur.memory))
@@ -159,10 +145,10 @@ fn promote_older_candidate_never_leaves_two_active_for_one_topic() {
 fn promote_without_supersedes_still_respects_current_topic_owner() {
     let f = fixture();
     f.clock.set(100);
-    let cand = f.engine.propose(external(&f, "vive en Bogotá")).unwrap();
+    let cand = forgotten(&f, "vive en Bogotá");
     f.clock.set(200);
     let cur = f.engine.propose(topical(&f, "vive en Cali")).unwrap();
-    f.engine.promote(cand.memory, f.person).unwrap();
+    f.engine.promote(cand, f.person).unwrap();
     let active = f.engine.list(f.scope, Some(State::Active), None).unwrap();
     assert_eq!(
         active.iter().map(|r| r.id).collect::<Vec<_>>(),
@@ -301,12 +287,12 @@ fn defaulted_update_before_a_future_dated_owner_is_rejected() {
 fn promote_with_equal_start_is_rejected() {
     let f = fixture();
     f.clock.set(100);
+    let cand = forgotten(&f, "dos");
     let owner = f.engine.propose(topical(&f, "uno")).unwrap();
-    let cand = f.engine.propose(external(&f, "dos")).unwrap();
     assert!(matches!(
-        f.engine.promote(cand.memory, f.person),
+        f.engine.promote(cand, f.person),
         Err(Error::InvalidValidity)
     ));
-    assert_eq!(f.engine.get(cand.memory).unwrap().state, State::Quarantine);
+    assert_eq!(f.engine.get(cand).unwrap().state, State::Quarantine);
     assert_eq!(f.engine.get(owner.memory).unwrap().state, State::Active);
 }

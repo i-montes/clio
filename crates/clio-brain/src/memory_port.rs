@@ -1,6 +1,7 @@
-//! The tool host's window into the person's memory: it reads the active memories of the scope
-//! `clio` and proposes candidates into quarantine, nothing else (S-60, S-61). The tool host
-//! process runs this. Reading opens the database with [`MemoryLink::open_read`], which never
+//! The tool host's window into the memory, which is the agent's: it reads the active memories of
+//! the places the session reads, and saves, corrects, forgets (to quarantine), pins, merges and
+//! undoes its own changes, all at once (S-60, S-61). With Jev, what is written is guarded first:
+//! a clear «no» refuses it, anything else saves (S-64). The tool host process runs this. Reading opens the database with [`MemoryLink::open_read`], which never
 //! creates or changes a file and never takes the writer lock, so the person's `clio memory
 //! remember` is not blocked while the agent reads. A proposal opens it for writing for that one
 //! call and closes it: the writer lock is held for as long as the engine lives, and holding it
@@ -10,24 +11,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clio_memory::{
-    Category, Error, Judged, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written,
-    State,
+    Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, State,
 };
 use clio_toolhost::{
     Found, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind, Proposed, Saved,
 };
 
-use crate::memory_judge::{Call, MemoryJudge, Neighbor, Request};
-use crate::memory_link::{Draft, EmbedModel, MemoryLink, Place, Res, explain, kind_label};
+use crate::memory_judge::{Guard, MemoryJudge};
+use crate::memory_link::{Draft, EmbedModel, MemoryLink, Place, Res, kind_label};
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
 const NOT_READABLE: &str = "ese recuerdo no existe o no se puede leer";
-/// Said when the person's own words do not show that they asked for the change.
-const NOT_CONFIRMED: &str =
-    "no consta, por lo que la persona dijo, que lo haya pedido: que lo haga con `clio memory`";
-const NO_JUDGE: &str =
-    "esta memoria no puede hacer ese cambio por aquí: que lo haga la persona con `clio memory`";
 const NO_VECTORS: &str = "solo texto: el modelo de vectores no está disponible";
 
 pub struct LinkPort {
@@ -36,7 +31,7 @@ pub struct LinkPort {
     /// Opened on the first call that finds a database, and kept. A failure is never kept: the
     /// person may create the memory (or fix it) while the session runs.
     link: Mutex<Option<MemoryLink>>,
-    /// Jev, who decides what becomes of a proposal. Without it every proposal waits for the person.
+    /// Jev, who guards what is written and chooses its place. Optional: without it everything saves.
     judge: Option<Arc<MemoryJudge>>,
     /// The project of the session, decided by the brain: its scope is read with the person's and
     /// the lessons', and what belongs to it is written there.
@@ -62,7 +57,7 @@ impl LinkPort {
         self
     }
 
-    /// With a judge, a proposal is decided by it (and by the rules of the engine behind it).
+    /// With Jev guarding what is written.
     #[must_use]
     pub fn with_judge(mut self, judge: Arc<MemoryJudge>) -> Self {
         self.judge = Some(judge);
@@ -114,43 +109,27 @@ impl LinkPort {
         }
     }
 
-    /// A change the person asked for through the model: the memory must be there, the judge must
-    /// confirm from the person's own words that they asked for exactly this about exactly it, and
-    /// only then is it done (by the person's actor, like `clio memory` would). The judge is asked
-    /// first, with a read-only view; the writer is taken only to do it, and the memory is read
-    /// again under it.
-    fn change(
-        &self,
-        id: i64,
-        judging: &Judging,
-        what: Request,
-        allowed: impl Fn(&MemoryRow) -> bool,
-        act: impl FnOnce(&MemoryLink, &MemoryRow) -> Res<()>,
-    ) -> Result<(), String> {
-        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
-        // Checked on the read-only view BEFORE Jev is asked: a memory this change cannot reach is
-        // the same answer as one that does not exist, and its text never leaves.
-        let seen = self
-            .reader()?
-            .get(MemoryId(id))
-            .ok()
-            .filter(|r| allowed(r))
-            .ok_or_else(|| NOT_READABLE.to_owned())?;
-        if !judge.confirm(what, &seen.content, &judging.person_said, judging.tainted) {
-            return Err(NOT_CONFIRMED.to_owned());
+    /// Asks Jev (when there is one) about a text before it is written: a clear «no» is the reason
+    /// the agent hears; otherwise the category to keep (Jev's when it was sure).
+    fn guard(&self, draft: &Draft, judging: &Judging) -> Result<Option<Category>, String> {
+        let Some(judge) = &self.judge else {
+            return Ok(draft.category);
+        };
+        match judge.guard(
+            &MemoryLink::agent_text(&draft.text),
+            draft.title.as_deref(),
+            draft.category.map(Category::label),
+            judging.tainted,
+        ) {
+            Guard::Refuse { why } => Err(why.to_owned()),
+            Guard::Allow { category } => Ok(category),
+            Guard::Unsure => Ok(draft.category),
         }
-        let link = self.writer()?;
-        let row = link
-            .get(MemoryId(id))
-            .ok()
-            .filter(|r| allowed(r))
-            .ok_or_else(|| NOT_READABLE.to_owned())?;
-        act(&link, &row)
     }
 }
 
 impl LinkPort {
-    /// A proposal, or (with `target`) a new text for that memory.
+    /// A save, or (with `target`) a new text for that memory.
     fn propose_to(
         &self,
         draft: &ProposalDraft,
@@ -159,7 +138,7 @@ impl LinkPort {
         target: Option<MemoryRow>,
     ) -> Result<Proposed, String> {
         let summary = draft.kind == ProposalKind::Session;
-        let draft = if summary {
+        let mut draft = if summary {
             // A session's summary is named here, has no category and is never a lesson.
             Draft {
                 text: draft.text.clone(),
@@ -178,25 +157,19 @@ impl LinkPort {
                 },
             }
         };
-        let (text, kind) = (draft.text.as_str(), draft.kind);
         let has_project = self.project.is_some();
-        // Where it goes and what Jev makes of it are asked BEFORE the writer is taken: what Jev is
-        // asked about is read without holding the lock, so a slow answer never keeps the person's
-        // own writes waiting. The engine re-checks every memory it is told to replace once it
-        // holds the lock.
-        let stored = MemoryLink::agent_text(text);
-        let target_place = match &target {
-            Some(t) => Some(
-                self.reader()?
-                    .place_of(t.scope)
-                    .ok_or_else(|| NOT_READABLE.to_owned())?,
-            ),
-            None => None,
-        };
+        // Jev is asked BEFORE the writer is taken: a slow answer never keeps the person's own
+        // writes waiting.
+        let category = self.guard(&draft, judging)?;
+        // A summary has no category, whatever Jev would give it.
+        if !summary {
+            draft.category = category;
+        }
+        let stored = MemoryLink::agent_text(&draft.text);
         let place = self
             .judge
             .as_ref()
-            .filter(|_| has_project && !summary && target_place.is_none())
+            .filter(|_| has_project && !summary && target.is_none())
             .and_then(|j| {
                 j.place(
                     &stored,
@@ -205,128 +178,38 @@ impl LinkPort {
                 )
             })
             .and_then(Place::parse)
-            .or(target_place)
             .unwrap_or_else(|| match (summary, has_project) {
                 (true, true) => Place::Project,
                 (true, false) => Place::Personal,
                 _ => Place::by_rule(draft.category, has_project),
             });
-        // A summary with no project would be the person's and show up everywhere: the person
-        // decides on it, never Jev.
-        let verdict = self
-            .judge
-            .as_ref()
-            .filter(|_| !summary || has_project)
-            .map(|judge| {
-                // A summary is about its own session: nothing to replace or to have known already.
-                let neighbors: Vec<Neighbor> = match MemoryLink::open_read_in(
-                    &self.data,
-                    &EmbedModel::none(),
-                    self.project.as_deref(),
-                ) {
-                    Ok(Some(link)) if !summary => match &target {
-                        // An update: the one memory it is about, and nothing else.
-                        Some(t) => Ok(vec![t.clone()]),
-                        None => link.search_in(place, &stored, 3),
-                    }
-                    .map(|rows| {
-                        rows.into_iter()
-                            .map(|r| Neighbor {
-                                id: r.id.0,
-                                // A lesson learned in another project is not this session's to
-                                // replace: only the person's words would (as with their own).
-                                // Pinned is the person's choice too: not replaced on the model's say.
-                                protected: link.is_protected(&r)
-                                    || link.is_pinned(&r)
-                                    || (place == Place::Lessons
-                                        && MemoryLink::learned_in(&r) != self.project.as_deref()),
-                                text: r.content,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                let v = judge.decide(
-                    &stored,
-                    kind == MemoryType::Procedural,
-                    &neighbors,
-                    judging.tainted,
-                    &judging.person_said,
-                );
-                // Something new next to a memory it does not replace: how the two stand (asked
-                // now, before the writer, like everything Jev is asked).
-                let relation = match (&v.call, neighbors.first()) {
-                    // Never on what the person holds: the model chose the text, so it could choose
-                    // which of their memories gets a «contradice».
-                    (Call::Add, Some(n)) if !n.protected => {
-                        judge.relation(&stored, &n.text).map(|r| (n.id, r))
-                    }
-                    _ => None,
-                };
-                (v, relation)
-            });
-        // Opened for this call only (it waits a few seconds for another writer), dropped at the end.
+        // Something new next to the most similar memory: how the two stand (a note, best effort).
+        let relation = match (&self.judge, &target) {
+            (Some(judge), None) if !summary => self
+                .reader()
+                .ok()
+                .and_then(|l| l.search_in(place, &stored, 1).ok())
+                .and_then(|rows| rows.into_iter().next())
+                .and_then(|n| judge.relation(&stored, &n.content).map(|r| (n.id, r))),
+            _ => None,
+        };
         let link = self.writer()?;
-        if let Some((v, relation)) = verdict {
-            let how = match v.call {
-                Call::Add => Some(Judged::Add),
-                Call::Update {
-                    old,
-                    person_confirmed,
-                } => Some(Judged::Update {
-                    old: MemoryId(old),
-                    person_confirmed,
-                }),
-                Call::Noop { existing } => Some(Judged::Noop {
-                    existing: MemoryId(existing),
-                }),
-                Call::Review => None,
-            };
-            if let Some(how) = how {
-                match link.propose_judged_draft(&draft, session, place, how, v.confidence) {
-                    Ok(o) => {
-                        if let (OpKind::Add, State::Active, Some((other, (rel, sure)))) =
-                            (o.kind, o.state, relation)
-                        {
-                            // Best effort: a relation is a note on the memory, not the memory.
-                            let _ = link.relate_judged(o.memory, MemoryId(other), rel, sure);
-                        }
-                        let saved = match (o.kind, o.state) {
-                            (OpKind::Noop, _) => Saved::Known,
-                            (OpKind::Update, State::Active) => Saved::Replaced,
-                            (_, State::Active) => Saved::Active,
-                            _ => Saved::Waiting,
-                        };
-                        return Ok(Proposed {
-                            id: o.memory.0,
-                            saved,
-                            change: matches!(saved, Saved::Active | Saved::Replaced)
-                                .then_some(o.op.0),
-                        });
-                    }
-                    // A refusal that is the proposal's own (a secret, a quota, too long, empty,
-                    // another writer) is said as it is; anything else the judge asked for and the
-                    // engine could not do (a neighbor that stopped being active, one the person
-                    // owns, a date, a judge that cannot be registered) leaves the proposal to the
-                    // person, as it was before the judge.
-                    Err(
-                        e @ (Error::SecretDetected
-                        | Error::QuotaExceeded
-                        | Error::TooLong
-                        | Error::EmptyContent
-                        | Error::WriterLocked),
-                    ) => return Err(explain(&e)),
-                    Err(_) => {}
-                }
-            }
+        let o = match &target {
+            Some(t) => link.update_as_agent(t.id, &draft, session, judging.tainted)?,
+            None => link.save_as_agent(&draft, session, place, judging.tainted)?,
+        };
+        if let (OpKind::Add, Some((other, (rel, sure)))) = (o.kind, relation) {
+            let _ = link.relate_judged(o.memory, other, rel, sure);
         }
-        link.propose_draft_as_agent(&draft, session, place)
-            .map(|id| Proposed {
-                id: id.0,
-                saved: Saved::Waiting,
-                change: None,
-            })
+        Ok(Proposed {
+            id: o.memory.0,
+            saved: match o.kind {
+                OpKind::Noop => Saved::Known,
+                OpKind::Update => Saved::Replaced,
+                _ => Saved::Active,
+            },
+            change: (o.kind != OpKind::Noop).then_some(o.op.0),
+        })
     }
 }
 
@@ -340,9 +223,8 @@ impl MemoryPort for LinkPort {
         self.propose_to(draft, session, judging, None)
     }
 
-    /// A new text for memory `id`: a proposal whose only neighbor is that memory, in its place.
-    /// Jev decides as always (replace it, already known, new, or doubtful); what the person holds
-    /// is replaced only with their own words; without Jev it waits for the person.
+    /// A new text for memory `id`, whoever wrote it: it replaces it at once, in its place and of
+    /// its kind; the old one stays in the log. What the model leaves out stays as it was.
     fn update(
         &self,
         id: i64,
@@ -354,10 +236,8 @@ impl MemoryPort for LinkPort {
             .reader()?
             .get(MemoryId(id))
             .ok()
-            // A fact only: a procedure needs the person (S-26), an episode is a record.
-            .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
+            .filter(|r| r.state == State::Active)
             .ok_or_else(|| NOT_READABLE.to_owned())?;
-        // What the model leaves out stays as it was.
         let draft = ProposalDraft {
             title: draft.title.clone().or_else(|| target.title.clone()),
             category: draft
@@ -369,10 +249,9 @@ impl MemoryPort for LinkPort {
         self.propose_to(&draft, session, judging, Some(target))
     }
 
-    /// One memory instead of several, because the person asked: all of them facts, active, in one
-    /// place this session reads; Jev checks the person's words (as for forgetting); then the merged
-    /// one is saved there, signed by the judge, and the originals are archived as the person's act
-    /// (restorable). Read-only checks come first; nothing reaches Jev when the merge cannot apply.
+    /// One memory instead of several: all of them active facts in one place this session reads.
+    /// Jev guards the merged text; it is saved there and the originals are forgotten (quarantine,
+    /// restorable). Read-only checks come first.
     fn consolidate(
         &self,
         ids: &[i64],
@@ -380,25 +259,15 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
-        let (place, texts) = {
+        let place = {
             let link = self.reader()?;
             let mut place = None;
-            let mut texts = Vec::new();
             for id in ids {
                 let r = link
                     .get(MemoryId(*id))
                     .ok()
                     .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
                     .ok_or_else(|| NOT_READABLE.to_owned())?;
-                // What the person holds (wrote, accepted, pinned) is not merged away into a
-                // memory of the agent's: they merge it themselves.
-                if link.is_protected(&r) || link.is_pinned(&r) {
-                    return Err(
-                        "una de esas memorias es de la persona o está fijada: no se une desde aquí"
-                            .into(),
-                    );
-                }
                 let here = link
                     .place_of(r.scope)
                     .ok_or_else(|| NOT_READABLE.to_owned())?;
@@ -406,29 +275,16 @@ impl MemoryPort for LinkPort {
                     return Err("solo se unen memorias del mismo sitio".into());
                 }
                 place = Some(here);
-                texts.push(format!("[m{id}] {}", r.content));
             }
-            (place.ok_or_else(|| NOT_READABLE.to_owned())?, texts)
+            place.ok_or_else(|| NOT_READABLE.to_owned())?
         };
-        let originals = texts.join(" | ");
-        if !judge.confirm(
-            Request::Consolidate,
-            &originals,
-            &judging.person_said,
-            judging.tainted,
-        ) {
-            return Err(NOT_CONFIRMED.to_owned());
-        }
-        // And what is saved says only what they said: the merged text is the model's.
-        if !judge.faithful_merge(
-            &MemoryLink::agent_text(&draft.text),
-            &originals,
-            judging.tainted,
-        ) {
-            return Err(
-                "Clio no confirmó que el texto unido diga solo lo que dicen esas memorias".into(),
-            );
-        }
+        let mut merged = Draft {
+            text: draft.text.clone(),
+            title: draft.title.clone(),
+            category: draft.category.as_deref().and_then(Category::parse),
+            kind: MemoryType::Semantic,
+        };
+        merged.category = self.guard(&merged, judging)?;
         let link = self.writer()?;
         for id in ids {
             // Checked again under the writer: still active, still here.
@@ -437,32 +293,22 @@ impl MemoryPort for LinkPort {
                 .filter(|r| r.state == State::Active && link.place_of(r.scope) == Some(place))
                 .ok_or_else(|| NOT_READABLE.to_owned())?;
         }
-        let merged = Draft {
-            text: draft.text.clone(),
-            title: draft.title.clone(),
-            category: draft.category.as_deref().and_then(Category::parse),
-            kind: MemoryType::Semantic,
-        };
-        // Jev confirmed the person's words at the bar of a request: the same sureness here.
-        let o = link
-            .propose_judged_draft(&merged, session, place, Judged::Add, 0.9)
-            .map_err(|e| explain(&e))?;
+        let o = link.save_as_agent(&merged, session, place, judging.tainted)?;
         // A new memory, active, not one of them (the engine answers a repeat with the existing
-        // one): otherwise nothing is archived.
+        // one): otherwise nothing is forgotten.
         if o.kind != OpKind::Add || o.state != State::Active || ids.contains(&o.memory.0) {
-            return Err("la unión no dio una memoria nueva y activa: no se archivó nada".into());
+            return Err("la unión no dio una memoria nueva y activa: no se olvidó nada".into());
         }
-        for (archived, id) in ids.iter().enumerate() {
-            if let Err(why) = link.archive(MemoryId(*id)) {
+        for (forgotten, id) in ids.iter().enumerate() {
+            if let Err(why) = link.forget_as_agent(MemoryId(*id)) {
                 return Err(format!(
-                    "se guardó m{} y se archivaron {archived} de {}; falló una: {why}",
+                    "se guardó m{} y se olvidaron {forgotten} de {}; falló una: {why}",
                     o.memory.0,
                     ids.len()
                 ));
             }
         }
-        // No change number: undoing only the new one would leave the originals archived; the
-        // person restores with `clio memory`.
+        // No change number: undoing only the new one would leave the originals forgotten.
         Ok(Proposed {
             id: o.memory.0,
             saved: Saved::Active,
@@ -470,77 +316,26 @@ impl MemoryPort for LinkPort {
         })
     }
 
-    /// Pins a memory the session can read, because the person asked (Jev checks their words).
-    fn pin(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        self.change(
-            id,
-            judging,
-            Request::Pin,
-            |r| r.state == State::Active,
-            |link, row| link.pin(row.id),
-        )
+    fn pin(&self, id: i64, _judging: &Judging) -> Result<(), String> {
+        self.writer()?
+            .pin_as_agent(MemoryId(id))
+            .map_err(|_| NOT_READABLE.to_owned())
     }
 
-    fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        self.change(
-            id,
-            judging,
-            Request::Forget,
-            |r| r.state == State::Active,
-            |link, row| link.archive(row.id),
-        )
+    fn forget(&self, id: i64, _judging: &Judging) -> Result<(), String> {
+        self.writer()?
+            .forget_as_agent(MemoryId(id))
+            .map(|_| ())
+            .map_err(|_| NOT_READABLE.to_owned())
     }
 
-    /// Only what the model proposed in THIS session and the person could hear about, and never a
-    /// procedure: the model cannot read the quarantine, so it could not show the person anything
-    /// else, and a procedure acts as an instruction later (S-26). Those go through `clio memory`.
-    fn promote(&self, id: i64, judging: &Judging) -> Result<(), String> {
-        let here = MemoryLink::agent_session(&judging.session);
-        self.change(
-            id,
-            judging,
-            Request::Promote,
-            |r| {
-                r.state == State::Quarantine
-                    && r.kind != MemoryType::Procedural
-                    && r.session.as_deref() == Some(here.as_str())
-            },
-            |link, row| link.promote(row.id),
-        )
-    }
-
-    fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
-        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
-        // Read-only, and BEFORE Jev: only a change the judge made (an add or a replacement) in
-        // this scope; anything else is the same answer as a change that does not exist.
-        let content = {
-            let link = self.reader()?;
-            let op = link
-                .engine()
-                .operation(OpId(change))
-                .map_err(|_| NOT_READABLE.to_owned())?;
-            let by_judge = link.judge_actor().is_some_and(|j| j == op.actor);
-            if !by_judge
-                || link.place_of(op.scope).is_none()
-                || !matches!(op.kind, OpKind::Add | OpKind::Update)
-            {
-                return Err(NOT_READABLE.to_owned());
-            }
-            let memory = op.memory.ok_or_else(|| NOT_READABLE.to_owned())?;
-            link.get(memory)
-                .map_err(|_| NOT_READABLE.to_owned())?
-                .content
-        };
-        if !judge.confirm(
-            Request::Undo,
-            &content,
-            &judging.person_said,
-            judging.tainted,
-        ) {
-            return Err(NOT_CONFIRMED.to_owned());
-        }
-        // The writer only now; `revert_judged` checks again that the judge made the change.
-        self.writer()?.revert_judged(OpId(change))
+    /// Only a change the agent signed itself; anything else is the same answer as a change that
+    /// does not exist.
+    fn undo(&self, change: i64, _judging: &Judging) -> Result<(), String> {
+        self.writer()?
+            .revert_as_agent(OpId(change))
+            .map(|_| ())
+            .map_err(|_| NOT_READABLE.to_owned())
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

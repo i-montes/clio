@@ -29,23 +29,12 @@ pub enum Verdict {
     },
 }
 
-/// Deterministic rules, in order: duplicate, then trust (quarantine), then same topic, then new.
-/// Trust is decided before topic so untrusted content can never replace trusted content directly.
-pub fn decide(kind: MemoryType, effective: Origin, existing: Existing) -> Verdict {
+/// Deterministic rules, in order: duplicate, then same topic, then new. Nothing waits for a
+/// person: the memory is the agent's, whatever the origin, the kind or who wrote what it replaces
+/// (the origin is kept and shown; every change stays in the log and can be reverted).
+pub fn decide(_kind: MemoryType, _effective: Origin, existing: Existing) -> Verdict {
     if let Some(dup) = existing.by_hash {
         return Verdict::Noop(dup.id);
-    }
-    // What a person wrote is replaced only by the person (or by a candidate they promote).
-    let replaces_a_persons =
-        effective != Origin::User && existing.by_topic.is_some_and(|r| r.origin == Origin::User);
-    let untrusted = effective == Origin::External
-        || (kind == MemoryType::Procedural && effective != Origin::User)
-        || replaces_a_persons;
-    if untrusted {
-        return Verdict::Add {
-            state: State::Quarantine,
-            supersedes: existing.by_topic.map(|r| r.id),
-        };
     }
     if let Some(same) = existing.by_topic {
         return Verdict::Update { old: same.id };
@@ -127,64 +116,32 @@ mod tests {
         );
     }
 
+    // The memory is the agent's: outside content and an agent's procedure are active at once, and
+    // a candidate with the topic of the person's memory replaces it (the log keeps the old one).
     #[test]
-    fn s25_external_with_topic_match_goes_to_quarantine_not_update() {
-        let r = row(3);
-        let e = Existing {
-            by_hash: None,
-            by_topic: Some(&r),
-        };
-        assert_eq!(
-            decide(MemoryType::Semantic, Origin::External, e),
-            Verdict::Add {
-                state: State::Quarantine,
-                supersedes: Some(MemoryId(3))
-            }
-        );
-    }
-
-    // S-25 (second audit): "untrusted content can never replace trusted content directly" held for
-    // `External` only. An agent's candidate with the topic of a memory the PERSON wrote must wait
-    // for the person too: otherwise it becomes the active fact and the person's one is `Replaced`.
-    #[test]
-    fn a_non_person_candidate_cannot_replace_a_persons_memory_by_topic() {
+    fn nothing_waits_for_a_person() {
         let persons = row(3); // origin User
         let e = Existing {
             by_hash: None,
             by_topic: Some(&persons),
         };
-        let waits = Verdict::Add {
-            state: State::Quarantine,
-            supersedes: Some(MemoryId(3)),
-        };
-        assert_eq!(decide(MemoryType::Semantic, Origin::Agent, e), waits);
-        assert_eq!(decide(MemoryType::Semantic, Origin::External, e), waits);
-        // The person updating their own memory, and an agent updating an agent's, still go through.
-        assert_eq!(
-            decide(MemoryType::Semantic, Origin::User, e),
-            Verdict::Update { old: MemoryId(3) }
-        );
-        let mut agents = row(4);
-        agents.origin = Origin::Agent;
-        let e = Existing {
-            by_hash: None,
-            by_topic: Some(&agents),
-        };
-        assert_eq!(
-            decide(MemoryType::Semantic, Origin::Agent, e),
-            Verdict::Update { old: MemoryId(4) }
-        );
-    }
-
-    #[test]
-    fn s26_agent_procedural_is_quarantined() {
-        assert_eq!(
-            decide(MemoryType::Procedural, Origin::Agent, NONE),
-            Verdict::Add {
-                state: State::Quarantine,
-                supersedes: None
-            }
-        );
+        for origin in [Origin::External, Origin::Agent, Origin::User] {
+            assert_eq!(
+                decide(MemoryType::Semantic, origin, e),
+                Verdict::Update { old: MemoryId(3) },
+                "{origin:?}"
+            );
+        }
+        for origin in [Origin::External, Origin::Agent] {
+            assert_eq!(
+                decide(MemoryType::Procedural, origin, NONE),
+                Verdict::Add {
+                    state: State::Active,
+                    supersedes: None
+                },
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]

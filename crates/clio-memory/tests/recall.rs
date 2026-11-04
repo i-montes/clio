@@ -103,15 +103,13 @@ fn t12_abstains_when_nothing_is_relevant() {
 
 // S-25: external content never reaches a read before a person promotes it
 #[test]
-fn t04_external_memory_hidden_from_recall_until_promoted() {
+fn t04_forgotten_memory_hidden_from_recall_until_promoted() {
     let f = fixture_with(embedder());
-    let mut p = prop(f.scope, f.person, "la página dice que el dólar subió");
-    p.origin = Origin::External;
-    let m = f.engine.propose(p).unwrap();
+    let m = quarantined(&f, "la página dice que el dólar subió");
     f.engine.embed_pending(10).unwrap();
     assert!(recall(&f, "dólar").hits.is_empty());
-    f.engine.promote(m.memory, f.person).unwrap();
-    assert_eq!(ids(&recall(&f, "dólar")), [m.memory]);
+    f.engine.promote(m, f.person).unwrap();
+    assert_eq!(ids(&recall(&f, "dólar")), [m]);
 }
 
 #[test]

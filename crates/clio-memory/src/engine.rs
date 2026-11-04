@@ -107,16 +107,10 @@ impl Judge {
 /// it is an ordinary `propose`, which the rules send to quarantine for the person.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Judged {
-    /// New: active, even where the rules would hold it for the person (outside origin, a
-    /// procedure). An exact copy of something active is still a no-op.
+    /// New: active. An exact copy of something active is still a no-op.
     Add,
-    /// Replaces `old`, which must be active, of the same scope and kind. What the person wrote, or
-    /// holds in a fixed block, is replaced only with `person_confirmed`: the caller has checked
-    /// that the person's own words say the new fact.
-    Update {
-        old: MemoryId,
-        person_confirmed: bool,
-    },
+    /// Replaces `old`, which must be active, of the same scope and kind, whoever wrote it.
+    Update { old: MemoryId },
     /// Already known as `existing`: nothing is written.
     Noop { existing: MemoryId },
 }
@@ -1057,10 +1051,18 @@ impl Engine {
         Ok(false)
     }
 
-    /// Promote, archive and revert are review powers: only a person may use them.
+    /// Promote and archive are the person's; revert too, except an agent's revert of its own
+    /// operations (`revert_inner`).
     fn require_person(&self, actor: ActorId) -> Result<()> {
         match self.store.actor_kind(actor)? {
             ActorKind::Person => Ok(()),
+            _ => Err(Error::NotAllowed),
+        }
+    }
+
+    fn require_person_or_agent(&self, actor: ActorId) -> Result<()> {
+        match self.store.actor_kind(actor)? {
+            ActorKind::Person | ActorKind::Agent => Ok(()),
             _ => Err(Error::NotAllowed),
         }
     }
@@ -1083,6 +1085,18 @@ impl Engine {
         let _g = self.write_guard();
         self.check_name(name)?;
         self.store.register_actor(name, kind, quota)
+    }
+
+    /// Changes the hourly quota of an actor the caller registered (never the system's or the judge's).
+    pub fn set_quota(&self, actor: ActorId, quota: Quota) -> Result<()> {
+        let _g = self.write_guard();
+        if matches!(
+            self.store.actor_kind(actor)?,
+            ActorKind::System | ActorKind::Judge
+        ) {
+            return Err(Error::NotAllowed);
+        }
+        self.store.set_quota(actor, quota)
     }
 
     /// The judge's pen, registering its actor the first time (a read-only engine cannot).
@@ -1117,7 +1131,7 @@ impl Engine {
         how: Judged,
         sure: Sureness,
     ) -> Result<Outcome> {
-        self.propose_inner(p, Some((judge, how, sure)))
+        self.propose_inner(p, Some((judge, how, sure)), None)
     }
 
     /// The only way content enters the memory.
@@ -1131,7 +1145,26 @@ impl Engine {
             outcome = ::tracing::field::Empty,
             state = ::tracing::field::Empty,
         );
-        let result = self.propose_inner(p, None);
+        let result = self.propose_inner(p, None, None);
+        finish_propose!(span, result);
+        result
+    }
+
+    /// `p` replaces exactly `old`: the agent correcting one memory («no es Iván Ruiz sino Iván
+    /// Montes»). `old` must be active, of the same scope and kind; the secret check and the quota
+    /// run first, the replacement is an Update in the log (revertible) and an exact copy of an
+    /// active memory is a no-op.
+    pub fn replace(&self, old: MemoryId, p: Proposal) -> Result<Outcome> {
+        let span = span!(
+            "propose",
+            scope = p.scope.0,
+            actor = p.actor.0,
+            kind = format!("{:?}", p.kind).as_str(),
+            trace_id = ::tracing::field::Empty,
+            outcome = ::tracing::field::Empty,
+            state = ::tracing::field::Empty,
+        );
+        let result = self.propose_inner(p, None, Some(old));
         finish_propose!(span, result);
         result
     }
@@ -1140,6 +1173,7 @@ impl Engine {
         &self,
         p: Proposal,
         judged: Option<(&Judge, Judged, Sureness)>,
+        target: Option<MemoryId>,
     ) -> Result<Outcome> {
         let _g = self.write_guard();
         if p.content.trim().is_empty() {
@@ -1210,21 +1244,19 @@ impl Engine {
         };
         // A judged update names the memory it replaces, whatever its topic key.
         let mut topic_key = p.topic_key;
+        if let Some(old) = target {
+            let row = self.store.get(old)?;
+            if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
+                return Err(Error::InvalidState);
+            }
+            topic_key = row.topic_key.clone();
+            by_topic = Some(row);
+        }
         match &judged {
-            Some((
-                _,
-                Judged::Update {
-                    old,
-                    person_confirmed,
-                },
-                _,
-            )) => {
+            Some((_, Judged::Update { old, .. }, _)) => {
                 let row = self.store.get(*old)?;
                 if row.state != State::Active || row.scope != p.scope || row.kind != p.kind {
                     return Err(Error::InvalidState);
-                }
-                if !person_confirmed && self.held_by_person(&row)? {
-                    return Err(Error::NotAllowed); // what the person wrote is replaced by the person
                 }
                 topic_key = row.topic_key.clone();
                 by_topic = Some(row);
@@ -1283,6 +1315,12 @@ impl Engine {
             },
             (Some((_, Judged::Update { old, .. }, _)), None) => Verdict::Update { old: *old },
             (Some((_, Judged::Noop { existing }, _)), None) => Verdict::Noop(*existing),
+            // Replacing a named memory: an exact copy of something active changes nothing.
+            (None, Some(dup)) if target.is_some() => Verdict::Noop(dup.id),
+            (None, None) => match target {
+                Some(old) => Verdict::Update { old },
+                None => verdict,
+            },
             (None, _) => verdict,
         };
         // The same untrusted text twice is one candidate: a second copy neither adds a row to
@@ -1627,6 +1665,34 @@ impl Engine {
         self.log(to, OpKind::Move, id, changes, actor, "moved")
     }
 
+    /// The agent forgets a memory: it goes to quarantine (no longer recalled), its record stays,
+    /// and `revert` brings it back. Any registered actor but the system; only an active memory.
+    pub fn forget(&self, id: MemoryId, actor: ActorId, reason: &str) -> Result<OpId> {
+        let _g = self.write_guard();
+        if self.store.actor_kind(actor)? == ActorKind::System {
+            return Err(Error::NotAllowed);
+        }
+        let row = self.store.get(id)?;
+        if row.state != State::Active {
+            return Err(Error::InvalidState);
+        }
+        let mut after = row.clone();
+        after.state = State::Quarantine;
+        let changes = vec![Change {
+            memory: id,
+            before: Some(row.clone()),
+            after,
+        }];
+        self.log(
+            row.scope,
+            OpKind::Forget,
+            id,
+            changes,
+            actor,
+            &self.bounded(reason),
+        )
+    }
+
     /// PURGE: erases a memory's content everywhere (S-24, S-25) and leaves a tombstone. Only a
     /// person may do it, and it is never reachable from an agent or MCP. `reason` is stored in the
     /// clear: do not put the erased text in it. Revert cannot undo it. Copies of the file made
@@ -1727,10 +1793,16 @@ impl Engine {
         outcome!(span, self.revert_inner(op, actor))
     }
 
+    /// A person reverts anything; an agent only what it signed itself.
     fn revert_inner(&self, op: OpId, actor: ActorId) -> Result<OpId> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
-        self.revert_locked(&self.store.operation(op)?, actor)
+        let done = self.store.operation(op)?;
+        if self.require_person(actor).is_err()
+            && (self.store.actor_kind(actor)? != ActorKind::Agent || done.actor != actor)
+        {
+            return Err(Error::NotAllowed);
+        }
+        self.revert_locked(&done, actor)
     }
 
     /// Reverts everything `target` did that is still revertible, newest first.
@@ -1846,6 +1918,15 @@ impl Engine {
         self.store.block_memories(block)
     }
 
+    /// What a block shows now: each entry followed to its current version, as the context does.
+    pub fn block_current(&self, block: BlockId) -> Result<Vec<MemoryRow>> {
+        let mut out = Vec::new();
+        for entry in self.block_get(block)? {
+            out.extend(self.current(entry)?);
+        }
+        Ok(out)
+    }
+
     pub fn blocks(&self, scope: ScopeId) -> Result<Vec<Block>> {
         self.store.blocks(scope)
     }
@@ -1863,11 +1944,11 @@ impl Engine {
         self.store.list(scope, state, kind)
     }
 
-    /// Pins a memory: it comes first in the context. A person's choice (the model asks through a
-    /// person's request); not part of the log. Only an active memory can be pinned.
+    /// Pins a memory: it comes first in the context. The person's or the agent's choice; not part
+    /// of the log. Only an active memory can be pinned.
     pub fn pin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
+        self.require_person_or_agent(actor)?;
         if self.store.get(id)?.state != State::Active {
             return Err(Error::InvalidState);
         }
@@ -1876,7 +1957,7 @@ impl Engine {
 
     pub fn unpin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
         let _g = self.write_guard();
-        self.require_person(actor)?;
+        self.require_person_or_agent(actor)?;
         self.store.get(id)?;
         self.store.set_pin(id, None)
     }
@@ -2209,10 +2290,10 @@ impl Engine {
             .collect()
     }
 
-    /// Follows `replaced_by` from a block entry to the memory that is active now. A block is
-    /// curated by a person and bypasses relevance filters, so an entry only follows an update
-    /// whose current version a person vouched for (`Origin::User`); otherwise it is left out
-    /// until a person edits the block.
+    /// Follows `replaced_by` from a block entry to the memory that is active now. A block bypasses
+    /// relevance filters, so an entry follows an update by the person or the agent's own
+    /// (`Origin::User` or `Agent`), never one from outside content (`External`): that one is left
+    /// out until a person edits the block.
     fn current(&self, mut id: MemoryId) -> Result<Option<MemoryRow>> {
         let mut via_update = false;
         for _ in 0..32 {
@@ -2223,7 +2304,7 @@ impl Engine {
             };
             match (row.state, row.replaced_by) {
                 (State::Active, _) => {
-                    return Ok((!via_update || row.origin == Origin::User).then_some(row));
+                    return Ok((!via_update || row.origin != Origin::External).then_some(row));
                 }
                 (State::Replaced, Some(next)) => {
                     id = next;

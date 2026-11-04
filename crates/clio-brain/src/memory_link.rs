@@ -10,12 +10,14 @@
 //!   the instruction, each under its own budget. "Nothing relevant" is a valid answer: the
 //!   context then has no memory layer at all.
 //! - At the close, [`MemoryLink::close_run`] writes ONE batch, after the model loop is over.
-//!   The run's own record is episodic: active only if the run never touched outside content
-//!   (`tainted == false`), in quarantine otherwise. What the model proposes (lines `RECORDAR:` or
-//!   `PROCEDIMIENTO:` in its final message) ALWAYS goes to quarantine, as external origin: a model
-//!   that read a hostile file can say anything, and nothing it says is a fact of the person.
-//!   Procedural memories wait for a person on top of that. A refusal (secret, quota, size) is
-//!   recorded in the report and never breaks the close.
+//!   Everything is active at once (the memory is the agent's): the run's own record is episodic,
+//!   with origin `agente`, or `externo` if the run touched outside content (`tainted`). What the
+//!   model asks to keep (lines `RECORDAR:` or `PROCEDIMIENTO:` in its final message) is always
+//!   `externo`: a model that read a hostile file can say anything, so it is read back marked. A
+//!   refusal (secret, quota, size) is recorded in the report and never breaks the close.
+//! - During a session the agent saves, corrects and forgets ([`MemoryLink::save_as_agent`],
+//!   [`MemoryLink::update_as_agent`], [`MemoryLink::forget_as_agent`]); forgetting sends to
+//!   quarantine, where the record stays.
 //! - Facts of the person only enter through [`MemoryLink::remember`], which no agent code calls.
 //!
 //! The embedding model is optional: without it everything works by text and `note()` says so.
@@ -25,9 +27,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use clio_memory::{
-    ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, Judged, MemoryId,
-    MemoryRow, MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation,
-    ScopeId, SearchOpts, Signal, State, Sureness, SystemClock,
+    ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, MemoryId, MemoryRow,
+    MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation, ScopeId,
+    SearchOpts, Signal, State, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -56,7 +58,8 @@ pub fn explain(e: &Error) -> String {
         Error::QuotaExceeded => "rechazado: cuota de propuestas agotada para este actor".into(),
         Error::TooLong => "rechazado: demasiado largo".into(),
         Error::QuarantineFull => {
-            "rechazado: hay demasiados recuerdos de este actor esperando tu revisión; revisa los pendientes (`clio memory review`)".into()
+            "rechazado: hay demasiados recuerdos de este actor en cuarentena (`clio memory review`)"
+                .into()
         }
         Error::EmptyContent => "rechazado: vacío".into(),
         Error::WriterLocked => "otro proceso está escribiendo la memoria; reintenta".into(),
@@ -309,6 +312,9 @@ fn load_embedder(_: &Path) -> Result<Arc<dyn clio_memory::Embedder>, String> {
     Err("este Clio se compiló sin la característica model2vec".into())
 }
 
+/// The agent's writes an hour: a brake on a loop, not a review (the memory is the agent's).
+const AGENT_QUOTA: u32 = 500;
+
 fn quota(max: u32) -> Quota {
     Quota {
         max,
@@ -427,10 +433,14 @@ impl MemoryLink {
         };
         let actors = Actors {
             persona: get("persona", ActorKind::Person, 200)?,
-            agente: get("agente", ActorKind::Agent, 20)?,
+            agente: get("agente", ActorKind::Agent, AGENT_QUOTA)?,
             sesion: get("sesion", ActorKind::Session, 30)?,
             importador: get("importador", ActorKind::Importer, 100)?,
         };
+        // A file made when the agent had 20 an hour gets the quota of now.
+        engine
+            .set_quota(actors.agente, quota(AGENT_QUOTA))
+            .map_err(m)?;
         let blocks = engine.blocks(scope).map_err(m)?;
         for (name, budget) in BLOCKS {
             if !blocks.iter().any(|b| b.name == name) {
@@ -670,7 +680,7 @@ impl MemoryLink {
         if let Some(m) = f.final_message.as_deref().filter(|m| !m.trim().is_empty()) {
             episode += &format!(" Dijo: {}", text(m, 240));
         }
-        // Active only for a run that never read outside content; external origin = quarantine.
+        // Active either way; the origin says whether the run read outside content.
         let origin = if f.tainted {
             Origin::External
         } else {
@@ -684,7 +694,7 @@ impl MemoryLink {
             "run",
         );
 
-        // What the model asks to keep: always quarantine, as external; procedures wait on top.
+        // What the model asks to keep: active, always marked as from outside.
         let mut asked = 0usize;
         for line in f.final_message.as_deref().unwrap_or_default().lines() {
             let t = line.trim();
@@ -755,28 +765,73 @@ impl MemoryLink {
         }
     }
 
-    /// What the agent proposes during a session (the `memory_propose` tool): always the agent's
-    /// and always from outside content, so it always lands in quarantine, and a procedure also
-    /// waits for approval whatever its origin (S-26). There is no argument for the actor, the
-    /// origin or the scope: they are not the caller's to say (S-61). The engine's quota for the
-    /// agent and the cap on the quarantine (S-27) still apply; the message says which one
-    /// refused. Returns the id of the candidate.
-    pub fn propose_as_agent(&self, text: &str, kind: MemoryType, session: &str) -> Res<MemoryId> {
-        self.propose_draft_as_agent(&Draft::plain(text, kind), session, Place::Personal)
-    }
-
-    /// The same for a draft (title, category) in a place. A place this link has no scope for
-    /// (a project when there is none) is the person's.
-    pub fn propose_draft_as_agent(
+    /// What the agent saves during a session (the `memory_save` tool): active at once, the agent's,
+    /// with origin `externo` when the session read outside content (`tainted`) and `agente`
+    /// otherwise. There is no argument for the actor or the scope beyond the place: they are not
+    /// the caller's to say (S-61). The engine's secret check and the agent's quota still apply. A
+    /// place this link has no scope for (a project when there is none) is the person's.
+    pub fn save_as_agent(
         &self,
         draft: &Draft,
         session: &str,
         place: Place,
-    ) -> Res<MemoryId> {
+        tainted: bool,
+    ) -> Res<Outcome> {
         self.need_write()?;
         self.engine
-            .propose(self.agent_proposal(draft, session, place))
-            .map(|o| o.memory)
+            .propose(self.agent_proposal(draft, session, place, tainted))
+            .map_err(|e| explain(&e))
+    }
+
+    /// The agent corrects `old` (the `memory_update` tool): the new text replaces exactly that
+    /// memory, whoever wrote it, in its place and of its kind. The old one stays in the log as
+    /// replaced and the person's revert brings it back.
+    pub fn update_as_agent(
+        &self,
+        old: MemoryId,
+        draft: &Draft,
+        session: &str,
+        tainted: bool,
+    ) -> Res<Outcome> {
+        self.need_write()?;
+        let row = self.get(old)?;
+        let place = self
+            .place_of(row.scope)
+            .ok_or("esa memoria no es de este lugar")?;
+        let mut p = self.agent_proposal(draft, session, place, tainted);
+        p.kind = row.kind;
+        self.engine.replace(old, p).map_err(|e| explain(&e))
+    }
+
+    /// The agent pins `id` (the `memory_pin` tool): it comes first in the context.
+    pub fn pin_as_agent(&self, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        self.get(id)?; // only a memory of this link's places
+        self.engine
+            .pin(id, self.actors.agente)
+            .map_err(|e| explain(&e))
+    }
+
+    /// The agent undoes `op` (the `memory_revert` tool): only a change it signed itself, in a
+    /// place of this link.
+    pub fn revert_as_agent(&self, op: OpId) -> Res<OpId> {
+        self.need_write()?;
+        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
+        if done.actor != self.actors.agente || self.place_of(done.scope).is_none() {
+            return Err("ese cambio no lo hizo el agente: no se puede deshacer por aquí".into());
+        }
+        self.engine
+            .revert(op, self.actors.agente)
+            .map_err(|e| explain(&e))
+    }
+
+    /// The agent forgets `id` (the `memory_forget` tool): to quarantine, out of every search, its
+    /// record kept; the person's revert brings it back.
+    pub fn forget_as_agent(&self, id: MemoryId) -> Res<OpId> {
+        self.need_write()?;
+        self.get(id)?; // only a memory of this link's places
+        self.engine
+            .forget(id, self.actors.agente, "olvidado por el agente")
             .map_err(|e| explain(&e))
     }
 
@@ -785,22 +840,18 @@ impl MemoryLink {
         clip(&clean_text(session), 200)
     }
 
-    /// The judge's actor, if it was ever registered (read-only: it never registers it).
-    pub fn judge_actor(&self) -> Option<ActorId> {
-        self.engine
-            .actors()
-            .ok()?
-            .into_iter()
-            .find(|a| a.kind == ActorKind::Judge)
-            .map(|a| a.id)
-    }
-
     /// The text of an agent's proposal as it is stored: clean, one line.
     pub fn agent_text(text: &str) -> String {
         clip(&clean_text(text), AGENT_TEXT_CHARS)
     }
 
-    fn agent_proposal(&self, draft: &Draft, session: &str, place: Place) -> Proposal {
+    fn agent_proposal(
+        &self,
+        draft: &Draft,
+        session: &str,
+        place: Place,
+        tainted: bool,
+    ) -> Proposal {
         let session = Self::agent_session(session);
         // Where it was learned: the project, when there is one (what a lesson shows elsewhere).
         let source = match self.project_name() {
@@ -813,7 +864,11 @@ impl MemoryLink {
             kind: draft.kind,
             content: Self::agent_text(&draft.text),
             topic_key: None,
-            origin: Origin::External,
+            origin: if tainted {
+                Origin::External
+            } else {
+                Origin::Agent
+            },
             session: Some(session.clone()),
             // The session is the episode: the timeline groups by it.
             episode: Some(session),
@@ -827,78 +882,6 @@ impl MemoryLink {
                 .filter(|t| !t.is_empty()),
             category: draft.category,
         }
-    }
-
-    /// The same proposal, decided by the judge (Jev) instead of the rules: new, a replacement or
-    /// already known. The engine still runs the quota and the secret check first, keeps the agent
-    /// as the author and the origin as outside, signs the operation as the judge and refuses to
-    /// replace what the person wrote without the person's confirmation. The error is the engine's
-    /// own so the caller can tell «refused, ask the person» from a failure.
-    pub fn propose_judged_as_agent(
-        &self,
-        text: &str,
-        kind: MemoryType,
-        session: &str,
-        how: Judged,
-        confidence: f32,
-    ) -> std::result::Result<Outcome, Error> {
-        self.propose_judged_draft(
-            &Draft::plain(text, kind),
-            session,
-            Place::Personal,
-            how,
-            confidence,
-        )
-    }
-
-    /// The same for a draft in a place.
-    pub fn propose_judged_draft(
-        &self,
-        draft: &Draft,
-        session: &str,
-        place: Place,
-        how: Judged,
-        confidence: f32,
-    ) -> std::result::Result<Outcome, Error> {
-        let judge = self.engine.judge()?;
-        self.engine.propose_judged(
-            &judge,
-            self.agent_proposal(draft, session, place),
-            how,
-            Sureness { confidence },
-        )
-    }
-
-    /// Undoes a change the judge made (the person asked, Jev confirmed). Only the judge's own
-    /// operations: what the person or anyone else did is not for the model to undo.
-    pub fn revert_judged(&self, op: OpId) -> Res<()> {
-        self.need_write()?;
-        let judge = self.engine.judge().map_err(|e| explain(&e))?;
-        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
-        if done.actor != judge.actor() || self.place_of(done.scope).is_none() {
-            return Err("ese cambio no lo hizo Jev: no se puede deshacer por aquí".into());
-        }
-        self.engine
-            .revert(op, self.actors.persona)
-            .map(|_| ())
-            .map_err(|e| explain(&e))
-    }
-
-    /// The change (operation) that the judge's `memory` came from, if the judge made it.
-    pub fn judge_change_of(&self, memory: MemoryId) -> Option<OpId> {
-        let judge = self.engine.judge().ok()?;
-        self.engine
-            .history(memory)
-            .ok()?
-            .into_iter()
-            .find(|o| o.actor == judge.actor())
-            .map(|o| o.id)
-    }
-
-    /// Is this memory the person's own (written by them, in a fixed block, or accepted by them)?
-    /// Then only the person's own words replace it. When in doubt (it cannot be read) it is.
-    pub fn is_protected(&self, row: &MemoryRow) -> bool {
-        self.engine.held_by_person(row).unwrap_or(true)
     }
 
     // ---------------------------------------------------------------- the person
@@ -973,8 +956,7 @@ impl MemoryLink {
         self.engine.tombstone(id).map_err(|e| explain(&e))
     }
 
-    /// First in the context of its place. Only the person pins (directly, or by asking the model
-    /// and Jev confirming their words).
+    /// First in the context of its place: the person's pin (the agent's is `pin_as_agent`).
     pub fn pin(&self, id: MemoryId) -> Res<()> {
         self.need_write()?;
         self.engine

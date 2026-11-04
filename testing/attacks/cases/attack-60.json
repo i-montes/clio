@@ -1,6 +1,6 @@
 {
   "id": "attack-60",
-  "title": "Con Pi real y sin Jev: argumentos que no existen (origin, scope, actor) se rechazan; purgar o archivar un recuerdo por su nombre del motor no existe; y aceptar, olvidar o deshacer (que sí existen, S-65) dicen que no sin el juez, también pedido directamente al socket del servicio, y no cambian nada",
+  "title": "Con Pi real y sin Jev: argumentos que no existen (origin, scope, actor) se rechazan; purgar, archivar o aceptar un recuerdo no existe (PURGE es solo de la persona y nada espera revisión); deshacer un cambio de la persona, pedido directamente al socket del servicio, dice que no y no cambia nada",
   "rules": [
     "S-02",
     "S-25",
