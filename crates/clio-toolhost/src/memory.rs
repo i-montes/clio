@@ -33,13 +33,16 @@ pub(crate) const MEMORY_OPS: [&str; 3] = ["memory_search", "memory_get", "memory
 
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
-const PROPOSE_DESCRIPTION: &str =
-    "Propose a memory for the person to review (it is never active until they accept it)";
+const PROPOSE_DESCRIPTION: &str = "Propose a memory: Clio decides whether it is kept, replaces another, was known, or waits for the person's review";
 
 /// Longest proposal, in characters, after cleaning.
 const MAX_PROPOSAL_CHARS: usize = 400;
-/// Proposals a session may make (S-47, S-61). The same number as the close of a run.
+/// Proposals a TAINTED session may make (S-47, S-61): what it read may be hostile, and what it
+/// proposes is the model's own words after reading it.
 pub(crate) const MAX_PROPOSALS: u32 = 5;
+/// Proposals a session that has read nothing hostile may make. The memory's own quota per hour is
+/// the real rate limit; this only stops a loop that proposes without end.
+pub(crate) const MAX_PROPOSALS_CLEAN: u32 = 30;
 
 const MAX_QUERY_CHARS: usize = 200;
 const DEFAULT_LIMIT: usize = 5;
@@ -104,14 +107,49 @@ pub enum ProposalKind {
     Procedural,
 }
 
+/// What the memory did with a proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    /// It is memory now (the judge, Jev, said it is new).
+    Active,
+    /// It replaced an earlier memory of the same fact.
+    Replaced,
+    /// It was already known: nothing was added.
+    Known,
+    /// It waits for the person's review.
+    Waiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Proposed {
+    pub id: i64,
+    pub saved: Saved,
+}
+
+/// What the tool host tells the port about the call so it can judge it: whether the session read
+/// anything hostile, and the person's last words in it (what they said themselves, never what the
+/// model reports they said).
+#[derive(Debug, Clone, Default)]
+pub struct Judging {
+    pub tainted: bool,
+    pub person_said: Vec<String>,
+}
+
 /// What the tool host needs from the memory: active memories of the person's scope to read, and
 /// one way to write: a proposal that waits for the person. There is no way to promote, archive,
 /// revert or purge through it, and nothing here says who the writer is or how far to trust it:
 /// the port decides that (S-60, S-61).
 pub trait MemoryPort: Send + Sync {
-    /// Queues `text` for the person's review, as the agent's, from outside content. `session` is
-    /// only for the record. Returns the id of the candidate.
-    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String>;
+    /// Hands `text` to the memory as the agent's, from outside content: the memory decides (the
+    /// judge when there is one, else the rules: quarantine for the person). `session` is only for
+    /// the record. Returns the id and what became of it.
+    fn propose(
+        &self,
+        text: &str,
+        kind: ProposalKind,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String>;
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
     /// it is must not leak.
@@ -333,10 +371,15 @@ impl ToolHost {
             Ok(b) => b,
             Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
         };
-        if budget.calls >= MAX_PROPOSALS {
+        let cap = if self.is_tainted(&req.session) {
+            MAX_PROPOSALS
+        } else {
+            MAX_PROPOSALS_CLEAN
+        };
+        if budget.calls >= cap {
             return self.budget_denied(
                 req,
-                "this session made its memory proposals (5); the person reviews what is there",
+                &format!("this session made its memory proposals ({cap}); the person reviews what is there"),
             );
         }
         budget.calls += 1;
@@ -396,14 +439,30 @@ impl ToolHost {
             );
         }
         let session = req.session.clone();
-        match self.ask_port(&port, move |p| p.propose(&text, kind, &session)) {
-            Ok(id) => {
-                facts.ids.push(id);
+        let judging = Judging {
+            tainted: self.is_tainted(&req.session),
+            person_said: self.person_said(&req.session),
+        };
+        match self.ask_port(&port, move |p| p.propose(&text, kind, &session, &judging)) {
+            Ok(done) => {
+                facts.ids.push(done.id);
+                let (content, how) = match done.saved {
+                    Saved::Active => ("saved: it is part of the person's memory now", "saved"),
+                    Saved::Replaced => (
+                        "saved: it replaced an earlier memory of the same fact",
+                        "replaced",
+                    ),
+                    Saved::Known => ("already known: nothing was added", "known"),
+                    Saved::Waiting => (
+                        "proposed: it waits for the person's review and is not memory until they accept it",
+                        "waiting",
+                    ),
+                };
                 Response {
                     id: req.id.clone(),
                     ok: true,
-                    content: "proposed: it waits for the person's review and is not memory until they accept it".into(),
-                    data: json!({ "proposed": true }),
+                    content: content.into(),
+                    data: json!({ "proposed": true, "result": how }),
                     decision: out,
                     tainted: self.is_tainted(&req.session),
                     external: false,

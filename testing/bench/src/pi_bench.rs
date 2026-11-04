@@ -1,7 +1,7 @@
 //! The bench with Pi as the harness (`clio-bench agent --harness pi`): the same lifecycle as
 //! `clio run --harness pi` (`clio toolhost` on the working copy, hardened Pi with the guard, the
 //! nine tools, `--thinking low`), driven to `agent_settled` under the task's limits. The task's
-//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@7`).
+//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@8`).
 //! The API key comes only from `OPENCODE_API_KEY` or `~/.config/clio/opencode-api-key`; it is
 //! handed to Pi and the toolhost through their environment and never printed or written.
 
@@ -12,7 +12,7 @@ use clio_brain::pi::PiPaths;
 use clio_brain::pi::install::{self, NodeInfo, PiInstall};
 use clio_brain::pi::launch::{Launch, Provider, Secret, SessionTarget, read_api_key, start};
 use clio_brain::pi::rpc::{Cancel, Event};
-use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
+use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, guard_env};
 use serde_json::{Value, json};
 
 /// Everything a Pi run needs that does not change between runs.
@@ -122,7 +122,7 @@ impl PiBench {
             run_dir,
             work,
             &self.key,
-            None, // the bench uses no memory
+            ToolhostOpts::default(), // the bench uses no memory and no Jev
         )?;
         let launch = Launch {
             guard: Some(ensure_guard(&self.install)?),

@@ -31,8 +31,8 @@ pub const GUARD_TOOLS: [&str; 9] = [
     "memory_get",
     "memory_propose",
 ];
-pub const PROMPT_NAME: &str = "clio-agent@7";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@7.md");
+pub const PROMPT_NAME: &str = "clio-agent@8";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@8.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -108,6 +108,15 @@ pub fn guard_env(paths: &PiPaths, toolhost: &Toolhost) -> Result<Vec<(String, St
 }
 
 /// `clio toolhost` running on the session's copy.
+/// What a tool host may be given besides its folders.
+#[derive(Default, Clone, Copy)]
+pub struct ToolhostOpts<'a> {
+    /// The person's data folder and, if there is one, the vector model's: the memory tools.
+    pub memory: Option<(&'a Path, Option<&'a Path>)>,
+    /// Extra variables for the service (what it needs to judge proposals with Jev).
+    pub extra_env: &'a [(String, String)],
+}
+
 pub struct Toolhost {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
@@ -130,8 +139,9 @@ impl Toolhost {
         run_dir: &Path,
         work: &Path,
         key: &Secret,
-        memory: Option<(&Path, Option<&Path>)>,
+        opts: ToolhostOpts<'_>,
     ) -> Result<Self, String> {
+        let ToolhostOpts { memory, extra_env } = opts;
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
             "th-{}-{}",
@@ -181,6 +191,7 @@ impl Toolhost {
             .arg(&effects)
             .args(["--jail", jail])
             .env_clear()
+            .envs(extra_env.iter().map(|(k, v)| (k, v)))
             .env("HOME", paths.home_dir())
             .env("PATH", "/usr/bin:/bin")
             .env(
@@ -274,6 +285,6 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_one_the_guard_checks() {
-        assert!(PROMPT.starts_with("version: 7"));
+        assert!(PROMPT.starts_with("version: 8"));
     }
 }

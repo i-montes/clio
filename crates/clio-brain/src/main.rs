@@ -87,7 +87,12 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     if cmd == "toolhost" {
         // The memory tools exist only here: the loose `clio-toolhost` binary has no memory.
         let memory = |data: &std::path::Path, model: Option<&std::path::Path>| {
-            let port = clio_brain::memory_port::LinkPort::new(data, model);
+            let mut port = clio_brain::memory_port::LinkPort::new(data, model);
+            // Only when `clio` started this service with Jev on: it then decides what becomes of
+            // each proposal; without it every proposal waits for the person.
+            if let Some(judge) = cli::jev::judge_from_env() {
+                port = port.with_judge(judge);
+            }
             Ok(std::sync::Arc::new(port) as std::sync::Arc<dyn clio_toolhost::MemoryPort>)
         };
         return clio_toolhost::cli::run_with(args.into_raw(), &memory).map(|()| 0);

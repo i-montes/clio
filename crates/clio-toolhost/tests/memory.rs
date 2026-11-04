@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
 use clio_toolhost::{
-    Config, Found, JailMode, MemoryItem, MemoryPort, Origin, ProposalKind, Request, Response,
-    ToolHost,
+    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed,
+    Request, Response, Saved, ToolHost,
 };
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
@@ -36,6 +36,10 @@ struct FakePort {
     last_search: Mutex<Option<(String, usize)>>,
     /// What `propose` was asked: the text, the kind and the session.
     proposals: Mutex<Vec<(String, ProposalKind, String)>>,
+    /// What the port was told to judge each proposal by.
+    judging: Mutex<Vec<Judging>>,
+    /// What the fake memory says became of a proposal.
+    saved: Mutex<Saved>,
 }
 
 impl FakePort {
@@ -61,6 +65,8 @@ impl FakePort {
             calls: AtomicUsize::new(0),
             last_search: Mutex::new(None),
             proposals: Mutex::new(Vec::new()),
+            judging: Mutex::new(Vec::new()),
+            saved: Mutex::new(Saved::Waiting),
         })
     }
 
@@ -83,13 +89,23 @@ impl FakePort {
 }
 
 impl MemoryPort for FakePort {
-    fn propose(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
+    fn propose(
+        &self,
+        text: &str,
+        kind: ProposalKind,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
         self.proposals
             .lock()
             .unwrap()
             .push((text.to_owned(), kind, session.to_owned()));
+        self.judging.lock().unwrap().push(judging.clone());
         self.behave()?;
-        Ok(900 + self.calls() as i64)
+        Ok(Proposed {
+            id: 900 + self.calls() as i64,
+            saved: *self.saved.lock().unwrap(),
+        })
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
@@ -912,9 +928,15 @@ fn if_the_vault_cannot_filter_the_proposal_nothing_is_proposed() {
 
 // S-47, S-61
 #[test]
-fn a_session_makes_five_proposals_and_failed_ones_count() {
-    let port = FakePort::new(vec![], Mode::Fail("la memoria está llena".into()));
+fn a_tainted_session_makes_five_proposals_a_clean_one_thirty_and_failed_ones_count() {
+    let port = FakePort::new(
+        vec![item(1, Origin::External, "x")],
+        Mode::Fail("la memoria está llena".into()),
+    );
     let e = env(&port);
+    // The session that read something hostile: five.
+    assert!(call(&e, "s1", "taint", json!({})).tainted);
+    port.proposals.lock().unwrap().clear();
     for n in 0..5 {
         let r = propose(&e, "s1", &format!("p{n}"), "semantic");
         assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
@@ -924,13 +946,22 @@ fn a_session_makes_five_proposals_and_failed_ones_count() {
     assert_eq!(port.proposals.lock().unwrap().len(), 5);
     // The proposals have their own count: reading is not spent.
     assert!(!search(&e, "s1", "q").content.contains("S-47"));
+    // One that has read nothing hostile (its own run folder, as in real use): thirty, and the
+    // failed ones count too.
+    let e = env(&port);
+    for n in 0..30 {
+        let r = propose(&e, "clean", &format!("p{n}"), "semantic");
+        assert!(r.decision.rule != "S-47/memory", "{n}: {r:?}");
+    }
+    assert!(denied_by_budget(&propose(&e, "clean", "p30", "semantic")));
 }
 
 // S-47, S-61
 #[test]
 fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
-    let port = FakePort::new(vec![], Mode::Items);
+    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
     let e = env(&port);
+    assert!(search(&e, "s1", "q").tainted);
     for n in 0..5 {
         assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok);
     }
@@ -941,7 +972,7 @@ fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
         args: json!({"text": "otra", "kind": "semantic"}),
         session: "s1".into(),
         call_id: "c2".into(),
-        tainted: false,
+        tainted: true,
     });
     assert!(denied_by_budget(&r), "{r:?}");
 
@@ -1000,4 +1031,62 @@ fn a_secret_with_spaces_is_not_proposed_with_other_blanks_in_its_place() {
             "{typed:?}: the secret reached the port"
         );
     }
+}
+
+// S-61, S-63: what the memory decided is what the model is told, in fixed words.
+#[test]
+fn the_model_is_told_what_became_of_its_proposal() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for (saved, starts, how) in [
+        (Saved::Waiting, "proposed", "waiting"),
+        (Saved::Active, "saved: it is part", "saved"),
+        (Saved::Replaced, "saved: it replaced", "replaced"),
+        (Saved::Known, "already known", "known"),
+    ] {
+        *port.saved.lock().unwrap() = saved;
+        let r = propose(&e, "s1", &format!("dato {how}"), "semantic");
+        assert!(r.ok && r.content.starts_with(starts), "{how}: {r:?}");
+        assert_eq!(r.data["result"], how);
+    }
+}
+
+// S-61: the person's words in the session reach the port from the brain, kept per session, five at
+// most, oldest dropped, and they are not a taint.
+#[test]
+fn the_brain_reports_what_the_person_said_and_the_port_gets_it_with_the_taint() {
+    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
+    let e = env(&port);
+    let said = |s: &str, t: &str| call(&e, s, "said", json!({ "text": t }));
+    for n in 0..7 {
+        let r = said("s1", &format!("mensaje {n}"));
+        assert!(r.ok && !r.tainted, "{r:?}");
+    }
+    said("s2", "otra sesión");
+    assert!(propose(&e, "s1", "algo", "semantic").ok);
+    let seen = port.judging.lock().unwrap()[0].clone();
+    assert!(!seen.tainted);
+    assert_eq!(
+        seen.person_said,
+        [
+            "mensaje 2",
+            "mensaje 3",
+            "mensaje 4",
+            "mensaje 5",
+            "mensaje 6"
+        ]
+    );
+    // After something hostile is read, the port is told so.
+    assert!(search(&e, "s1", "q").tainted);
+    assert!(propose(&e, "s1", "algo más", "semantic").ok);
+    assert!(port.judging.lock().unwrap()[1].tainted);
+    // Cleaned, cut, and a message that is not text is refused.
+    said("s3", &format!("hola\u{1b}[31m{}", "x".repeat(3000)));
+    assert!(propose(&e, "s3", "dato", "semantic").ok);
+    let w = port.judging.lock().unwrap()[2].person_said[0].clone();
+    assert!(
+        w.starts_with("hola") && !w.contains('\u{1b}') && w.chars().count() == 2000,
+        "{w:?}"
+    );
+    assert!(!call(&e, "s3", "said", json!({ "text": 5 })).ok);
 }

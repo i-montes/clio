@@ -116,6 +116,24 @@ fn seed(w: &World) -> Ids {
     }
 }
 
+/// What these tests need of a proposal: the id, with no judge and nothing known about the session.
+trait ProposeId {
+    fn propose_id(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String>;
+}
+
+impl ProposeId for clio_brain::memory_port::LinkPort {
+    fn propose_id(&self, text: &str, kind: ProposalKind, session: &str) -> Result<i64, String> {
+        MemoryPort::propose(
+            self,
+            text,
+            kind,
+            session,
+            &clio_toolhost::Judging::default(),
+        )
+        .map(|d| d.id)
+    }
+}
+
 fn port(w: &World) -> LinkPort {
     LinkPort::new(&w.data, None)
 }
@@ -461,7 +479,7 @@ fn a_proposal_lands_in_quarantine_as_the_agents_and_from_outside() {
             MemoryType::Procedural,
         ),
     ] {
-        let id = p.propose(text, kind, "sess-1").unwrap();
+        let id = p.propose_id(text, kind, "sess-1").unwrap();
         let link = open(&w);
         let row = link.get(clio_memory::MemoryId(id)).unwrap();
         assert_eq!(row.state, State::Quarantine, "{text}");
@@ -488,7 +506,7 @@ fn a_proposal_cleans_what_is_recorded_about_the_session() {
     let w = world();
     let p = port(&w);
     let id = p
-        .propose("un dato", ProposalKind::Semantic, "s\u{1b}[31m1\nfalso")
+        .propose_id("un dato", ProposalKind::Semantic, "s\u{1b}[31m1\nfalso")
         .unwrap();
     let row = open(&w).get(clio_memory::MemoryId(id)).unwrap();
     for field in [row.session.as_deref(), row.source.as_deref()] {
@@ -502,7 +520,8 @@ fn a_proposal_cleans_what_is_recorded_about_the_session() {
 fn a_proposal_does_not_keep_the_writer_lock() {
     let w = world();
     let p = port(&w);
-    p.propose("un dato", ProposalKind::Semantic, "s").unwrap();
+    p.propose_id("un dato", ProposalKind::Semantic, "s")
+        .unwrap();
     // `open_write` waits two seconds for a held lock and then fails: it must not wait at all.
     let data = w.data.clone();
     let t = Instant::now();
@@ -530,7 +549,7 @@ fn the_person_and_the_agent_can_both_write() {
     });
     start.wait();
     for i in 0..15 {
-        p.propose(
+        p.propose_id(
             &format!("propuesta número {i} del agente"),
             ProposalKind::Semantic,
             "s",
@@ -552,11 +571,13 @@ fn the_engines_quota_and_secret_check_still_apply_with_fixed_messages() {
     let w = world();
     let p = port(&w);
     for i in 0..20 {
-        p.propose(&format!("dato distinto {i}"), ProposalKind::Semantic, "s")
+        p.propose_id(&format!("dato distinto {i}"), ProposalKind::Semantic, "s")
             .unwrap();
     }
     let marker = "frase-del-modelo-4714";
-    let why = p.propose(marker, ProposalKind::Semantic, "s").unwrap_err();
+    let why = p
+        .propose_id(marker, ProposalKind::Semantic, "s")
+        .unwrap_err();
     assert!(why.contains("cuota"), "{why}");
     assert!(!why.contains(marker), "{why}");
 
@@ -564,7 +585,7 @@ fn the_engines_quota_and_secret_check_still_apply_with_fixed_messages() {
     let p = port(&w);
     let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
     let why = p
-        .propose(&format!("la clave es {key}"), ProposalKind::Semantic, "s")
+        .propose_id(&format!("la clave es {key}"), ProposalKind::Semantic, "s")
         .unwrap_err();
     assert!(!why.contains(key), "{why}");
     assert!(open(&w).pending().unwrap().is_empty());
@@ -578,7 +599,241 @@ fn a_proposal_that_cannot_open_the_memory_is_a_short_error() {
     std::fs::write(w.data.join("memory.db"), "no es una base de datos").unwrap();
     let p = port(&w);
     let why = p
-        .propose("un dato", ProposalKind::Semantic, "s")
+        .propose_id("un dato", ProposalKind::Semantic, "s")
         .unwrap_err();
     assert!(!why.contains(w.root.to_str().unwrap()), "{why}");
+}
+
+// ---- proposals decided by Jev (spec 2026-11-03-jev-design.md, entrega 3) ----
+
+use clio_brain::memory_judge::MemoryJudge;
+use clio_jev::{Config as JevConfig, Jev, Transport};
+use clio_toolhost::{Judging, Saved};
+
+/// A Jev that picks `choice` (`update_first` and `noop_first` mean the first such option offered)
+/// with `confidence`, and says `said` to «the person said it».
+struct Scripted {
+    choice: String,
+    confidence: f64,
+    said: f64,
+}
+
+impl Transport for Scripted {
+    fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+        let q = body["questions"].as_object().unwrap();
+        let mut answers = serde_json::Map::new();
+        if let Some(op) = q.get("operacion") {
+            let want = self.choice.strip_suffix("_first");
+            let choice = match want {
+                Some(prefix) => op["criteria"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .find(|k| k.starts_with(prefix))
+                    .cloned()
+                    .unwrap_or_else(|| "review".into()),
+                None => self.choice.clone(),
+            };
+            answers.insert(
+                "operacion".into(),
+                json!({"type": "choice", "choice": choice, "confidence": self.confidence}),
+            );
+        }
+        if q.contains_key("la_persona_lo_dijo") {
+            answers.insert(
+                "la_persona_lo_dijo".into(),
+                json!({"type": "noul", "noul": self.said}),
+            );
+        }
+        Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
+    }
+}
+
+fn judged_port(w: &World, choice: &str, confidence: f64, said: f64) -> LinkPort {
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Scripted {
+            choice: choice.into(),
+            confidence,
+            said,
+        }),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    LinkPort::new(&w.data, None).with_judge(Arc::new(judge))
+}
+
+fn ask(p: &LinkPort, text: &str, kind: ProposalKind, said: &[&str]) -> clio_toolhost::Proposed {
+    let judging = Judging {
+        tainted: false,
+        person_said: said.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    MemoryPort::propose(p, text, kind, "sess-1", &judging).unwrap()
+}
+
+// S-25, S-61: the judge turns a proposal into memory; the author, the origin and the signature say
+// who did what, and it reads like any memory of the agent (so reading it taints a session).
+// S-64
+#[test]
+fn a_proposal_the_judge_calls_new_is_memory_now_signed_by_the_judge() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let d = ask(
+        &p,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(d.saved, Saved::Active);
+    let link = open(&w);
+    let row = link.get(clio_memory::MemoryId(d.id)).unwrap();
+    assert_eq!((row.state, row.origin), (State::Active, MOrigin::External));
+    assert_eq!(
+        row.actor,
+        link.actors().agente,
+        "the author is still the agent"
+    );
+    let op = &link.engine().history(row.id).unwrap()[0];
+    assert_ne!(op.actor, link.actors().agente, "the judge signed it");
+    // It is found and readable by the model like any active memory.
+    assert!(!p.search("PostgreSQL", 5).unwrap().items.is_empty());
+    assert!(p.get(d.id).is_ok());
+}
+
+#[test]
+fn a_proposal_the_judge_says_replaces_one_replaces_it_and_a_repeat_is_known() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let first = ask(
+        &p,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let replace = judged_port(&w, "update_first", 0.95, 0.0);
+    let d = ask(
+        &replace,
+        "El proyecto ahora usa PostgreSQL 17",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(d.saved, Saved::Replaced);
+    // (Not kept open: an open writer would lock the next call out.)
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(first.id)).unwrap().state,
+        State::Replaced
+    );
+    let known = judged_port(&w, "noop_first", 0.95, 0.0);
+    let again = ask(
+        &known,
+        "Se usa PostgreSQL 17 en el proyecto",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!((again.saved, again.id), (Saved::Known, d.id));
+    assert_eq!(open(&w).list(State::Active).unwrap().len(), 1);
+}
+
+#[test]
+fn when_jev_is_not_sure_the_proposal_waits_for_the_person_as_before() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.5, 0.0);
+    let d = ask(&p, "Algo dudoso", ProposalKind::Semantic, &[]);
+    assert_eq!(d.saved, Saved::Waiting);
+    let row = open(&w).get(clio_memory::MemoryId(d.id)).unwrap();
+    assert_eq!(row.state, State::Quarantine);
+    assert!(
+        p.get(d.id).is_err(),
+        "not readable until the person promotes"
+    );
+}
+
+// S-26, S-64
+#[test]
+fn a_procedure_needs_more_confidence_than_a_fact() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.85, 0.0);
+    assert_eq!(
+        ask(&p, "El hecho nuevo", ProposalKind::Semantic, &[]).saved,
+        Saved::Active
+    );
+    assert_eq!(
+        ask(
+            &p,
+            "Para desplegar, corre deploy.sh primero",
+            ProposalKind::Procedural,
+            &[]
+        )
+        .saved,
+        Saved::Waiting,
+        "0.85 is not enough for something that will act as an instruction"
+    );
+    let sure = judged_port(&w, "add", 0.95, 0.0);
+    assert_eq!(
+        ask(
+            &sure,
+            "Para desplegar, corre deploy.sh primero",
+            ProposalKind::Procedural,
+            &[]
+        )
+        .saved,
+        Saved::Active
+    );
+}
+
+// S-25, S-27: what the person wrote is replaced only with the person's own words.
+// S-64
+#[test]
+fn what_the_person_wrote_is_replaced_only_when_their_own_words_say_the_new_fact() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    // No words of the person in the session: the proposal waits, the memory stays.
+    let p = judged_port(&w, "update_first", 0.95, 0.99);
+    let d = ask(
+        &p,
+        "Marta ahora vive en Bogotá",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(d.saved, Saved::Waiting);
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
+    // The person did say it, and Jev agrees: replaced.
+    let d = ask(
+        &p,
+        "Marta ahora vive en Cali",
+        ProposalKind::Semantic,
+        &["me mudé a Cali"],
+    );
+    assert_eq!(d.saved, Saved::Replaced);
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Replaced);
+    // The person's words do not say it: it waits.
+    let w2 = world();
+    let mine2 = open(&w2).remember("Marta vive en Medellín", None).unwrap();
+    let doubtful = judged_port(&w2, "update_first", 0.95, 0.1);
+    let d = ask(
+        &doubtful,
+        "Marta ahora vive en Cali",
+        ProposalKind::Semantic,
+        &["hola"],
+    );
+    assert_eq!(d.saved, Saved::Waiting);
+    assert_eq!(open(&w2).get(mine2).unwrap().state, State::Active);
+}
+
+#[test]
+fn the_engines_checks_still_come_first() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.99, 0.0);
+    let key = format!("{}{}", "sk-", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6");
+    let e = MemoryPort::propose(
+        &p,
+        &format!("mi clave es {key}"),
+        ProposalKind::Semantic,
+        "s",
+        &Judging::default(),
+    )
+    .unwrap_err();
+    assert!(e.contains("secreto") || e.contains("clave"), "{e}");
+    assert!(open(&w).list(State::Active).unwrap().is_empty());
 }

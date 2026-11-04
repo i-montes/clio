@@ -32,7 +32,7 @@ use clio_brain::pi::launch::{
 use clio_brain::pi::level::{Assessor, run_assessed};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
-use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
+use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, guard_env};
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use serde_json::{Value, json};
 
@@ -168,7 +168,12 @@ impl SessionSource for LocalSource {
             &run_dir,
             &work,
             &key,
-            memory,
+            ToolhostOpts {
+                memory,
+                // Jev, if the person turned it on: the service that handles the model's proposals
+                // asks it what to do with each (the key stays in the vault).
+                extra_env: &jev::toolhost_env(d, &cfg.jev),
+            },
         )?;
         // 3. Pi
         let launch = Launch {

@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clio_brain::memory_judge::MemoryJudge;
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
-use clio_brain::pi::preprompt::{Candidate, PrePrompt, Prepared, Recall, Scrub, Settings};
+use clio_brain::pi::preprompt::{Candidate, Hooks, PrePrompt, Prepared, Recall, Scrub, Settings};
 use clio_core::SystemClock;
 use clio_jev::{Config as JevConfig, Jev, Process, ToolHint, parse_catalog};
 use clio_memory::{Origin, State};
@@ -46,23 +47,16 @@ fn adapter_path(dirs: &Dirs) -> Res<PathBuf> {
     Ok(p)
 }
 
-/// The client, or `None` when Jev is off (the default) or cannot be set up. The key is asked of
-/// the vault on every call and kept nowhere.
-pub fn client(dirs: &Dirs, cfg: &JevCfg) -> Option<Arc<Jev>> {
-    if !cfg.enabled {
-        return None;
-    }
-    let script = adapter_path(dirs)
-        .inspect_err(|e| eprintln!("clio: Jev apagado: {e}"))
-        .ok()?;
-    let socket = gateway_socket(dirs).ok()?;
-    let vault = VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
-    Some(Arc::new(Jev::new(
+/// The client over `script`; the key is asked of the vault at `socket` on every call and kept
+/// nowhere.
+fn build_client(script: PathBuf, socket: &Path, base_url: Option<String>) -> Arc<Jev> {
+    let vault = VaultClient::new(socket).with_timeout(Duration::from_secs(2));
+    Arc::new(Jev::new(
         JevConfig::default(),
         Box::new(Process {
             python: "python3".into(),
             script,
-            base_url: cfg.base_url.clone(),
+            base_url,
         }),
         Box::new(move || {
             vault
@@ -71,6 +65,54 @@ pub fn client(dirs: &Dirs, cfg: &JevCfg) -> Option<Arc<Jev>> {
                 .map_err(|e| e.to_string())
         }),
         Arc::new(SystemClock),
+    ))
+}
+
+/// The client, or `None` when Jev is off (the default) or cannot be set up.
+pub fn client(dirs: &Dirs, cfg: &JevCfg) -> Option<Arc<Jev>> {
+    if !cfg.enabled {
+        return None;
+    }
+    let script = adapter_path(dirs)
+        .inspect_err(|e| eprintln!("clio: Jev apagado: {e}"))
+        .ok()?;
+    let socket = gateway_socket(dirs).ok()?;
+    Some(build_client(script, &socket, cfg.base_url.clone()))
+}
+
+const ENV_ADAPTER: &str = "CLIO_JEV_ADAPTER";
+const ENV_BASE: &str = "CLIO_JEV_BASE_URL";
+const ENV_VAULT: &str = "CLIO_JEV_VAULT_SOCKET";
+
+/// What the tool host process needs to judge proposals with Jev, to be set in its environment when
+/// `clio` starts it: nothing at all when Jev is off, so the service never judges.
+pub fn toolhost_env(dirs: &Dirs, cfg: &JevCfg) -> Vec<(String, String)> {
+    if !cfg.enabled {
+        return Vec::new();
+    }
+    let (Ok(script), Ok(socket)) = (adapter_path(dirs), gateway_socket(dirs)) else {
+        return Vec::new();
+    };
+    let mut v = vec![
+        (ENV_ADAPTER.to_owned(), script.display().to_string()),
+        (ENV_VAULT.to_owned(), socket.display().to_string()),
+    ];
+    if let Some(b) = &cfg.base_url {
+        v.push((ENV_BASE.to_owned(), b.clone()));
+    }
+    v
+}
+
+/// In the tool host process: the judge of proposals, if `clio` said Jev is on. The text it asks
+/// about goes through the vault's scrubber, and without the vault there is no question.
+pub fn judge_from_env() -> Option<Arc<MemoryJudge>> {
+    let script = PathBuf::from(std::env::var_os(ENV_ADAPTER)?);
+    let socket = PathBuf::from(std::env::var_os(ENV_VAULT)?);
+    let jev = build_client(script, &socket, std::env::var(ENV_BASE).ok());
+    let vault = VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
+    Some(Arc::new(MemoryJudge::new(
+        jev,
+        Arc::new(move |t| vault.scrub(t).map_err(|e| e.to_string())),
     )))
 }
 
@@ -152,29 +194,39 @@ pub fn catalog_from_entries(entries: &Value) -> Vec<ToolHint> {
         .unwrap_or_default()
 }
 
+/// One request to the tool host and its answer, or `None` if it could not be had in time.
+fn ask_host(socket: &Path, req: &Value) -> Option<Value> {
+    let mut s = UnixStream::connect(socket).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    s.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+    writeln!(s, "{req}").ok()?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line).ok()?;
+    serde_json::from_str(&line).ok()
+}
+
 /// Tells the tool host that this session now holds something the person did not write. Tried a
 /// few times (the host answers one request at a time and may be busy with a tool); `true` only if
 /// the host said it was done. A mark that could not be made means what is not the person's is not
 /// shown.
 pub fn taint_session(socket: &Path, session: &str) -> bool {
-    let once = || -> std::io::Result<bool> {
-        let mut s = UnixStream::connect(socket)?;
-        s.set_read_timeout(Some(Duration::from_secs(5)))?;
-        s.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let req = json!({"id": "taint", "tool": "taint", "args": {}, "session": session, "call_id": "taint"});
-        writeln!(s, "{req}")?;
-        let mut line = String::new();
-        BufReader::new(s).read_line(&mut line)?;
-        let answer: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
-        Ok(answer["ok"] == true && answer["tainted"] == true)
-    };
+    let req =
+        json!({"id": "taint", "tool": "taint", "args": {}, "session": session, "call_id": "taint"});
     for _ in 0..2 {
-        if once().unwrap_or(false) {
+        if ask_host(socket, &req).is_some_and(|a| a["ok"] == true && a["tainted"] == true) {
             return true;
         }
     }
     eprintln!("clio: no se pudo marcar la sesión como contaminada: no se muestra memoria ajena");
     false
+}
+
+/// Tells the tool host what the person just said in this session, so that a request to change a
+/// memory is compared with it and not with the model's report of it. Best effort: if it is not
+/// known, the memory simply does not change what the person wrote.
+pub fn said_to_host(socket: &Path, session: &str, text: &str) {
+    let req = json!({"id": "said", "tool": "said", "args": {"text": text}, "session": session, "call_id": "said"});
+    let _ = ask_host(socket, &req);
 }
 
 /// Everything that goes in front of a message in this chat.
@@ -201,14 +253,18 @@ pub fn preprompt(
         None => Err("sin baúl".into()),
     });
     let (socket, id) = (toolhost_socket.to_path_buf(), session.to_owned());
+    let (socket2, id2) = (socket.clone(), id.clone());
     let log_file = run_dir.join("memory-inject.jsonl");
     PrePrompt::new(
         client(dirs, cfg),
         catalog_from_entries(entries),
         Some(recall),
         scrub,
-        Arc::new(move || taint_session(&socket, &id)),
-        Arc::new(move |p| log_shown(&log_file, p)),
+        Hooks {
+            taint: Arc::new(move || taint_session(&socket, &id)),
+            said: Arc::new(move |t| said_to_host(&socket2, &id2, t)),
+            log: Arc::new(move |p| log_shown(&log_file, p)),
+        },
         Settings {
             memory: cfg.memory,
             tool_hints: cfg.tool_hints,

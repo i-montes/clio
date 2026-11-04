@@ -55,6 +55,7 @@ fn the_judge_is_made_by_the_engine_and_nobody_else_can_be_one() {
 }
 
 // S-25: the one exception to «outside text waits in quarantine»: a signed judgment.
+// S-64
 #[test]
 fn a_judged_add_is_active_where_the_rules_would_hold_it_and_the_judge_signs_it() {
     let f = fixture();
@@ -161,6 +162,7 @@ fn a_judged_update_replaces_the_old_memory_and_the_person_can_revert_it() {
 }
 
 // S-25 S-27: what the person wrote is replaced by the person.
+// S-64
 #[test]
 fn what_the_person_wrote_is_replaced_only_with_the_persons_confirmation() {
     let f = fixture();
