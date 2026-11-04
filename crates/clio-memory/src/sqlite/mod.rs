@@ -1187,6 +1187,17 @@ impl Store for SqliteStore {
         Ok(ActorId(conn.last_insert_rowid()))
     }
 
+    fn set_quota(&self, actor: ActorId, quota: Quota) -> Result<()> {
+        let n = self.writer()?.execute(
+            "UPDATE actors SET quota_max = ?2, quota_window = ?3 WHERE id = ?1",
+            params![actor.0, quota.max, quota.window_secs],
+        )?;
+        if n == 0 {
+            return Err(Error::UnknownActor);
+        }
+        Ok(())
+    }
+
     fn actor_kind(&self, actor: ActorId) -> Result<ActorKind> {
         let kind: Option<String> = self
             .reader()?

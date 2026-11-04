@@ -422,16 +422,39 @@ fn every_actor_has_its_own_quota_and_a_flood_never_breaks_a_close() {
     }
     // Per run: five proposals at most, the other four are dropped before they cost quota.
     assert_eq!(dropped_total, 6 * (9 - MAX_AGENT_PROPOSALS));
-    // The agent actor's hour holds 20 proposals: the fifth run is the first to be refused.
-    assert!(rejected_total > 0, "the quota never spoke");
+    // Nothing was refused yet: the agent's hour holds 500. Filled to the brim, the next is
+    // refused, and saying so is a line, not an error.
+    assert_eq!(rejected_total, 0);
     let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
-    let from_agent = l
+    let agent = l.actors().agente;
+    let used = l
         .list(State::Active)
         .unwrap()
         .iter()
-        .filter(|m| m.actor == l.actors().agente)
+        .filter(|m| m.actor == agent)
         .count();
-    assert_eq!(from_agent, 20, "the agent actor is capped at its quota");
+    for i in used..500 {
+        let d =
+            clio_brain::memory_link::Draft::plain(&format!("relleno {i}"), MemoryType::Semantic);
+        l.save_as_agent(&d, "s", clio_brain::memory_link::Place::Personal, false)
+            .unwrap_or_else(|e| panic!("{i}: {e}"));
+    }
+    let d = clio_brain::memory_link::Draft::plain("uno de más", MemoryType::Semantic);
+    let e = l
+        .save_as_agent(&d, "s", clio_brain::memory_link::Place::Personal, false)
+        .unwrap_err();
+    assert!(e.contains("cuota"), "{e}");
+    drop(l);
+    // A close with the hour spent: the refusal is a line of its report.
+    let r = run(
+        &w,
+        "r-lleno",
+        "haz algo",
+        vec![final_msg("RECORDAR: otro hecho inventado")],
+        &s,
+    );
+    assert!(!r.report.rejected.is_empty(), "{:?}", r.report);
+    let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
     // The person's quota is separate: they can still write.
     l.remember("Sigo pudiendo escribir", None).unwrap();
 }
@@ -674,4 +697,24 @@ fn the_builtin_loop_is_shown_what_the_person_holds_and_not_what_the_agent_read_o
     assert!(got.ids.contains(&mine.0), "{got:?}");
     assert!(!got.ids.contains(&judged.0), "{got:?}");
     assert!(!got.text.contains("plástico"), "{}", got.text);
+}
+
+// The agent's hourly quota is a brake on a loop, not a review: 500 writes an hour (spec), also for a
+// file made when it was 20.
+#[test]
+fn the_agents_quota_is_five_hundred_an_hour_even_in_an_older_file() {
+    use clio_brain::memory_link::{Draft, Place};
+    let w = world();
+    drop(MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap());
+    // An older file: the agent's actor at 20 an hour.
+    let conn = rusqlite::Connection::open(MemoryLink::db_path(&w.data)).unwrap();
+    conn.execute("UPDATE actors SET quota_max = 20 WHERE name = 'agente'", [])
+        .unwrap();
+    drop(conn);
+    let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
+    for i in 0..25 {
+        let d = Draft::plain(&format!("dato número {i}"), MemoryType::Semantic);
+        l.save_as_agent(&d, "s", Place::Personal, false)
+            .unwrap_or_else(|e| panic!("save {i}: {e}"));
+    }
 }

@@ -151,9 +151,8 @@ pub struct Config {
     /// Extra rules (breaker threshold, more protected paths, ...). The working folder, the tool
     /// declarations and the mandatory protected paths are always the host's own.
     pub rules: Option<Rules>,
-    /// The person's memory: read, and propose into quarantine. Without it `memory_search`,
-    /// `memory_get` and `memory_propose` are not declared and the gateway denies them (S-02): the
-    /// loose `clio-toolhost` binary has none.
+    /// The memory, which is the agent's: read and write. Without it no `memory_*` tool is declared
+    /// and the gateway denies them (S-02): the loose `clio-toolhost` binary has none.
     pub memory: Option<Arc<dyn MemoryPort>>,
     /// What the brain must show to close a session (`closing`): a secret the brain made and put in
     /// this process's environment, which Pi never gets.

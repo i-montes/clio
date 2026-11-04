@@ -15,7 +15,7 @@ use clio_brain::pi::preprompt::{Candidate, Hooks, PrePrompt, Prepared, Recall, S
 use clio_brain::pi::session::Toolhost;
 use clio_core::SystemClock;
 use clio_jev::{Config as JevConfig, Jev, Process, ToolHint, parse_catalog};
-use clio_memory::{Origin, State};
+use clio_memory::Origin;
 use clio_vault::VaultClient;
 use serde_json::{Value, json};
 
@@ -149,16 +149,13 @@ impl Recall for MemoryRecall {
             let engine = link.engine();
             let mut out = Vec::new();
             for block in engine.blocks(link.scope()).ok()? {
-                for id in engine.block_get(block.id).ok()? {
-                    // Active only: a replaced, archived or quarantined memory is not shown.
-                    let Ok(row) = link.get(id) else { continue };
-                    if row.state == State::Active {
-                        out.push(Candidate {
-                            id: id.0,
-                            text: row.content,
-                            person: row.origin == Origin::User,
-                        });
-                    }
+                // Each entry as it is now (a correction followed, as the context does).
+                for row in engine.block_current(block.id).ok()? {
+                    out.push(Candidate {
+                        id: row.id.0,
+                        text: row.content,
+                        person: row.origin == Origin::User,
+                    });
                 }
             }
             Some(out)

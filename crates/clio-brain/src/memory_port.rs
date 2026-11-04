@@ -160,8 +160,10 @@ impl LinkPort {
         let has_project = self.project.is_some();
         // Jev is asked BEFORE the writer is taken: a slow answer never keeps the person's own
         // writes waiting.
+        let category = self.guard(&draft, judging)?;
+        // A summary has no category, whatever Jev would give it.
         if !summary {
-            draft.category = self.guard(&draft, judging)?;
+            draft.category = category;
         }
         let stored = MemoryLink::agent_text(&draft.text);
         let place = self

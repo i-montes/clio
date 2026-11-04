@@ -95,7 +95,7 @@ fn the_memory_screen_draws_clean_and_exact_at_every_size() {
         assert_fits(&t, w, h);
         assert_clean(&t);
         assert!(t.contains("memoria"), "{t}");
-        assert!(t.contains("pendientes de revisión (2)"), "{w}x{h}\n{t}");
+        assert!(t.contains("olvidados, en cuarentena (2)"), "{w}x{h}\n{t}");
         assert!(t.contains("m12"), "{w}x{h}\n{t}");
         // The status bar (use and context of the last run) stays on the last line.
         let last = t.lines().last().unwrap().trim();
@@ -234,7 +234,7 @@ fn enter_shows_the_whole_memory_with_where_it_came_from() {
     let (a, _) = feed(memory_app(), vec![key(KeyCode::Enter)]);
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("m12") && t.contains("pendiente de revisión"),
+        t.contains("m12") && t.contains("olvidado (en cuarentena)"),
         "{t}"
     );
     assert!(t.contains("origen externo"), "{t}");

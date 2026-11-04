@@ -107,16 +107,10 @@ impl Judge {
 /// it is an ordinary `propose`, which the rules send to quarantine for the person.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Judged {
-    /// New: active, even where the rules would hold it for the person (outside origin, a
-    /// procedure). An exact copy of something active is still a no-op.
+    /// New: active. An exact copy of something active is still a no-op.
     Add,
-    /// Replaces `old`, which must be active, of the same scope and kind. What the person wrote, or
-    /// holds in a fixed block, is replaced only with `person_confirmed`: the caller has checked
-    /// that the person's own words say the new fact.
-    Update {
-        old: MemoryId,
-        person_confirmed: bool,
-    },
+    /// Replaces `old`, which must be active, of the same scope and kind, whoever wrote it.
+    Update { old: MemoryId },
     /// Already known as `existing`: nothing is written.
     Noop { existing: MemoryId },
 }
@@ -1057,7 +1051,8 @@ impl Engine {
         Ok(false)
     }
 
-    /// Promote, archive and revert are review powers: only a person may use them.
+    /// Promote and archive are the person's; revert too, except an agent's revert of its own
+    /// operations (`revert_inner`).
     fn require_person(&self, actor: ActorId) -> Result<()> {
         match self.store.actor_kind(actor)? {
             ActorKind::Person => Ok(()),
@@ -1090,6 +1085,18 @@ impl Engine {
         let _g = self.write_guard();
         self.check_name(name)?;
         self.store.register_actor(name, kind, quota)
+    }
+
+    /// Changes the hourly quota of an actor the caller registered (never the system's or the judge's).
+    pub fn set_quota(&self, actor: ActorId, quota: Quota) -> Result<()> {
+        let _g = self.write_guard();
+        if matches!(
+            self.store.actor_kind(actor)?,
+            ActorKind::System | ActorKind::Judge
+        ) {
+            return Err(Error::NotAllowed);
+        }
+        self.store.set_quota(actor, quota)
     }
 
     /// The judge's pen, registering its actor the first time (a read-only engine cannot).
@@ -1911,6 +1918,15 @@ impl Engine {
         self.store.block_memories(block)
     }
 
+    /// What a block shows now: each entry followed to its current version, as the context does.
+    pub fn block_current(&self, block: BlockId) -> Result<Vec<MemoryRow>> {
+        let mut out = Vec::new();
+        for entry in self.block_get(block)? {
+            out.extend(self.current(entry)?);
+        }
+        Ok(out)
+    }
+
     pub fn blocks(&self, scope: ScopeId) -> Result<Vec<Block>> {
         self.store.blocks(scope)
     }
@@ -2274,10 +2290,10 @@ impl Engine {
             .collect()
     }
 
-    /// Follows `replaced_by` from a block entry to the memory that is active now. A block is
-    /// curated by a person and bypasses relevance filters, so an entry only follows an update
-    /// whose current version a person vouched for (`Origin::User`); otherwise it is left out
-    /// until a person edits the block.
+    /// Follows `replaced_by` from a block entry to the memory that is active now. A block bypasses
+    /// relevance filters, so an entry follows an update by the person or the agent's own
+    /// (`Origin::User` or `Agent`), never one from outside content (`External`): that one is left
+    /// out until a person edits the block.
     fn current(&self, mut id: MemoryId) -> Result<Option<MemoryRow>> {
         let mut via_update = false;
         for _ in 0..32 {
@@ -2288,7 +2304,7 @@ impl Engine {
             };
             match (row.state, row.replaced_by) {
                 (State::Active, _) => {
-                    return Ok((!via_update || row.origin == Origin::User).then_some(row));
+                    return Ok((!via_update || row.origin != Origin::External).then_some(row));
                 }
                 (State::Replaced, Some(next)) => {
                     id = next;

@@ -198,7 +198,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                     "m{} · {} · {} · origen {} · la escribió {}\n{}\n\n{}",
                     r.id,
                     if pending {
-                        "pendiente de revisión"
+                        "olvidado (en cuarentena)"
                     } else {
                         state_label(r.state)
                     },
@@ -232,7 +232,7 @@ fn ask(app: &mut App, act: Act) -> Vec<Cmd> {
         return vec![];
     };
     if act == Act::Promote && !pending {
-        app.flash = Some("solo lo pendiente de revisión se aprueba; ese ya está activo".into());
+        app.flash = Some("solo se devuelve lo olvidado; ese ya está activo".into());
         return vec![];
     }
     let total = r.content.chars().count();
@@ -275,7 +275,7 @@ fn row_line(app: &App, r: &MRow, pending: bool, selected: bool, width: usize) ->
     };
     let head = format!("{:<6}", format!("m{}", r.id));
     let state = if pending && r.state == State::Quarantine {
-        "pendiente"
+        "olvidado"
     } else {
         state_label(r.state)
     };
@@ -335,7 +335,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             "recuerdos activos"
         ),
         t.dot(),
-        plural(d.pending.len(), "pendiente", "pendientes"),
+        plural(d.pending.len(), "olvidado", "olvidados"),
         t.dot(),
         plural(
             usize::try_from(d.archived).unwrap_or(0),
@@ -405,7 +405,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 None,
                 section(
                     t,
-                    &format!("pendientes de revisión ({n_pending})"),
+                    &format!("olvidados, en cuarentena ({n_pending})"),
                     area.width,
                 ),
             ));

@@ -58,7 +58,8 @@ pub fn explain(e: &Error) -> String {
         Error::QuotaExceeded => "rechazado: cuota de propuestas agotada para este actor".into(),
         Error::TooLong => "rechazado: demasiado largo".into(),
         Error::QuarantineFull => {
-            "rechazado: hay demasiados recuerdos de este actor esperando tu revisión; revisa los pendientes (`clio memory review`)".into()
+            "rechazado: hay demasiados recuerdos de este actor en cuarentena (`clio memory review`)"
+                .into()
         }
         Error::EmptyContent => "rechazado: vacío".into(),
         Error::WriterLocked => "otro proceso está escribiendo la memoria; reintenta".into(),
@@ -311,6 +312,9 @@ fn load_embedder(_: &Path) -> Result<Arc<dyn clio_memory::Embedder>, String> {
     Err("este Clio se compiló sin la característica model2vec".into())
 }
 
+/// The agent's writes an hour: a brake on a loop, not a review (the memory is the agent's).
+const AGENT_QUOTA: u32 = 500;
+
 fn quota(max: u32) -> Quota {
     Quota {
         max,
@@ -429,10 +433,14 @@ impl MemoryLink {
         };
         let actors = Actors {
             persona: get("persona", ActorKind::Person, 200)?,
-            agente: get("agente", ActorKind::Agent, 20)?,
+            agente: get("agente", ActorKind::Agent, AGENT_QUOTA)?,
             sesion: get("sesion", ActorKind::Session, 30)?,
             importador: get("importador", ActorKind::Importer, 100)?,
         };
+        // A file made when the agent had 20 an hour gets the quota of now.
+        engine
+            .set_quota(actors.agente, quota(AGENT_QUOTA))
+            .map_err(m)?;
         let blocks = engine.blocks(scope).map_err(m)?;
         for (name, budget) in BLOCKS {
             if !blocks.iter().any(|b| b.name == name) {
@@ -948,8 +956,7 @@ impl MemoryLink {
         self.engine.tombstone(id).map_err(|e| explain(&e))
     }
 
-    /// First in the context of its place. Only the person pins (directly, or by asking the model
-    /// and Jev confirming their words).
+    /// First in the context of its place: the person's pin (the agent's is `pin_as_agent`).
     pub fn pin(&self, id: MemoryId) -> Res<()> {
         self.need_write()?;
         self.engine

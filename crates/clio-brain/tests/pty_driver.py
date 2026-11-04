@@ -284,7 +284,7 @@ elif scenario == "memory":
     mark = len(buf)
     os.write(fd, b"m")
     out["memory_screen"] = pump(fd, lambda: b"ZAFIRO" in buf[mark:], 10)
-    out["pending_section"] = b"pendientes" in buf[mark:]
+    out["pending_section"] = b"olvidados" in buf[mark:]
     mark = len(buf)
     os.write(fd, b"/")
     time.sleep(0.2)

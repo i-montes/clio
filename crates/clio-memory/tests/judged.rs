@@ -132,10 +132,7 @@ fn a_judged_update_replaces_the_old_memory_and_the_person_can_revert_it() {
         .propose_judged(
             &j,
             external(&f, "El proyecto ahora usa PostgreSQL 17"),
-            Judged::Update {
-                old: old.memory,
-                person_confirmed: false,
-            },
+            Judged::Update { old: old.memory },
             sure(),
         )
         .unwrap();
@@ -163,10 +160,7 @@ fn a_judged_update_replaces_what_the_person_wrote_and_revert_restores_it() {
         .unwrap()
         .memory;
     let j = f.engine.judge().unwrap();
-    let update = |confirmed| Judged::Update {
-        old: mine,
-        person_confirmed: confirmed,
-    };
+    let update = |_: bool| Judged::Update { old: mine };
     let o = f
         .engine
         .propose_judged(
@@ -196,15 +190,8 @@ fn a_judged_update_needs_an_active_memory_of_the_same_scope_and_kind() {
     let go = |old: MemoryId, kind| {
         let mut p = external(&f, &format!("dato nuevo {}", old.0));
         p.kind = kind;
-        f.engine.propose_judged(
-            &j,
-            p,
-            Judged::Update {
-                old,
-                person_confirmed: false,
-            },
-            sure(),
-        )
+        f.engine
+            .propose_judged(&j, p, Judged::Update { old }, sure())
     };
     assert!(
         matches!(

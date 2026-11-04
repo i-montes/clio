@@ -37,6 +37,7 @@ pub trait Store: VectorIndex + Send + Sync {
     fn create_scope(&self, name: &str, language: &str) -> Result<ScopeId>;
     fn scope_language(&self, scope: ScopeId) -> Result<String>;
     fn register_actor(&self, name: &str, kind: ActorKind, quota: Quota) -> Result<ActorId>;
+    fn set_quota(&self, actor: ActorId, quota: Quota) -> Result<()>;
     fn actor_kind(&self, actor: ActorId) -> Result<ActorKind>;
     /// Counts one proposal in the actor's current window; `QuotaExceeded` when it is over the max.
     /// Commits on its own so a later rejected proposal still counts.

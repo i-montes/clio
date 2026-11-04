@@ -1225,6 +1225,20 @@ fn attack_11() -> bool {
     // The close: at most MAX_AGENT_PROPOSALS lines of the model count, the rest are dropped.
     let (l, first) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
     assert_eq!(first.dropped, 100 - MAX_AGENT_PROPOSALS);
+    // The agent's hour holds 500 (a brake on a loop): filled up to the brim, as many runs would.
+    {
+        let lw = writer(&w);
+        let agent = lw.actors().agente;
+        let used = all_rows(&lw).iter().filter(|m| m.actor == agent).count();
+        for i in used..500 {
+            let d = clio_brain::memory_link::Draft::plain(
+                &format!("relleno {i}"),
+                MemoryType::Semantic,
+            );
+            lw.save_as_agent(&d, "s", clio_brain::memory_link::Place::Personal, true)
+                .unwrap();
+        }
+    }
     let mut refused = 0;
     for n in 1..8 {
         let mut o = out.clone();
@@ -1232,14 +1246,14 @@ fn attack_11() -> bool {
         let (_, r) = close_into_memory(&w, &a, &o, "resume el README", &format!("atk-11-{n}"));
         refused += r.rejected.len();
     }
-    // The agent actor's quota (20 per hour) stopped it: everything else was refused and said so.
+    // The agent actor's quota (500 per hour) stopped it: everything else was refused and said so.
     assert!(refused > 0, "the quota never spoke");
     let agent = l.actors().agente;
     let stored = all_rows(&l)
         .into_iter()
         .filter(|m| m.actor == agent)
         .count();
-    assert_eq!(stored, 20);
+    assert_eq!(stored, 500);
     assert!(
         all_rows(&l)
             .iter()

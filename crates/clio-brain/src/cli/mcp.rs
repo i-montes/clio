@@ -3,9 +3,9 @@
 //! `2026-11-04-memory-engram-design.md`, section 7).
 //!
 //! It is the same tool host a Pi session has, in this process, with only the memory tools that
-//! read or propose: the gateway, the budget, the vault's filter, the taint, the cap on proposals
-//! and Jev (or the person's review) all apply as they do for Pi. Nothing here can promote,
-//! archive, revert, pin or purge (S-25); there is no file or command tool. The project is the one
+//! read or save: the gateway, the budget, the vault's filter, the taint, the cap on saves and Jev's
+//! guard all apply as they do for Pi. Nothing here can promote, archive, revert, pin or purge
+//! (S-25); there is no file or command tool. The project is the one
 //! of the folder the client started it in, decided here, never by the client.
 
 use std::io::{BufRead, Read, Write};
