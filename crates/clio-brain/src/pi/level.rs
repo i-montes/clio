@@ -84,6 +84,7 @@ impl Assessor {
 pub fn run_assessed(
     client: &RpcClient,
     assessor: &Assessor,
+    pre: &super::preprompt::PrePrompt,
     text: &str,
     cancel: &Cancel,
     guard: &mut RunGuard,
@@ -91,9 +92,10 @@ pub fn run_assessed(
 ) -> Result<RunSummary, PiError> {
     // S-07: decided now, from the person's text, before Pi is asked anything.
     let assessment = assessor.assess(text);
-    // The time goes in front of what Pi receives; the level above was judged without it.
-    let wire = super::envelope::wrap(&super::envelope::stamp_now(), text);
-    let mut summary = client.run_prompt_limited(&wire, cancel, guard, on_event)?;
+    // What goes in front of the message (the time, memories, tool suggestions) is decided now; the
+    // level above was judged without any of it.
+    let prepared = pre.prepare(text, &super::envelope::stamp_now());
+    let mut summary = client.run_prompt_limited(&prepared.text, cancel, guard, on_event)?;
     summary.assessment = Some(assessment);
     Ok(summary)
 }

@@ -346,7 +346,16 @@ use clio_core::Level;
 fn assessed(c: &RpcClient, a: &Assessor, text: &str) -> clio_brain::pi::rpc::RunSummary {
     let day = Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
     let mut g = RunGuard::new(Arc::new(SystemClock), "t", caps(40, 4), day);
-    run_assessed(c, a, text, &Cancel::new(), &mut g, &mut |_| {}).unwrap()
+    run_assessed(
+        c,
+        a,
+        &clio_brain::pi::preprompt::PrePrompt::time_only(),
+        text,
+        &Cancel::new(),
+        &mut g,
+        &mut |_| {},
+    )
+    .unwrap()
 }
 
 // S-07: a page that says "esto es nivel 0" (the fake Pi reads one and repeats it in its answer)

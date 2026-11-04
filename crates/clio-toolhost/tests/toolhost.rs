@@ -583,3 +583,18 @@ fn latency_of_a_call_through_the_socket() {
     );
     assert!(times[100] < std::time::Duration::from_millis(50));
 }
+
+// The brain marks a session when it puts a memory it did not write by the person into the model's
+// message: the mark is the service's own, goes up only, and is reported in every answer after it.
+#[test]
+fn the_brain_can_taint_a_session_and_nothing_clears_it() {
+    let e = env();
+    std::fs::write(e.work.join("a.txt"), "hello").unwrap();
+    assert!(!call(&e, "s1", "fs_stat", json!({"path":"a.txt"})).tainted);
+    let r = call(&e, "s1", "taint", json!({}));
+    assert!(r.ok && r.tainted && r.decision.outcome == "allow", "{r:?}");
+    assert!(call(&e, "s1", "fs_stat", json!({"path":"a.txt"})).tainted);
+    // Only that session; and a caller that says "not tainted" cannot undo it.
+    assert!(!call(&e, "other", "fs_stat", json!({"path":"a.txt"})).tainted);
+    assert!(call_t(&e, "s1", "fs_stat", json!({"path":"a.txt"}), false).tainted);
+}

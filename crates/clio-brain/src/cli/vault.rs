@@ -67,6 +67,11 @@ struct Paths {
     pid: PathBuf,
 }
 
+/// The gateway socket of the vault: where a secret is asked for and text is scrubbed.
+pub fn gateway_socket(dirs: &Dirs) -> Res<PathBuf> {
+    Ok(paths(dirs)?.gateway)
+}
+
 fn paths(dirs: &Dirs) -> Res<Paths> {
     let dir = dirs.need_runtime()?.to_path_buf();
     Ok(Paths {

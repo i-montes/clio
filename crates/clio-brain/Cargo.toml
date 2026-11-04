@@ -24,6 +24,7 @@ clio-gateway = { path = "../clio-gateway" }
 clio-node = { path = "../clio-node" }
 clio-toolhost = { path = "../clio-toolhost" }
 clio-triage = { path = "../clio-triage" }
+clio-jev = { path = "../clio-jev" }
 clio-vault = { path = "../clio-vault" }
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

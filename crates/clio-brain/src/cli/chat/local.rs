@@ -30,6 +30,7 @@ use clio_brain::pi::launch::{
     Launch, PiProcess, Provider, SessionTarget, read_api_key, start, valid_id,
 };
 use clio_brain::pi::level::{Assessor, run_assessed};
+use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ensure_guard, guard_env};
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
@@ -38,6 +39,7 @@ use serde_json::{Value, json};
 use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
 use crate::cli::Res;
 use crate::cli::home::{Config, Dirs, Limits};
+use crate::cli::jev;
 use crate::cli::runs::{self, RunOpts};
 use crate::cli::usage;
 
@@ -185,6 +187,12 @@ impl SessionSource for LocalSource {
         };
         let pi = start(&launch).map_err(text)?;
         let history = pi.client.get_messages().map_err(text)?;
+        // What goes in front of every message: the time, the memories, the tools (Jev optional).
+        let entries = pi
+            .client
+            .request("get_entries", json!({}))
+            .unwrap_or(Value::Null);
+        let pre = jev::preprompt(d, &cfg.jev, &entries, &toolhost.socket, &pi.session_id);
         let s = ChatSession {
             pi,
             toolhost,
@@ -194,6 +202,7 @@ impl SessionSource for LocalSource {
             day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
             prompts: AtomicU64::new(0),
             assessor: Assessor::new(Arc::new(SystemClock)),
+            pre,
         };
         let refresh = s.refresh().ok();
         Ok(Opened {
@@ -243,6 +252,8 @@ struct ChatSession {
     prompts: AtomicU64,
     /// The level of each prompt, decided from the person's words alone (S-07, ADR 0008).
     assessor: Assessor,
+    /// The time, memories and tool suggestions put in front of each message (Jev optional).
+    pre: PrePrompt,
 }
 
 impl Session for ChatSession {
@@ -262,6 +273,7 @@ impl Session for ChatSession {
         run_assessed(
             &self.pi.client,
             &self.assessor,
+            &self.pre,
             text,
             cancel,
             &mut guard,

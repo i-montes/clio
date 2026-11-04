@@ -281,6 +281,53 @@ fn jail_lines(o: &mut Report) {
     o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
 }
 
+/// Jev is optional: off, it is said and nothing else is checked; on, what it needs is: Python for
+/// the adapter and the secret `jev` in the vault, allowed for the API's host and no other.
+fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
+    if !jev.enabled {
+        o.say(
+            Level::Pass,
+            "Jev: apagado (es opcional: todo funciona sin él)".into(),
+            None,
+        );
+        return;
+    }
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        o.say(
+            Level::Warn,
+            "Jev: está encendido pero falta python3 para el adaptador; se sigue sin él".into(),
+            Some("Instala python3 o apaga Jev (`\"jev\": {\"enabled\": false}` en la configuración).".into()),
+        );
+        return;
+    }
+    let ready = super::vault::gateway_socket(dirs).ok().map(|s| {
+        VaultClient::new(&s)
+            .check("jev", "jev", Some("api.typesafe.ai"), "")
+            .map_err(|e| e.to_string())
+    });
+    match ready {
+        Some(Ok(())) => o.say(
+            Level::Pass,
+            "Jev: encendido; la clave está en el baúl y puede usarse solo hacia api.typesafe.ai".into(),
+            None,
+        ),
+        Some(Err(why)) => o.say(
+            Level::Warn,
+            format!("Jev: está encendido pero no se puede usar la clave ({})", sanitize::line(&why)),
+            Some("Con el baúl en marcha y desbloqueado: `clio vault put jev --dest jev:api.typesafe.ai`. Mientras tanto Clio sigue sin Jev.".into()),
+        ),
+        None => o.say(
+            Level::Warn,
+            "Jev: está encendido pero no hay carpeta de ejecución para hablar con el baúl".into(),
+            None,
+        ),
+    }
+}
+
 /// A vault made before the cost of the passphrase was raised still opens, but its passphrase is
 /// cheaper to guess for whoever gets the file.
 fn kdf_warning(status: &serde_json::Value) -> Option<String> {
@@ -521,6 +568,7 @@ pub fn collect(dirs: &Dirs) -> Report {
                 ),
                 None,
             );
+            jev_report(&mut o, dirs, &c.jev);
             if let Some(script) = c.model.command.get(1)
                 && !Path::new(script).is_file()
             {
@@ -682,6 +730,15 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jev_is_off_by_default_and_an_old_config_without_it_still_loads() {
+        assert!(!super::super::home::JevCfg::default().enabled);
+        let mut v = serde_json::to_value(Config::default_with(vec![])).unwrap();
+        v.as_object_mut().unwrap().remove("jev");
+        let c: Config = serde_json::from_value(v).unwrap();
+        assert!(!c.jev.enabled && c.jev.memory && c.jev.tool_hints);
+    }
 
     #[test]
     fn an_old_vault_cost_is_warned_about_and_a_current_one_is_not() {

@@ -59,6 +59,17 @@ def message_of(item):
     return msg
 
 
+def last_user(messages):
+    """The text of the last `user` message (what the model was just asked), for tests."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):
+                c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+            return c if isinstance(c, str) else None
+    return None
+
+
 def make_handler(script, log_path, expect_key):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -94,6 +105,7 @@ def make_handler(script, log_path, expect_key):
                     "model": req.get("model"),
                     "stream": bool(req.get("stream")),
                     "roles": [m.get("role") for m in req.get("messages", [])],
+                    "last_user": last_user(req.get("messages", [])),
                     "tools": [t.get("function", {}).get("name") for t in req.get("tools", [])],
                     "headers": headers,
                 }
