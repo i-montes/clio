@@ -9,13 +9,13 @@ use crate::embed::{Embedder, panic_message, unit_vector};
 use crate::error::{Error, Result};
 use crate::format::{compact_line, json_item};
 use crate::model::{
-    ActorId, ActorInfo, ActorKind, Block, BlockId, Candidate, Change, Choice, ContextOpts,
-    DeciderMode, DecisionRecord, DecisionStatus, DoctorReport, ExportSummary, FeedbackSummary,
-    Format, Hit, ImportOpts, ImportSummary, JobKind, JobRecord, JobState, Limits, MemoryId,
-    MemoryRow, MemoryType, Neighbor, NewOperation, OpId, OpKind, OpenMode, Operation, Origin,
-    Outcome, Proposal, PurgeOutcome, Question, QueueStats, Quota, Recall, RecallHit, RecallOpts,
-    RevertReport, RunOpts, RunReport, ScopeId, ScopeInfo, SearchOpts, Signal, State, Stats,
-    Tombstone,
+    ActorId, ActorInfo, ActorKind, Block, BlockId, Candidate, Category, Change, Choice,
+    ContextOpts, DeciderMode, DecisionRecord, DecisionStatus, DoctorReport, ExportSummary,
+    FeedbackSummary, Format, Hit, ImportOpts, ImportSummary, JobKind, JobRecord, JobState, Limits,
+    MemoryId, MemoryRow, MemoryType, Neighbor, NewOperation, OpId, OpKind, OpenMode, Operation,
+    Origin, Outcome, Proposal, PurgeOutcome, Question, QueueStats, Quota, Recall, RecallHit,
+    RecallOpts, Relation, RelationRow, RevertReport, RunOpts, RunReport, ScopeId, ScopeInfo,
+    SearchOpts, Signal, State, Stats, Tombstone,
 };
 use crate::normalize::{content_hash, normalize};
 use crate::platform;
@@ -890,6 +890,8 @@ impl Engine {
             source: loose.source,
             valid_from: loose.valid_from,
             valid_to: loose.valid_to,
+            title: None,
+            category: None,
         })
     }
 
@@ -1160,6 +1162,7 @@ impl Engine {
             p.session.as_ref(),
             p.episode.as_ref(),
             p.source.as_ref(),
+            p.title.as_ref(),
         ];
         if p.content.len() > self.limits.max_content_bytes
             || fields
@@ -1175,6 +1178,7 @@ impl Engine {
             p.session.as_ref(),
             p.episode.as_ref(),
             p.source.as_ref(),
+            p.title.as_ref(),
         ];
         let secret = {
             let _s = span!("secrets");
@@ -1257,6 +1261,13 @@ impl Engine {
             known_since: now,
             replaced_by: None,
             supersedes: None,
+            // One line, NFC like the content; an empty title is no title.
+            title: p
+                .title
+                .as_deref()
+                .map(|t| normalize(&t.split_whitespace().collect::<Vec<_>>().join(" ")))
+                .filter(|t| !t.is_empty()),
+            category: p.category,
         };
         let verdict = {
             let _s = span!("rules");
@@ -1830,6 +1841,134 @@ impl Engine {
         kind: Option<MemoryType>,
     ) -> Result<Vec<MemoryRow>> {
         self.store.list(scope, state, kind)
+    }
+
+    /// Pins a memory: it comes first in the context. A person's choice (the model asks through a
+    /// person's request); not part of the log. Only an active memory can be pinned.
+    pub fn pin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
+        let _g = self.write_guard();
+        self.require_person(actor)?;
+        if self.store.get(id)?.state != State::Active {
+            return Err(Error::InvalidState);
+        }
+        self.store.set_pin(id, Some(self.clock.now()))
+    }
+
+    pub fn unpin(&self, id: MemoryId, actor: ActorId) -> Result<()> {
+        let _g = self.write_guard();
+        self.require_person(actor)?;
+        self.store.get(id)?;
+        self.store.set_pin(id, None)
+    }
+
+    /// The active pinned memories of a scope, in the order they were pinned.
+    pub fn pinned(&self, scope: ScopeId) -> Result<Vec<MemoryRow>> {
+        self.store.pinned(scope)
+    }
+
+    /// The person looked at a memory again: its review cycle starts over.
+    pub fn mark_reviewed(&self, id: MemoryId, actor: ActorId) -> Result<()> {
+        let _g = self.write_guard();
+        self.require_person(actor)?;
+        if self.store.get(id)?.state != State::Active {
+            return Err(Error::InvalidState);
+        }
+        self.store.set_reviewed(id, self.clock.now())
+    }
+
+    /// Is `row` due for a look (its category's cycle has passed since it became known or was last
+    /// reviewed)? A memory with no category, or of a kind that keeps, never is.
+    pub fn is_due(row: &MemoryRow, reviewed_at: Option<i64>, now: i64) -> bool {
+        let Some(days) = row.category.and_then(Category::review_days) else {
+            return false;
+        };
+        let since = reviewed_at.map_or(row.known_since, |r| r.max(row.known_since));
+        now >= since.saturating_add(days.saturating_mul(86_400))
+    }
+
+    /// The active memories of a scope that are due for a look, oldest first. They stay active:
+    /// this is a list for the person, not a state.
+    pub fn review_due(&self, scope: ScopeId) -> Result<Vec<MemoryRow>> {
+        let now = self.clock.now();
+        let mut due: Vec<MemoryRow> = self
+            .store
+            .review_candidates(scope)?
+            .into_iter()
+            .filter(|(row, at)| Self::is_due(row, *at, now))
+            .map(|(row, _)| row)
+            .collect();
+        due.sort_by_key(|r| (r.known_since, r.id));
+        Ok(due)
+    }
+
+    /// Records how `source` stands to `target` (revising an earlier verdict on the same pair), as
+    /// judged by `by` with `confidence`. Both must exist; a memory has no relation to itself.
+    pub fn relate(
+        &self,
+        source: MemoryId,
+        target: MemoryId,
+        relation: Relation,
+        by: &str,
+        confidence: f32,
+    ) -> Result<()> {
+        let _g = self.write_guard();
+        if source == target || !(0.0..=1.0).contains(&confidence) {
+            return Err(Error::InvalidState);
+        }
+        self.store.get(source)?;
+        self.store.get(target)?;
+        self.store.put_relation(&RelationRow {
+            source,
+            target,
+            relation,
+            by: self.bounded(by),
+            confidence,
+            at: self.clock.now(),
+        })
+    }
+
+    /// Every judged relation that names this memory.
+    pub fn relations(&self, id: MemoryId) -> Result<Vec<RelationRow>> {
+        self.store.relations_of(id)
+    }
+
+    /// The memories around an active one: of its session (episode) when it has one, else of its
+    /// scope, in the order they became known.
+    pub fn timeline(&self, id: MemoryId, before: usize, after: usize) -> Result<Vec<MemoryRow>> {
+        let row = self.store.get(id)?;
+        if row.state != State::Active {
+            return Err(Error::NotFound);
+        }
+        self.store.timeline(&row, before, after)
+    }
+
+    /// The most recently known active memories of a scope.
+    pub fn recent(&self, scope: ScopeId, limit: usize) -> Result<Vec<MemoryRow>> {
+        self.store.recent(scope, limit)
+    }
+
+    /// `recall` over several scopes at once (a project, the person's, the lessons): the hits of
+    /// all of them by score, up to the limit. It abstains only if every scope does.
+    pub fn recall_many(
+        &self,
+        scopes: &[ScopeId],
+        query: &str,
+        opts: &RecallOpts,
+    ) -> Result<Recall> {
+        let mut hits = Vec::new();
+        let mut abstained = true;
+        for scope in scopes {
+            let r = self.recall(*scope, query, opts)?;
+            abstained &= r.abstained;
+            hits.extend(r.hits);
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.memory.id.cmp(&b.memory.id))
+        });
+        hits.truncate(opts.search.limit);
+        Ok(Recall { hits, abstained })
     }
 
     /// One operation of the log (read only): who did it, what it changed.

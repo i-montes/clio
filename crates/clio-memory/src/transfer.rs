@@ -9,11 +9,11 @@ use crate::error::{Error, Result};
 
 use crate::model::{
     ActorId, ActorKind, Block, BlockId, DecisionRecord, ExportSummary, MemoryId, MemoryType,
-    Operation, ScopeId, Signal,
+    Operation, Relation, ScopeId, Signal,
 };
 
 /// Semver of the file format. A reader accepts the same major version and not a newer minor.
-pub const EXPORT_FORMAT_VERSION: &str = "1.0.0";
+pub const EXPORT_FORMAT_VERSION: &str = "1.1.0";
 pub(crate) const EXPORT_FORMAT: &str = "clio-memory-export";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,12 +60,33 @@ pub(crate) enum ExportRecord {
         at: i64,
         spent: bool,
     },
+    /// Format 1.1: what the person pinned and reviewed, and the judged relations.
+    Pin {
+        memory: MemoryId,
+        at: i64,
+    },
+    Review {
+        memory: MemoryId,
+        at: i64,
+    },
+    Relation {
+        source: MemoryId,
+        target: MemoryId,
+        relation: Relation,
+        by: String,
+        confidence: f32,
+        at: i64,
+    },
 }
 
 impl ExportRecord {
     pub(crate) fn tally(&self, summary: &mut ExportSummary) {
         match self {
-            Self::Header { .. } | Self::BlockMemory { .. } => {}
+            Self::Header { .. }
+            | Self::BlockMemory { .. }
+            | Self::Pin { .. }
+            | Self::Review { .. }
+            | Self::Relation { .. } => {}
             Self::Scope { .. } => summary.scopes += 1,
             Self::Actor { .. } => summary.actors += 1,
             Self::Operation(_) => summary.operations += 1,
@@ -156,8 +177,9 @@ pub(crate) struct LooseMemory {
     pub source: Option<String>,
 }
 
-/// Accepts the same major version and not a newer minor (the patch never matters), and only the
-/// schema this build writes: restoring across schemas would need a migration that does not exist.
+/// Accepts the same major version and not a newer minor (the patch never matters), and the schema
+/// this build writes or an older one (schema 2 only added fields and records an older export does
+/// not have); never a newer one.
 pub(crate) fn check_header(
     format: &str,
     format_version: &str,
@@ -189,9 +211,9 @@ pub(crate) fn check_header(
             "format version {format_version} is newer than this build ({EXPORT_FORMAT_VERSION})"
         ));
     }
-    if schema_version != expected_schema {
+    if schema_version < 1 || schema_version > expected_schema {
         return bad(format!(
-            "schema version {schema_version} differs from this build's {expected_schema}"
+            "schema version {schema_version} is not one this build ({expected_schema}) can restore"
         ));
     }
     Ok(())

@@ -8,6 +8,114 @@ macro_rules! id {
 }
 id!(ScopeId, MemoryId, OpId, ActorId, BlockId);
 
+/// What a memory is about, for searching, for the review cycle and for where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Category {
+    Decision,
+    Architecture,
+    Bugfix,
+    Pattern,
+    Config,
+    Discovery,
+    Preference,
+    Learning,
+}
+
+impl Category {
+    pub const ALL: [Category; 8] = [
+        Category::Decision,
+        Category::Architecture,
+        Category::Bugfix,
+        Category::Pattern,
+        Category::Config,
+        Category::Discovery,
+        Category::Preference,
+        Category::Learning,
+    ];
+
+    /// The lowercase name used by the tools and the command line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Decision => "decision",
+            Category::Architecture => "architecture",
+            Category::Bugfix => "bugfix",
+            Category::Pattern => "pattern",
+            Category::Config => "config",
+            Category::Discovery => "discovery",
+            Category::Preference => "preference",
+            Category::Learning => "learning",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Category> {
+        Category::ALL
+            .into_iter()
+            .find(|c| c.label().eq_ignore_ascii_case(s.trim()))
+    }
+
+    /// Days after which a memory of this kind should be looked at again; `None` never. Settings
+    /// change, decisions get revisited, discoveries go stale; a preference, a fixed bug, a pattern
+    /// and a lesson keep.
+    pub fn review_days(self) -> Option<i64> {
+        match self {
+            Category::Config => Some(90),
+            Category::Discovery => Some(120),
+            Category::Decision | Category::Architecture => Some(180),
+            Category::Preference | Category::Bugfix | Category::Pattern | Category::Learning => {
+                None
+            }
+        }
+    }
+}
+
+/// How one memory stands to another, as judged (by Jev or a person). Replacing is not here: the
+/// engine records it itself (`replaced_by`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Relation {
+    Related,
+    Compatible,
+    /// True in a narrower context than the other (this project, this case).
+    Scoped,
+    ConflictsWith,
+    NotConflict,
+}
+
+impl Relation {
+    pub const ALL: [Relation; 5] = [
+        Relation::Related,
+        Relation::Compatible,
+        Relation::Scoped,
+        Relation::ConflictsWith,
+        Relation::NotConflict,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Relation::Related => "related",
+            Relation::Compatible => "compatible",
+            Relation::Scoped => "scoped",
+            Relation::ConflictsWith => "conflicts_with",
+            Relation::NotConflict => "not_conflict",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Relation> {
+        Relation::ALL.into_iter().find(|r| r.label() == s.trim())
+    }
+}
+
+/// A judged relation between two memories.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelationRow {
+    pub source: MemoryId,
+    pub target: MemoryId,
+    pub relation: Relation,
+    /// Who judged it (`jev`, a person's name).
+    pub by: String,
+    pub confidence: f32,
+    pub at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryType {
     Working,
@@ -104,6 +212,11 @@ pub struct MemoryRow {
     pub replaced_by: Option<MemoryId>,
     /// Set on a quarantined candidate that would replace this memory once promoted.
     pub supersedes: Option<MemoryId>,
+    /// Short and searchable. Rows written before titles existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<Category>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +270,9 @@ pub struct Proposal {
     pub source: Option<String>,
     pub valid_from: Option<i64>,
     pub valid_to: Option<i64>,
+    /// Short and searchable; checked like the content (size, secrets).
+    pub title: Option<String>,
+    pub category: Option<Category>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

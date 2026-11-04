@@ -19,8 +19,9 @@ fn language(conn: &Connection, scope: ScopeId) -> Result<String> {
 pub fn apply_change(conn: &Connection, after: &MemoryRow) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO memories(id, scope, kind, content, content_hash, topic_key, origin,
-            actor, session, episode, source, state, valid_from, valid_to, known_since, replaced_by, supersedes)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            actor, session, episode, source, state, valid_from, valid_to, known_since, replaced_by,
+            supersedes, title, category)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![
             after.id.0,
             after.scope.0,
@@ -39,9 +40,16 @@ pub fn apply_change(conn: &Connection, after: &MemoryRow) -> Result<()> {
             after.known_since,
             after.replaced_by.map(|m| m.0),
             after.supersedes.map(|m| m.0),
+            after.title,
+            after.category.map(|c| enc(&c)),
         ],
     )?;
-    let text = stem_text(&language(conn, after.scope)?, &after.content);
+    // The title is searched with the content.
+    let searched = match &after.title {
+        Some(t) => format!("{t}\n{}", after.content),
+        None => after.content.clone(),
+    };
+    let text = stem_text(&language(conn, after.scope)?, &searched);
     conn.execute("DELETE FROM memories_fts WHERE rowid = ?1", [after.id.0])?;
     conn.execute(
         "INSERT INTO memories_fts(rowid, text) VALUES (?1, ?2)",

@@ -77,6 +77,8 @@ mod tests {
             known_since: 0,
             replaced_by: None,
             supersedes: None,
+            title: None,
+            category: None,
         }
     }
 

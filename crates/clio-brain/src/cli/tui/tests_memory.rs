@@ -436,6 +436,8 @@ fn a_36_escape_sequences_stored_in_the_file_do_not_reach_the_terminal() {
                 source: Some((*h).to_owned()),
                 valid_from: None,
                 valid_to: None,
+                title: None,
+                category: None,
             })
             .unwrap();
     }

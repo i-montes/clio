@@ -38,6 +38,8 @@ sha2 = "0.11.1"
 clio-attacks = { path = "../../testing/attacks" }
 clio-canaries = { path = "../../testing/canaries" }
 tempfile = "3.27.0"
+# To put a memory file back to an older schema in a test (same version as clio-memory uses).
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [lints]
 workspace = true

@@ -586,6 +586,8 @@ fn text_from_the_memory_file_never_reaches_the_terminal_raw() {
                 source: Some("src\u{1b}[31m".into()),
                 valid_from: None,
                 valid_to: None,
+                title: None,
+                category: None,
             })
             .unwrap();
     }

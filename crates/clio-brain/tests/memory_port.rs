@@ -63,6 +63,8 @@ fn propose(link: &MemoryLink, scope: ScopeId, origin: MOrigin, text: &str) -> i6
             source: None,
             valid_from: None,
             valid_to: None,
+            title: None,
+            category: None,
         })
         .unwrap()
         .memory
@@ -1143,4 +1145,31 @@ fn the_writer_is_not_held_while_jev_checks_a_request() {
     );
     forgetting.join().unwrap().unwrap();
     assert_eq!(open(&w).get(mine).unwrap().state, State::Archived);
+}
+
+// The person's memory file of schema 1 (what every install had before) is upgraded the first
+// time anything reads it, and keeps everything.
+#[test]
+fn a_memory_file_of_the_old_schema_is_upgraded_when_it_is_first_read() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let path = MemoryLink::db_path(&w.data);
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(
+            "DROP INDEX memories_episode; DROP TABLE pins; DROP TABLE reviews; DROP TABLE relations;
+             ALTER TABLE memories DROP COLUMN title; ALTER TABLE memories DROP COLUMN category;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+    let link = MemoryLink::open_read(&w.data, &EmbedModel::none())
+        .unwrap()
+        .expect("read after the upgrade");
+    assert_eq!(link.get(mine).unwrap().content, "Marta vive en Medellín");
+    let v: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 2);
 }

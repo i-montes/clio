@@ -46,6 +46,11 @@ pub enum Error {
     UnwritableDirectory(PathBuf),
     #[error("database schema version {0} is newer than this build supports")]
     SchemaTooNew(i64),
+    /// A read-only open found a file of an older schema: open it once for writing to upgrade it.
+    #[error(
+        "database schema version {0} is older than this build; open it for writing once to upgrade it"
+    )]
+    SchemaTooOld(i64),
     #[error("vector has the wrong size, a non-finite value or no direction")]
     BadVector,
     #[error("malformed job payload")]

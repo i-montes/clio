@@ -66,6 +66,8 @@ pub fn run(cli: &Cli) -> Result<ExitCode, String> {
                     source: source.clone(),
                     valid_from: None,
                     valid_to: None,
+                    title: None,
+                    category: None,
                 })
                 .map_err(fail)?;
             line(&format!(

@@ -226,6 +226,8 @@ pub fn prop(scope: ScopeId, actor: ActorId, content: &str) -> Proposal {
         source: None,
         valid_from: None,
         valid_to: None,
+        title: None,
+        category: None,
     }
 }
 
