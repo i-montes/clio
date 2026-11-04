@@ -57,6 +57,13 @@ impl LinkPort {
         self
     }
 
+    /// With this vector model (the one `new` was given, by default).
+    #[must_use]
+    pub fn with_model(mut self, model: Arc<EmbedModel>) -> Self {
+        self.model = model;
+        self
+    }
+
     /// With Jev guarding what is written.
     #[must_use]
     pub fn with_judge(mut self, judge: Arc<MemoryJudge>) -> Self {
@@ -92,12 +99,10 @@ impl LinkPort {
 impl LinkPort {
     /// Opened for writing for this one call (it waits a few seconds for another writer).
     fn writer(&self) -> Result<MemoryLink, String> {
-        MemoryLink::open_write_in(&self.data, &EmbedModel::none(), self.project.as_deref()).map_err(
-            |why| {
-                eprintln!("clio-toolhost: memory: {why}");
-                "la memoria no se puede abrir para escribir ahora".to_owned()
-            },
-        )
+        MemoryLink::open_write_in(&self.data, &self.model, self.project.as_deref()).map_err(|why| {
+            eprintln!("clio-toolhost: memory: {why}");
+            "la memoria no se puede abrir para escribir ahora".to_owned()
+        })
     }
 
     /// Reads without holding the writer: what Jev is asked about must not keep the person's own
@@ -201,6 +206,7 @@ impl LinkPort {
         if let (OpKind::Add, Some((other, (rel, sure)))) = (o.kind, relation) {
             let _ = link.relate_judged(o.memory, other, rel, sure);
         }
+        embed_now(&link);
         Ok(Proposed {
             id: o.memory.0,
             saved: match o.kind {
@@ -306,6 +312,7 @@ impl MemoryPort for LinkPort {
                 ));
             }
         }
+        embed_now(&link);
         // No change number: undoing only the new one would leave the originals forgotten.
         Ok(Proposed {
             id: o.memory.0,
@@ -420,6 +427,14 @@ impl MemoryPort for LinkPort {
             }
             Ok(out.iter().map(|r| item(link, r)).collect())
         })
+    }
+}
+
+/// Right after a write, the vectors of the whole queue (best effort: what fails waits for the next
+/// write, the close of a run, or `clio memory`).
+fn embed_now(link: &MemoryLink) {
+    if let Err(why) = link.embed_queue() {
+        eprintln!("clio-toolhost: memory: vectores pendientes: {why}");
     }
 }
 
