@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
-use clio_brain::pi::preprompt::{Candidate, PrePrompt, Recall, Scrub, Settings};
+use clio_brain::pi::preprompt::{Candidate, PrePrompt, Prepared, Recall, Scrub, Settings};
 use clio_core::SystemClock;
 use clio_jev::{Config as JevConfig, Jev, Process, ToolHint, parse_catalog};
-use clio_memory::{ContextOpts, MemoryId, Origin};
-use clio_vault::{Scrubber, VaultClient};
+use clio_memory::{Origin, State};
+use clio_vault::VaultClient;
 use serde_json::{Value, json};
 
 use super::Res;
@@ -27,11 +27,14 @@ const SECRET: &str = "jev";
 const TOOL: &str = "jev";
 const DOMAIN: &str = "api.typesafe.ai";
 
-/// The adapter script: next to the executable (a checkout), or the copy that travels inside this
-/// binary, written private and refreshed when it differs. Never searched in the working
-/// directory: it receives the key on every call and runs outside the jail.
+/// The adapter script: the copy that travels inside this binary, written private and refreshed
+/// when it differs. A file of the checkout is used only if it is exactly that copy: the adapter
+/// receives the key on every call and runs outside the jail, so nothing found on disk that
+/// differs is ever run. Never searched in the working directory.
 fn adapter_path(dirs: &Dirs) -> Res<PathBuf> {
-    if let Some(c) = super::find_above_exe(Path::new("adapters/jev/jev_systemone.py")) {
+    if let Some(c) = super::find_above_exe(Path::new("adapters/jev/jev_systemone.py"))
+        && std::fs::read_to_string(&c).ok().as_deref() == Some(ADAPTER_SOURCE)
+    {
         return c.canonicalize().map_err(|e| io_err(&c, &e));
     }
     let dir = dirs.data.join("adapters");
@@ -97,30 +100,32 @@ impl MemoryRecall {
 impl Recall for MemoryRecall {
     fn fixed(&self) -> Vec<Candidate> {
         self.with_link(|link| {
-            let text = link
-                .engine()
-                .context(link.scope(), &ContextOpts::default())
-                .ok()?;
-            Some(
-                text.lines()
-                    .filter_map(|l| {
-                        let id: i64 = l.strip_prefix("[m")?.split(']').next()?.parse().ok()?;
-                        let row = link.get(MemoryId(id)).ok()?;
-                        Some(Candidate {
-                            id,
+            let engine = link.engine();
+            let mut out = Vec::new();
+            for block in engine.blocks(link.scope()).ok()? {
+                for id in engine.block_get(block.id).ok()? {
+                    // Active only: a replaced, archived or quarantined memory is not shown.
+                    let Ok(row) = link.get(id) else { continue };
+                    if row.state == State::Active {
+                        out.push(Candidate {
+                            id: id.0,
                             text: row.content,
                             person: row.origin == Origin::User,
-                        })
-                    })
-                    .collect(),
-            )
+                        });
+                    }
+                }
+            }
+            Some(out)
         })
         .unwrap_or_default()
     }
 
     fn candidates(&self, query: &str, limit: usize) -> Vec<Candidate> {
         self.with_link(|link| {
-            let (rows, _) = link.search(query, limit).ok()?;
+            let (rows, abstained) = link.search(query, limit).ok()?;
+            if abstained {
+                return Some(Vec::new()); // the memory says nothing here is relevant
+            }
             Some(
                 rows.into_iter()
                     .map(|r| Candidate {
@@ -147,10 +152,12 @@ pub fn catalog_from_entries(entries: &Value) -> Vec<ToolHint> {
         .unwrap_or_default()
 }
 
-/// Tells the tool host that this session now holds something the person did not write. Best
-/// effort by design: a host that does not answer is a host that will not run anything either.
-pub fn taint_session(socket: &Path, session: &str) {
-    let go = || -> std::io::Result<()> {
+/// Tells the tool host that this session now holds something the person did not write. Tried a
+/// few times (the host answers one request at a time and may be busy with a tool); `true` only if
+/// the host said it was done. A mark that could not be made means what is not the person's is not
+/// shown.
+pub fn taint_session(socket: &Path, session: &str) -> bool {
+    let once = || -> std::io::Result<bool> {
         let mut s = UnixStream::connect(socket)?;
         s.set_read_timeout(Some(Duration::from_secs(5)))?;
         s.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -158,11 +165,16 @@ pub fn taint_session(socket: &Path, session: &str) {
         writeln!(s, "{req}")?;
         let mut line = String::new();
         BufReader::new(s).read_line(&mut line)?;
-        Ok(())
+        let answer: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+        Ok(answer["ok"] == true && answer["tainted"] == true)
     };
-    if let Err(e) = go() {
-        eprintln!("clio: no se pudo marcar la sesión como contaminada: {e}");
+    for _ in 0..2 {
+        if once().unwrap_or(false) {
+            return true;
+        }
     }
+    eprintln!("clio: no se pudo marcar la sesión como contaminada: no se muestra memoria ajena");
+    false
 }
 
 /// Everything that goes in front of a message in this chat.
@@ -172,6 +184,7 @@ pub fn preprompt(
     entries: &Value,
     toolhost_socket: &Path,
     session: &str,
+    run_dir: &Path,
 ) -> PrePrompt {
     let model = MemoryLink::model_dir(&dirs.home);
     let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(
@@ -181,33 +194,44 @@ pub fn preprompt(
     let vault = gateway_socket(dirs)
         .ok()
         .map(|s| VaultClient::new(&s).with_timeout(Duration::from_secs(2)));
-    let strict_vault = vault.clone();
-    // To Jev: the vault's scrubber or nothing (S-44).
-    let to_jev: Scrub = Arc::new(move |t| match &strict_vault {
+    // The vault's scrubber or nothing, for what goes to Jev (S-44) and for what the model is shown:
+    // a value only the vault knows cannot be struck out without it.
+    let scrub: Scrub = Arc::new(move |t| match &vault {
         Some(v) => v.scrub(t).map_err(|e| e.to_string()),
         None => Err("sin baúl".into()),
     });
-    // To the model: the vault's, or the key patterns alone when the vault is not running.
-    let patterns = Scrubber::default();
-    let to_model: Scrub = Arc::new(move |t| {
-        Ok(match vault.as_ref().map(|v| v.scrub(t)) {
-            Some(Ok(s)) => s,
-            _ => patterns.scrub(t),
-        })
-    });
     let (socket, id) = (toolhost_socket.to_path_buf(), session.to_owned());
+    let log_file = run_dir.join("memory-inject.jsonl");
     PrePrompt::new(
         client(dirs, cfg),
         catalog_from_entries(entries),
         Some(recall),
-        to_jev,
-        to_model,
+        scrub,
         Arc::new(move || taint_session(&socket, &id)),
+        Arc::new(move |p| log_shown(&log_file, p)),
         Settings {
             memory: cfg.memory,
             tool_hints: cfg.tool_hints,
         },
     )
+}
+
+/// One line of facts per message that had anything to show: which memories (ids), how many tools
+/// were suggested and whether Jev took part. Never a text.
+fn log_shown(path: &Path, p: &Prepared) {
+    if p.memory_ids.is_empty() && p.tools.is_empty() {
+        return;
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let line = json!({"ids": p.memory_ids, "tools": p.tools.len(), "jev": p.used_jev, "tainted": p.tainted});
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 #[cfg(test)]

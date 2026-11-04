@@ -192,7 +192,20 @@ impl SessionSource for LocalSource {
             .client
             .request("get_entries", json!({}))
             .unwrap_or(Value::Null);
-        let pre = jev::preprompt(d, &cfg.jev, &entries, &toolhost.socket, &pi.session_id);
+        let pre = jev::preprompt(
+            d,
+            &cfg.jev,
+            &entries,
+            &toolhost.socket,
+            &pi.session_id,
+            &run_dir,
+        );
+        // A session that was marked before (the service leaves the mark in the run folder) is
+        // marked again in the new service: the mark does not go away by closing the chat.
+        let taint_file = run_dir.join("toolhost/tainted.json");
+        if taint_file.is_file() {
+            jev::taint_session(&toolhost.socket, &pi.session_id);
+        }
         let s = ChatSession {
             pi,
             toolhost,
@@ -203,6 +216,7 @@ impl SessionSource for LocalSource {
             prompts: AtomicU64::new(0),
             assessor: Assessor::new(Arc::new(SystemClock)),
             pre,
+            taint_file,
         };
         let refresh = s.refresh().ok();
         Ok(Opened {
@@ -254,6 +268,8 @@ struct ChatSession {
     assessor: Assessor,
     /// The time, memories and tool suggestions put in front of each message (Jev optional).
     pre: PrePrompt,
+    /// Where the service leaves the mark when it saw (or was told of) what is not the person's.
+    taint_file: PathBuf,
 }
 
 impl Session for ChatSession {
@@ -289,9 +305,10 @@ impl Session for ChatSession {
         let stats = self.pi.client.get_session_stats()?;
         // The guard writes `clio-guard.taint` into the session when it read outside content.
         let entries = self.pi.client.request("get_entries", json!({}))?;
-        let tainted = entries["entries"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(is_taint));
+        let tainted = self.taint_file.is_file()
+            || entries["entries"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(is_taint));
         let masked = entries["entries"].as_array().map_or(0, |a| masked_total(a));
         let egress_denied = self
             .pi
