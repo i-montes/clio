@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "clio-attacks"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "clio-bench"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-brain",
  "clio-core",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "clio-brain"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-attacks",
  "clio-canaries",
@@ -250,18 +250,18 @@ dependencies = [
 
 [[package]]
 name = "clio-canaries"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "clio-chaos"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "clio-contract"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-core",
  "serde",
@@ -273,18 +273,18 @@ dependencies = [
 
 [[package]]
 name = "clio-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "clio-diagnosis"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "clio-fake-llm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "clio-gateway"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-attacks",
  "clio-canaries",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "clio-jev"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-core",
  "serde_json",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "clio-memory"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "model2vec-rs",
  "regex",
@@ -331,11 +331,11 @@ dependencies = [
 
 [[package]]
 name = "clio-network"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "clio-node"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-attacks",
  "clio-canaries",
@@ -350,15 +350,15 @@ dependencies = [
 
 [[package]]
 name = "clio-policy"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "clio-synthetic"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "clio-toolhost"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-attacks",
  "clio-canaries",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "clio-trace"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-canaries",
  "rusqlite",
@@ -385,14 +385,14 @@ dependencies = [
 
 [[package]]
 name = "clio-triage"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clio-core",
 ]
 
 [[package]]
 name = "clio-vault"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",

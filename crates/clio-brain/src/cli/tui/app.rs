@@ -89,6 +89,13 @@ pub enum Cmd {
     MemoryArchive {
         id: String,
     },
+    /// Works out what deleting a session removes, to ask before.
+    PlanSessionDelete {
+        reference: String,
+    },
+    DeleteSession {
+        reference: String,
+    },
     /// Useful (true) or wrong (false) for one memory a run recalled.
     MemoryFeedback {
         id: i64,
@@ -142,6 +149,10 @@ pub enum Bg {
     Memory(Result<Box<MemoryData>, String>),
     Done(Result<String, String>),
     Sessions(Vec<Row>),
+    /// What deleting a session removes: its file, its title, one line on what goes.
+    SessionPlan(Result<(String, String, String), String>),
+    /// A session deleted (or why not), and the list as it is now.
+    SessionDeleted(Result<String, String>, Vec<Row>),
     ChatOpened {
         seq: u64,
         result: Result<Box<ChatInfo>, String>,
@@ -202,6 +213,8 @@ pub enum Action {
     /// A memory: `Confirm::id` is its number and `Confirm::workspace` its text.
     Promote,
     Archive,
+    /// A Pi session: `Confirm::id` is its file and `Confirm::workspace` what goes with it.
+    DeleteSession,
 }
 
 /// A question that needs a `y`.
@@ -497,6 +510,7 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Action::Undo => vec![Cmd::Undo { id: c.id }],
         Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
+        Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
     }
 }
 
@@ -626,6 +640,28 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::Sessions(rows) => {
             app.sessions.set(rows);
+            vec![]
+        }
+        Bg::SessionPlan(r) => {
+            match r {
+                Ok((file, title, what)) if app.screen == Screen::Sessions => {
+                    app.confirm = Some(Confirm::new(
+                        Action::DeleteSession,
+                        file,
+                        0,
+                        format!("«{title}»: {what}"),
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => app.flash = Some(e),
+            }
+            vec![]
+        }
+        Bg::SessionDeleted(r, rows) => {
+            app.sessions.set(rows);
+            app.flash = Some(match r {
+                Ok(m) | Err(m) => m,
+            });
             vec![]
         }
         Bg::ChatOpened { seq, result } => {
@@ -882,6 +918,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 c.id
             ),
             Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
+            Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
         };
         let mut lines = vec![
             Line::from(Span::styled(verb, t.bold())),

@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod memory;
 pub mod pi;
 pub mod runs;
+pub mod sessions;
 pub mod tui;
 pub mod ui;
 pub mod usage;

@@ -592,11 +592,13 @@ Lo que ya existía:
 clio pi install            # instala Pi fijado (1.4.0) con `npm ci --ignore-scripts`; `clio init` y `just install` también
 clio pi doctor [--json]    # Node 22.19+, Pi instalado y de la versión fijada, que su carpeta no sea ~/.pi
 clio pi sessions [--json]  # las sesiones que Pi guardó (título, mensajes, carpeta, última actividad)
+clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo si es de Clio
 ```
 
 - Hace falta **Node 22.19 o más** en el `PATH` (mise, nvm o el gestor de tu sistema) y red la primera vez. Si falta algo, el mensaje dice qué hacer. `clio init` nunca falla por Pi: avisa y puedes repetir con `clio pi install`.
 - Pi vive solo en las carpetas de Clio, todas 0700: `~/.local/share/clio/pi/1.4.0/` (la instalación, desde el `package-lock.json` incrustado en el binario, sin scripts de instalación), `pi/agent/` (`models.json`, sin la clave), `pi/sessions/` (las sesiones, 0600) y `pi/home/`. Tu `~/.pi` (el de tu propio Pi) no se toca ni se lee, y `clio doctor` lo comprueba.
 - La clave del modelo no se escribe en ningún archivo ni en la línea de comandos: va solo en el entorno del proceso de Pi, que arranca con un entorno vacío (nada de `SSH_AUTH_SOCK`, tu `HOME` ni otras variables tuyas). Con la jaula, ese entorno es el de `bwrap` y no sus argumentos: los argumentos de un proceso los puede leer cualquier usuario del equipo con `ps`.
+- **Borrar sesiones:** `clio pi sessions rm ID…` (el id o el nombre del archivo; `--all` para todas) o la tecla `x` en el selector de sesiones de la TUI. Se borra el archivo de la conversación y, si la sesión es de Clio, su copia de trabajo (`runs/<id>`); antes dice qué se va y, si la copia tiene cambios que no aplicaste a tu carpeta, lo avisa y pide confirmar. Tu memoria no se toca. Una sesión que se está cerrando (guardando su resumen) se borra cuando termina.
 - `clio pi sessions` lee solo la cabecera y lo mínimo de cada archivo (abre al instante con cientos); los títulos y nombres se limpian de secuencias de escape; un archivo roto se ignora con un aviso. El número de mensajes lleva `~` cuando es una estimación (archivos grandes).
 
 ## Comprobar la máquina
