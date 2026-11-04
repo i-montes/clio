@@ -1,0 +1,15 @@
+[package]
+name = "clio-jev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Client of Jev (TypeSafe System One): closed questions in, probabilities out. Optional: callers keep working without it."
+
+[dependencies]
+clio-core = { path = "../clio-core" }
+serde_json = "1"
+
+[lints]
+workspace = true
