@@ -131,6 +131,67 @@ pub fn init_lines(dirs: &Dirs) {
     }
 }
 
+/// `clio pi sessions rm`: the named sessions (by id or file name), or every one with `--all`.
+/// Says what goes with each one; a copy with changes not applied needs a yes (or `--yes`).
+fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i32> {
+    let dir = paths(dirs).sessions_dir();
+    let list = list_sessions(&dir);
+    let chosen: Vec<_> = if all {
+        if !names.is_empty() {
+            return Err("o nombras sesiones o usas --all, no las dos cosas".into());
+        }
+        list.sessions.iter().collect()
+    } else {
+        if names.is_empty() {
+            return Err("falta qué borrar: clio pi sessions rm <id>… (o --all)".into());
+        }
+        let mut v = Vec::new();
+        for n in names {
+            let hit = list.sessions.iter().find(|s| {
+                s.id == *n
+                    || s.path
+                        .file_name()
+                        .is_some_and(|f| f.to_string_lossy() == *n)
+            });
+            v.push(hit.ok_or_else(|| format!("no hay una sesión {}", sanitize::line(n)))?);
+        }
+        v
+    };
+    if chosen.is_empty() {
+        println!("no hay sesiones de Pi");
+        return Ok(0);
+    }
+    let plans: Vec<_> = chosen
+        .iter()
+        .map(|s| super::sessions::plan(dirs, &dir, s))
+        .collect::<Res<_>>()?;
+    for p in &plans {
+        println!(
+            "{}  →  {}",
+            text::line(&p.title, 50),
+            super::sessions::describe(p)
+        );
+    }
+    let risky = plans.iter().filter(|p| p.unapplied != Some(0)).count();
+    let question = if risky > 0 {
+        format!(
+            "¿Borrar {} sesión(es)? {risky} tienen cambios sin aplicar que se perderán",
+            plans.len()
+        )
+    } else {
+        format!("¿Borrar {} sesión(es)?", plans.len())
+    };
+    if !yes && !super::apply::confirm(&question) {
+        println!("no se borró nada");
+        return Ok(0);
+    }
+    for p in &plans {
+        super::sessions::delete(p)?;
+    }
+    println!("borradas {} sesión(es)", plans.len());
+    Ok(0)
+}
+
 pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
     let mut it = argv.into_iter();
     let sub = it.next().unwrap_or_default();
@@ -176,7 +237,14 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
         }
         "sessions" => {
             let json = args.flag("--json");
-            args.rest()?;
+            let (all, yes) = (args.flag("--all"), args.flag("--yes"));
+            let rest = args.rest()?;
+            if rest.first().map(String::as_str) == Some("rm") {
+                return remove_sessions(dirs, &rest[1..], all, yes);
+            }
+            if !rest.is_empty() || all {
+                return Err("uso: clio pi sessions [--json] | rm <id>… | rm --all [--yes]".into());
+            }
             let l = list_sessions(&paths(dirs).sessions_dir());
             if json {
                 let v: Vec<_> = l

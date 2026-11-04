@@ -309,6 +309,20 @@ struct Ctx {
 /// The threads closing a session (and saving its summary).
 type Closing = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
 
+/// The session listed under `file` in Pi's sessions folder (and that folder).
+fn session_by_file(
+    d: &Dirs,
+    file: &str,
+) -> Result<(PathBuf, clio_brain::pi::sessions::SessionInfo), String> {
+    let dir = crate::cli::pi::paths(d).sessions_dir();
+    let s = clio_brain::pi::sessions::list_sessions(&dir)
+        .sessions
+        .into_iter()
+        .find(|s| s.path.display().to_string() == file)
+        .ok_or("esa sesión ya no está")?;
+    Ok((dir, s))
+}
+
 /// Waits for every session being closed: a session is never opened again (two Pi on one file and
 /// one working copy) while its last turn still runs.
 fn wait_closing(closing: &Closing) {
@@ -523,6 +537,36 @@ impl Ctx {
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
+            Cmd::PlanSessionDelete { reference } => self.spawn(
+                move |d, _| {
+                    let (dir, s) = session_by_file(d, &reference)?;
+                    let p = crate::cli::sessions::plan(d, &dir, &s)?;
+                    Ok::<_, String>((reference, s.title, crate::cli::sessions::describe(&p)))
+                },
+                |r| Bg::SessionPlan(r.and_then(|x| x)),
+            ),
+            Cmd::DeleteSession { reference } => {
+                let (sources, closing) = (self.sources.clone(), self.closing.clone());
+                self.spawn(
+                    move |d, _| {
+                        // A session still closing (its summary) is never deleted under it.
+                        wait_closing(&closing);
+                        let done = session_by_file(d, &reference).and_then(|(dir, s)| {
+                            let p = crate::cli::sessions::plan(d, &dir, &s)?;
+                            crate::cli::sessions::delete(&p)?;
+                            Ok(format!("sesión borrada: {}", sanitize::line(&s.title)))
+                        });
+                        (
+                            done,
+                            sources.iter().flat_map(|s| s.list()).collect::<Vec<_>>(),
+                        )
+                    },
+                    |r| match r {
+                        Ok((done, rows)) => Bg::SessionDeleted(done, rows),
+                        Err(e) => Bg::Done(Err(e)),
+                    },
+                );
+            }
             Cmd::Redraw => {}
             Cmd::LoadSessions => {
                 let sources = self.sources.clone();

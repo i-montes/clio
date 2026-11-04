@@ -1322,6 +1322,69 @@ mod tests {
         assert!(app.flash.is_some() && app.chat.input == "hola");
     }
 
+    // `x` on a session asks what deleting it removes, shows it, and deletes only on `y`.
+    #[test]
+    fn x_deletes_a_session_after_saying_what_goes_with_it() {
+        use crate::cli::chat::{Row, RowKind};
+        let mut app = App::new(
+            "/p/proj",
+            Theme {
+                color: false,
+                unicode: true,
+            },
+        );
+        app.use_pi();
+        app.sessions.set(vec![Row {
+            kind: RowKind::Session,
+            title: "t".into(),
+            detail: String::new(),
+            messages: 2,
+            last_ms: None,
+            reference: "/s/a.jsonl".into(),
+            unavailable: None,
+        }]);
+        let none = KeyModifiers::NONE;
+        // On "nueva sesión" there is nothing to delete.
+        let (app, cmds) = press(app, KeyCode::Char('x'), none);
+        assert!(cmds.is_empty() && app.flash.is_some());
+        let (app, _) = press(app, KeyCode::Char('j'), none);
+        let (app, cmds) = press(app, KeyCode::Char('x'), none);
+        assert!(
+            matches!(&cmds[..], [Cmd::PlanSessionDelete { reference }] if reference == "/s/a.jsonl")
+        );
+        let (app, _) = super::super::app::update(
+            app,
+            super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
+                "/s/a.jsonl".into(),
+                "t".into(),
+                "la conversación y su copia de trabajo, con 2 archivo(s) cambiados SIN APLICAR a tu carpeta".into(),
+            )))),
+        );
+        assert!(
+            app.confirm
+                .as_ref()
+                .unwrap()
+                .workspace
+                .contains("SIN APLICAR")
+        );
+        // Anything but y keeps it.
+        let (app, cmds) = press(app, KeyCode::Char('n'), none);
+        assert!(cmds.is_empty() && app.confirm.is_none());
+        let (app, _) = press(app, KeyCode::Char('x'), none);
+        let (app, _) = super::super::app::update(
+            app,
+            super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
+                "/s/a.jsonl".into(),
+                "t".into(),
+                "solo la conversación".into(),
+            )))),
+        );
+        let (_, cmds) = press(app, KeyCode::Char('y'), none);
+        assert!(
+            matches!(&cmds[..], [Cmd::DeleteSession { reference }] if reference == "/s/a.jsonl")
+        );
+    }
+
     #[test]
     fn the_selector_opens_new_existing_and_explains_what_cannot_open() {
         use crate::cli::chat::{Row, RowKind};

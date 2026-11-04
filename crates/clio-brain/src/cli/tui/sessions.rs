@@ -91,6 +91,14 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             return vec![Cmd::RunDoctor];
         }
         Act::Memory => return super::memory::opened(app),
+        Act::Delete => match app.sessions.selected() {
+            Some(row) => {
+                return vec![Cmd::PlanSessionDelete {
+                    reference: row.reference.clone(),
+                }];
+            }
+            None => app.flash = Some("elige una sesión para borrarla".into()),
+        },
         Act::Help => app.open_help(),
         _ => {}
     }

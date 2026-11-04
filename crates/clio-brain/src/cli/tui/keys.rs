@@ -63,6 +63,7 @@ pub enum Act {
     Promote,
     Archive,
     Copy,
+    Delete,
     Useful,
     Wrong,
 }
@@ -774,6 +775,7 @@ const SESSIONS: &[Bind] = &[
     ),
     b(&[ENTER], Act::Open, "Enter", "abrir", true),
     b(&[Char('n')], Act::New, "n", "nueva", true),
+    b(&[Char('x')], Act::Delete, "x", "borrar", true),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('D')], Act::Doctor, "D", "doctor", false),
     b(&[Char('m')], Act::Memory, "m", "memoria", true),
