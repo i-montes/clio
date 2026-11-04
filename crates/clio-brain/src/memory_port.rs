@@ -149,12 +149,14 @@ impl LinkPort {
     }
 }
 
-impl MemoryPort for LinkPort {
-    fn propose(
+impl LinkPort {
+    /// A proposal, or (with `target`) a new text for that memory.
+    fn propose_to(
         &self,
         draft: &ProposalDraft,
         session: &str,
         judging: &Judging,
+        target: Option<MemoryRow>,
     ) -> Result<Proposed, String> {
         let summary = draft.kind == ProposalKind::Session;
         let draft = if summary {
@@ -183,10 +185,18 @@ impl MemoryPort for LinkPort {
         // own writes waiting. The engine re-checks every memory it is told to replace once it
         // holds the lock.
         let stored = MemoryLink::agent_text(text);
+        let target_place = match &target {
+            Some(t) => Some(
+                self.reader()?
+                    .place_of(t.scope)
+                    .ok_or_else(|| NOT_READABLE.to_owned())?,
+            ),
+            None => None,
+        };
         let place = self
             .judge
             .as_ref()
-            .filter(|_| has_project && !summary)
+            .filter(|_| has_project && !summary && target_place.is_none())
             .and_then(|j| {
                 j.place(
                     &stored,
@@ -195,6 +205,7 @@ impl MemoryPort for LinkPort {
                 )
             })
             .and_then(Place::parse)
+            .or(target_place)
             .unwrap_or_else(|| match (summary, has_project) {
                 (true, true) => Place::Project,
                 (true, false) => Place::Personal,
@@ -213,23 +224,27 @@ impl MemoryPort for LinkPort {
                     &EmbedModel::none(),
                     self.project.as_deref(),
                 ) {
-                    Ok(Some(link)) if !summary => link
-                        .search_in(place, &stored, 3)
-                        .map(|rows| {
-                            rows.into_iter()
-                                .map(|r| Neighbor {
-                                    id: r.id.0,
-                                    // A lesson learned in another project is not this session's to
-                                    // replace: only the person's words would (as with their own).
-                                    protected: link.is_protected(&r)
-                                        || (place == Place::Lessons
-                                            && MemoryLink::learned_in(&r)
-                                                != self.project.as_deref()),
-                                    text: r.content,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    Ok(Some(link)) if !summary => match &target {
+                        // An update: the one memory it is about, and nothing else.
+                        Some(t) => Ok(vec![t.clone()]),
+                        None => link.search_in(place, &stored, 3),
+                    }
+                    .map(|rows| {
+                        rows.into_iter()
+                            .map(|r| Neighbor {
+                                id: r.id.0,
+                                // A lesson learned in another project is not this session's to
+                                // replace: only the person's words would (as with their own).
+                                // Pinned is the person's choice too: not replaced on the model's say.
+                                protected: link.is_protected(&r)
+                                    || link.is_pinned(&r)
+                                    || (place == Place::Lessons
+                                        && MemoryLink::learned_in(&r) != self.project.as_deref()),
+                                text: r.content,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                     _ => Vec::new(),
                 };
                 let v = judge.decide(
@@ -312,6 +327,46 @@ impl MemoryPort for LinkPort {
                 saved: Saved::Waiting,
                 change: None,
             })
+    }
+}
+
+impl MemoryPort for LinkPort {
+    fn propose(
+        &self,
+        draft: &ProposalDraft,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        self.propose_to(draft, session, judging, None)
+    }
+
+    /// A new text for memory `id`: a proposal whose only neighbor is that memory, in its place.
+    /// Jev decides as always (replace it, already known, new, or doubtful); what the person holds
+    /// is replaced only with their own words; without Jev it waits for the person.
+    fn update(
+        &self,
+        id: i64,
+        draft: &ProposalDraft,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        let target = self
+            .reader()?
+            .get(MemoryId(id))
+            .ok()
+            // A fact only: a procedure needs the person (S-26), an episode is a record.
+            .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
+            .ok_or_else(|| NOT_READABLE.to_owned())?;
+        // What the model leaves out stays as it was.
+        let draft = ProposalDraft {
+            title: draft.title.clone().or_else(|| target.title.clone()),
+            category: draft
+                .category
+                .clone()
+                .or_else(|| target.category.map(|c| c.label().to_owned())),
+            ..draft.clone()
+        };
+        self.propose_to(&draft, session, judging, Some(target))
     }
 
     /// Pins a memory the session can read, because the person asked (Jev checks their words).

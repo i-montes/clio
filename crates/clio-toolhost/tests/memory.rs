@@ -150,6 +150,20 @@ impl MemoryPort for FakePort {
         self.change("pin", id, judging)
     }
 
+    fn update(
+        &self,
+        id: i64,
+        draft: &ProposalDraft,
+        session: &str,
+        judging: &Judging,
+    ) -> Result<Proposed, String> {
+        self.changes
+            .lock()
+            .unwrap()
+            .push(("update".into(), id, judging.clone()));
+        self.propose(draft, session, judging)
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
         *self.last_search.lock().unwrap() = Some((query.to_owned(), limit));
         self.behave()?;
@@ -1655,4 +1669,61 @@ fn a_memory_line_says_how_it_stands_to_others() {
         "{line}"
     );
     assert_eq!(body(&r).iter().filter(|l| l.starts_with("[m")).count(), 1);
+}
+
+// ---- memory_update ----
+
+// An update is a proposal about one memory: checked like one (text, title, category, secrets),
+// counted like one, and handed to the port with its id.
+#[test]
+fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = call(
+        &e,
+        "s",
+        "memory_update",
+        json!({"id": 7, "text": "usa  PostgreSQL\n16", "title": "Base", "category": "decision"}),
+    );
+    assert!(r.ok, "{r:?}");
+    let seen = port.changes.lock().unwrap().last().unwrap().clone();
+    assert_eq!((seen.0.as_str(), seen.1), ("update", 7));
+    let d = port.drafts.lock().unwrap().last().unwrap().clone();
+    assert_eq!(d.text, "usa PostgreSQL 16");
+    assert_eq!(d.kind, ProposalKind::Semantic);
+    let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
+    for args in [
+        json!({"id": 0, "text": "x"}),
+        json!({"text": "x"}),
+        json!({"id": 7, "text": format!("la clave {key}")}),
+        json!({"id": 7, "text": "x", "kind": "procedural"}),
+    ] {
+        assert!(!call(&e, "s", "memory_update", args.clone()).ok, "{args}");
+    }
+    assert_eq!(
+        port.drafts.lock().unwrap().len(),
+        1,
+        "nothing else reached the port"
+    );
+    // Counted among the proposals (per run): a tainted session has five in all.
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    call(&e, "t", "taint", json!({}));
+    for i in 0..5 {
+        assert!(
+            call(
+                &e,
+                "t",
+                "memory_update",
+                json!({"id": 7, "text": format!("t{i}")})
+            )
+            .ok
+        );
+    }
+    assert!(denied_by_budget(&call(
+        &e,
+        "t",
+        "memory_propose",
+        json!({"text": "x", "kind": "semantic"})
+    )));
 }
