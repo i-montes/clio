@@ -1745,3 +1745,37 @@ fn a_merge_from_another_project_lands_in_the_memories_project() {
         .unwrap();
     assert_eq!(beta.get(m.id).unwrap().place, "proyecto alfa");
 }
+
+/// A tiny stand-in model: a few hashed buckets, enough to give every text a vector.
+struct Buckets;
+impl clio_memory::Embedder for Buckets {
+    fn model_id(&self) -> &str {
+        "buckets"
+    }
+    fn dim(&self) -> usize {
+        8
+    }
+    fn embed(&self, texts: &[&str]) -> clio_memory::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let mut v = vec![0.0f32; 8];
+                for (i, b) in t.bytes().enumerate() {
+                    v[(usize::from(b) + i) % 8] += 1.0;
+                }
+                v
+            })
+            .collect())
+    }
+}
+
+// What the Pi chat saves gets its vector at once, and so does whatever was waiting in the queue.
+#[test]
+fn a_save_from_the_chat_computes_the_vectors_of_the_whole_queue() {
+    let w = world();
+    open(&w).remember("guardado sin modelo", None).unwrap();
+    let p = port(&w).with_model(EmbedModel::from_embedder(Arc::new(Buckets)));
+    ask(&p, "el despliegue usa compose", ProposalKind::Semantic).unwrap();
+    let stats = open(&w).engine().stats().unwrap();
+    assert_eq!(stats.vectors, 2, "{stats:?}");
+}

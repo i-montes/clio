@@ -19,8 +19,8 @@ model2vec = ["clio-memory/model2vec"]
 telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-# clio-memory v0.2.1, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "2b78db283eaea3013620409c3bd8914fcf11fdf6" }
+# clio-memory v0.2.2, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "93118e1f9159d40887102eefc180072c7a2aafcb" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }
