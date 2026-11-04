@@ -1779,3 +1779,101 @@ fn a_save_from_the_chat_computes_the_vectors_of_the_whole_queue() {
     let stats = open(&w).engine().stats().unwrap();
     assert_eq!(stats.vectors, 2, "{stats:?}");
 }
+
+fn related_to(w: &World, id: i64) -> Vec<i64> {
+    open(w)
+        .engine()
+        .relations(clio_memory::MemoryId(id))
+        .unwrap()
+        .iter()
+        .map(|r| {
+            if r.source.0 == id {
+                r.target.0
+            } else {
+                r.source.0
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_correction_in_clio_keeps_the_relations() {
+    let w = world();
+    let p = port(&w);
+    let a = ask(
+        &p,
+        "los respaldos se hacen con restic",
+        ProposalKind::Semantic,
+    )
+    .unwrap()
+    .id;
+    let b = ask(&p, "la base guarda los pedidos", ProposalKind::Semantic)
+        .unwrap()
+        .id;
+    open(&w)
+        .engine()
+        .relate(
+            clio_memory::MemoryId(a),
+            clio_memory::MemoryId(b),
+            clio_memory::Relation::Related,
+            "jev",
+            0.8,
+        )
+        .unwrap();
+    let new = MemoryPort::update(
+        &p,
+        a,
+        &draft(
+            "los respaldos se hacen con restic a un disco externo",
+            ProposalKind::Semantic,
+        ),
+        "sess-1",
+        &judging(false),
+    )
+    .unwrap()
+    .id;
+    assert!(
+        related_to(&w, new).contains(&b),
+        "{:?}",
+        related_to(&w, new)
+    );
+}
+
+#[test]
+fn a_merge_in_clio_carries_the_relations() {
+    let w = world();
+    let p = port(&w);
+    let [a, b, c] = [
+        "restic respalda la base",
+        "restaurar con restic",
+        "el perro se llama Toby",
+    ]
+    .map(|t| ask(&p, t, ProposalKind::Semantic).unwrap().id);
+    open(&w)
+        .engine()
+        .relate(
+            clio_memory::MemoryId(a),
+            clio_memory::MemoryId(c),
+            clio_memory::Relation::Related,
+            "jev",
+            0.8,
+        )
+        .unwrap();
+    let merged = MemoryPort::consolidate(
+        &p,
+        &[a, b],
+        &draft(
+            "restic respalda la base y con él se restaura",
+            ProposalKind::Semantic,
+        ),
+        "sess-1",
+        &judging(false),
+    )
+    .unwrap()
+    .id;
+    assert!(
+        related_to(&w, merged).contains(&c),
+        "{:?}",
+        related_to(&w, merged)
+    );
+}

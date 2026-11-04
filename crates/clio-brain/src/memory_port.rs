@@ -14,7 +14,8 @@ use clio_memory::{
     Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, State,
 };
 use clio_toolhost::{
-    Found, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind, Proposed, Saved,
+    Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft, ProposalKind, Proposed,
+    Saved,
 };
 
 use crate::memory_judge::{Guard, MemoryJudge};
@@ -208,7 +209,12 @@ impl LinkPort {
             let _ = link.relate_judged(o.memory, other, rel, sure);
         }
         embed_now(&link);
+        let similar = match o.kind {
+            OpKind::Noop => None,
+            _ => link.near_duplicate(o.memory).as_ref().map(near_of),
+        };
         Ok(Proposed {
+            similar,
             id: o.memory.0,
             saved: match o.kind {
                 OpKind::Noop => Saved::Known,
@@ -304,6 +310,10 @@ impl MemoryPort for LinkPort {
         if o.kind != OpKind::Add || o.state != State::Active || ids.contains(&o.memory.0) {
             return Err("la unión no dio una memoria nueva y activa: no se olvidó nada".into());
         }
+        for id in ids {
+            // Best effort: the merge is made; a relation that does not follow is a note lost.
+            let _ = link.copy_relations_as_agent(MemoryId(*id), o.memory);
+        }
         for (forgotten, id) in ids.iter().enumerate() {
             if let Err(why) = link.forget_as_agent(MemoryId(*id)) {
                 return Err(format!(
@@ -319,6 +329,7 @@ impl MemoryPort for LinkPort {
             id: o.memory.0,
             saved: Saved::Active,
             change: None,
+            similar: None,
         })
     }
 
@@ -351,7 +362,7 @@ impl MemoryPort for LinkPort {
                 .search_all(query, limit)
                 .map_err(|_| "la búsqueda en la memoria falló".to_owned())?;
             Ok(Found {
-                items: rows.iter().map(|r| item(link, r)).collect(),
+                items: rows.iter().map(|r| item(link, r, NEAR_SEARCH)).collect(),
                 abstained,
                 note: (!link.has_embeddings()).then(|| NO_VECTORS.to_owned()),
             })
@@ -363,7 +374,7 @@ impl MemoryPort for LinkPort {
             // `MemoryLink::get` already refuses another scope; its text is dropped with the rest.
             match link.get(MemoryId(id)) {
                 Ok(row) if row.state == State::Active && link.place_of(row.scope).is_some() => {
-                    Ok(item(link, &row))
+                    Ok(item(link, &row, NEAR_GET))
                 }
                 _ => Err(NOT_READABLE.into()),
             }
@@ -383,7 +394,7 @@ impl MemoryPort for LinkPort {
             Ok(rows
                 .iter()
                 .filter(|r| link.place_of(r.scope).is_some())
-                .map(|r| item(link, r))
+                .map(|r| item(link, r, 0))
                 .collect())
         })
     }
@@ -426,7 +437,7 @@ impl MemoryPort for LinkPort {
                     out.push(r);
                 }
             }
-            Ok(out.iter().map(|r| item(link, r)).collect())
+            Ok(out.iter().map(|r| item(link, r, 0)).collect())
         })
     }
 }
@@ -439,15 +450,32 @@ fn embed_now(link: &MemoryLink) {
     }
 }
 
-fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
+/// Neighbors given with a memory read in full, and with each search result (only their ids show).
+const NEAR_GET: usize = 5;
+const NEAR_SEARCH: usize = 3;
+
+fn origin_of(row: &MemoryRow) -> Origin {
+    match row.origin {
+        Written::User => Origin::Person,
+        Written::Agent => Origin::Agent,
+        Written::External => Origin::External,
+    }
+}
+
+fn near_of(row: &MemoryRow) -> Near {
+    Near {
+        id: row.id.0,
+        origin: origin_of(row),
+        preview: clio_memory::agent::preview(row),
+    }
+}
+
+/// `near`: how many of its neighbors go with it (0: none).
+fn item(link: &MemoryLink, row: &MemoryRow, near: usize) -> MemoryItem {
     MemoryItem {
         id: row.id.0,
         kind: kind_label(row.kind).to_owned(),
-        origin: match row.origin {
-            Written::User => Origin::Person,
-            Written::Agent => Origin::Agent,
-            Written::External => Origin::External,
-        },
+        origin: origin_of(row),
         date: civil_date(row.valid_from),
         text: row.content.clone(),
         title: row.title.clone(),
@@ -460,6 +488,11 @@ fn item(link: &MemoryLink, row: &MemoryRow) -> MemoryItem {
                 n.insert(0, "revisar: pasó su plazo, puede estar desfasado".into());
             }
             n
+        },
+        near: if near > 0 {
+            link.neighbors(row, near).iter().map(near_of).collect()
+        } else {
+            Vec::new()
         },
     }
 }

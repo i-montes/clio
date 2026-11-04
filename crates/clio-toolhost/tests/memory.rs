@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
 use clio_toolhost::{
-    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind,
-    Proposed, Request, Response, Saved, ToolHost,
+    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft,
+    ProposalKind, Proposed, Request, Response, Saved, ToolHost,
 };
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ struct FakePort {
     drafts: Mutex<Vec<ProposalDraft>>,
     /// What the fake memory says became of a proposal.
     saved: Mutex<Saved>,
+    /// The memory a proposal came out nearly identical to, if any.
+    similar: Mutex<Option<Near>>,
     /// Changes asked for: the tool, the number and what the port was told to judge it by.
     changes: Mutex<Vec<(String, i64, Judging)>>,
 }
@@ -72,6 +74,7 @@ impl FakePort {
             judging: Mutex::new(Vec::new()),
             drafts: Mutex::new(Vec::new()),
             saved: Mutex::new(Saved::Active),
+            similar: Mutex::new(None),
             changes: Mutex::new(Vec::new()),
         })
     }
@@ -120,6 +123,7 @@ impl MemoryPort for FakePort {
             id: 900 + self.calls() as i64,
             saved: *self.saved.lock().unwrap(),
             change: Some(41),
+            similar: self.similar.lock().unwrap().clone(),
         })
     }
 
@@ -1685,5 +1689,147 @@ fn a_proposal_may_be_about_who_the_person_is() {
     assert_eq!(
         port.drafts.lock().unwrap()[0].category.as_deref(),
         Some("profile")
+    );
+}
+
+fn near(id: i64, origin: Origin, preview: &str) -> Near {
+    Near {
+        id,
+        origin,
+        preview: preview.into(),
+    }
+}
+
+fn with_near(mut it: MemoryItem, near: Vec<Near>) -> MemoryItem {
+    it.near = near;
+    it
+}
+
+#[test]
+fn memory_get_shows_the_neighbors_line() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "los respaldos se hacen con restic"),
+            vec![
+                near(2, Origin::Person, "restaurar la base"),
+                near(3, Origin::Person, "la base guarda los pedidos"),
+            ],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    let g = call(&e, "s", "memory_get", json!({ "id": 1 }));
+    assert_eq!(
+        body(&g),
+        [
+            "[m1] hecho · persona · 2026-10-30: los respaldos se hacen con restic",
+            "Cerca: m2 «restaurar la base» · m3 «la base guarda los pedidos»",
+        ]
+    );
+}
+
+#[test]
+fn an_external_neighbor_is_marked() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(7, Origin::External, "según una web")],
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(
+        body(&g).contains(&"Cerca: m7 (externo) «según una web»"),
+        "{g:?}"
+    );
+}
+
+#[test]
+fn a_neighbor_preview_is_cleaned_and_on_one_line() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(2, Origin::Person, "hola\u{1b}[31m rojo\nlinea")],
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(!g.content.contains('\u{1b}'), "{g:?}");
+    let lines = body(&g);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].starts_with("Cerca: m2 «") && lines[1].contains("rojo"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn search_lines_carry_three_neighbor_ids() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            (2..=6).map(|i| near(i, Origin::Person, "x")).collect(),
+        )],
+        Mode::Items,
+    );
+    let r = search(&env(&port), "s", "uno");
+    assert_eq!(
+        body(&r),
+        ["[m1] hecho · persona · 2026-10-30: uno · cerca: m2, m3, m4"]
+    );
+}
+
+#[test]
+fn the_answer_cap_holds_with_neighbors() {
+    let long = "palabra larga de relleno ".repeat(64);
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, &long),
+            (2..=6)
+                .map(|i| near(i, Origin::Person, &"título muy largo ".repeat(4)))
+                .collect(),
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(g.content.len() <= 4096, "{}", g.content.len());
+    assert!(g.content.contains("palabra larga de relleno"));
+}
+
+// S-05: what a neighbor says is returned memory too.
+#[test]
+fn a_neighbor_that_is_not_the_persons_taints_the_session() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "dicho por la persona"),
+            vec![near(2, Origin::Agent, "escrito por un agente")],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    assert!(call(&e, "s", "memory_get", json!({ "id": 1 })).tainted);
+    assert!(e.host.is_tainted("s"));
+}
+
+#[test]
+fn a_near_duplicate_save_says_so() {
+    let port = FakePort::new(vec![], Mode::Items);
+    *port.similar.lock().unwrap() = Some(near(5, Origin::Agent, "postgres guarda los pedidos"));
+    let r = call(
+        &env(&port),
+        "s",
+        "memory_save",
+        json!({ "text": "postgres ya no; ahora mysql", "kind": "semantic" }),
+    );
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.content.contains(
+            "muy parecida a m5: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m5 la muestra)"
+        ),
+        "{r:?}"
+    );
+    assert!(
+        !r.content.contains("pedidos"),
+        "no memory text outside the data frame"
     );
 }

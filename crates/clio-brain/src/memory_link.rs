@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use clio_memory::{
     ActorId, ActorInfo, ActorKind, Category, ContextOpts, Engine, Error, MemoryId, MemoryRow,
-    MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation, ScopeId,
-    SearchOpts, Signal, State, SystemClock,
+    MemoryType, OpId, OpKind, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, Relation,
+    ScopeId, SearchOpts, Signal, State, SystemClock,
 };
 use clio_vault::Scrubber;
 
@@ -774,7 +774,49 @@ impl MemoryLink {
         // In the old one's own scope (another project's, too) and of its kind.
         p.scope = row.scope;
         p.kind = row.kind;
-        self.engine.replace(old, p).map_err(|e| explain(&e))
+        let o = self.engine.replace(old, p).map_err(|e| explain(&e))?;
+        if o.kind == OpKind::Update {
+            // Best effort: the correction is made; a relation that does not follow is a note lost.
+            let _ = self.engine.copy_relations(old, o.memory);
+        }
+        Ok(o)
+    }
+
+    /// Copies the judged relations of `from` to `to` (a merge's originals to the merge).
+    pub fn copy_relations_as_agent(&self, from: MemoryId, to: MemoryId) -> Res<usize> {
+        self.need_write()?;
+        self.engine
+            .copy_relations(from, to)
+            .map_err(|e| explain(&e))
+    }
+
+    /// The memories nearest to `row` that this link may read, best first (at most `k`): what the
+    /// model can walk to from it. Empty when they cannot be found.
+    pub fn neighbors(&self, row: &MemoryRow, k: usize) -> Vec<MemoryRow> {
+        self.engine
+            .neighbors(row.id, &self.reading_scopes(), k * 2)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(r, _)| self.get(r.id).ok())
+            .filter(|r| r.state == State::Active)
+            .take(k)
+            .collect()
+    }
+
+    /// The memory this link may read that is nearly the same as `id` (by meaning, from the
+    /// model's floor); `None` without a model, a floor or a vector of `id`.
+    pub fn near_duplicate(&self, id: MemoryId) -> Option<MemoryRow> {
+        let floor = clio_memory::agent::near_duplicate_floor(self.engine.model_id()?)?;
+        if !self.engine.has_vector(id).unwrap_or(false) {
+            return None;
+        }
+        self.engine
+            .neighbors(id, &self.reading_scopes(), 3)
+            .ok()?
+            .into_iter()
+            .find(|(r, _)| self.get(r.id).is_ok_and(|r| r.state == State::Active))
+            .filter(|(_, s)| *s >= floor)
+            .map(|(r, _)| r)
     }
 
     /// Computes the vectors of everything waiting for one, the whole queue and not only what this

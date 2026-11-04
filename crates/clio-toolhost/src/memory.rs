@@ -129,6 +129,11 @@ const MAX_BUDGET_BYTES: u64 = 24 * 1024;
 const MIN_ROOM: u64 = 1024;
 const MAX_ERROR_CHARS: usize = 300;
 const MAX_NOTE_CHARS: usize = 200;
+/// Neighbors shown under a memory read in full, ids of neighbors after each search result, and
+/// how long a neighbor's preview is (the same as clio-memory's tools).
+const NEAR_GET: usize = 5;
+const NEAR_SEARCH: usize = 3;
+const PREVIEW_CHARS: usize = 60;
 /// How long the memory has to answer before the call fails.
 pub(crate) const MEMORY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -164,6 +169,16 @@ pub struct MemoryItem {
     pub place: String,
     /// How it stands to other memories, as Jev judged it or as it replaced one: `contradice a m12`.
     pub notes: Vec<String>,
+    /// The memories nearest to it, best first: what the model can walk to from it.
+    pub near: Vec<Near>,
+}
+
+/// A memory near another one: its number, who wrote it and a few words of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Near {
+    pub id: i64,
+    pub origin: Origin,
+    pub preview: String,
 }
 
 impl MemoryItem {
@@ -179,6 +194,7 @@ impl MemoryItem {
             category: None,
             place: String::new(),
             notes: Vec::new(),
+            near: Vec::new(),
         }
     }
 }
@@ -222,12 +238,14 @@ pub enum Saved {
     Known,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposed {
     pub id: i64,
     pub saved: Saved,
     /// The change (operation) the agent made, so it can undo it (`memory_revert`).
     pub change: Option<i64>,
+    /// An existing memory the saved one is nearly identical to: the model may correct instead.
+    pub similar: Option<Near>,
 }
 
 /// What the tool host tells the port about the call: whether the session read anything hostile
@@ -913,7 +931,7 @@ impl ToolHost {
                     Saved::Known => ("already known: nothing was added", "known"),
                 };
                 // The change number is for undoing it: `memory_revert`.
-                let content = match done.change {
+                let mut content = match done.change {
                     Some(c) if matches!(done.saved, Saved::Active | Saved::Replaced) => {
                         format!(
                             "{content} (m{}, change {c}: memory_revert undoes it)",
@@ -922,6 +940,13 @@ impl ToolHost {
                     }
                     _ => content.to_owned(),
                 };
+                // Only its number: this answer is not framed as data, so no memory text goes in it.
+                if let (Some(twin), false) = (&done.similar, done.saved == Saved::Known) {
+                    content.push_str(&format!(
+                        " · muy parecida a m{0}: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m{0} la muestra)",
+                        twin.id
+                    ));
+                }
                 Response {
                     id: req.id.clone(),
                     ok: true,
@@ -1033,8 +1058,13 @@ impl ToolHost {
             Err(why) => return self.memory_failed(req, out, &why),
         };
 
-        // The session is marked for what the memory returned, shown or not.
-        if found.items.iter().any(|i| i.origin != Origin::Person) {
+        // The session is marked for what the memory returned, shown or not: a memory read in full
+        // also returns its neighbors' words (a search, only their numbers).
+        let previews = req.tool == "memory_get";
+        if found.items.iter().any(|i| {
+            i.origin != Origin::Person
+                || (previews && i.near.iter().any(|n| n.origin != Origin::Person))
+        }) {
             self.mark(&req.session, "memory");
             facts.marked = true;
         }
@@ -1106,7 +1136,16 @@ impl ToolHost {
                 &one_line(&cleaned),
                 max_line.saturating_sub(head.chars().count()),
             );
-            let line = format!("{head}{text}");
+            let mut line = format!("{head}{text}");
+            if !previews && !it.near.is_empty() {
+                let near: Vec<String> = it
+                    .near
+                    .iter()
+                    .take(NEAR_SEARCH)
+                    .map(|n| format!("m{}", n.id))
+                    .collect();
+                line.push_str(&format!(" · cerca: {}", near.join(", ")));
+            }
             if used + line.len() + 1 > room {
                 break;
             }
@@ -1115,6 +1154,34 @@ impl ToolHost {
             masked += count_masks(&cleaned).saturating_sub(count_masks(&body));
             ids.push(it.id);
             lines.push(line);
+            if previews {
+                // After the memory, in what room is left: fewer neighbors, never less of it.
+                let named: Vec<String> = it
+                    .near
+                    .iter()
+                    .take(NEAR_GET)
+                    .map(|n| {
+                        let outside = if n.origin == Origin::External {
+                            " (externo)"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "m{}{outside} «{}»",
+                            n.id,
+                            self.tidy(&n.preview, PREVIEW_CHARS)
+                        )
+                    })
+                    .collect();
+                for k in (1..=named.len()).rev() {
+                    let near_line = format!("Cerca: {}", named[..k].join(" · "));
+                    if used + near_line.len() < room {
+                        used += near_line.len() + 1;
+                        lines.push(near_line);
+                        break;
+                    }
+                }
+            }
         }
         let left = found.items.len() - ids.len();
         facts.ids.clone_from(&ids);
