@@ -13,6 +13,6 @@ pub mod catalog;
 pub mod client;
 pub mod wire;
 
-pub use catalog::{ToolHint, parse_catalog, suggested, tool_questions};
+pub use catalog::{THRESHOLD, ToolHint, parse_catalog, suggested, tool_questions};
 pub use client::{Config, Jev, JevError, Process, Transport};
 pub use wire::{Answer, Answers, Clean, Question, Questions};

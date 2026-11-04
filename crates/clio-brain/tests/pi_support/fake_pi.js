@@ -31,7 +31,7 @@ const settle = (aborted) => { out({ type: "agent_end", messages: [], willRetry: 
 
 // The brain puts an envelope (the time) in front of what the person typed; the scripted commands
 // below are matched on what was typed, and `echo` shows what Pi really received.
-const ENVELOPE = /^<clio-contexto>\nhora: [^\n]*\n<\/clio-contexto>\n\n/;
+const ENVELOPE = /^<clio-contexto>\n[\s\S]*?<\/clio-contexto>\n\n/;
 function prompt(id, raw) {
   const msg = raw.replace(ENVELOPE, "");
   if (msg === "echo") {

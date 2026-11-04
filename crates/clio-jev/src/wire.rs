@@ -31,6 +31,31 @@ impl Clean {
         Self(walk(state, scrub))
     }
 
+    /// Like [`Clean::new`] for a scrubber that can fail (the vault is a separate process): if it
+    /// fails for any string, there is no `Clean` and so no call: the text does not leave.
+    pub fn try_new(
+        state: Value,
+        scrub: &dyn Fn(&str) -> Result<String, String>,
+    ) -> Result<Self, String> {
+        fn walk(v: Value, scrub: &dyn Fn(&str) -> Result<String, String>) -> Result<Value, String> {
+            Ok(match v {
+                Value::String(s) => Value::String(scrub(&s)?),
+                Value::Array(a) => Value::Array(
+                    a.into_iter()
+                        .map(|x| walk(x, scrub))
+                        .collect::<Result<_, _>>()?,
+                ),
+                Value::Object(o) => Value::Object(
+                    o.into_iter()
+                        .map(|(k, x)| Ok((k, walk(x, scrub)?)))
+                        .collect::<Result<_, String>>()?,
+                ),
+                other => other,
+            })
+        }
+        walk(state, scrub).map(Self)
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.0
     }
@@ -291,6 +316,27 @@ mod tests {
         assert_eq!(
             c.as_value(),
             &json!({"a": "tengo ***", "b": ["x ***", {"c": "***"}], "n": 3, "t": true})
+        );
+    }
+
+    #[test]
+    fn a_scrubber_that_fails_gives_no_clean_state() {
+        let state = json!({"a": "uno", "b": ["dos", {"c": "tres"}]});
+        let ok = Clean::try_new(state.clone(), &|s| Ok(s.to_uppercase())).unwrap();
+        assert_eq!(
+            ok.as_value(),
+            &json!({"a": "UNO", "b": ["DOS", {"c": "TRES"}]})
+        );
+        let nested_fail = |s: &str| {
+            if s == "tres" {
+                Err("vault down".into())
+            } else {
+                Ok(s.to_owned())
+            }
+        };
+        assert_eq!(
+            Clean::try_new(state, &nested_fail),
+            Err("vault down".into())
         );
     }
 

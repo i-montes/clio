@@ -10,6 +10,7 @@ pub mod diff;
 pub mod doctor;
 pub mod home;
 pub mod jail;
+pub mod jev;
 pub mod memory;
 pub mod pi;
 pub mod runs;

@@ -489,6 +489,9 @@ impl ToolHost {
         if req.tool == "filter" {
             return self.filter(&req, &map, tainted);
         }
+        if req.tool == "taint" {
+            return self.taint(&req);
+        }
         if map
             .get("content")
             .and_then(Value::as_str)
@@ -703,6 +706,25 @@ impl ToolHost {
 
     /// `filter`: no effect, no path. Cleans and scrubs texts and wraps the ones that ask for it
     /// as external data. `{"items": [{"text": "...", "wrap": "file" | "tool-result"}]}`.
+    /// The brain marks a session: it put into the model's message something the person did not
+    /// write (a memory of the agent or from outside). Like every mark, it only ever goes up.
+    fn taint(&self, req: &Request) -> Response {
+        self.mark(&req.session, "memory");
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: String::new(),
+            data: Value::Null,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "taint".into(),
+                reason: "marking a session has no effect on the machine".into(),
+            },
+            tainted: true,
+            external: false,
+        }
+    }
+
     fn filter(&self, req: &Request, args: &Map<String, Value>, tainted: bool) -> Response {
         let bad = |why: &str| self.refuse(&req.id, "protocol", why.into(), tainted);
         let Some(items) = args.get("items").and_then(Value::as_array) else {

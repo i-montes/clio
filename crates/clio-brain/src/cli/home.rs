@@ -89,11 +89,46 @@ pub struct WorkspaceLimits {
     pub max_bytes: u64,
 }
 
+/// Jev (TypeSafe System One), optional: off until the person turns it on, and everything works
+/// without it (spec `docs/specs/2026-11-03-jev-design.md`). It needs the secret `jev` in the vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JevCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Put the memories that matter in front of each message (Jev picks them; without Jev the
+    /// memory's own rules do).
+    #[serde(default = "yes")]
+    pub memory: bool,
+    /// Suggest tools (only with Jev).
+    #[serde(default = "yes")]
+    pub tool_hints: bool,
+    /// Only for tests: a loopback URL in place of `https://api.typesafe.ai`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for JevCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            memory: true,
+            tool_hints: true,
+            base_url: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model: ModelCfg,
     pub limits: Limits,
     pub workspace: WorkspaceLimits,
+    #[serde(default)]
+    pub jev: JevCfg,
 }
 
 impl Config {
@@ -117,6 +152,7 @@ impl Config {
                 max_files: 5000,
                 max_bytes: 200 * 1024 * 1024,
             },
+            jev: JevCfg::default(),
         }
     }
 

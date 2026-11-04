@@ -145,6 +145,12 @@ Un lector independiente leyó este documento y señaló ocho puntos; cada uno qu
 - Se descartó el modelo local por su costo de GPU y RAM.
 - Jev viene apagado; el juicio va antes del candado; los últimos 5 mensajes de la persona son la ventana de confirmación; el límite de ritmo es la cuota del motor (60 por hora por actor). Detalles en «Cómo se construye».
 
+## Decisiones de la persona (2026-11-03)
+
+1. **Procedimientos:** los aprueba Jev como todo lo demás («todo lo debe aprobar Jev»). El umbral es el alto y una sesión contaminada lo sube más; sigue valiendo REVIEW ante la duda.
+2. **Retención:** acepta que TypeSafe no documente cuánto conserva de lo que recibe.
+3. Trabajo autónomo: las entregas 2 a 4 se suben como PR sin esperar su revisión; las fusiones las decide ella.
+
 ## Preguntas abiertas (solo la persona puede responder)
 
 1. **Procedimientos** (qué hacer y cómo): ¿Jev puede aprobarlos solo, o los sigue aprobando la persona (S-26)?
