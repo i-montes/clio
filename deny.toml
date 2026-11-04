@@ -27,3 +27,5 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# The memory engine lives in its own repository and is pinned by tag (clio-brain/Cargo.toml).
+allow-git = ["https://github.com/i-montes/clio-memory"]

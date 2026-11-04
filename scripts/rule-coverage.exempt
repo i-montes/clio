@@ -26,3 +26,4 @@ S-51  autonomy, scheduled jobs and standing policies are not built yet (crates/c
 S-52  autonomy, scheduled jobs and standing policies are not built yet (crates/clio-policy is a placeholder)
 S-53  Clio does not change itself yet; the CODEOWNERS review of protected paths is what holds it
 S-55  there is one task at a time; interrupting or reordering tasks is not built yet
+S-46  tested in i-montes/clio-memory (tests/telemetry.rs: no span or event carries memory text), the engine's own CI; Clio pins it by tag

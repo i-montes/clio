@@ -12,4 +12,4 @@ Respondemos al aviso en privado y corregimos antes de publicar nada. Cada vulner
 
 ## Qué cubre
 
-Clio (cerebro, vault, pasarela, nodo y servicio de herramientas), clio-memory y clio-trace. `clio-network` y la PWA siguen siendo marcadores de posición. El modelo de amenazas (qué se protege y de qué) está en [`docs/threat-model.md`](docs/threat-model.md) y las reglas obligatorias en [`docs/security.md`](docs/security.md).
+Clio (cerebro, vault, pasarela, nodo y servicio de herramientas), clio-memory y clio-trace. El motor de memoria vive en su propio repositorio, [i-montes/clio-memory](https://github.com/i-montes/clio-memory): un fallo que esté solo ahí se avisa allí (también vale avisar aquí). `clio-network` y la PWA siguen siendo marcadores de posición. El modelo de amenazas (qué se protege y de qué) está en [`docs/threat-model.md`](docs/threat-model.md) y las reglas obligatorias en [`docs/security.md`](docs/security.md).

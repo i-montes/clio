@@ -4,7 +4,7 @@
 # Pinned to one Hugging Face commit; every file is checked against its sha256 before it is used.
 #
 # Destination: $CLIO_MODEL, or ~/.cache/clio-models/potion-multilingual-128M (the default of
-# scripts/memory-dev.sh).
+# Clio and of clio-memory).
 set -euo pipefail
 
 [ "$(uname -s)" = Linux ] || { echo "this script is for Linux" >&2; exit 1; }

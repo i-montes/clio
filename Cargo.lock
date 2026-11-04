@@ -245,7 +245,6 @@ dependencies = [
  "sha2",
  "signal-hook",
  "tempfile",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -313,7 +312,8 @@ dependencies = [
 
 [[package]]
 name = "clio-memory"
-version = "0.1.0"
+version = "0.2.1"
+source = "git+https://github.com/i-montes/clio-memory?rev=2b78db283eaea3013620409c3bd8914fcf11fdf6#2b78db283eaea3013620409c3bd8914fcf11fdf6"
 dependencies = [
  "model2vec-rs",
  "regex",
@@ -322,10 +322,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
  "thiserror",
  "tracing",
- "tracing-core",
  "unicode-normalization",
 ]
 
@@ -1915,7 +1913,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
- "valuable",
 ]
 
 [[package]]
@@ -1986,12 +1983,6 @@ dependencies = [
  "crypto-common",
  "ctutils",
 ]
-
-[[package]]
-name = "valuable"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"

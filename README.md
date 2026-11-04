@@ -25,7 +25,7 @@ just audit   # cargo-deny and cargo-audit (S-41)
 
 ## Layout
 
-- `crates/clio-memory`: generic, publishable on its own; depends on no other Clio crate.
+- The memory engine is [clio-memory](https://github.com/i-montes/clio-memory), in its own repository: Clio depends on it pinned by the commit of a release tag (`crates/clio-brain/Cargo.toml`); to move up, put the new tag's commit there (the memory file's schema only changes backward-compatibly). The same file, `~/.local/share/clio/memory.db`, is shared with any agent that uses clio-memory, such as Claude Code (`clio-memory setup claude-code`).
 - `crates/clio-brain` (the `clio` binary), `clio-vault`, `clio-gateway`, `clio-node`, `clio-toolhost`, `clio-contract`, `clio-triage`, `clio-trace`, `clio-core`: the working parts of Clio.
 - `crates/clio-network`, `clio-policy`, `clio-diagnosis`, `apps/pwa`, `testing/fake-nodes`: placeholders for later phases.
 - `adapters/models/openai_compat.py`: the model adapter `clio run` calls (OpenAI-compatible API, key from `OPENCODE_API_KEY` or `~/.config/clio/opencode-api-key`, which must not be readable by group or others).

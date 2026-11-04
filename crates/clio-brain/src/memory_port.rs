@@ -259,24 +259,22 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        let place = {
+        // All of one scope (one project, not just «a project»), and the merge is saved there.
+        let first = {
             let link = self.reader()?;
-            let mut place = None;
+            let mut first: Option<MemoryRow> = None;
             for id in ids {
                 let r = link
                     .get(MemoryId(*id))
                     .ok()
                     .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
                     .ok_or_else(|| NOT_READABLE.to_owned())?;
-                let here = link
-                    .place_of(r.scope)
-                    .ok_or_else(|| NOT_READABLE.to_owned())?;
-                if place.is_some_and(|p| p != here) {
+                if first.as_ref().is_some_and(|f| f.scope != r.scope) {
                     return Err("solo se unen memorias del mismo sitio".into());
                 }
-                place = Some(here);
+                first.get_or_insert(r);
             }
-            place.ok_or_else(|| NOT_READABLE.to_owned())?
+            first.ok_or_else(|| NOT_READABLE.to_owned())?
         };
         let mut merged = Draft {
             text: draft.text.clone(),
@@ -287,13 +285,13 @@ impl MemoryPort for LinkPort {
         merged.category = self.guard(&merged, judging)?;
         let link = self.writer()?;
         for id in ids {
-            // Checked again under the writer: still active, still here.
+            // Checked again under the writer: still active, still in that scope.
             link.get(MemoryId(*id))
                 .ok()
-                .filter(|r| r.state == State::Active && link.place_of(r.scope) == Some(place))
+                .filter(|r| r.state == State::Active && r.scope == first.scope)
                 .ok_or_else(|| NOT_READABLE.to_owned())?;
         }
-        let o = link.save_as_agent(&merged, session, place, judging.tainted)?;
+        let o = link.save_beside(&merged, session, &first, judging.tainted)?;
         // A new memory, active, not one of them (the engine answers a repeat with the existing
         // one): otherwise nothing is forgotten.
         if o.kind != OpKind::Add || o.state != State::Active || ids.contains(&o.memory.0) {

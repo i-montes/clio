@@ -15,10 +15,12 @@ path = "src/main.rs"
 # memory still works, by text only.
 default = ["model2vec"]
 model2vec = ["clio-memory/model2vec"]
+# The memory engine's tracing spans (off by default, as before).
+telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-clio-memory = { path = "../clio-memory" }
-unicode-normalization = "0.1.26"
+# clio-memory v0.2.1, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "2b78db283eaea3013620409c3bd8914fcf11fdf6" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }

@@ -395,7 +395,7 @@ Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a pro
 
 ### Cerrar lo que quedó abierto de clio-memory v1
 
-- [ ] **300** Confirmar que el nombre `clio-memory` está libre en crates.io y en GitHub
+- [x] **300** El nombre `clio-memory`: el repositorio es https://github.com/i-montes/clio-memory (crates.io queda sin publicar)
 - [x] **301** Documentar `remember` en el spec (§8) y en el README
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
 - [ ] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones)
