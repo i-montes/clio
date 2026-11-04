@@ -1,6 +1,6 @@
 # Clio frente a Engram, punto por punto
 
-Comparación hecha el 2026-11-04 contra `DOCS.md` y `README.md` de [Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram) (las 27 herramientas MCP y todos los subcomandos de la CLI, leídos completos), sobre las ramas `feat/memory-*` (PRs #29 a #38). «Persona» marca lo que en Clio solo hace la persona por decisión de seguridad (S-25, S-65): el modelo no puede borrar, fusionar sin permiso ni tocar lo que ella escribió. Cada fila nombra dónde está y qué lo prueba.
+Comparación hecha el 2026-11-04 contra `DOCS.md` (sus 27 encabezados `### mem_*`, comprobados literalmente con `grep` sobre el archivo descargado) y `README.md` de [Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram) (las 27 herramientas MCP y todos los subcomandos de la CLI, leídos completos), sobre las ramas `feat/memory-*` (PRs #29 a #39). «Persona» marca lo que en Clio solo hace la persona por decisión de seguridad (S-25, S-65): el modelo no puede borrar, fusionar sin permiso ni tocar lo que ella escribió. Cada fila nombra dónde está y qué lo prueba.
 
 ## Herramientas MCP de Engram
 
@@ -20,9 +20,9 @@ Comparación hecha el 2026-11-04 contra `DOCS.md` y `README.md` de [Gentleman-Pr
 | `mem_timeline` | `memory_timeline` | #30; `the_timeline_is_the_session_*` |
 | `mem_get_observation` (+ versiones) | `memory_get`; versiones: `clio memory history ID` (persona) | #38 |
 | `mem_session_summary` | `memory_session_summary` | #31 |
-| `mem_session_start` / `_end` / `_finalize` | El cerebro abre y cierra la sesión: pide el resumen al compactar y al cerrar, y el servicio solo deja guardarlo en el cierre | #31; `closing_a_session_*` |
+| `mem_session_start` / `mem_session_end` / `mem_session_finalize` | El cerebro abre y cierra la sesión: pide el resumen al compactar y al cerrar, y el servicio solo deja guardarlo en el cierre | #31; `closing_a_session_*` |
 | `mem_capture_passive` | No: lo cubren el resumen de sesión y las propuestas con su forma `Qué · Por qué · Dónde · Aprendido` | — |
-| `mem_merge_projects` | No (pendiente): el motor no tiene una operación que mueva memorias de un sitio a otro; hace falta diseñarla en el registro para que se pueda deshacer | — |
+| `mem_merge_projects` | `clio memory projects merge DE EN` (persona): una operación `Move` del registro por memoria, deshacible con `revert` | #39; `a_person_moves_a_memory_*`, `the_person_merges_*` |
 | `mem_current_project` | `memory_current_project` (MCP) y `clio memory project` | #33, #35 |
 | `mem_list_projects` | `clio memory projects` (persona) | #34 |
 | `mem_doctor` | `clio doctor` (incluye la memoria; nunca la escribe) | #34 |
@@ -42,13 +42,13 @@ Comparación hecha el 2026-11-04 contra `DOCS.md` y `README.md` de [Gentleman-Pr
 | `search` / `save` | `clio memory search` / `clio memory remember` |
 | `delete <id>` | `clio memory archive` (reversible) y `clio memory purge` (para siempre) |
 | `delete session` / `delete prompt` | No aplica: no hay sesiones ni mensajes guardados aparte |
-| `delete project` | No hay una orden en bloque (pendiente; se archiva o purga por recuerdo) |
+| `delete project` | `clio memory projects archive NOMBRE` (archiva todo, reversible; borrar para siempre sigue siendo por recuerdo con `purge`) |
 | `timeline` / `context` / `stats` | `clio memory timeline` / `clio memory context` / `clio memory stats` |
 | `export` / `import` | `clio memory export` / `clio memory import` (a una memoria vacía) |
 | `sync`, `cloud …`, `obsidian-export` | No: la persona decidió no sincronizar por ahora |
 | `conflicts list/show/…` | `clio memory conflicts` (y `show` dice las relaciones) |
 | `doctor` | `clio doctor` |
-| `projects list/alias/merge/…` | `list`: `clio memory projects`; `alias`/`merge`: no (pendiente, como `mem_merge_projects`) |
+| `projects list/alias/merge/…` | `clio memory projects` y `projects merge` (también renombra: unir con un nombre nuevo); `alias` lo cubre `.clio-project` |
 | `version` | `clio --version` |
 
 ## Lo que tiene Clio y Engram no
@@ -57,4 +57,4 @@ Vectores e híbrido, registro de operaciones con REVERT y reconstrucción, PURGE
 
 ## Lo pendiente
 
-Fusionar o renombrar proyectos (`mem_merge_projects`, `projects alias/merge`) y borrar un proyecto entero: necesitan una operación nueva del registro (mover memorias de sitio, deshacible) y su diseño. Todo lo demás está hecho o lo descartó la persona.
+Nada de lo que la persona no descartó. Lo descartado: sincronizar entre máquinas, la nube, Obsidian, guardar sus mensajes (`mem_save_prompt`, `mem_search_prompts`) y la API HTTP (eligió MCP). Distinto a propósito: borrar, fusionar y fijar desde el agente piden las palabras de la persona y a Jev; borrar para siempre (PURGE) es solo de la persona.

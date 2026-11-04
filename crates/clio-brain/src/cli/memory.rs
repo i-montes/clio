@@ -34,6 +34,8 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory project [set <nombre>]          el proyecto de esta carpeta y de dónde sale; set lo fija (.clio-project)
   clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
   clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
+  clio memory projects merge <de> <en>        mueve todo un proyecto a otro (unir o renombrar; deshacible)
+  clio memory projects archive <proyecto>     archiva todo un proyecto (no lo borra)
   clio memory review-due [--json]             lo que pasó su plazo de revisión (decisiones, configuración…)
   clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
   clio memory timeline <id> [--json]          lo que se guardó antes y después, en la misma sesión
@@ -528,7 +530,39 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
         }
         "projects" => {
             let json = args.flag("--json");
-            args.rest()?;
+            let yes = args.flag("--yes");
+            let rest = args.rest()?;
+            match rest.as_slice() {
+                [] => {}
+                [verb, from, into] if verb == "merge" => {
+                    if !yes && !confirm(&format!("¿Mover todo lo del proyecto {from} a {into}?")) {
+                        println!("no se cambió nada");
+                        return Ok(0);
+                    }
+                    let n = open_write(dirs)?.merge_projects(from, into)?;
+                    println!(
+                        "movidos {n} recuerdos de {} a {} (cada uno se deshace con clio memory revert; míralo en history)",
+                        sanitize::line(from),
+                        sanitize::line(into)
+                    );
+                    return Ok(0);
+                }
+                [verb, name] if verb == "archive" => {
+                    if !yes && !confirm(&format!("¿Archivar todo lo del proyecto {name}?")) {
+                        println!("no se cambió nada");
+                        return Ok(0);
+                    }
+                    let n = open_write(dirs)?.archive_project(name)?;
+                    println!(
+                        "archivados {n} recuerdos de {} (no se borran)",
+                        sanitize::line(name)
+                    );
+                    return Ok(0);
+                }
+                _ => {
+                    return Err("uso: clio memory projects [--json] | merge <de> <en> [--yes] | archive <proyecto> [--yes]".into());
+                }
+            }
             let Some(link) = open_read(dirs, false)? else {
                 println!("{NONE_YET}");
                 return Ok(0);

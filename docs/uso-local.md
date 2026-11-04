@@ -368,6 +368,8 @@ clio memory context [--json]                lo que recibe una sesión que empiez
 clio memory conflicts [--json]              recuerdos que Jev juzgó que se contradicen
 clio memory import <archivo>                trae una exportación a una memoria vacía (otra máquina)
 clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
+clio memory projects merge <de> <en>        mueve todo un proyecto a otro (unir o renombrar; cada movimiento se deshace con revert)
+clio memory projects archive <proyecto>     archiva todo un proyecto (no lo borra)
 clio memory review-due [--json]             lo que pasó su plazo de revisión (sigue activo)
 clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
 clio memory timeline <id> [--json]          lo que se guardó antes y después, en la misma sesión

@@ -1020,3 +1020,63 @@ fn review_history_revert_context_conflicts_and_import() {
         "{back:#}"
     );
 }
+
+// Merging (or renaming) projects and archiving one, by the person: every memory moves with its
+// state, each move is undone with revert, and archiving keeps everything restorable.
+#[test]
+fn the_person_merges_renames_and_archives_projects() {
+    use clio_toolhost::MemoryPort;
+    let e = Env::new(true);
+    let data = e.home().join(".local/share/clio");
+    let alfa = clio_brain::memory_port::LinkPort::new(&data, None).in_project(Some("alfa".into()));
+    let draft = |t: &str| clio_toolhost::ProposalDraft {
+        text: t.into(),
+        title: None,
+        category: Some("decision".into()),
+        kind: clio_toolhost::ProposalKind::Semantic,
+    };
+    let s = clio_toolhost::Judging::default();
+    let a = alfa.propose(&draft("usa Postgres"), "s", &s).unwrap().id;
+    alfa.propose(&draft("usa Redis"), "s", &s).unwrap();
+    drop(alfa);
+    e.clio(&["memory", "promote", &a.to_string(), "--yes"]);
+    let out = e.clio(&["memory", "projects", "merge", "alfa", "Alfa Web", "--yes"]);
+    assert!(out.contains("movidos 2"), "{out}");
+    let places: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();
+    let count = |name: &str| -> (u64, u64) {
+        let p = places
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["place"] == format!("proyecto {name}"))
+            .unwrap_or_else(|| panic!("{places:#}"));
+        (
+            p["active"].as_u64().unwrap(),
+            p["quarantine"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(count("alfa-web"), (1, 1), "state goes with it");
+    assert_eq!(count("alfa"), (0, 0));
+    // The move is in the history and undone with revert.
+    let h: Value =
+        serde_json::from_str(&e.clio(&["memory", "history", &a.to_string(), "--json"])).unwrap();
+    let last = h.as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["kind"], "Move", "{h:#}");
+    e.clio(&["memory", "revert", &last["change"].to_string(), "--yes"]);
+    let shown: Value =
+        serde_json::from_str(&e.clio(&["memory", "show", &a.to_string(), "--json"])).unwrap();
+    assert_eq!(shown["place"], "proyecto alfa");
+    // Archiving a whole project: nothing is erased.
+    assert!(
+        e.clio(&["memory", "projects", "archive", "alfa-web", "--yes"])
+            .contains("archivados 1")
+    );
+    let shown: Value =
+        serde_json::from_str(&e.clio(&["memory", "list", "--pending", "--json"])).unwrap();
+    assert!(shown.as_array().unwrap().is_empty(), "{shown:#}");
+    assert!(
+        !e.try_clio(&["memory", "projects", "merge", "nadie", "otro", "--yes"])
+            .status
+            .success()
+    );
+}
