@@ -1817,3 +1817,21 @@ fn a_merge_counts_among_the_ten_changes() {
     assert!(denied_by_budget(&r), "{r:?}");
     assert!(port.drafts.lock().unwrap().is_empty());
 }
+
+// `profile` is one of the categories a proposal may carry.
+#[test]
+fn a_proposal_may_be_about_who_the_person_is() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = call(
+        &e,
+        "s",
+        "memory_propose",
+        json!({"text": "Qué: se llama Iván", "kind": "semantic", "title": "Nombre", "category": "Profile"}),
+    );
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        port.drafts.lock().unwrap()[0].category.as_deref(),
+        Some("profile")
+    );
+}

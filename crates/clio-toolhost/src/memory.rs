@@ -87,7 +87,7 @@ const MAX_PROPOSAL_CHARS: usize = 1200;
 /// Longest title.
 const MAX_TITLE_CHARS: usize = 120;
 /// The categories a proposal may have (the same names as the memory's).
-pub const CATEGORIES: [&str; 8] = [
+pub const CATEGORIES: [&str; 9] = [
     "decision",
     "architecture",
     "bugfix",
@@ -95,6 +95,7 @@ pub const CATEGORIES: [&str; 8] = [
     "config",
     "discovery",
     "preference",
+    "profile",
     "learning",
 ];
 /// How many memories a timeline may show on each side.

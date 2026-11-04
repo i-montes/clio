@@ -45,7 +45,7 @@ const TOOLS: [(&str, &str); 6] = [
     ),
     (
         "memory_propose",
-        "Hand a memory to Clio (verified knowledge that is costly to rebuild): it is kept, replaces an earlier one, was known, or waits for the person's review. text: one line 'Qué: … · Por qué: … · Dónde: … · Aprendido: …'; kind: semantic or procedural; category: decision, architecture, bugfix, pattern, config, discovery, preference or learning.",
+        "Hand a memory to Clio (verified knowledge that is costly to rebuild): it is kept, replaces an earlier one, was known, or waits for the person's review. text: one line 'Qué: … · Por qué: … · Dónde: … · Aprendido: …'; kind: semantic or procedural; category: decision, architecture, bugfix, pattern, config, discovery, preference (how the person wants answers and work), profile (who the person is) or learning.",
     ),
     (
         "memory_session_summary",

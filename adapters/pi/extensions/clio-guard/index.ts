@@ -334,8 +334,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 			},
 			category: {
 				type: "string",
-				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning"],
-				description: "What it is. bugfix, pattern and learning can help in other projects; preference is the person's.",
+				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning", "profile"],
+				description: "What it is. bugfix, pattern and learning can help in other projects; profile is who the person is (name, where they live, what they do); preference is how they want answers, writing and work.",
 			},
 			kind: { type: "string", enum: ["semantic", "procedural"], description: "semantic: a fact; procedural: how to do something." },
 		},
@@ -351,7 +351,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 			text: { type: "string", minLength: 1, maxLength: 1200, description: "The memory as it should read now, one line ('Qué: … · Por qué: … · Dónde: … · Aprendido: …')." },
 			category: {
 				type: "string",
-				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning"],
+				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning", "profile"],
 				description: "What it is.",
 			},
 		},
@@ -366,7 +366,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 			text: { type: "string", minLength: 1, maxLength: 1200, description: "The merged memory, one line ('Qué: … · Por qué: … · Dónde: … · Aprendido: …')." },
 			category: {
 				type: "string",
-				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning"],
+				enum: ["decision", "architecture", "bugfix", "pattern", "config", "discovery", "preference", "learning", "profile"],
 				description: "What it is.",
 			},
 		},

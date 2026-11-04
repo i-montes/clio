@@ -2225,3 +2225,39 @@ fn a_merge_is_faithful_and_never_takes_what_the_person_holds() {
     );
     assert!(alfa.get(theirs.id).is_ok());
 }
+
+// Who the person is (profile) and what they prefer (preference) are the person's: without Jev the
+// rule keeps them in the personal place, seen from every project, whatever project the session is in.
+#[test]
+fn profile_and_preference_go_to_the_persons_place() {
+    let w = world();
+    let alfa = in_project(&w, "alfa");
+    for (text, category) in [
+        (
+            "Qué: la persona se llama Iván Montes y vive en Tolú",
+            "profile",
+        ),
+        ("Qué: prefiere respuestas cortas y en español", "preference"),
+    ] {
+        MemoryPort::propose(
+            &alfa,
+            &titled(text, category, category),
+            "s",
+            &Judging::default(),
+        )
+        .unwrap();
+    }
+    promote_all(&w);
+    let beta = in_project(&w, "beta");
+    for q in ["Iván Montes", "respuestas cortas"] {
+        let found = beta.search(q, 3).unwrap().items;
+        assert_eq!(found.len(), 1, "{q}: {found:?}");
+        assert_eq!(found[0].place, "personal", "{q}");
+    }
+    assert_eq!(
+        beta.search("Iván Montes", 3).unwrap().items[0]
+            .category
+            .as_deref(),
+        Some("profile")
+    );
+}
