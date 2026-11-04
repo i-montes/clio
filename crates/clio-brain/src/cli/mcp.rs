@@ -9,6 +9,7 @@
 //! of the folder the client started it in, decided here, never by the client.
 
 use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,6 +53,8 @@ const TOOLS: [(&str, &str); 6] = [
     ),
 ];
 const PROJECT_TOOL: &str = "memory_current_project";
+/// The protocol versions this server speaks; any other is answered with the newest.
+const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// A line longer than this is refused (and its id is not known, so the answer has none).
 const MAX_LINE: usize = 1 << 20;
 
@@ -60,8 +63,18 @@ pub fn serve(dirs: &Dirs) -> Res<i32> {
     let project = std::env::current_dir()
         .ok()
         .and_then(|d| clio_brain::project::detect(&d));
-    let host = host(dirs, &cfg, project.as_deref())?;
-    let mut session = "mcp:cliente".to_owned();
+    // Its own folder in the runtime directory (budget, taint, effect log), gone when it ends:
+    // never among the person's runs.
+    let run = Scratch(
+        dirs.need_runtime()?
+            .join(format!("mcp-{}", std::process::id())),
+    );
+    let host = host(dirs, &cfg, project.as_deref(), &run.0)?;
+    let mut state = State {
+        session: "mcp:cliente".into(),
+        named: false,
+        calls: 0,
+    };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     let mut reader = stdin.lock();
@@ -92,7 +105,13 @@ pub fn serve(dirs: &Dirs) -> Res<i32> {
             Some(error(Value::Null, -32600, "the message is too long"))
         } else {
             match serde_json::from_slice::<Value>(&buf) {
-                Ok(msg) => handle(&host, &mut session, project.as_deref(), &msg),
+                Ok(msg) if msg.is_object() => handle(&host, &mut state, project.as_deref(), &msg),
+                // A batch, or a bare value: not supported, said so (a client must not wait).
+                Ok(_) => Some(error(
+                    Value::Null,
+                    -32600,
+                    "one request per line, as an object",
+                )),
                 Err(_) if buf.iter().all(u8::is_ascii_whitespace) => None,
                 Err(_) => Some(error(Value::Null, -32700, "not JSON")),
             }
@@ -105,15 +124,27 @@ pub fn serve(dirs: &Dirs) -> Res<i32> {
     Ok(0)
 }
 
+/// The client's session in the tool host, named once by `initialize`.
+struct State {
+    session: String,
+    named: bool,
+    calls: u64,
+}
+
+/// The folder of this process, removed when it ends.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// The tool host of this process: an empty private working folder, no jail (no command tool is
-/// offered), the vault's filter when it runs, and the person's memory in the folder's project.
-fn host(dirs: &Dirs, cfg: &Config, project: Option<&str>) -> Res<ToolHost> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let run = dirs
-        .runs
-        .join(format!("mcp-{stamp}-{}", std::process::id()));
+/// offered), the model key and the vault's filter (when it runs), and the person's memory in the
+/// folder's project.
+fn host(dirs: &Dirs, cfg: &Config, project: Option<&str>, run: &Path) -> Res<ToolHost> {
+    let run = run.to_path_buf();
     for d in [run.clone(), run.join("work"), run.join("scratch")] {
         mkdir_private(&d)?;
     }
@@ -132,17 +163,13 @@ fn host(dirs: &Dirs, cfg: &Config, project: Option<&str>) -> Res<ToolHost> {
     }
     let mut hc = HostConfig::new(&run.join("work"), &run.join("scratch"), &run);
     hc.jail = JailMode::Off;
+    hc.scrubber = Some(super::debug::scrubber(dirs));
     hc.vault = vault_socket.map(|s| VaultClient::new(&s));
     hc.memory = Some(Arc::new(port));
     ToolHost::new(hc)
 }
 
-fn handle(
-    host: &ToolHost,
-    session: &mut String,
-    project: Option<&str>,
-    msg: &Value,
-) -> Option<Value> {
+fn handle(host: &ToolHost, state: &mut State, project: Option<&str>, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg["method"].as_str().unwrap_or_default();
     // A notification (no id) gets no answer, whatever it is.
@@ -150,13 +177,26 @@ fn handle(
     let params = &msg["params"];
     Some(match method {
         "initialize" => {
-            if let Some(name) = params["clientInfo"]["name"].as_str() {
-                let name = clio_brain::project::normal(name);
+            // Named once: a second `initialize` cannot move to a fresh (untainted) session or
+            // take another client's name.
+            if !state.named {
+                state.named = true;
+                let name: String = clio_brain::project::normal(
+                    params["clientInfo"]["name"].as_str().unwrap_or_default(),
+                )
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                .take(40)
+                .collect();
                 if !name.is_empty() {
-                    *session = format!("mcp:{}", name.chars().take(40).collect::<String>());
+                    state.session = format!("mcp:{name}");
                 }
             }
-            let version = params["protocolVersion"].as_str().unwrap_or("2025-06-18");
+            let asked = params["protocolVersion"].as_str().unwrap_or_default();
+            let version = VERSIONS
+                .into_iter()
+                .find(|v| *v == asked)
+                .unwrap_or(VERSIONS[0]);
             ok(
                 id,
                 json!({
@@ -169,7 +209,7 @@ fn handle(
         }
         "ping" => ok(id, json!({})),
         "tools/list" => ok(id, json!({ "tools": tool_list() })),
-        "tools/call" => call(host, session, project, id, params),
+        "tools/call" => call(host, state, project, id, params),
         _ => error(id, -32601, "unknown method"),
     })
 }
@@ -201,7 +241,13 @@ fn tool_list() -> Vec<Value> {
     tools
 }
 
-fn call(host: &ToolHost, session: &str, project: Option<&str>, id: Value, params: &Value) -> Value {
+fn call(
+    host: &ToolHost,
+    state: &mut State,
+    project: Option<&str>,
+    id: Value,
+    params: &Value,
+) -> Value {
     let name = params["name"].as_str().unwrap_or_default();
     let args = params
         .get("arguments")
@@ -213,13 +259,17 @@ fn call(host: &ToolHost, session: &str, project: Option<&str>, id: Value, params
     if !TOOLS.iter().any(|(n, _)| *n == name) {
         return error(id, -32602, "unknown tool");
     }
+    state.calls += 1;
+    let n = format!("mcp-{}", state.calls);
     let r = host.handle(Request {
-        id: id.to_string(),
+        id: n.clone(),
         tool: name.to_owned(),
         args,
-        session: session.to_owned(),
-        call_id: id.to_string(),
-        tainted: false,
+        session: state.session.clone(),
+        call_id: n,
+        // What another agent brings is from outside, whatever it read before: its proposals are
+        // judged as a tainted session's (five at most, Jev's higher bar).
+        tainted: true,
     });
     tool_result(id, &r.content, !r.ok)
 }

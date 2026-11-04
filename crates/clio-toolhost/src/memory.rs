@@ -10,7 +10,8 @@
 //! would tire the person and be ignored, never marking would make S-05 mean nothing.
 //!
 //! A session may spend 20 calls and 24 KiB of returned text (S-47). The count lives in a file of the
-//! run folder, so a restarted service does not give a fresh budget, and what is logged are facts
+//! run folder, so a restarted service of the same run does not give a fresh budget (the MCP server
+//! has a folder per process, so its budget is per process), and what is logged are facts
 //! (ids, counts, a short hash of the query), never the text of a query or of a memory.
 
 use std::io::Write;

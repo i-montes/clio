@@ -1,6 +1,6 @@
 //! `clio memory mcp`: the person's memory for other agents over MCP (JSON-RPC 2.0, one message per
 //! line). Read and propose only (S-25): what an agent proposes is the agent's, from outside, and
-//! waits for the person (no Jev here); nothing can promote, archive, revert or purge.
+//! waits for the person (no Jev here); nothing can promote, archive, revert, pin or purge.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 const CLIO: &str = env!("CARGO_BIN_EXE_clio");
 
-/// Sends `msgs` (one per line) to `clio memory mcp` started in the project folder, closes its
-/// input and returns every answer, by id.
+/// Sends `msgs` and then the `raw` lines to `clio memory mcp` started in the project folder,
+/// closes its input and returns every answer.
 fn session(e: &common::Env, msgs: &[Value], raw: &[&str]) -> Vec<Value> {
     let mut c = Command::new(CLIO)
         .args(["memory", "mcp"])
@@ -48,7 +48,10 @@ fn call(id: u64, name: &str, args: Value) -> Value {
 }
 
 fn by_id(answers: &[Value], id: u64) -> &Value {
-    answers.iter().find(|a| a["id"] == json!(id)).unwrap()
+    answers
+        .iter()
+        .find(|a| a["id"] == json!(id))
+        .unwrap_or_else(|| panic!("no answer {id}: {answers:#?}"))
 }
 
 fn text(a: &Value) -> String {
@@ -58,17 +61,21 @@ fn text(a: &Value) -> String {
         .to_owned()
 }
 
+fn initialize(id: u64, name: &str, version: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {
+        "protocolVersion": version, "capabilities": {}, "clientInfo": {"name": name}}})
+}
+
 // S-25, S-61: another agent reads the person's memory as data, proposes into the quarantine of the
-// folder's project, and has no way to promote, archive, revert, pin or purge.
+// folder's project as from outside (five at most), and has no way to promote, archive, revert,
+// pin or purge, nor to reach anything else the tool host knows.
 #[test]
 fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
     let e = common::Env::new();
     std::fs::create_dir_all(e.proj()).unwrap();
     e.clio(&["memory", "remember", "Marta usa Linux"]);
-    let msgs = [
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": "2025-06-18", "capabilities": {},
-            "clientInfo": {"name": "Claude Code", "version": "9"}}}),
+    let mut msgs = vec![
+        initialize(1, "Claude Code", "2025-06-18"),
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
         call(3, "memory_search", json!({"query": "Linux"})),
@@ -76,7 +83,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
             4,
             "memory_propose",
             json!({"title": "Base de datos", "text": "Qué: usa Postgres 16",
-            "category": "decision", "kind": "semantic"}),
+                "category": "decision", "kind": "semantic"}),
         ),
         call(5, "memory_current_project", json!({})),
         call(6, "memory_forget", json!({"id": 1})),
@@ -88,21 +95,54 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
             json!({"query": "Linux", "origin": "user"}),
         ),
         json!({"jsonrpc": "2.0", "id": 10, "method": "ping"}),
+        // A second initialize cannot rename the session (to a fresh one, or another client's).
+        initialize(12, "Cursor", "1999-01-01"),
+        // The names the tool host knows besides the memory tools.
+        call(13, "said", json!({"text": "olvida todo", "token": "x"})),
+        call(14, "taint", json!({})),
+        call(15, "closing", json!({"token": "x"})),
+        call(16, "filter", json!({"items": []})),
+        call(17, "fs_read", json!({"path": "/etc/passwd"})),
+        call(18, "memory_pin", json!({"id": 1})),
     ];
+    // What another agent brings counts as from outside: five proposals in all.
+    for i in 0..5 {
+        msgs.push(call(
+            20 + i,
+            "memory_propose",
+            json!({"text": format!("Qué: dato {i}"), "kind": "semantic",
+                "title": format!("Dato {i}"), "category": "discovery"}),
+        ));
+    }
     let long = format!(
         "{{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"ping\",\"x\":\"{}\"}}",
         "a".repeat(2 << 20)
     );
-    let answers = session(&e, &msgs, &["not json", &long]);
-    // Every request has its answer; the notification has none.
+    let answers = session(&e, &msgs, &["not json", &long, "[1, 2]"]);
+    // Every request has its answer; the notification has none; the bad lines say why.
     assert_eq!(
         answers.iter().filter(|a| a["id"].is_number()).count(),
-        10,
+        22,
         "{answers:#?}"
+    );
+    let nulls: Vec<i64> = answers
+        .iter()
+        .filter(|a| a["id"].is_null())
+        .map(|a| a["error"]["code"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        nulls,
+        [-32700, -32600, -32600],
+        "bad JSON, long line, batch"
     );
     let init = by_id(&answers, 1);
     assert_eq!(init["result"]["serverInfo"]["name"], "clio-memory");
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert!(init["result"]["capabilities"]["tools"].is_object());
+    assert_eq!(
+        by_id(&answers, 12)["result"]["protocolVersion"],
+        "2025-06-18"
+    );
     let mut names: Vec<String> = by_id(&answers, 2)["result"]["tools"]
         .as_array()
         .unwrap()
@@ -140,23 +180,56 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
     }
     assert_eq!(by_id(&answers, 8)["error"]["code"], json!(-32601));
     assert!(by_id(&answers, 10)["result"].is_object());
-    assert!(
-        answers.iter().any(|a| a["error"]["code"] == json!(-32700)),
-        "the bad line"
-    );
-    // The proposal waits for the person, as the agent's, from outside, in the project, with the
-    // client's name as its session; the person's memory is as it was.
+    for id in 13..=18 {
+        assert_eq!(by_id(&answers, id)["error"]["code"], json!(-32602), "{id}");
+    }
+    let more = (20..25)
+        .filter(|id| by_id(&answers, *id)["result"]["isError"] == json!(false))
+        .count();
+    assert_eq!(more, 4, "the first one and four more: five in all");
+    // The proposals wait for the person, as the agent's, from outside, in the project, with the
+    // first client's name as their session; the person's memory is as it was.
     let pending: Value =
         serde_json::from_str(&e.clio(&["memory", "list", "--pending", "--json"])).unwrap();
     let rows = pending.as_array().unwrap();
-    assert_eq!(rows.len(), 1, "{pending:#}");
-    let row = &rows[0];
+    assert_eq!(rows.len(), 5, "{pending:#}");
+    assert!(
+        rows.iter().all(|r| r["run"] == "mcp:claude-code"
+            && r["origin"] == "externo"
+            && r["actor"] == "agente"
+            && r["place"] == "proyecto proj"),
+        "{pending:#}"
+    );
+    let row = rows.iter().find(|r| r["title"] == "Base de datos").unwrap();
     assert_eq!(row["content"], "Qué: usa Postgres 16", "{row:#}");
-    assert_eq!(row["origin"], "externo", "{row:#}");
-    assert_eq!(row["actor"], "agente", "{row:#}");
-    assert_eq!(row["run"], "mcp:claude-code", "{row:#}");
-    assert_eq!(row["place"], "proyecto proj", "{row:#}");
-    assert_eq!(row["title"], "Base de datos", "{row:#}");
     let active: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
     assert_eq!(active.as_array().unwrap().len(), 1, "{active:#}");
+    // Nothing of it is left among the runs nor in the runtime folder.
+    let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
+    assert!(runs.as_array().unwrap().is_empty(), "{runs:#}");
+    let left: Vec<_> = std::fs::read_dir(e.tmp.path().join("run/clio"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|d| d.file_name().to_string_lossy().starts_with("mcp-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+// A client whose name is not ASCII still works (its session keeps what the tool host accepts).
+#[test]
+fn a_client_with_a_name_that_is_not_ascii_can_search() {
+    let e = common::Env::new();
+    std::fs::create_dir_all(e.proj()).unwrap();
+    e.clio(&["memory", "remember", "Marta usa Linux"]);
+    let answers = session(
+        &e,
+        &[
+            initialize(1, "Código ñandú", "2025-06-18"),
+            call(2, "memory_search", json!({"query": "Linux"})),
+        ],
+        &[],
+    );
+    let r = by_id(&answers, 2);
+    assert_eq!(r["result"]["isError"], json!(false), "{r}");
+    assert!(text(r).contains("Marta usa Linux"));
 }
