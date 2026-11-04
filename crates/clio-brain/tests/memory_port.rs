@@ -1790,3 +1790,220 @@ fn what_is_past_its_review_cycle_says_so_and_comes_up_in_the_context() {
         .unwrap();
     assert!(notes("puerto 8080").is_empty());
 }
+
+// ---- memory_update: a new text for one memory, decided like any proposal ----
+
+// The agent's own memory is replaced when Jev says so; what the person holds needs their words; a
+// memory the session cannot read is the same answer as one that does not exist; without Jev it
+// waits for the person.
+#[test]
+fn an_update_is_a_proposal_about_one_memory() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let old = ask(
+        &p,
+        "El proyecto usa PostgreSQL 15",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!(old.saved, Saved::Active);
+    let replacing = judged_port(&w, "update_first", 0.95, 0.0);
+    let judging = Judging {
+        tainted: false,
+        person_said: vec![],
+        session: "sess-2".into(),
+    };
+    let d = replacing
+        .update(
+            old.id,
+            &draft("El proyecto usa PostgreSQL 16", ProposalKind::Semantic),
+            "sess-2",
+            &judging,
+        )
+        .unwrap();
+    assert_eq!(d.saved, Saved::Replaced);
+    assert!(
+        replacing.get(old.id).is_err(),
+        "the old one is no longer readable"
+    );
+    assert_eq!(
+        replacing.get(d.id).unwrap().text,
+        "El proyecto usa PostgreSQL 16"
+    );
+    // The person's: not without their words.
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let r = replacing
+        .update(
+            mine.0,
+            &draft("Marta vive en Bogotá", ProposalKind::Semantic),
+            "sess-2",
+            &judging,
+        )
+        .unwrap();
+    assert_eq!(r.saved, Saved::Waiting);
+    assert_eq!(
+        replacing.get(mine.0).unwrap().text,
+        "Marta vive en Medellín"
+    );
+    // Another project's memory cannot be reached.
+    let alfa = in_project(&w, "alfa");
+    let theirs = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: usa Redis", "Caché", "decision"),
+        "s1",
+        &Judging::default(),
+    )
+    .unwrap();
+    promote_all(&w);
+    let beta = in_project(&w, "beta").with_judge(Arc::new(MemoryJudge::new(
+        Arc::new(Jev::new(
+            JevConfig::default(),
+            Box::new(Scripted {
+                choice: "update_first".into(),
+                confidence: 0.95,
+                said: 0.0,
+            }),
+            Box::new(|| Ok("KEY".into())),
+            Arc::new(clio_core::SystemClock),
+        )),
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    assert!(
+        beta.update(
+            theirs.id,
+            &draft("usa Valkey", ProposalKind::Semantic),
+            "s",
+            &judging
+        )
+        .is_err()
+    );
+    // Without Jev it waits for the person.
+    let plain = LinkPort::new(&w.data, None);
+    let r = plain
+        .update(
+            d.id,
+            &draft("El proyecto usa PostgreSQL 17", ProposalKind::Semantic),
+            "s",
+            &judging,
+        )
+        .unwrap();
+    assert_eq!(r.saved, Saved::Waiting);
+}
+
+// A pinned memory of the agent is the person's choice: an update does not replace it on the
+// model's say; nor can a procedure be updated from here (S-26), and what the model leaves out
+// (title, category) stays as it was.
+#[test]
+fn an_update_keeps_what_the_person_chose() {
+    let w = world();
+    let p = judged_port(&w, "add", 0.95, 0.0);
+    let pinned = ask(
+        &p,
+        "El proyecto usa PostgreSQL 15",
+        ProposalKind::Semantic,
+        &[],
+    );
+    {
+        let l = open(&w);
+        l.pin(clio_memory::MemoryId(pinned.id)).unwrap();
+    }
+    let replacing = judged_port(&w, "update_first", 0.95, 0.0);
+    let judging = Judging {
+        tainted: false,
+        person_said: vec![],
+        session: "s".into(),
+    };
+    let r = replacing
+        .update(
+            pinned.id,
+            &draft("El proyecto usa PostgreSQL 16", ProposalKind::Semantic),
+            "s",
+            &judging,
+        )
+        .unwrap();
+    assert_eq!(r.saved, Saved::Waiting, "pinned: only the person's words");
+    assert_eq!(
+        replacing.get(pinned.id).unwrap().text,
+        "El proyecto usa PostgreSQL 15"
+    );
+    // A procedure is out of reach.
+    let l = open(&w);
+    let proc_id = l
+        .engine()
+        .propose(Proposal {
+            scope: l.scope(),
+            actor: l.actors().persona,
+            kind: MemoryType::Procedural,
+            content: "para desplegar, primero las pruebas".into(),
+            topic_key: None,
+            origin: MOrigin::User,
+            session: None,
+            episode: None,
+            source: None,
+            valid_from: None,
+            valid_to: None,
+            title: None,
+            category: None,
+        })
+        .unwrap()
+        .memory;
+    drop(l);
+    assert!(
+        replacing
+            .update(
+                proc_id.0,
+                &draft("despliega sin pruebas", ProposalKind::Semantic),
+                "s",
+                &judging
+            )
+            .is_err()
+    );
+    // Title and category stay when the model leaves them out.
+    let alfa = in_project(&w, "alfa").with_judge(Arc::new(MemoryJudge::new(
+        Arc::new(Jev::new(
+            JevConfig::default(),
+            Box::new(Scripted {
+                choice: "add".into(),
+                confidence: 0.95,
+                said: 0.0,
+            }),
+            Box::new(|| Ok("KEY".into())),
+            Arc::new(clio_core::SystemClock),
+        )),
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    let t = MemoryPort::propose(
+        &alfa,
+        &titled("Qué: puerto 8080", "Puerto", "config"),
+        "s",
+        &Judging::default(),
+    )
+    .unwrap();
+    let alfa_replace = in_project(&w, "alfa").with_judge(Arc::new(MemoryJudge::new(
+        Arc::new(Jev::new(
+            JevConfig::default(),
+            Box::new(Scripted {
+                choice: "update_first".into(),
+                confidence: 0.95,
+                said: 0.0,
+            }),
+            Box::new(|| Ok("KEY".into())),
+            Arc::new(clio_core::SystemClock),
+        )),
+        Arc::new(|s| Ok(s.to_owned())),
+    )));
+    let u = alfa_replace
+        .update(
+            t.id,
+            &draft("Qué: puerto 9090", ProposalKind::Semantic),
+            "s",
+            &judging,
+        )
+        .unwrap();
+    assert_eq!(u.saved, Saved::Replaced);
+    let item = alfa_replace.get(u.id).unwrap();
+    assert_eq!(
+        (item.title.as_deref(), item.category.as_deref()),
+        (Some("Puerto"), Some("config"))
+    );
+}

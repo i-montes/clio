@@ -55,6 +55,84 @@ pub fn resolve_with(dir: &Path, env: Option<&str>) -> Option<(String, Source)> {
     detect(dir).map(|n| (n, Source::Detected))
 }
 
+/// Where the project each folder was first detected as is kept, in the person's data folder.
+const SEEN_FILE: &str = "projects.json";
+
+/// The project of `dir` for the memory, with a word when detection changed: a name set by hand
+/// (`CLIO_PROJECT`, `.clio-project`) always wins; a detected one is remembered per repository (or
+/// folder) the first time, and if detection later says something else (a renamed remote, another
+/// repository cloned at the same path) the third value says so. The current detection is used:
+/// two repositories at one path must not share a memory; merging is the person's choice
+/// (`clio memory project set OLD`). The record is best effort and never rewritten from a file it
+/// could not read.
+pub fn settle(data: &Path, dir: &Path) -> Option<(String, Source, Option<String>)> {
+    settle_with(data, dir, std::env::var(PROJECT_ENV).ok().as_deref())
+}
+
+pub fn settle_with(
+    data: &Path,
+    dir: &Path,
+    env: Option<&str>,
+) -> Option<(String, Source, Option<String>)> {
+    let (name, source) = resolve_with(dir, env)?;
+    if source != Source::Detected {
+        return Some((name, source, None));
+    }
+    let Ok(key) = git_root(dir)
+        .unwrap_or_else(|| dir.to_path_buf())
+        .canonicalize()
+    else {
+        return Some((name, source, None));
+    };
+    let key = key.display().to_string();
+    let path = data.join(SEEN_FILE);
+    let seen: std::collections::BTreeMap<String, String> = match std::fs::read_to_string(&path) {
+        Ok(t) => match serde_json::from_str(&t) {
+            Ok(m) => m,
+            // Damaged: left as it is, and nothing remembered this time.
+            Err(_) => return Some((name, source, None)),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(_) => return Some((name, source, None)),
+    };
+    match seen.get(&key).and_then(|b| checked(b.clone())) {
+        Some(before) if before != name => {
+            let note = format!(
+                "esta carpeta era del proyecto {before} y ahora se detecta {name}: lo de {before} no se ve aquí; si es el mismo proyecto, clio memory project set {before}"
+            );
+            Some((name, source, Some(note)))
+        }
+        Some(_) => Some((name, source, None)),
+        None => {
+            let mut seen = seen;
+            seen.insert(key, name.clone());
+            if data.is_dir() {
+                let _ = write_private(
+                    &path,
+                    &serde_json::to_string_pretty(&seen).unwrap_or_default(),
+                );
+            }
+            Some((name, source, None))
+        }
+    }
+}
+
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // One temporary file per process: two writers never mix their bytes (the last one wins).
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(text.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
 /// The first line of a project file, normalized; at most 4 KiB are read.
 fn read_name(path: &Path) -> Option<String> {
     use std::io::Read;
@@ -258,6 +336,44 @@ mod tests {
         std::fs::remove_file(root.join(PROJECT_FILE)).unwrap();
         std::fs::write(t.path().join(PROJECT_FILE), "fuera\n").unwrap();
         assert_eq!(resolve_with(&deep, None).unwrap().0, "clio");
+    }
+
+    #[test]
+    fn a_detected_project_stays_when_detection_changes_and_a_hand_set_one_wins() {
+        let t = repo(Some("git@github.com:me/clio.git"));
+        let data = tempfile::tempdir().unwrap();
+        let deep = t.path().join("Mi Proyecto/src");
+        let got = |env: Option<&str>| settle_with(data.path(), &deep, env).unwrap();
+        assert_eq!(got(None), ("clio".into(), Source::Detected, None));
+        // Another repository at the same path (or a renamed remote): what is detected now is used,
+        // never the other one's memory, and it says how to join them if they are the same.
+        std::fs::write(
+            t.path().join("Mi Proyecto/.git/config"),
+            "[remote \"origin\"]\n\turl = git@github.com:me/clio-nuevo.git\n",
+        )
+        .unwrap();
+        let (name, _, note) = got(None);
+        assert_eq!(name, "clio-nuevo");
+        assert!(note.unwrap().contains("clio memory project set clio"));
+        // A damaged record is left alone and nothing breaks.
+        let file = data.path().join(SEEN_FILE);
+        std::fs::write(&file, "{roto").unwrap();
+        assert_eq!(got(None), ("clio-nuevo".into(), Source::Detected, None));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{roto");
+        // A folder that is gone still has its detected name.
+        let gone = t.path().join("ya-no-existe");
+        assert_eq!(
+            settle_with(data.path(), &gone, None).unwrap().0,
+            "ya-no-existe"
+        );
+        // A name set by hand always wins.
+        assert_eq!(got(Some("clio-nuevo")).0, "clio-nuevo");
+        std::fs::write(
+            t.path().join("Mi Proyecto").join(PROJECT_FILE),
+            "clio-nuevo\n",
+        )
+        .unwrap();
+        assert_eq!(got(None), ("clio-nuevo".into(), Source::File, None));
     }
 
     #[test]

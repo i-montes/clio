@@ -328,8 +328,13 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let rest = args.rest()?;
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             match rest.as_slice() {
-                [] => match clio_brain::project::resolve(&cwd) {
-                    Some((name, from)) => println!("{name} ({})", from.label()),
+                [] => match clio_brain::project::settle(&dirs.data, &cwd) {
+                    Some((name, from, note)) => {
+                        println!("{name} ({})", from.label());
+                        if let Some(n) = note {
+                            println!("{}", st.yellow(&sanitize::line(&n)));
+                        }
+                    }
                     None => println!("ninguno: lo que se guarde aquí va a lo personal"),
                 },
                 [set, name] if set == "set" => {

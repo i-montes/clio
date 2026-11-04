@@ -62,8 +62,14 @@ pub fn serve(dirs: &Dirs) -> Res<i32> {
     let cfg = Config::load(dirs)?;
     let project = std::env::current_dir()
         .ok()
-        .and_then(|d| clio_brain::project::resolve(&d))
-        .map(|(name, _)| name);
+        .and_then(|d| clio_brain::project::settle(&dirs.data, &d))
+        .map(|(name, _, note)| {
+            // To the client's log: the person reads it there, and `clio memory project` says it too.
+            if let Some(n) = note {
+                eprintln!("clio memory mcp: {}", super::tui::sanitize::line(&n));
+            }
+            name
+        });
     // Its own folder in the runtime directory (budget, taint, effect log), gone when it ends:
     // never among the person's runs.
     let run = Scratch(

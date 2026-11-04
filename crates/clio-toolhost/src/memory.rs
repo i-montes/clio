@@ -30,13 +30,14 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 10] = [
+pub(crate) const MEMORY_OPS: [&str; 11] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
     "memory_context",
     "memory_propose",
     "memory_session_summary",
+    "memory_update",
     "memory_forget",
     "memory_promote",
     "memory_revert",
@@ -57,6 +58,8 @@ const SUMMARY_PARTS: [(&str, &str); 6] = [
     ("next_steps", "Siguiente"),
     ("files", "Archivos"),
 ];
+
+const UPDATE_DESCRIPTION: &str = "Propose a new text for one memory (its id): Clio decides whether it replaces it, like any proposal";
 
 const TIMELINE_DESCRIPTION: &str =
     "Read the memories around one, of its session (or its place), in order (read-only)";
@@ -244,6 +247,16 @@ pub trait MemoryPort: Send + Sync {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String>;
+    /// A new text for memory `id`, decided like a proposal (the judge, or the person's review).
+    fn update(
+        &self,
+        _id: i64,
+        _draft: &ProposalDraft,
+        _session: &str,
+        _judging: &Judging,
+    ) -> Result<Proposed, String> {
+        Err("this memory cannot update; propose a new one".into())
+    }
     /// The memories around `id` (its session, else its place), oldest first, `id` included.
     fn timeline(&self, _id: i64, _before: usize, _after: usize) -> Result<Vec<MemoryItem>, String> {
         Err("this memory has no timeline".into())
@@ -302,6 +315,12 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
                 )
             })
             .collect(),
+        "memory_update" => vec![
+            a("id", ArgKind::Int, true),
+            a("text", ArgKind::Text, true),
+            a("title", ArgKind::Text, false),
+            a("category", ArgKind::Text, false),
+        ],
         "memory_timeline" => vec![
             a("id", ArgKind::Int, true),
             a("before", ArgKind::Int, false),
@@ -337,6 +356,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_context", CONTEXT_DESCRIPTION),
         ("memory_propose", PROPOSE_DESCRIPTION),
         ("memory_session_summary", SUMMARY_DESCRIPTION),
+        ("memory_update", UPDATE_DESCRIPTION),
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_promote", PROMOTE_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
@@ -518,7 +538,7 @@ impl ToolHost {
     ) -> Response {
         if matches!(
             req.tool.as_str(),
-            "memory_propose" | "memory_session_summary"
+            "memory_propose" | "memory_session_summary" | "memory_update"
         ) {
             return self.propose_call(req, args, out);
         }
@@ -694,6 +714,9 @@ impl ToolHost {
                 Ok(t) => (t, ProposalKind::Session),
                 Err(why) => return self.memory_failed(req, out, why),
             }
+        } else if req.tool == "memory_update" {
+            let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
+            (text.to_owned(), ProposalKind::Semantic)
         } else {
             let kind = match args.get("kind").and_then(Value::as_str) {
                 Some("semantic") => ProposalKind::Semantic,
@@ -777,6 +800,15 @@ impl ToolHost {
             category,
             kind,
         };
+        // An update names the memory it is for; a bad id is refused before anyone is asked.
+        let target = if req.tool == "memory_update" {
+            match args.get("id").and_then(Value::as_i64).filter(|n| *n > 0) {
+                Some(id) => Some(id),
+                None => return self.memory_failed(req, out, "id must be a positive number"),
+            }
+        } else {
+            None
+        };
         let session = req.session.clone();
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
@@ -787,7 +819,10 @@ impl ToolHost {
         // writer: a proposal reported as failed must not be saved afterwards in the background.
         match self.ask_port_for(
             &port,
-            move |p| p.propose(&draft, &session, &judging),
+            move |p| match target {
+                Some(id) => p.update(id, &draft, &session, &judging),
+                None => p.propose(&draft, &session, &judging),
+            },
             self.memory_timeout * 3,
         ) {
             Ok(done) => {
