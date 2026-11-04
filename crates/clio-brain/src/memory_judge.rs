@@ -57,6 +57,18 @@ pub struct MemoryJudge {
     scrub: Scrub,
 }
 
+/// What the person is asked to have asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    Forget,
+    Promote,
+    Undo,
+}
+
+/// Confidence needed to do, on the model's say-so, what the person asked for: more than for a
+/// fact, because it acts on what the person has.
+const REQUEST: f32 = 0.9;
+
 /// The confidence a call needs.
 pub fn needed(procedural: bool, tainted: bool) -> f32 {
     let base = if procedural { PROCEDURE } else { FACT };
@@ -184,6 +196,54 @@ impl MemoryJudge {
         }
     }
 
+    /// Did the person ask, in their own last words in this session, for `request` about the memory
+    /// whose text is `memory`? The model's claim that they did is not asked about: only their
+    /// words are. False when there are none, when Jev cannot say, or when it is not sure enough.
+    pub fn confirm(
+        &self,
+        request: Request,
+        memory: &str,
+        person_said: &[String],
+        tainted: bool,
+    ) -> bool {
+        if person_said.is_empty() {
+            return false;
+        }
+        let (name, what) = match request {
+            Request::Forget => (
+                "pide_olvidar",
+                "En `mensajes_de_la_persona`, la persona pide olvidar o borrar exactamente la memoria `memoria`.",
+            ),
+            Request::Promote => (
+                "pide_guardar",
+                "En `mensajes_de_la_persona`, la persona pide aceptar o guardar exactamente la memoria `memoria` (la escribió el agente, no ella).",
+            ),
+            Request::Undo => (
+                "pide_deshacer",
+                "En `mensajes_de_la_persona`, la persona pide deshacer que se haya guardado o cambiado exactamente la memoria `memoria`.",
+            ),
+        };
+        let Ok(qs) = Questions::new().noul(name, what) else {
+            return false;
+        };
+        let Ok(state) = Clean::try_new(
+            json!({ "memoria": memory, "mensajes_de_la_persona": person_said }),
+            &*self.scrub,
+        ) else {
+            return false;
+        };
+        let need = if tainted {
+            (REQUEST + TAINTED_EXTRA).min(0.99)
+        } else {
+            REQUEST
+        };
+        self.jev
+            .ask(&state, &qs)
+            .ok()
+            .and_then(|a| a.noul(name))
+            .is_some_and(|p| p as f32 >= need)
+    }
+
     /// Do the person's own last words in the session say what the proposal says?
     fn person_said_it(&self, text: &str, said: &[String], need: f32) -> bool {
         let Ok(qs) = Questions::new().noul(
@@ -245,11 +305,15 @@ mod tests {
                     json!({"type": "choice", "choice": choice, "confidence": self.confidence}),
                 );
             }
-            if q.contains_key("la_persona_lo_dijo") {
-                answers.insert(
-                    "la_persona_lo_dijo".into(),
-                    json!({"type": "noul", "noul": self.said}),
-                );
+            for name in [
+                "la_persona_lo_dijo",
+                "pide_olvidar",
+                "pide_guardar",
+                "pide_deshacer",
+            ] {
+                if q.contains_key(name) {
+                    answers.insert(name.into(), json!({"type": "noul", "noul": self.said}));
+                }
             }
             Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
         }
@@ -440,6 +504,48 @@ mod tests {
             Call::Review,
             "0.81 < 0.85"
         );
+    }
+
+    // S-65: a request to change what the person has is checked against the person's words.
+    #[test]
+    fn a_request_to_forget_promote_or_undo_needs_the_persons_words_and_a_confident_jev() {
+        let said = vec!["olvida que vivo en Medellín".to_owned()];
+        let yes = judge("add", 0.9, 0.95, false);
+        for r in [Request::Forget, Request::Promote, Request::Undo] {
+            assert!(
+                yes.0.confirm(r, "Marta vive en Medellín", &said, false),
+                "{r:?}"
+            );
+        }
+        let calls = yes.1.lock().unwrap().clone();
+        assert_eq!(
+            calls[0]["state"]["mensajes_de_la_persona"][0],
+            "olvida que vivo en Medellín"
+        );
+        assert_eq!(calls[0]["state"]["memoria"], "Marta vive en Medellín");
+        // The person said nothing in the session: no question is even asked.
+        let silent = judge("add", 0.9, 0.99, false);
+        assert!(!silent.0.confirm(Request::Forget, "x", &[], false));
+        assert!(silent.1.lock().unwrap().is_empty());
+        // Not sure enough (0.9 is the bar, 0.95 after something hostile), Jev down, vault down.
+        assert!(
+            !judge("add", 0.9, 0.85, false)
+                .0
+                .confirm(Request::Forget, "x", &said, false)
+        );
+        assert!(
+            !judge("add", 0.9, 0.92, false)
+                .0
+                .confirm(Request::Forget, "x", &said, true)
+        );
+        assert!(
+            !judge("add", 0.9, 0.99, true)
+                .0
+                .confirm(Request::Forget, "x", &said, false)
+        );
+        let (j, _) = judge("add", 0.9, 0.99, false);
+        let blind = MemoryJudge::new(j.jev.clone(), Arc::new(|_| Err("vault down".into())));
+        assert!(!blind.confirm(Request::Forget, "x", &said, false));
     }
 
     #[test]

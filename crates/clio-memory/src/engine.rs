@@ -96,6 +96,13 @@ pub struct Judge {
     actor: ActorId,
 }
 
+impl Judge {
+    /// The actor that signs what the judge does.
+    pub fn actor(&self) -> ActorId {
+        self.actor
+    }
+}
+
 /// What the judge decided about a proposal (spec `2026-11-03-jev-design.md`). A review is not here:
 /// it is an ordinary `propose`, which the rules send to quarantine for the person.
 #[derive(Debug, Clone, PartialEq)]
@@ -1823,6 +1830,11 @@ impl Engine {
         kind: Option<MemoryType>,
     ) -> Result<Vec<MemoryRow>> {
         self.store.list(scope, state, kind)
+    }
+
+    /// One operation of the log (read only): who did it, what it changed.
+    pub fn operation(&self, op: OpId) -> Result<Operation> {
+        self.store.operation(op)
     }
 
     pub fn history(&self, id: MemoryId) -> Result<Vec<Operation>> {

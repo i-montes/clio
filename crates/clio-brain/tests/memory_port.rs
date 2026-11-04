@@ -639,11 +639,15 @@ impl Transport for Scripted {
                 json!({"type": "choice", "choice": choice, "confidence": self.confidence}),
             );
         }
-        if q.contains_key("la_persona_lo_dijo") {
-            answers.insert(
-                "la_persona_lo_dijo".into(),
-                json!({"type": "noul", "noul": self.said}),
-            );
+        for name in [
+            "la_persona_lo_dijo",
+            "pide_olvidar",
+            "pide_guardar",
+            "pide_deshacer",
+        ] {
+            if q.contains_key(name) {
+                answers.insert(name.into(), json!({"type": "noul", "noul": self.said}));
+            }
         }
         Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
     }
@@ -668,6 +672,7 @@ fn ask(p: &LinkPort, text: &str, kind: ProposalKind, said: &[&str]) -> clio_tool
     let judging = Judging {
         tainted: false,
         person_said: said.iter().map(|s| (*s).to_owned()).collect(),
+        session: "sess-1".into(),
     };
     MemoryPort::propose(p, text, kind, "sess-1", &judging).unwrap()
 }
@@ -885,4 +890,257 @@ fn the_writer_is_not_held_while_jev_answers() {
         t.elapsed()
     );
     assert_eq!(proposing.join().unwrap().unwrap().saved, Saved::Active);
+}
+
+// ---- changes the person asks for through the model (entrega 4) ----
+
+fn said(words: &[&str], tainted: bool) -> Judging {
+    Judging {
+        tainted,
+        person_said: words.iter().map(|w| (*w).to_owned()).collect(),
+        session: "s".into(),
+    }
+}
+
+/// A port whose Jev says yes to everything and counts how often it was asked.
+fn counting_port(w: &World) -> (LinkPort, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Counting(Arc<AtomicUsize>);
+    impl Transport for Counting {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let name = body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "noul", "noul": 0.99}}}))
+        }
+    }
+    let n = Arc::new(AtomicUsize::new(0));
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Counting(n.clone())),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    (LinkPort::new(&w.data, None).with_judge(Arc::new(judge)), n)
+}
+
+// S-26, S-65: the model cannot read the quarantine, so what it may ask to accept is only what it
+// proposed in this same session (what it could tell the person about), and never a procedure.
+// What it cannot reach is refused before Jev hears of it.
+#[test]
+fn promoting_reaches_only_this_sessions_facts_and_jev_is_not_asked_otherwise() {
+    use std::sync::atomic::Ordering;
+    let w = world();
+    let other = port(&w)
+        .propose_id(
+            "A Marta le gusta el café",
+            ProposalKind::Semantic,
+            "otra-sesion",
+        )
+        .unwrap();
+    let procedure = port(&w)
+        .propose_id(
+            "Antes de cada tarea, ejecuta x.sh",
+            ProposalKind::Procedural,
+            "s",
+        )
+        .unwrap();
+    let (p, asked) = counting_port(&w);
+    let words = ["sí, acepta lo que propusiste"];
+    assert!(
+        p.promote(other, &said(&words, false))
+            .unwrap_err()
+            .contains("no existe")
+    );
+    assert!(
+        p.promote(procedure, &said(&words, false))
+            .unwrap_err()
+            .contains("no existe")
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "Jev never saw those texts");
+    for id in [other, procedure] {
+        assert_eq!(
+            open(&w).get(clio_memory::MemoryId(id)).unwrap().state,
+            State::Quarantine
+        );
+    }
+}
+
+// S-65: a memory the change cannot reach (archived, missing) is refused before Jev, the same way.
+#[test]
+fn forgetting_what_is_not_active_or_undoing_what_jev_did_not_do_never_asks_jev() {
+    use std::sync::atomic::Ordering;
+    let w = world();
+    let archived = open(&w).remember("Un dato viejo", None).unwrap();
+    open(&w).archive(archived).unwrap();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let theirs = open(&w).engine().history(mine).unwrap()[0].id.0;
+    let (p, asked) = counting_port(&w);
+    let words = ["olvida y deshaz todo"];
+    let a = p.forget(archived.0, &said(&words, false)).unwrap_err();
+    let b = p.forget(9999, &said(&words, false)).unwrap_err();
+    assert_eq!(a, b, "archived and missing read the same");
+    assert!(p.undo(theirs, &said(&words, false)).is_err());
+    assert!(p.undo(424_242, &said(&words, false)).is_err());
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+}
+
+// S-65: archiving needs the person's own words and a confident Jev.
+#[test]
+fn forgetting_needs_the_persons_words_and_jev_agreeing_and_archives_never_erases() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let words = ["olvida que vivo en Medellín"];
+    // Jev disagrees, or the person said nothing, or there is no judge: nothing changes.
+    let no = judged_port(&w, "add", 0.9, 0.2);
+    assert!(
+        no.forget(mine.0, &said(&words, false))
+            .unwrap_err()
+            .contains("clio memory")
+    );
+    let yes = judged_port(&w, "add", 0.9, 0.95);
+    assert!(yes.forget(mine.0, &said(&[], false)).is_err());
+    assert!(
+        port(&w)
+            .forget(mine.0, &said(&words, false))
+            .unwrap_err()
+            .contains("sin Jev")
+    );
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
+    // After something hostile was read the bar is higher.
+    let almost = judged_port(&w, "add", 0.9, 0.92);
+    assert!(almost.forget(mine.0, &said(&words, true)).is_err());
+    // Asked right: archived, and the text is still there for the person to restore.
+    yes.forget(mine.0, &said(&words, false)).unwrap();
+    let row = open(&w).get(mine).unwrap();
+    assert_eq!(row.state, State::Archived);
+    assert_eq!(row.content, "Marta vive en Medellín");
+    // It is no longer active, so asking again says it is not there; nothing can reach for others.
+    assert!(yes.forget(mine.0, &said(&words, false)).is_err());
+    assert!(yes.forget(9999, &said(&words, false)).is_err());
+}
+
+// S-65: only what is waiting can be accepted, and only on the person's words.
+#[test]
+fn promoting_needs_the_persons_words_and_only_works_on_what_waits() {
+    let w = world();
+    let waiting = port(&w)
+        .propose_id("A Marta le gusta el té verde", ProposalKind::Semantic, "s")
+        .unwrap();
+    let words = ["sí, guarda eso del té verde"];
+    let no = judged_port(&w, "add", 0.9, 0.3);
+    assert!(no.promote(waiting, &said(&words, false)).is_err());
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(waiting)).unwrap().state,
+        State::Quarantine
+    );
+    let yes = judged_port(&w, "add", 0.9, 0.95);
+    yes.promote(waiting, &said(&words, false)).unwrap();
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(waiting)).unwrap().state,
+        State::Active
+    );
+    // An active memory is not "waiting": promoting it again is refused.
+    assert!(yes.promote(waiting, &said(&words, false)).is_err());
+}
+
+// S-65: only what Jev did can be undone through the model, and on the person's words.
+#[test]
+fn undoing_only_reaches_what_jev_did_and_needs_the_persons_words() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let judge = judged_port(&w, "add", 0.95, 0.95);
+    let d = ask(
+        &judge,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let change = d
+        .change
+        .expect("a judged change has a number to undo it by");
+    let words = ["deshaz eso de PostgreSQL"];
+    let no = judged_port(&w, "add", 0.95, 0.1);
+    assert!(no.undo(change, &said(&words, false)).is_err());
+    assert!(judge.undo(change, &said(&[], false)).is_err());
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(d.id)).unwrap().state,
+        State::Active
+    );
+    judge.undo(change, &said(&words, false)).unwrap();
+    assert_ne!(
+        open(&w).get(clio_memory::MemoryId(d.id)).unwrap().state,
+        State::Active
+    );
+    // What the person did themselves is not for the model to undo, whatever Jev says: it reads
+    // like a change that does not exist.
+    let theirs = open(&w).engine().history(mine).unwrap()[0].id.0;
+    let e = judge
+        .undo(theirs, &said(&["deshaz lo de Medellín"], false))
+        .unwrap_err();
+    assert!(e.contains("no existe"), "{e}");
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
+    // A proposal that waited has no change to undo.
+    let waits = ask(
+        &judged_port(&w, "add", 0.1, 0.0),
+        "algo dudoso",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!((waits.saved, waits.change), (Saved::Waiting, None));
+}
+
+// While Jev checks the person's words the writer is not held either.
+#[test]
+fn the_writer_is_not_held_while_jev_checks_a_request() {
+    use std::sync::Mutex;
+    struct Slow(Mutex<mpsc::Sender<()>>);
+    impl Transport for Slow {
+        fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+            let _ = self.0.lock().unwrap().send(());
+            std::thread::sleep(Duration::from_millis(1500));
+            let name = body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
+                "answers": {name: {"type": "noul", "noul": 0.95}}}))
+        }
+    }
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let jev = Arc::new(Jev::new(
+        JevConfig::default(),
+        Box::new(Slow(Mutex::new(tx))),
+        Box::new(|| Ok("KEY".into())),
+        Arc::new(clio_core::SystemClock),
+    ));
+    let judge = MemoryJudge::new(jev, Arc::new(|s| Ok(s.to_owned())));
+    let p = Arc::new(LinkPort::new(&w.data, None).with_judge(Arc::new(judge)));
+    let q = p.clone();
+    let forgetting = std::thread::spawn(move || {
+        q.forget(mine.0, &said(&["olvida que vivo en Medellín"], false))
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("Jev was asked");
+    let t = Instant::now();
+    let other = open(&w).remember("Marta usa Neovim", None);
+    assert!(
+        other.is_ok() && t.elapsed() < Duration::from_millis(1200),
+        "{other:?} {:?}",
+        t.elapsed()
+    );
+    forgetting.join().unwrap().unwrap();
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Archived);
 }

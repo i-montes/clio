@@ -574,6 +574,16 @@ fn fake_jev() -> FakeJev {
             let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let mut answers = serde_json::Map::new();
             for (q, def) in req["questions"].as_object().into_iter().flatten() {
+                if q.starts_with("pide_") {
+                    // «Did the person ask for this?»: yes only if their words say `olvida`.
+                    let said = req["state"]["mensajes_de_la_persona"].to_string();
+                    let yes = said.contains("olvida");
+                    answers.insert(
+                        q.clone(),
+                        json!({"type": "noul", "noul": if yes { 0.95 } else { 0.05 }}),
+                    );
+                    continue;
+                }
                 if def["type"] == "choice" {
                     // What to do with a memory: «new», sure of it.
                     answers.insert(
@@ -865,4 +875,80 @@ fn with_jev_on_a_proposal_of_the_model_becomes_memory_decided_by_jev() {
             .all(|(a, _)| a.as_deref() == Some(format!("Authorization: Bearer {key}").as_str()))
     );
     w.assert_key_nowhere();
+}
+
+fn jev_world(script: &str, key_tail: &str) -> (World, Vault, FakeJev) {
+    let w = World::new(script);
+    let vault = start_vault(&w, &format!("jev-test-{}-{key_tail}", "key"));
+    let jev = fake_jev();
+    let cfg_path = w.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["jev"] =
+        json!({"enabled": true, "memory": false, "tool_hints": false, "base_url": jev.base});
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    let r = w
+        .clio(&["memory", "remember", "Marta vive en Medellín"])
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    (w, vault, jev)
+}
+
+fn memory_state(w: &World) -> clio_memory::State {
+    let link = clio_brain::memory_link::MemoryLink::open_read(
+        &w.home().join(".local/share/clio"),
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .unwrap();
+    link.get(clio_memory::MemoryId(1)).unwrap().state
+}
+
+const FORGET: &str = r#"[{"tool_calls":[{"name":"memory_forget","arguments":{"reason":"olvidar el dato","id":1}}]},{"text":"listo","usage":[10,2]}]"#;
+
+// S-65: the person asks the model to forget, in their own words; the tool host checks those words
+// (which the brain told it) with Jev, and the memory is archived, not erased.
+// S-65
+#[test]
+fn when_the_person_asks_to_forget_the_model_can_and_the_memory_is_archived() {
+    if can_run("jev_forget", false).is_none() {
+        return;
+    }
+    let (w, _vault, _jev) = jev_world(FORGET, "5555");
+    let o = w
+        .clio(&["run", "--harness", "pi", "olvida que vivo en Medellín"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(memory_state(&w), clio_memory::State::Archived);
+}
+
+// S-65: the same call, with nothing in the person's words that asks for it (the model was told so
+// by a page, say), is refused and the memory stays as it was.
+// S-65
+#[test]
+fn the_model_cannot_forget_what_the_person_did_not_ask_to_forget() {
+    if can_run("jev_forget_refused", false).is_none() {
+        return;
+    }
+    let (w, _vault, jev) = jev_world(FORGET, "4444");
+    let o = w
+        .clio(&["run", "--harness", "pi", "hola, ¿cómo vas?"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(memory_state(&w), clio_memory::State::Active);
+    // It was Jev that said no, looking at what the person really said (reported by the brain).
+    let seen = jev.seen.lock().unwrap();
+    let asked: Vec<&Value> = seen
+        .iter()
+        .map(|(_, b)| b)
+        .filter(|b| b["questions"]["pide_olvidar"].is_object())
+        .collect();
+    assert_eq!(asked.len(), 1, "{seen:?}");
+    assert_eq!(
+        asked[0]["state"]["mensajes_de_la_persona"],
+        json!(["hola, ¿cómo vas?"])
+    );
 }

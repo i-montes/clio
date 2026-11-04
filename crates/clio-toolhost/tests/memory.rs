@@ -40,6 +40,8 @@ struct FakePort {
     judging: Mutex<Vec<Judging>>,
     /// What the fake memory says became of a proposal.
     saved: Mutex<Saved>,
+    /// Changes asked for: the tool, the number and what the port was told to judge it by.
+    changes: Mutex<Vec<(String, i64, Judging)>>,
 }
 
 impl FakePort {
@@ -67,11 +69,20 @@ impl FakePort {
             proposals: Mutex::new(Vec::new()),
             judging: Mutex::new(Vec::new()),
             saved: Mutex::new(Saved::Waiting),
+            changes: Mutex::new(Vec::new()),
         })
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn change(&self, what: &str, n: i64, judging: &Judging) -> Result<(), String> {
+        self.changes
+            .lock()
+            .unwrap()
+            .push((what.to_owned(), n, judging.clone()));
+        self.behave()
     }
 
     fn behave(&self) -> Result<(), String> {
@@ -105,7 +116,20 @@ impl MemoryPort for FakePort {
         Ok(Proposed {
             id: 900 + self.calls() as i64,
             saved: *self.saved.lock().unwrap(),
+            change: Some(41),
         })
+    }
+
+    fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        self.change("forget", id, judging)
+    }
+
+    fn promote(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        self.change("promote", id, judging)
+    }
+
+    fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
+        self.change("undo", change, judging)
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
@@ -1118,4 +1142,200 @@ fn what_the_person_said_is_taken_only_from_whoever_has_the_brains_token() {
     let e = env_with(Some(&port), |c| c.said_token = None);
     let r = call(&e, "s1", "said", json!({ "text": "hola", "token": "" }));
     assert!(!r.ok, "{r:?}");
+}
+
+// ---- memory_forget, memory_promote, memory_revert (entrega 4) ----
+
+fn change(e: &Env, session: &str, tool: &str, n: i64) -> Response {
+    let key = if tool == "memory_revert" {
+        "change"
+    } else {
+        "id"
+    };
+    call(e, session, tool, json!({ key: n }))
+}
+
+// S-65: the port is asked, with what the brain says the person said and the taint; the answer is in
+// fixed words.
+#[test]
+fn a_change_the_person_asked_for_reaches_the_port_with_their_words_and_is_told_in_fixed_words() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for (tool, starts, what) in [
+        ("memory_forget", "forgotten", "forget"),
+        ("memory_promote", "promoted", "promote"),
+        ("memory_revert", "undone", "undo"),
+    ] {
+        // Each change spends the person's words: they say it again each time.
+        call(
+            &e,
+            "s1",
+            "said",
+            json!({ "text": "olvida que vivo en Medellín", "token": TOKEN }),
+        );
+        let r = change(&e, "s1", tool, 12);
+        assert!(r.ok && r.content.starts_with(starts), "{tool}: {r:?}");
+        let seen = port.changes.lock().unwrap().last().unwrap().clone();
+        assert_eq!((seen.0.as_str(), seen.1), (what, 12));
+        assert_eq!(seen.2.person_said, ["olvida que vivo en Medellín"]);
+        assert!(!seen.2.tainted);
+    }
+    // After something hostile was read the port is told so.
+    assert!(call(&e, "s1", "taint", json!({})).tainted);
+    change(&e, "s1", "memory_forget", 3);
+    assert!(port.changes.lock().unwrap().last().unwrap().2.tainted);
+}
+
+// S-65: the port can say no, and a memory with no judge cannot make the change at all.
+#[test]
+fn a_refused_change_says_why_and_a_port_without_a_judge_sends_the_person_to_the_cli() {
+    let port = FakePort::new(
+        vec![],
+        Mode::Fail("no consta que la persona lo pidiera".into()),
+    );
+    let e = env(&port);
+    let r = change(&e, "s1", "memory_forget", 5);
+    assert!(!r.ok && r.content.contains("no consta"), "{r:?}");
+    // A port that does not implement the change (the default).
+    struct Plain;
+    impl MemoryPort for Plain {
+        fn propose(
+            &self,
+            _: &str,
+            _: ProposalKind,
+            _: &str,
+            _: &Judging,
+        ) -> Result<Proposed, String> {
+            Err("no".into())
+        }
+        fn search(&self, _: &str, _: usize) -> Result<Found, String> {
+            Err("no".into())
+        }
+        fn get(&self, _: i64) -> Result<MemoryItem, String> {
+            Err("no".into())
+        }
+    }
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let mut cfg = Config::new(&r.join("w"), &r.join("s"), &r.join("r"));
+    std::fs::create_dir_all(cfg_dirs(&r)).unwrap();
+    cfg.jail = JailMode::Off;
+    cfg.memory = Some(Arc::new(Plain));
+    let host = ToolHost::new(cfg).unwrap();
+    let line = json!({"id":"i","tool":"memory_promote","args":{"id": 3},"session":"s","call_id":"c","tainted":false}).to_string();
+    let resp: Response = serde_json::from_str(&host.handle_line(&line)).unwrap();
+    assert!(!resp.ok && resp.content.contains("clio memory"), "{resp:?}");
+}
+
+fn cfg_dirs(r: &Path) -> PathBuf {
+    r.join("w")
+}
+
+#[test]
+fn a_change_needs_a_positive_number_and_a_session_has_ten_of_them_and_the_refused_ones_count() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    for bad in [
+        json!({"id": 0}),
+        json!({"id": -4}),
+        json!({"id": "7"}),
+        json!({}),
+    ] {
+        let r = call(&e, "s1", "memory_forget", bad.clone());
+        assert!(!r.ok, "{bad}: {r:?}");
+    }
+    assert!(
+        !call(&e, "s1", "memory_revert", json!({"id": 3})).ok,
+        "revert takes `change`"
+    );
+    assert!(port.changes.lock().unwrap().is_empty());
+    // A bad number is refused before it is counted; ten good ones, then no more.
+    for n in 1..=10 {
+        assert!(change(&e, "s1", "memory_forget", n).ok, "{n}");
+    }
+    assert!(denied_by_budget(&change(&e, "s1", "memory_forget", 11)));
+    assert_eq!(port.changes.lock().unwrap().len(), 10);
+    // And the ones the memory refused count too.
+    let failing = FakePort::new(vec![], Mode::Fail("no".into()));
+    let e = env(&failing);
+    for n in 1..=10 {
+        let r = change(&e, "s1", "memory_promote", n);
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
+    }
+    assert!(denied_by_budget(&change(&e, "s1", "memory_promote", 11)));
+}
+
+#[test]
+fn a_proposal_that_became_memory_tells_the_model_the_change_to_undo_it() {
+    let port = FakePort::new(vec![], Mode::Items);
+    *port.saved.lock().unwrap() = Saved::Active;
+    let e = env(&port);
+    let r = propose(&e, "s1", "dato", "semantic");
+    assert!(
+        r.content.contains("change 41") && r.content.contains("memory_revert"),
+        "{r:?}"
+    );
+    assert_eq!(r.data["change"], 41);
+    *port.saved.lock().unwrap() = Saved::Waiting;
+    let r = propose(&e, "s1", "otro dato", "semantic");
+    assert!(
+        !r.content.contains("change"),
+        "waiting has nothing to undo: {r:?}"
+    );
+}
+
+// S-65: one request of the person is one change; the next change needs new words.
+#[test]
+fn the_persons_words_are_spent_by_the_change_they_asked_for() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    call(
+        &e,
+        "s1",
+        "said",
+        json!({ "text": "olvida lo de Medellín", "token": TOKEN }),
+    );
+    assert!(change(&e, "s1", "memory_forget", 3).ok);
+    assert!(change(&e, "s1", "memory_forget", 4).ok);
+    let seen = port.changes.lock().unwrap().clone();
+    assert_eq!(seen[0].2.person_said, ["olvida lo de Medellín"]);
+    assert!(
+        seen[1].2.person_said.is_empty(),
+        "spent by the first change"
+    );
+    assert_eq!(seen[0].2.session, "s1");
+    // A refused change does not spend them.
+    let failing = FakePort::new(vec![], Mode::Fail("no".into()));
+    let e = env(&failing);
+    call(
+        &e,
+        "s1",
+        "said",
+        json!({ "text": "olvida X", "token": TOKEN }),
+    );
+    assert!(!change(&e, "s1", "memory_forget", 3).ok);
+    change(&e, "s1", "memory_forget", 3);
+    assert_eq!(
+        failing.changes.lock().unwrap()[1].2.person_said,
+        ["olvida X"]
+    );
+}
+
+#[test]
+fn a_proposal_that_waits_tells_the_model_its_number_and_an_undo_is_logged_as_a_change() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    let r = propose(&e, "s1", "dato", "semantic");
+    assert!(r.content.starts_with("proposed (m"), "{r:?}");
+    call(
+        &e,
+        "s1",
+        "said",
+        json!({ "text": "deshaz", "token": TOKEN }),
+    );
+    assert!(change(&e, "s1", "memory_revert", 77).ok);
+    let log = std::fs::read_to_string(run_dir(&e).join("memory.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(last["change"], 77);
+    assert_eq!(last["ids"], json!([]), "a change number is not a memory id");
 }

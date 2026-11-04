@@ -10,18 +10,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clio_memory::{
-    Error, Judged, MemoryId, MemoryRow, MemoryType, OpKind, Origin as Written, State,
+    Error, Judged, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, State,
 };
 use clio_toolhost::{
     Found, Judging, MemoryItem, MemoryPort, Origin, ProposalKind, Proposed, Saved,
 };
 
-use crate::memory_judge::{Call, MemoryJudge, Neighbor};
+use crate::memory_judge::{Call, MemoryJudge, Neighbor, Request};
 use crate::memory_link::{EmbedModel, MemoryLink, Res, explain, kind_label};
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
 const NOT_READABLE: &str = "ese recuerdo no existe o no se puede leer";
+/// Said when the person's own words do not show that they asked for the change.
+const NOT_CONFIRMED: &str =
+    "no consta, por lo que la persona dijo, que lo haya pedido: que lo haga con `clio memory`";
+const NO_JUDGE: &str =
+    "esta memoria no puede hacer ese cambio sin Jev: que lo haga la persona con `clio memory`";
 const NO_VECTORS: &str = "solo texto: el modelo de vectores no está disponible";
 
 pub struct LinkPort {
@@ -68,6 +73,59 @@ impl LinkPort {
             }
         }
         slot.as_ref().map_or_else(|| Err(NOT_READABLE.into()), f)
+    }
+}
+
+impl LinkPort {
+    /// Opened for writing for this one call (it waits a few seconds for another writer).
+    fn writer(&self) -> Result<MemoryLink, String> {
+        MemoryLink::open_write(&self.data, &EmbedModel::none()).map_err(|why| {
+            eprintln!("clio-toolhost: memory: {why}");
+            "la memoria no se puede abrir para escribir ahora".to_owned()
+        })
+    }
+
+    /// Reads without holding the writer: what Jev is asked about must not keep the person's own
+    /// writes waiting.
+    fn reader(&self) -> Result<MemoryLink, String> {
+        match MemoryLink::open_read(&self.data, &EmbedModel::none()) {
+            Ok(Some(link)) => Ok(link),
+            _ => Err(NOT_READABLE.to_owned()),
+        }
+    }
+
+    /// A change the person asked for through the model: the memory must be there, the judge must
+    /// confirm from the person's own words that they asked for exactly this about exactly it, and
+    /// only then is it done (by the person's actor, like `clio memory` would). The judge is asked
+    /// first, with a read-only view; the writer is taken only to do it, and the memory is read
+    /// again under it.
+    fn change(
+        &self,
+        id: i64,
+        judging: &Judging,
+        what: Request,
+        allowed: impl Fn(&MemoryRow) -> bool,
+        act: impl FnOnce(&MemoryLink, &MemoryRow) -> Res<()>,
+    ) -> Result<(), String> {
+        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        // Checked on the read-only view BEFORE Jev is asked: a memory this change cannot reach is
+        // the same answer as one that does not exist, and its text never leaves.
+        let seen = self
+            .reader()?
+            .get(MemoryId(id))
+            .ok()
+            .filter(|r| allowed(r))
+            .ok_or_else(|| NOT_READABLE.to_owned())?;
+        if !judge.confirm(what, &seen.content, &judging.person_said, judging.tainted) {
+            return Err(NOT_CONFIRMED.to_owned());
+        }
+        let link = self.writer()?;
+        let row = link
+            .get(MemoryId(id))
+            .ok()
+            .filter(|r| allowed(r))
+            .ok_or_else(|| NOT_READABLE.to_owned())?;
+        act(&link, &row)
     }
 }
 
@@ -145,6 +203,8 @@ impl MemoryPort for LinkPort {
                         return Ok(Proposed {
                             id: o.memory.0,
                             saved,
+                            change: matches!(saved, Saved::Active | Saved::Replaced)
+                                .then_some(o.op.0),
                         });
                     }
                     // A refusal that is the proposal's own (a secret, a quota, too long, empty,
@@ -167,7 +227,70 @@ impl MemoryPort for LinkPort {
             .map(|id| Proposed {
                 id: id.0,
                 saved: Saved::Waiting,
+                change: None,
             })
+    }
+
+    fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        self.change(
+            id,
+            judging,
+            Request::Forget,
+            |r| r.state == State::Active,
+            |link, row| link.archive(row.id),
+        )
+    }
+
+    /// Only what the model proposed in THIS session and the person could hear about, and never a
+    /// procedure: the model cannot read the quarantine, so it could not show the person anything
+    /// else, and a procedure acts as an instruction later (S-26). Those go through `clio memory`.
+    fn promote(&self, id: i64, judging: &Judging) -> Result<(), String> {
+        let here = MemoryLink::agent_session(&judging.session);
+        self.change(
+            id,
+            judging,
+            Request::Promote,
+            |r| {
+                r.state == State::Quarantine
+                    && r.kind != MemoryType::Procedural
+                    && r.session.as_deref() == Some(here.as_str())
+            },
+            |link, row| link.promote(row.id),
+        )
+    }
+
+    fn undo(&self, change: i64, judging: &Judging) -> Result<(), String> {
+        let judge = self.judge.as_ref().ok_or(NO_JUDGE)?;
+        // Read-only, and BEFORE Jev: only a change the judge made (an add or a replacement) in
+        // this scope; anything else is the same answer as a change that does not exist.
+        let content = {
+            let link = self.reader()?;
+            let op = link
+                .engine()
+                .operation(OpId(change))
+                .map_err(|_| NOT_READABLE.to_owned())?;
+            let by_judge = link.judge_actor().is_some_and(|j| j == op.actor);
+            if !by_judge
+                || op.scope != link.scope()
+                || !matches!(op.kind, OpKind::Add | OpKind::Update)
+            {
+                return Err(NOT_READABLE.to_owned());
+            }
+            let memory = op.memory.ok_or_else(|| NOT_READABLE.to_owned())?;
+            link.get(memory)
+                .map_err(|_| NOT_READABLE.to_owned())?
+                .content
+        };
+        if !judge.confirm(
+            Request::Undo,
+            &content,
+            &judging.person_said,
+            judging.tainted,
+        ) {
+            return Err(NOT_CONFIRMED.to_owned());
+        }
+        // The writer only now; `revert_judged` checks again that the judge made the change.
+        self.writer()?.revert_judged(OpId(change))
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

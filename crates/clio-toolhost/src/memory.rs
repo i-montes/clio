@@ -29,11 +29,29 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 3] = ["memory_search", "memory_get", "memory_propose"];
+pub(crate) const MEMORY_OPS: [&str; 6] = [
+    "memory_search",
+    "memory_get",
+    "memory_propose",
+    "memory_forget",
+    "memory_promote",
+    "memory_revert",
+];
 
 const SEARCH_DESCRIPTION: &str = "Search the person's memory (active memories only, read-only)";
 const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-only)";
 const PROPOSE_DESCRIPTION: &str = "Propose a memory: Clio decides whether it is kept, replaces another, was known, or waits for the person's review";
+
+const FORGET_DESCRIPTION: &str =
+    "Archive a memory because the person asked (it is not erased; Jev checks the person's words)";
+const PROMOTE_DESCRIPTION: &str = "Accept a memory that waits for review because the person asked (Jev checks the person's words)";
+const REVERT_DESCRIPTION: &str =
+    "Undo a change Jev made to the memory because the person asked (Jev checks the person's words)";
+
+/// Changes a session may ask for through these three tools (S-47, S-65).
+pub(crate) const MAX_CHANGES: u32 = 10;
+const NO_CHANGES: &str =
+    "this memory cannot make that change: the person can do it with `clio memory`";
 
 /// Longest proposal, in characters, after cleaning.
 const MAX_PROPOSAL_CHARS: usize = 400;
@@ -124,6 +142,8 @@ pub enum Saved {
 pub struct Proposed {
     pub id: i64,
     pub saved: Saved,
+    /// The change (operation) the judge made, so the model can undo it if the person asks.
+    pub change: Option<i64>,
 }
 
 /// What the tool host tells the port about the call so it can judge it: whether the session read
@@ -133,6 +153,8 @@ pub struct Proposed {
 pub struct Judging {
     pub tainted: bool,
     pub person_said: Vec<String>,
+    /// The Pi session the call comes from.
+    pub session: String,
 }
 
 /// What the tool host needs from the memory: active memories of the person's scope to read, and
@@ -150,6 +172,19 @@ pub trait MemoryPort: Send + Sync {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String>;
+    /// Archives memory `id` (reversible, not an erasure) because the person asked. The port checks
+    /// the person's words in `judging`; the model's claim is not evidence.
+    fn forget(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
+        Err(NO_CHANGES.into())
+    }
+    /// Accepts the candidate `id` that waits for review, because the person asked.
+    fn promote(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
+        Err(NO_CHANGES.into())
+    }
+    /// Undoes `change`, one the judge made, because the person asked.
+    fn undo(&self, _change: i64, _judging: &Judging) -> Result<(), String> {
+        Err(NO_CHANGES.into())
+    }
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
     /// it is must not leak.
@@ -171,6 +206,7 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("text", ArgKind::Text, true),
             a("kind", ArgKind::Text, true),
         ],
+        "memory_revert" => vec![a("change", ArgKind::Int, true)],
         _ => vec![a("id", ArgKind::Int, true)],
     }
 }
@@ -181,16 +217,19 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_search", SEARCH_DESCRIPTION),
         ("memory_get", GET_DESCRIPTION),
         ("memory_propose", PROPOSE_DESCRIPTION),
+        ("memory_forget", FORGET_DESCRIPTION),
+        ("memory_promote", PROMOTE_DESCRIPTION),
+        ("memory_revert", REVERT_DESCRIPTION),
     ]
     .into_iter()
     .map(|(name, description)| ToolDecl {
         name: name.into(),
         version: "1".into(),
         // A proposal changes the memory file, but only by adding a candidate nobody trusts.
-        effect: if name == "memory_propose" {
-            Effect::LocalReversible
-        } else {
+        effect: if matches!(name, "memory_search" | "memory_get") {
             Effect::Read
+        } else {
+            Effect::LocalReversible
         },
         egress: Egress::None,
         description_hash: digest_hex(description),
@@ -261,6 +300,8 @@ impl Budget {
 #[derive(Default)]
 struct Facts {
     ids: Vec<i64>,
+    /// The change (operation) an undo was about: not a memory id.
+    change: Option<i64>,
     /// This call marked the session (a memory that is not the person's).
     marked: bool,
     query_hash: Option<String>,
@@ -297,13 +338,22 @@ impl ToolHost {
         port: &Arc<dyn MemoryPort>,
         f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
+        self.ask_port_for(port, f, self.memory_timeout)
+    }
+
+    fn ask_port_for<T: Send + 'static>(
+        &self,
+        port: &Arc<dyn MemoryPort>,
+        f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,
+        timeout: Duration,
+    ) -> Result<T, String> {
         let (tx, rx) = mpsc::channel();
         let port = Arc::clone(port);
         std::thread::spawn(move || {
             let ran = catch_unwind(AssertUnwindSafe(|| f(port.as_ref())));
             let _ = tx.send(ran.unwrap_or_else(|_| Err("the memory tool panicked".into())));
         });
-        rx.recv_timeout(self.memory_timeout)
+        rx.recv_timeout(timeout)
             .unwrap_or_else(|_| Err("the memory did not answer in time".into()))
     }
 
@@ -328,6 +378,12 @@ impl ToolHost {
     ) -> Response {
         if req.tool == "memory_propose" {
             return self.propose_call(req, args, out);
+        }
+        if matches!(
+            req.tool.as_str(),
+            "memory_forget" | "memory_promote" | "memory_revert"
+        ) {
+            return self.change_call(req, args, out);
         }
         let path = self.run_dir.join("memory-budget.json");
         let mut budget = match Budget::load(&path) {
@@ -365,6 +421,88 @@ impl ToolHost {
     /// (S-47) are counted in a file before the port is asked, as the reads are, and the log has to
     /// be kept or the call is denied. A proposal never marks the session: it carries what the
     /// model decided to say, not what a memory said.
+    /// `memory_forget`, `memory_promote` and `memory_revert`: what the person asks the model to do
+    /// with their memory. The port checks the person's own words (reported by the brain, never the
+    /// model's claim) with Jev; without a judge it says no, and the person uses `clio memory`.
+    fn change_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
+        let Some(port) = self.memory.clone() else {
+            return self.memory_failed(req, out, "there is no memory");
+        };
+        let key = if req.tool == "memory_revert" {
+            "change"
+        } else {
+            "id"
+        };
+        let Some(n) = args.get(key).and_then(Value::as_i64).filter(|n| *n > 0) else {
+            return self.memory_failed(req, out, &format!("{key} must be a positive number"));
+        };
+        let path = self.run_dir.join("memory-changes.json");
+        let mut budget = match Budget::load(&path) {
+            Ok(b) => b,
+            Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
+        };
+        if budget.calls >= MAX_CHANGES {
+            return self.budget_denied(
+                req,
+                &format!("this session asked for its memory changes ({MAX_CHANGES}); the person can use `clio memory`"),
+            );
+        }
+        budget.calls += 1;
+        if let Err(why) = budget.save(&path) {
+            return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
+        }
+        let judging = Judging {
+            tainted: self.is_tainted(&req.session),
+            person_said: self.person_said(&req.session),
+            session: req.session.clone(),
+        };
+        let tool = req.tool.clone();
+        // Longer than a read: Jev, the vault and the writer may all take their time, and a change
+        // reported as failed must not happen afterwards in the background.
+        let done = self.ask_port_for(
+            &port,
+            move |p| match tool.as_str() {
+                "memory_forget" => p.forget(n, &judging),
+                "memory_promote" => p.promote(n, &judging),
+                _ => p.undo(n, &judging),
+            },
+            self.memory_timeout * 3,
+        );
+        let mut facts = Facts::default();
+        let resp = match done {
+            Ok(()) => {
+                // One request of the person is one change: the next one needs new words.
+                self.forget_said(&req.session);
+                if req.tool == "memory_revert" {
+                    facts.change = Some(n);
+                } else {
+                    facts.ids.push(n);
+                }
+                let content = match req.tool.as_str() {
+                    "memory_forget" => {
+                        "forgotten: it is archived, not erased; the person can restore it"
+                    }
+                    "memory_promote" => "promoted: it is part of the person's memory now",
+                    _ => "undone: the change was reverted",
+                };
+                Response {
+                    id: req.id.clone(),
+                    ok: true,
+                    content: content.into(),
+                    data: json!({ "done": true }),
+                    decision: out,
+                    tainted: self.is_tainted(&req.session),
+                    external: false,
+                }
+            }
+            Err(why) => self.memory_failed(req, out, &why),
+        };
+        match self.log_facts(req, &facts, 0) {
+            Ok(()) => resp,
+            Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
+        }
+    }
+
     fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
         let path = self.run_dir.join("memory-proposals.json");
         let mut budget = match Budget::load(&path) {
@@ -442,6 +580,7 @@ impl ToolHost {
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
             person_said: self.person_said(&req.session),
+            session: req.session.clone(),
         };
         match self.ask_port(&port, move |p| p.propose(&text, kind, &session, &judging)) {
             Ok(done) => {
@@ -458,11 +597,24 @@ impl ToolHost {
                         "waiting",
                     ),
                 };
+                // The change number is only for undoing, if the person asks: `memory_revert`.
+                let content = match done.change {
+                    _ if done.saved == Saved::Waiting => format!(
+                        "proposed (m{}): it waits for the person's review and is not memory until they accept it",
+                        done.id
+                    ),
+                    Some(c) if matches!(done.saved, Saved::Active | Saved::Replaced) => {
+                        format!(
+                            "{content} (change {c}: if the person asks you to undo it, use memory_revert with it)"
+                        )
+                    }
+                    _ => content.to_owned(),
+                };
                 Response {
                     id: req.id.clone(),
                     ok: true,
-                    content: content.into(),
-                    data: json!({ "proposed": true, "result": how }),
+                    content,
+                    data: json!({ "proposed": true, "result": how, "change": done.change }),
                     decision: out,
                     tainted: self.is_tainted(&req.session),
                     external: false,
@@ -481,6 +633,7 @@ impl ToolHost {
             "tool": req.tool,
             "results": facts.ids.len(),
             "ids": facts.ids,
+            "change": facts.change,
             "bytes": bytes,
             "tainted": facts.marked,
             "query_hash": facts.query_hash,
