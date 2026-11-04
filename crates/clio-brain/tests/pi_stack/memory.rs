@@ -65,7 +65,7 @@ fn tool_messages(model: &FakeModel) -> Vec<String> {
         .collect()
 }
 
-/// Pi lists nine tools, a memory call reaches the service, what the model reads is wrapped
+/// Pi lists twelve tools, a memory call reaches the service, what the model reads is wrapped
 /// exactly once and with source `memory`, and the session is marked only for a memory that is
 /// not the person's.
 fn smoke(with_agent: bool) {
@@ -95,7 +95,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        9,
+        12,
         "{:?}",
         declared_tools(&model)
     );
@@ -118,7 +118,7 @@ fn smoke(with_agent: bool) {
 
 // S-60
 #[test]
-fn pi_lists_nine_tools_and_a_memory_call_reaches_the_host() {
+fn pi_lists_twelve_tools_and_a_memory_call_reaches_the_host() {
     smoke(false);
 }
 
@@ -635,11 +635,13 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        9,
+        12,
         "{:?}",
         declared_tools(&model)
     );
-    for name in ["memory_promote", "memory_purge", "memory_archive"] {
+    // There is no tool that erases (PURGE is the person's alone) and none by the engine's own
+    // names. The three that archive, accept or undo exist, and with no judge they say no.
+    for name in ["memory_purge", "memory_archive"] {
         assert!(
             !declared_tools(&model).contains(&name.to_owned()),
             "{name} exists"
@@ -651,6 +653,9 @@ fn attack_60() -> Option<bool> {
         ("memory_search", vec!["limit", "query"]),
         ("memory_get", vec!["id"]),
         ("memory_propose", vec!["kind", "text"]),
+        ("memory_forget", vec!["id"]),
+        ("memory_promote", vec!["id"]),
+        ("memory_revert", vec!["change"]),
     ] {
         let schema = schema_of(&model, name);
         let mut keys: Vec<String> = schema["properties"]
@@ -678,7 +683,7 @@ fn attack_60() -> Option<bool> {
     }
     // Asked on the service's own socket (a Pi that was taken over could do it): an operation
     // nobody declared is denied by default (S-02), and a made-up argument is refused too.
-    for tool in ["memory_promote", "memory_purge", "memory_archive"] {
+    for tool in ["memory_purge", "memory_archive"] {
         let r = ask_host(
             &host.socket,
             json!({"id":"p","tool":tool,"args":{"id":person,"text":"x","kind":"semantic"},"session":"s","call_id":"c","tainted":false}),
@@ -686,6 +691,19 @@ fn attack_60() -> Option<bool> {
         assert_eq!(r["ok"], false, "{tool}: {r}");
         assert_eq!(r["decision"]["outcome"], "deny", "{tool}: {r}");
         assert_eq!(r["decision"]["rule"], "S-02", "{tool}: {r}");
+    }
+    // The ones that do exist, asked on the socket by a Pi that was taken over, with no person's
+    // words reported and no judge: the memory says no and changes nothing.
+    for (tool, args) in [
+        ("memory_promote", json!({"id": person})),
+        ("memory_forget", json!({"id": person})),
+        ("memory_revert", json!({"change": 1})),
+    ] {
+        let r = ask_host(
+            &host.socket,
+            json!({"id":"p","tool":tool,"args":args,"session":"s","call_id":"c","tainted":false}),
+        );
+        assert_eq!(r["ok"], false, "{tool}: {r}");
     }
     for (tool, args) in [
         ("memory_search", json!({"query":"x","origin":"user"})),

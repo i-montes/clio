@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use clio_memory::{
     ActorId, ActorInfo, ActorKind, ContextOpts, Engine, Error, Judged, MemoryId, MemoryRow,
-    MemoryType, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId, SearchOpts,
+    MemoryType, OpId, OpenMode, Origin, Outcome, Proposal, Quota, RecallOpts, ScopeId, SearchOpts,
     Signal, State, Sureness, SystemClock,
 };
 use clio_vault::Scrubber;
@@ -691,6 +691,32 @@ impl MemoryLink {
             how,
             Sureness { confidence },
         )
+    }
+
+    /// Undoes a change the judge made (the person asked, Jev confirmed). Only the judge's own
+    /// operations: what the person or anyone else did is not for the model to undo.
+    pub fn revert_judged(&self, op: OpId) -> Res<()> {
+        self.need_write()?;
+        let judge = self.engine.judge().map_err(|e| explain(&e))?;
+        let done = self.engine.operation(op).map_err(|e| explain(&e))?;
+        if done.actor != judge.actor() || done.scope != self.scope {
+            return Err("ese cambio no lo hizo Jev: no se puede deshacer por aquí".into());
+        }
+        self.engine
+            .revert(op, self.actors.persona)
+            .map(|_| ())
+            .map_err(|e| explain(&e))
+    }
+
+    /// The change (operation) that the judge's `memory` came from, if the judge made it.
+    pub fn judge_change_of(&self, memory: MemoryId) -> Option<OpId> {
+        let judge = self.engine.judge().ok()?;
+        self.engine
+            .history(memory)
+            .ok()?
+            .into_iter()
+            .find(|o| o.actor == judge.actor())
+            .map(|o| o.id)
     }
 
     /// Is this memory the person's own (written by them, in a fixed block, or accepted by them)?

@@ -639,11 +639,15 @@ impl Transport for Scripted {
                 json!({"type": "choice", "choice": choice, "confidence": self.confidence}),
             );
         }
-        if q.contains_key("la_persona_lo_dijo") {
-            answers.insert(
-                "la_persona_lo_dijo".into(),
-                json!({"type": "noul", "noul": self.said}),
-            );
+        for name in [
+            "la_persona_lo_dijo",
+            "pide_olvidar",
+            "pide_guardar",
+            "pide_deshacer",
+        ] {
+            if q.contains_key(name) {
+                answers.insert(name.into(), json!({"type": "noul", "noul": self.said}));
+            }
         }
         Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
     }
@@ -885,4 +889,116 @@ fn the_writer_is_not_held_while_jev_answers() {
         t.elapsed()
     );
     assert_eq!(proposing.join().unwrap().unwrap().saved, Saved::Active);
+
+// ---- changes the person asks for through the model (entrega 4) ----
+
+fn said(words: &[&str], tainted: bool) -> Judging {
+    Judging {
+        tainted,
+        person_said: words.iter().map(|w| (*w).to_owned()).collect(),
+    }
+}
+
+// S-65: archiving needs the person's own words and a confident Jev.
+#[test]
+fn forgetting_needs_the_persons_words_and_jev_agreeing_and_archives_never_erases() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let words = ["olvida que vivo en Medellín"];
+    // Jev disagrees, or the person said nothing, or there is no judge: nothing changes.
+    let no = judged_port(&w, "add", 0.9, 0.2);
+    assert!(
+        no.forget(mine.0, &said(&words, false))
+            .unwrap_err()
+            .contains("clio memory")
+    );
+    let yes = judged_port(&w, "add", 0.9, 0.95);
+    assert!(yes.forget(mine.0, &said(&[], false)).is_err());
+    assert!(
+        port(&w)
+            .forget(mine.0, &said(&words, false))
+            .unwrap_err()
+            .contains("sin Jev")
+    );
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
+    // After something hostile was read the bar is higher.
+    let almost = judged_port(&w, "add", 0.9, 0.92);
+    assert!(almost.forget(mine.0, &said(&words, true)).is_err());
+    // Asked right: archived, and the text is still there for the person to restore.
+    yes.forget(mine.0, &said(&words, false)).unwrap();
+    let row = open(&w).get(mine).unwrap();
+    assert_eq!(row.state, State::Archived);
+    assert_eq!(row.content, "Marta vive en Medellín");
+    // It is no longer active, so asking again says it is not there; nothing can reach for others.
+    assert!(yes.forget(mine.0, &said(&words, false)).is_err());
+    assert!(yes.forget(9999, &said(&words, false)).is_err());
+}
+
+// S-65: only what is waiting can be accepted, and only on the person's words.
+#[test]
+fn promoting_needs_the_persons_words_and_only_works_on_what_waits() {
+    let w = world();
+    let waiting = port(&w)
+        .propose_id("A Marta le gusta el té verde", ProposalKind::Semantic, "s")
+        .unwrap();
+    let words = ["sí, guarda eso del té verde"];
+    let no = judged_port(&w, "add", 0.9, 0.3);
+    assert!(no.promote(waiting, &said(&words, false)).is_err());
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(waiting)).unwrap().state,
+        State::Quarantine
+    );
+    let yes = judged_port(&w, "add", 0.9, 0.95);
+    yes.promote(waiting, &said(&words, false)).unwrap();
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(waiting)).unwrap().state,
+        State::Active
+    );
+    // An active memory is not "waiting": promoting it again is refused.
+    assert!(yes.promote(waiting, &said(&words, false)).is_err());
+}
+
+// S-65: only what Jev did can be undone through the model, and on the person's words.
+#[test]
+fn undoing_only_reaches_what_jev_did_and_needs_the_persons_words() {
+    let w = world();
+    let mine = open(&w).remember("Marta vive en Medellín", None).unwrap();
+    let judge = judged_port(&w, "add", 0.95, 0.95);
+    let d = ask(
+        &judge,
+        "El proyecto usa PostgreSQL 16",
+        ProposalKind::Semantic,
+        &[],
+    );
+    let change = d
+        .change
+        .expect("a judged change has a number to undo it by");
+    let words = ["deshaz eso de PostgreSQL"];
+    let no = judged_port(&w, "add", 0.95, 0.1);
+    assert!(no.undo(change, &said(&words, false)).is_err());
+    assert!(judge.undo(change, &said(&[], false)).is_err());
+    assert_eq!(
+        open(&w).get(clio_memory::MemoryId(d.id)).unwrap().state,
+        State::Active
+    );
+    judge.undo(change, &said(&words, false)).unwrap();
+    assert_ne!(
+        open(&w).get(clio_memory::MemoryId(d.id)).unwrap().state,
+        State::Active
+    );
+    // What the person did themselves is not for the model to undo, whatever Jev says.
+    let theirs = open(&w).engine().history(mine).unwrap()[0].id.0;
+    let e = judge
+        .undo(theirs, &said(&["deshaz lo de Medellín"], false))
+        .unwrap_err();
+    assert!(e.contains("Jev"), "{e}");
+    assert_eq!(open(&w).get(mine).unwrap().state, State::Active);
+    // A proposal that waited has no change to undo.
+    let waits = ask(
+        &judged_port(&w, "add", 0.1, 0.0),
+        "algo dudoso",
+        ProposalKind::Semantic,
+        &[],
+    );
+    assert_eq!((waits.saved, waits.change), (Saved::Waiting, None));
 }
