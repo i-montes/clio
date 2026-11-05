@@ -129,6 +129,11 @@ const MAX_BUDGET_BYTES: u64 = 24 * 1024;
 const MIN_ROOM: u64 = 1024;
 const MAX_ERROR_CHARS: usize = 300;
 const MAX_NOTE_CHARS: usize = 200;
+/// Neighbors shown under a memory read in full, ids of neighbors after each search result, and
+/// how long a neighbor's preview is (the same as clio-memory's tools).
+const NEAR_GET: usize = 5;
+const NEAR_SEARCH: usize = 3;
+const PREVIEW_CHARS: usize = 60;
 /// How long the memory has to answer before the call fails.
 pub(crate) const MEMORY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -164,6 +169,17 @@ pub struct MemoryItem {
     pub place: String,
     /// How it stands to other memories, as Jev judged it or as it replaced one: `contradice a m12`.
     pub notes: Vec<String>,
+    /// The memories nearest to it, best first: what the model can walk to from it.
+    pub near: Vec<Near>,
+}
+
+/// A memory near another one: its number, who wrote it and a few words of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Near {
+    pub id: i64,
+    pub origin: Origin,
+    /// Its title or text, uncut: cleaned (vault values crossed out) before it is cut to a preview.
+    pub preview: String,
 }
 
 impl MemoryItem {
@@ -179,6 +195,7 @@ impl MemoryItem {
             category: None,
             place: String::new(),
             notes: Vec::new(),
+            near: Vec::new(),
         }
     }
 }
@@ -222,12 +239,14 @@ pub enum Saved {
     Known,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposed {
     pub id: i64,
     pub saved: Saved,
     /// The change (operation) the agent made, so it can undo it (`memory_revert`).
     pub change: Option<i64>,
+    /// An existing memory the saved one is nearly identical to: the model may correct instead.
+    pub similar: Option<Near>,
 }
 
 /// What the tool host tells the port about the call: whether the session read anything hostile
@@ -496,6 +515,8 @@ impl Budget {
 #[derive(Default)]
 struct Facts {
     ids: Vec<i64>,
+    /// Neighbors whose words were shown with a memory read in full.
+    near: Vec<i64>,
     /// The change (operation) an undo was about: not a memory id.
     change: Option<i64>,
     /// This call marked the session (a memory that is not the person's).
@@ -913,7 +934,7 @@ impl ToolHost {
                     Saved::Known => ("already known: nothing was added", "known"),
                 };
                 // The change number is for undoing it: `memory_revert`.
-                let content = match done.change {
+                let mut content = match done.change {
                     Some(c) if matches!(done.saved, Saved::Active | Saved::Replaced) => {
                         format!(
                             "{content} (m{}, change {c}: memory_revert undoes it)",
@@ -922,6 +943,13 @@ impl ToolHost {
                     }
                     _ => content.to_owned(),
                 };
+                // Only its number: this answer is not framed as data, so no memory text goes in it.
+                if let (Some(twin), false) = (&done.similar, done.saved == Saved::Known) {
+                    content.push_str(&format!(
+                        " · muy parecida a m{0}: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m{0} la muestra)",
+                        twin.id
+                    ));
+                }
                 Response {
                     id: req.id.clone(),
                     ok: true,
@@ -945,6 +973,7 @@ impl ToolHost {
             "tool": req.tool,
             "results": facts.ids.len(),
             "ids": facts.ids,
+            "near": facts.near,
             "change": facts.change,
             "bytes": bytes,
             "tainted": facts.marked,
@@ -1033,8 +1062,13 @@ impl ToolHost {
             Err(why) => return self.memory_failed(req, out, &why),
         };
 
-        // The session is marked for what the memory returned, shown or not.
-        if found.items.iter().any(|i| i.origin != Origin::Person) {
+        // The session is marked for what the memory returned, shown or not: a memory read in full
+        // also returns its neighbors' words (a search, only their numbers).
+        let previews = req.tool == "memory_get";
+        if found.items.iter().any(|i| {
+            i.origin != Origin::Person
+                || (previews && i.near.iter().any(|n| n.origin != Origin::Person))
+        }) {
             self.mark(&req.session, "memory");
             facts.marked = true;
         }
@@ -1076,6 +1110,7 @@ impl ToolHost {
             }
             None => false,
         });
+        let mut ids_after: Vec<(usize, String)> = Vec::new();
         let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
         // A memory read on its own is shown whole (within the cap); a list shows previews.
         let max_line = if req.tool == "memory_get" {
@@ -1110,11 +1145,60 @@ impl ToolHost {
             if used + line.len() + 1 > room {
                 break;
             }
+            if !previews && !it.near.is_empty() {
+                let near: Vec<String> = it
+                    .near
+                    .iter()
+                    .take(NEAR_SEARCH)
+                    .map(|n| format!("m{}", n.id))
+                    .collect();
+                ids_after.push((lines.len(), format!(" · cerca: {}", near.join(", "))));
+            }
             used += line.len() + 1;
             // Only memories that are shown: one left out was never in front of the model.
             masked += count_masks(&cleaned).saturating_sub(count_masks(&body));
             ids.push(it.id);
             lines.push(line);
+            if previews {
+                // After the memory, in what room is left: fewer neighbors, never less of it.
+                let named: Vec<String> = it
+                    .near
+                    .iter()
+                    .take(NEAR_GET)
+                    .map(|n| {
+                        let outside = if n.origin == Origin::External {
+                            " (externo)"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "m{}{outside} «{}»",
+                            n.id,
+                            self.tidy(&n.preview, PREVIEW_CHARS)
+                        )
+                    })
+                    .collect();
+                for k in (1..=named.len()).rev() {
+                    let near_line = format!("Cerca: {}", named[..k].join(" · "));
+                    if used + near_line.len() < room {
+                        used += near_line.len() + 1;
+                        lines.push(near_line);
+                        for n in it.near.iter().take(k) {
+                            facts.near.push(n.id);
+                            masked += count_masks(&self.clean(&n.preview))
+                                .saturating_sub(count_masks(&n.preview));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // Neighbor ids go in the room the results left: they never cost a result.
+        for (at, near) in ids_after {
+            if used + near.len() <= room {
+                used += near.len();
+                lines[at].push_str(&near);
+            }
         }
         let left = found.items.len() - ids.len();
         facts.ids.clone_from(&ids);

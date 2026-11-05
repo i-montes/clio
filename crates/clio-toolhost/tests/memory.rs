@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use clio_core::SystemClock;
 use clio_toolhost::{
-    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Origin, ProposalDraft, ProposalKind,
-    Proposed, Request, Response, Saved, ToolHost,
+    Config, Found, JailMode, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft,
+    ProposalKind, Proposed, Request, Response, Saved, ToolHost,
 };
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ struct FakePort {
     drafts: Mutex<Vec<ProposalDraft>>,
     /// What the fake memory says became of a proposal.
     saved: Mutex<Saved>,
+    /// The memory a proposal came out nearly identical to, if any.
+    similar: Mutex<Option<Near>>,
     /// Changes asked for: the tool, the number and what the port was told to judge it by.
     changes: Mutex<Vec<(String, i64, Judging)>>,
 }
@@ -72,6 +74,7 @@ impl FakePort {
             judging: Mutex::new(Vec::new()),
             drafts: Mutex::new(Vec::new()),
             saved: Mutex::new(Saved::Active),
+            similar: Mutex::new(None),
             changes: Mutex::new(Vec::new()),
         })
     }
@@ -120,6 +123,7 @@ impl MemoryPort for FakePort {
             id: 900 + self.calls() as i64,
             saved: *self.saved.lock().unwrap(),
             change: Some(41),
+            similar: self.similar.lock().unwrap().clone(),
         })
     }
 
@@ -1686,4 +1690,218 @@ fn a_proposal_may_be_about_who_the_person_is() {
         port.drafts.lock().unwrap()[0].category.as_deref(),
         Some("profile")
     );
+}
+
+fn near(id: i64, origin: Origin, preview: &str) -> Near {
+    Near {
+        id,
+        origin,
+        preview: preview.into(),
+    }
+}
+
+fn with_near(mut it: MemoryItem, near: Vec<Near>) -> MemoryItem {
+    it.near = near;
+    it
+}
+
+#[test]
+fn memory_get_shows_the_neighbors_line() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "los respaldos se hacen con restic"),
+            vec![
+                near(2, Origin::Person, "restaurar la base"),
+                near(3, Origin::Person, "la base guarda los pedidos"),
+            ],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    let g = call(&e, "s", "memory_get", json!({ "id": 1 }));
+    assert_eq!(
+        body(&g),
+        [
+            "[m1] hecho · persona · 2026-10-30: los respaldos se hacen con restic",
+            "Cerca: m2 «restaurar la base» · m3 «la base guarda los pedidos»",
+        ]
+    );
+}
+
+#[test]
+fn an_external_neighbor_is_marked() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(7, Origin::External, "según una web")],
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(
+        body(&g).contains(&"Cerca: m7 (externo) «según una web»"),
+        "{g:?}"
+    );
+}
+
+#[test]
+fn a_neighbor_preview_is_cleaned_and_on_one_line() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(2, Origin::Person, "hola\u{1b}[31m rojo\nlinea")],
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(!g.content.contains('\u{1b}'), "{g:?}");
+    let lines = body(&g);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].starts_with("Cerca: m2 «") && lines[1].contains("rojo"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn search_lines_carry_three_neighbor_ids() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            (2..=6).map(|i| near(i, Origin::Person, "x")).collect(),
+        )],
+        Mode::Items,
+    );
+    let r = search(&env(&port), "s", "uno");
+    assert_eq!(
+        body(&r),
+        ["[m1] hecho · persona · 2026-10-30: uno · cerca: m2, m3, m4"]
+    );
+}
+
+#[test]
+fn the_answer_cap_holds_with_neighbors() {
+    let long = "palabra larga de relleno ".repeat(64);
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, &long),
+            (2..=6)
+                .map(|i| near(i, Origin::Person, &"título muy largo ".repeat(4)))
+                .collect(),
+        )],
+        Mode::Items,
+    );
+    let g = call(&env(&port), "s", "memory_get", json!({ "id": 1 }));
+    assert!(g.content.len() <= 4096, "{}", g.content.len());
+    assert!(g.content.contains("palabra larga de relleno"));
+}
+
+// S-05: what a neighbor says is returned memory too.
+#[test]
+fn a_neighbor_that_is_not_the_persons_taints_the_session() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "dicho por la persona"),
+            vec![near(2, Origin::Agent, "escrito por un agente")],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    assert!(call(&e, "s", "memory_get", json!({ "id": 1 })).tainted);
+    assert!(e.host.is_tainted("s"));
+}
+
+#[test]
+fn a_near_duplicate_save_says_so() {
+    let port = FakePort::new(vec![], Mode::Items);
+    *port.similar.lock().unwrap() = Some(near(5, Origin::Agent, "postgres guarda los pedidos"));
+    let r = call(
+        &env(&port),
+        "s",
+        "memory_save",
+        json!({ "text": "postgres ya no; ahora mysql", "kind": "semantic" }),
+    );
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.content.contains(
+            "muy parecida a m5: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m5 la muestra)"
+        ),
+        "{r:?}"
+    );
+    assert!(
+        !r.content.contains("pedidos"),
+        "no memory text outside the data frame"
+    );
+}
+
+// A vault value that straddles the preview's cut is crossed out whole, not left half shown.
+#[test]
+fn a_secret_across_the_preview_cut_is_crossed_out() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    let text = format!("{}{value} y más texto", "x".repeat(50));
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![near(2, Origin::Person, &text)],
+        )],
+        Mode::Items,
+    );
+    let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+    let g = call(&e, "s", "memory_get", json!({ "id": 1 }));
+    assert!(!g.content.contains("canario-del"), "{g:?}");
+    assert!(g.content.contains("[secreto"), "{g:?}");
+    assert_eq!(g.data["masked"], 1, "the crossed-out value is counted");
+}
+
+// The log says which memories reached the model, the neighbors whose words were shown too.
+#[test]
+fn the_log_names_the_neighbors_shown() {
+    let port = FakePort::new(
+        vec![with_near(
+            item(1, Origin::Person, "uno"),
+            vec![
+                near(2, Origin::Person, "dos"),
+                near(3, Origin::Agent, "tres"),
+            ],
+        )],
+        Mode::Items,
+    );
+    let e = env(&port);
+    assert!(call(&e, "s", "memory_get", json!({ "id": 1 })).ok);
+    let log = std::fs::read_to_string(run_dir(&e).join("memory.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(last["ids"], json!([1]));
+    assert_eq!(last["near"], json!([2, 3]));
+}
+
+// Neighbor ids never cost a search a result: a line that does not fit with them goes without.
+#[test]
+fn neighbor_ids_never_push_a_result_out() {
+    for len in (200..600).step_by(7) {
+        let items = |near: bool| -> Vec<MemoryItem> {
+            (1..=6)
+                .map(|i| {
+                    let it = item(i, Origin::Person, &"é".repeat(len));
+                    if near {
+                        with_near(
+                            it,
+                            (10..13)
+                                .map(|n| self::near(n, Origin::Person, "x"))
+                                .collect(),
+                        )
+                    } else {
+                        it
+                    }
+                })
+                .collect()
+        };
+        let shown = |near: bool| {
+            let r = search(&env(&FakePort::new(items(near), Mode::Items)), "s", "q");
+            assert!(r.content.len() <= 4096);
+            r.data["count"].as_u64().unwrap()
+        };
+        assert_eq!(shown(true), shown(false), "memories of {len} characters");
+    }
 }

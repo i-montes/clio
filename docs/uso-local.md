@@ -324,6 +324,12 @@ La comparación punto por punto con Engram está en `docs/specs/2026-11-04-engra
 
 **Copiar un recuerdo.** En la pantalla de memoria, `y` copia el recuerdo elegido al portapapeles (por la secuencia OSC 52 de la terminal, ya limpio; la mayoría de terminales la aceptan).
 
+**Recuerdos cercanos.** Cada recuerdo que el modelo abre con `memory_get` termina con la línea `Cerca:`, con hasta 5 recuerdos (número y comienzo, marcados si son `externo`). Cada resultado de búsqueda termina con `cerca:` y 3 números. El modelo abre los que le sirven y sigue hasta tener lo que necesita.
+- Se calculan al leer (por significado, o por texto sin modelo de vectores) y no se guardan, así que ningún recuerdo queda suelto.
+- Si un cercano no es tuyo, leerlo contamina la sesión como cualquier recuerdo.
+- Al guardar algo casi igual a un recuerdo que ya existe, la respuesta lo dice con su número, para que el agente corrija en vez de duplicar.
+- Al corregir o unir recuerdos, sus relaciones pasan al recuerdo nuevo (menos «contradice»).
+
 **Relaciones entre recuerdos.** Cuando el agente guarda algo nuevo junto a un recuerdo parecido, Jev dice cómo se relacionan (se contradicen, son compatibles, uno es un caso concreto del otro, o solo están relacionados) con al menos 0,7 de confianza; es una nota, no cambia ninguno de los dos. La búsqueda del modelo la muestra en la línea de cada recuerdo («contradice a m12») solo si el otro recuerdo también puede leerlo y sigue activo.
 
 **Qué puedes esperar cuando Pi consulta la memoria.**

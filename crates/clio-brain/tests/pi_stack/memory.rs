@@ -371,8 +371,9 @@ fn attack_57() -> Option<bool> {
         let spent: u64 = log.iter().map(|l| l["bytes"].as_u64().unwrap()).sum();
         assert_eq!(budget(&w)["bytes"], spent, "the file and the log agree");
     }
-    // Bytes: eight memories of 600 characters. Each answer is about 4 KiB, so the cap of 24 KiB
-    // of memory text stops the session at the seventh call, long before the twentieth.
+    // Bytes: eight memories of 600 characters. Each answer is 3 to 4 KiB (how many lines fit
+    // depends on what each line carries, its neighbors' ids too), so the cap of 24 KiB of memory
+    // text stops the session at the seventh or eighth call, long before the twentieth.
     let w = world();
     let data = data_dir(&w);
     {
@@ -384,27 +385,33 @@ fn attack_57() -> Option<bool> {
                 .unwrap();
         }
     }
-    let model = repeat(7, || search(WORD, 8));
+    let model = repeat(9, || search(WORD, 8));
     let host = Toolhost::start_with_memory(&w, false, None, Some(&data));
     let mut pi = Pi::start(&node, &w, &model, Some(&host.socket), &Opts::default());
     let ev = pi.prompt("read everything you remember");
     let ends = tool_ends(&ev);
-    assert_eq!(ends.len(), 7, "all seven calls were made: {}", ends.len());
+    assert_eq!(ends.len(), 9, "all nine calls were made: {}", ends.len());
     let sizes: Vec<(bool, usize)> = ends.iter().map(|e| (e.1, e.2.len())).collect();
+    let served = ends.iter().position(|e| e.1).expect("the budget ran out");
+    assert!((6..=7).contains(&served), "{sizes:?}");
+    // Full answers, and the last one served may be cut to what was left of the budget.
+    assert!(ends[..served].iter().all(|e| !e.1), "{sizes:?}");
     assert!(
-        ends[..6].iter().all(|e| !e.1 && e.2.len() > 3 * 1024),
+        ends[..served - 1].iter().all(|e| e.2.len() > 3 * 1024),
         "{sizes:?}"
     );
-    denied_by_budget(&ends[6]);
+    for e in &ends[served..] {
+        denied_by_budget(e);
+    }
     let spent = budget(&w)["bytes"].as_u64().unwrap();
     assert!(
         spent <= 24 * 1024,
         "{spent} bytes of memory text left in one session"
     );
     assert!(spent > 23 * 1024, "the cap was really reached: {spent}");
-    assert_eq!(budget(&w)["calls"], 6);
+    assert_eq!(budget(&w)["calls"], served);
     let log = jsonl(&w, "memory.jsonl");
-    assert_eq!(log.len(), 6, "one line per call that went through");
+    assert_eq!(log.len(), served, "one line per call that went through");
     assert_eq!(
         log.iter()
             .map(|l| l["bytes"].as_u64().unwrap())
