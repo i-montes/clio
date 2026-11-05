@@ -957,7 +957,7 @@ fn a_bad_kind_or_text_is_refused_before_the_port() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     let long = "x".repeat(1201);
-    // Five refusals, because a refused call spends one of the session's five proposals too.
+    // Refused on their own arguments: none of them reaches the port.
     for (text, kind) in [
         ("algo", "episodic"),
         ("algo", ""),
@@ -1944,4 +1944,60 @@ fn neighbor_ids_never_push_a_result_out() {
         };
         assert_eq!(shown(true), shown(false), "memories of {len} characters");
     }
+}
+
+// S-47, S-61
+#[test]
+fn a_write_refused_on_its_own_arguments_spends_no_save_but_one_with_a_secret_does() {
+    let value = "canario-del-baul-7f3a9c";
+    let scrubber = Scrubber::new(Arc::new(SystemClock));
+    scrubber.add("canario", value);
+    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
+    let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
+    assert!(call(&e, "s1", "taint", json!({})).tainted);
+    let part = "p".repeat(400);
+    let long = json!({"goal": part, "accomplished": part, "next_steps": part});
+    // Each part fits its 600, the whole does not: refused with its numbers, many times over.
+    for _ in 0..10 {
+        let r = summary(&e, "s1", long.clone());
+        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+        assert!(
+            r.content.contains("1234") && r.content.contains("1200"),
+            "{r:?}"
+        );
+        let r = summary(
+            &e,
+            "s1",
+            json!({"goal": "p".repeat(601), "accomplished": "h"}),
+        );
+        assert!(!r.ok && r.content.contains("601"), "{r:?}");
+        for bad in [
+            json!({"text": "algo", "kind": "episodic"}),
+            json!({"text": "algo", "kind": "semantic", "category": "nope"}),
+            json!({"text": "algo", "kind": "semantic", "title": "t".repeat(121)}),
+        ] {
+            assert!(!call(&e, "s1", "memory_save", bad).ok);
+        }
+        assert!(!call(&e, "s1", "memory_update", json!({"id": 0, "text": "x"})).ok);
+        assert!(
+            !call(
+                &e,
+                "s1",
+                "memory_consolidate",
+                json!({"ids": "3", "text": "x"})
+            )
+            .ok
+        );
+    }
+    assert!(port.drafts.lock().unwrap().is_empty());
+    // Too long as typed, fits once flattened: it is measured as it will be proposed.
+    let spaced = format!("{}\n\n\n\n{}", "a".repeat(600), "b".repeat(599));
+    assert!(propose(&e, "s1", &spaced, "semantic").ok);
+    // A secret is refused after the count: four of the five are left, so four more and no sixth.
+    let r = propose(&e, "s1", &format!("la llave es {value}"), "semantic");
+    assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+    for n in 0..3 {
+        assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok, "{n}");
+    }
+    assert!(denied_by_budget(&propose(&e, "s1", "p3", "semantic")));
 }
