@@ -35,6 +35,9 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
   clio memory setup sleep [--remove]          instala (o quita) el sueño nocturno: un timer que corre
                                               `clio memory sleep` cada media hora de 23:00 a 05:30
+  clio memory update                          instala la última versión de clio-memory (el binario
+                                              que usan los otros agentes) y pone al día su skill; la
+                                              memoria de Clio sube cuando Clio se recompila
   clio memory sleep [--now] [--dry-run] [--report] [--json]
                                               una noche de sueño: chequea y copia, cuarentena de
                                               secretos y ataques, une repetidos y casi iguales (con tu
@@ -161,6 +164,11 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
         "mcp" => {
             args.rest()?;
             return super::mcp::serve(dirs);
+        }
+        // The standalone clio-memory and its skill: the same installer as `clio-memory update`.
+        "update" => {
+            args.rest()?;
+            clio_memory::setup::update(clio_memory::setup::INSTALLER_URL)?;
         }
         "sleep" => {
             let (now, dry_run) = (args.flag("--now"), args.flag("--dry-run"));
