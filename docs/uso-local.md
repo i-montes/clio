@@ -330,7 +330,7 @@ La comparación punto por punto con Engram está en `docs/specs/2026-11-04-engra
 - Al guardar algo casi igual a un recuerdo que ya existe, la respuesta lo dice con su número, para que el agente corrija en vez de duplicar.
 - Al corregir o unir recuerdos, sus relaciones pasan al recuerdo nuevo (menos «contradice»).
 
-**Relaciones entre recuerdos.** Cuando el agente guarda algo nuevo junto a un recuerdo parecido, Jev dice cómo se relacionan (se contradicen, son compatibles, uno es un caso concreto del otro, o solo están relacionados) con al menos 0,7 de confianza; es una nota, no cambia ninguno de los dos. La búsqueda del modelo la muestra en la línea de cada recuerdo («contradice a m12») solo si el otro recuerdo también puede leerlo y sigue activo.
+**Relaciones entre recuerdos.** Cuando el agente guarda algo nuevo, Jev lo compara con sus 3 recuerdos más cercanos y anota solo las contradicciones de las que está seguro (al menos 0,9 de confianza); es una nota, no cambia ninguno de los dos. Se midió así: Jev encontró las 3 contradicciones de la prueba con 0,95 o más y su única falsa con 0,77, y los otros tipos («compatible», «caso concreto», «relacionada») los acertó 10 % de las veces o menos (`bench/relations/results.md` de clio-memory). Para lo demás, el modelo ya ve los recuerdos cercanos de cada uno. La búsqueda del modelo la muestra en la línea de cada recuerdo («contradice a m12») solo si el otro recuerdo también puede leerlo y sigue activo.
 
 **Qué puedes esperar cuando Pi consulta la memoria.**
 

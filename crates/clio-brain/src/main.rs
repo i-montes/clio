@@ -219,4 +219,120 @@ mod tests {
             "clio: falta el id\ncon ayuda"
         );
     }
+
+    /// Jev on the relations bench of clio-memory (needs the vault open and Jev on): for each
+    /// memory's 5 nearest by Granite, what Jev says, against the pairs a person marked.
+    /// `CLIO_BENCH_RELATIONS=<absolute path to clio-memory>/bench/relations cargo test -p clio-brain --bin clio
+    /// jev_relations_on_the_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "asks Jev over the network; needs the vault open"]
+    fn jev_relations_on_the_bench() {
+        use std::collections::{BTreeMap, BTreeSet};
+        use std::path::{Path, PathBuf};
+        use std::sync::Arc;
+
+        use clio_brain::memory_judge::MemoryJudge;
+        use clio_memory::agent::EmbedModel;
+        use clio_vault::VaultClient;
+
+        let bench = PathBuf::from(std::env::var("CLIO_BENCH_RELATIONS").unwrap());
+        let lines = |p: &Path| -> Vec<serde_json::Value> {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        };
+        let mems: Vec<(i64, String)> = lines(&bench.join("../embeddings/memories.jsonl"))
+            .into_iter()
+            .chain(lines(&bench.join("extra.jsonl")))
+            .map(|m| {
+                (
+                    m["id"].as_i64().unwrap(),
+                    m["text"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let gold: BTreeMap<(i64, i64), String> = lines(&bench.join("pairs.jsonl"))
+            .into_iter()
+            .map(|p| {
+                let (a, b) = (p["a"].as_i64().unwrap(), p["b"].as_i64().unwrap());
+                ((a.min(b), a.max(b)), p["rel"].as_str().unwrap().to_owned())
+            })
+            .collect();
+
+        let dirs = super::Dirs::from_env().unwrap();
+        let home = dirs.home.clone();
+        let model = EmbedModel::with_dirs(clio_brain::memory_link::MemoryLink::model_dirs(&home))
+            .get()
+            .unwrap()
+            .unwrap();
+        assert!(
+            model.model_id().starts_with("granite"),
+            "{}",
+            model.model_id()
+        );
+        let texts: Vec<&str> = mems.iter().map(|(_, t)| t.as_str()).collect();
+        let v = model.embed(&texts).unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let mut cands = BTreeSet::new();
+        for i in 0..mems.len() {
+            let mut order: Vec<usize> = (0..mems.len()).filter(|&j| j != i).collect();
+            order.sort_by(|&x, &y| dot(&v[i], &v[y]).total_cmp(&dot(&v[i], &v[x])));
+            for &j in &order[..5] {
+                cands.insert((i.min(j), i.max(j)));
+            }
+        }
+
+        let cfg = super::cli::home::Config::load(&dirs).unwrap();
+        let jev = super::cli::jev::client(&dirs, &cfg.jev).expect("Jev is off");
+        let socket = super::cli::vault::gateway_socket(&dirs).unwrap();
+        let vault = VaultClient::new(&socket);
+        let judge = MemoryJudge::new(
+            jev,
+            Arc::new(move |t| vault.scrub(t).map_err(|e| e.to_string())),
+        );
+
+        // Per type Jev says: (said, of them right); per gold type: (gold among the candidates, found).
+        let mut said: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        let mut found: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        for &(i, j) in &cands {
+            // The later memory is the one being saved, as in `propose`.
+            let ((a, ta), (b, tb)) = (&mems[i], &mems[j]);
+            let (new, old) = if a > b { (ta, tb) } else { (tb, ta) };
+            let verdict = judge.relation(new, old);
+            let (name, sure) = match verdict {
+                Some((r, sure)) => (r.label().to_owned(), sure),
+                None => ("ninguna".to_owned(), 0.0),
+            };
+            let truth = gold.get(&(*a.min(b), *a.max(b)));
+            let e = said.entry(name.clone()).or_default();
+            e.0 += 1;
+            e.1 += u32::from(truth.is_some_and(|t| *t == name));
+            if let Some(t) = truth {
+                let f = found.entry(t.clone()).or_default();
+                f.0 += 1;
+                f.1 += u32::from(*t == name);
+                println!("m{a}–m{b}: marcado {t}, Jev {name} {sure:.2}");
+            } else if name != "ninguna" {
+                println!("m{a}–m{b}: sin marcar, Jev {name} {sure:.2}");
+            }
+        }
+        println!("\n{} candidatos", cands.len());
+        println!("Jev dice | veces | aciertos (precisión)");
+        for (k, (n, ok)) in &said {
+            println!(
+                "{k} | {n} | {ok} ({:.0} %)",
+                100.0 * f64::from(*ok) / f64::from(*n)
+            );
+        }
+        println!("\nmarcado | entre candidatos | Jev lo dice (cobertura)");
+        for (k, (n, ok)) in &found {
+            println!(
+                "{k} | {n} | {ok} ({:.0} %)",
+                100.0 * f64::from(*ok) / f64::from(*n)
+            );
+        }
+    }
 }

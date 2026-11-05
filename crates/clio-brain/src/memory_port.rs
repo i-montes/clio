@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use clio_memory::{
-    Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, State,
+    Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, Relation, State,
 };
 use clio_toolhost::{
     Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft, ProposalKind, Proposed,
@@ -190,29 +190,20 @@ impl LinkPort {
                 (true, false) => Place::Personal,
                 _ => Place::by_rule(draft.category, has_project),
             });
-        // Something new next to the most similar memory: how the two stand (a note, best effort).
-        let relation = match (&self.judge, &target) {
-            (Some(judge), None) if !summary => self
-                .reader()
-                .ok()
-                .and_then(|l| l.search_in(place, &stored, 1).ok())
-                .and_then(|rows| rows.into_iter().next())
-                .and_then(|n| judge.relation(&stored, &n.content).map(|r| (n.id, r))),
-            _ => None,
-        };
         let link = self.writer()?;
         let o = match &target {
             Some(t) => link.update_as_agent(t.id, &draft, session, judging.tainted)?,
             None => link.save_as_agent(&draft, session, place, judging.tainted)?,
         };
-        if let (OpKind::Add, Some((other, (rel, sure)))) = (o.kind, relation) {
-            let _ = link.relate_judged(o.memory, other, rel, sure);
-        }
         embed_now(&link);
         let similar = match o.kind {
             OpKind::Noop => None,
             _ => link.near_duplicate(o.memory).as_ref().map(near_of),
         };
+        drop(link);
+        if let (OpKind::Add, Some(judge), false) = (o.kind, &self.judge, summary) {
+            self.relate_nearest(judge, o.memory);
+        }
         Ok(Proposed {
             similar,
             id: o.memory.0,
@@ -223,6 +214,37 @@ impl LinkPort {
             },
             change: (o.kind != OpKind::Noop).then_some(o.op.0),
         })
+    }
+}
+
+impl LinkPort {
+    /// Something new next to its nearest memories: Jev says how each pair stands, and only what
+    /// `JEV_TYPES` allows is noted (best effort). Jev is asked with no writer held.
+    fn relate_nearest(&self, judge: &MemoryJudge, id: MemoryId) {
+        let Ok((text, near)) = self.with_link(|l| {
+            let row = l.get(id)?;
+            let near = l.neighbors(&row, JEV_NEIGHBORS);
+            Ok((row.content, near))
+        }) else {
+            return;
+        };
+        let found: Vec<_> = near
+            .into_iter()
+            .filter_map(|n| {
+                judge
+                    .relation(&text, &n.content)
+                    .filter(|(r, sure)| JEV_TYPES.contains(r) && *sure >= JEV_SURE)
+                    .map(|(r, sure)| (n.id, r, sure))
+            })
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        if let Ok(link) = self.writer() {
+            for (other, r, sure) in found {
+                let _ = link.relate_judged(id, other, r, sure);
+            }
+        }
     }
 }
 
@@ -449,6 +471,13 @@ fn embed_now(link: &MemoryLink) {
         eprintln!("clio-toolhost: memory: vectores pendientes: {why}");
     }
 }
+
+/// What Jev may note between a new memory and its nearest, and how sure it must be: on clio-memory's
+/// bench/relations it found the 3 contradictions at 0.95 or more and its one false one at 0.77, and
+/// its other kinds were right 10 % of the time or less (bench/relations/results.md).
+const JEV_TYPES: &[Relation] = &[Relation::ConflictsWith];
+const JEV_SURE: f32 = 0.9;
+const JEV_NEIGHBORS: usize = 3;
 
 /// Neighbors given with a memory read in full, and with each search result (only their ids show).
 const NEAR_GET: usize = 5;

@@ -625,7 +625,8 @@ struct Scripted {
     storable: f64,
     /// The category it picks, and how sure.
     category: (&'static str, f64),
-    /// How sure it is that two neighbors contradict each other.
+    /// How two neighbors stand (`conflicts_with` unless said), and how sure it is.
+    relation_kind: &'static str,
     relation: f64,
     down: bool,
 }
@@ -636,6 +637,7 @@ impl Default for Scripted {
             unsafe_: 0.0,
             storable: 1.0,
             category: ("ninguna", 0.9),
+            relation_kind: "conflicts_with",
             relation: 0.0,
             down: false,
         }
@@ -667,7 +669,7 @@ impl Transport for Scripted {
         if q.contains_key("relacion") {
             answers.insert(
                 "relacion".into(),
-                json!({"type": "choice", "choice": "conflicts_with", "confidence": self.relation}),
+                json!({"type": "choice", "choice": self.relation_kind, "confidence": self.relation}),
             );
         }
         Ok(json!({"model": "jev-t", "answers": answers, "usage": {"input_tokens": 10}}))
@@ -1323,6 +1325,54 @@ fn a_new_memory_next_to_one_it_does_not_replace_is_related_by_jev() {
     assert_eq!(notes(old.id), [format!("contradice a m{}", d.id)]);
     open(&w).archive(clio_memory::MemoryId(old.id)).unwrap();
     assert!(notes(d.id).is_empty());
+}
+
+// After a save Jev looks at the 3 nearest memories, and keeps only a contradiction it is sure of:
+// on clio-memory's bench/relations it found every contradiction at 0.95 or more, and its other
+// kinds were right 10 % of the time or less.
+#[test]
+fn jev_judges_the_three_nearest_after_the_save() {
+    let saved_next_to_four = |kind: &'static str, sure: f64| {
+        let w = world();
+        let p = judged_port(
+            &w,
+            Scripted {
+                relation_kind: kind,
+                relation: sure,
+                ..Scripted::default()
+            },
+        );
+        for v in 12..16 {
+            ask(
+                &p,
+                &format!("El proyecto usa PostgreSQL {v}"),
+                ProposalKind::Semantic,
+            )
+            .unwrap();
+        }
+        let d = ask(&p, "El proyecto usa PostgreSQL 16", ProposalKind::Semantic).unwrap();
+        let rels = open(&w)
+            .engine()
+            .relations(clio_memory::MemoryId(d.id))
+            .unwrap();
+        (d.id, rels)
+    };
+    let (id, rels) = saved_next_to_four("conflicts_with", 0.95);
+    assert_eq!(rels.len(), 3, "{rels:?}");
+    for r in &rels {
+        assert_eq!(
+            (r.source.0, r.relation, r.by.as_str()),
+            (id, clio_memory::Relation::ConflictsWith, "jev")
+        );
+    }
+    assert!(
+        saved_next_to_four("related", 0.95).1.is_empty(),
+        "a kind Jev gets wrong"
+    );
+    assert!(
+        saved_next_to_four("conflicts_with", 0.8).1.is_empty(),
+        "not sure enough"
+    );
 }
 
 // A relation with a memory of another project is named too: the memory is global, and the line
