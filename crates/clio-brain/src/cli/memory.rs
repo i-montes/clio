@@ -33,6 +33,14 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory import <archivo>                trae una exportación a una memoria vacía
   clio memory project [set <nombre>]          el proyecto de esta carpeta y de dónde sale; set lo fija (.clio-project)
   clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
+  clio memory setup sleep [--remove]          instala (o quita) el sueño nocturno: un timer que corre
+                                              `clio memory sleep` cada media hora de 23:00 a 05:30
+  clio memory sleep [--now] [--dry-run] [--report] [--json]
+                                              una noche de sueño: chequea y copia, cuarentena de
+                                              secretos y ataques, une repetidos y casi iguales (con tu
+                                              modelo), purga lo descartado hace tiempo. Solo si nadie
+                                              usó la memoria en 30 min y no durmió en 20 h (--now se
+                                              salta ambas esperas; --dry-run solo mira)
   clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
   clio memory projects merge <de> <en>        mueve todo un proyecto a otro (unir o renombrar; deshacible)
   clio memory projects archive <proyecto>     archiva todo un proyecto (no lo borra)
@@ -153,6 +161,12 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
         "mcp" => {
             args.rest()?;
             return super::mcp::serve(dirs);
+        }
+        "sleep" => {
+            let (now, dry_run) = (args.flag("--now"), args.flag("--dry-run"));
+            let (report, json) = (args.flag("--report"), args.flag("--json"));
+            args.rest()?;
+            return super::sleep::run(dirs, now, dry_run, report, json);
         }
         "search" => {
             let json = args.flag("--json");
@@ -362,7 +376,14 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
         }
         // How to plug another agent into the memory (MCP): printed, never written for it.
         "setup" => {
+            let remove = args.flag("--remove");
             let rest = args.rest()?;
+            if rest.as_slice() == ["sleep"] {
+                return super::sleep::setup(dirs, remove);
+            }
+            if remove {
+                return Err("--remove va con: clio memory setup sleep".into());
+            }
             let [agent] = rest.as_slice() else {
                 return Err(format!(
                     "uso: clio memory setup <agente>  ({})",

@@ -46,6 +46,8 @@ struct FakePort {
     similar: Mutex<Option<Near>>,
     /// Changes asked for: the tool, the number and what the port was told to judge it by.
     changes: Mutex<Vec<(String, i64, Judging)>>,
+    /// Last night's line of the sleep.
+    morning: Mutex<Option<String>>,
 }
 
 impl FakePort {
@@ -76,6 +78,7 @@ impl FakePort {
             saved: Mutex::new(Saved::Active),
             similar: Mutex::new(None),
             changes: Mutex::new(Vec::new()),
+            morning: Mutex::new(None),
         })
     }
 
@@ -136,6 +139,10 @@ impl MemoryPort for FakePort {
     fn context(&self) -> Result<Vec<MemoryItem>, String> {
         self.behave()?;
         Ok(self.items.clone())
+    }
+
+    fn morning(&self) -> Option<String> {
+        self.morning.lock().unwrap().clone()
     }
 
     fn forget(&self, id: i64, judging: &Judging) -> Result<(), String> {
@@ -1380,6 +1387,39 @@ fn the_timeline_and_the_context_are_reads_with_the_same_budget_and_taint() {
     assert!(
         !call(&e, "s3", "memory_context", json!({"x": 1})).ok,
         "no arguments"
+    );
+}
+
+// Last night's sleep comes first in the context, cleaned and outside the frame; not in a search.
+#[test]
+fn the_context_starts_with_last_nights_sleep() {
+    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
+    *port.morning.lock().unwrap() =
+        Some("Anoche (sueño): 1 purgada\u{1b}[31m · para revisar: m5 contradice a m61".into());
+    let e = env(&port);
+    let c = call(&e, "s1", "memory_context", json!({}));
+    let first = c.content.lines().next().unwrap();
+    assert!(
+        first.starts_with("Anoche (sueño): 1 purgada"),
+        "{}",
+        c.content
+    );
+    assert!(!first.contains('\u{1b}'), "{first}");
+    assert!(
+        c.content.lines().nth(1).unwrap().starts_with("<<<"),
+        "{}",
+        c.content
+    );
+    let s = search(&e, "s2", "dato");
+    assert!(!s.content.contains("Anoche"), "{}", s.content);
+    let empty = FakePort::new(vec![], Mode::Items);
+    *empty.morning.lock().unwrap() = Some("Anoche (sueño): 1 purgada".into());
+    let c = call(&env(&empty), "s3", "memory_context", json!({}));
+    assert!(
+        c.content
+            .starts_with("Anoche (sueño): 1 purgada\nnothing relevant"),
+        "{}",
+        c.content
     );
 }
 

@@ -129,6 +129,8 @@ const MAX_BUDGET_BYTES: u64 = 24 * 1024;
 const MIN_ROOM: u64 = 1024;
 const MAX_ERROR_CHARS: usize = 300;
 const MAX_NOTE_CHARS: usize = 200;
+/// Last night's line of the sleep, at most.
+const MAX_MORNING_CHARS: usize = 600;
 /// Neighbors shown under a memory read in full, ids of neighbors after each search result, and
 /// how long a neighbor's preview is (the same as clio-memory's tools).
 const NEAR_GET: usize = 5;
@@ -298,6 +300,11 @@ pub trait MemoryPort: Send + Sync {
     /// The last session's summary, the pinned memories and the most recent ones.
     fn context(&self) -> Result<Vec<MemoryItem>, String> {
         Err("this memory has no context".into())
+    }
+    /// What the memory's sleep did last night, in its own words (ids and reasons, never memory
+    /// text): `memory_context` starts with it. `None` when it did nothing or it was long ago.
+    fn morning(&self) -> Option<String> {
+        None
     }
     /// Forgets memory `id`: to quarantine, its record kept, restorable.
     fn forget(&self, _id: i64, _judging: &Judging) -> Result<(), String> {
@@ -1061,6 +1068,12 @@ impl ToolHost {
             Ok(f) => f,
             Err(why) => return self.memory_failed(req, out, &why),
         };
+        // Last night's sleep goes first, outside the frame: the sleep's own words, cleaned.
+        let morning = (req.tool == "memory_context")
+            .then(|| port.morning())
+            .flatten()
+            .map(|l| format!("{}\n", self.tidy(&l, MAX_MORNING_CHARS)))
+            .unwrap_or_default();
 
         // The session is marked for what the memory returned, shown or not: a memory read in full
         // also returns its neighbors' words (a search, only their numbers).
@@ -1074,7 +1087,7 @@ impl ToolHost {
         }
         let note = found.note.as_deref().map(|n| self.tidy(n, MAX_NOTE_CHARS));
         if found.items.is_empty() {
-            let mut content = String::from("nothing relevant in memory");
+            let mut content = format!("{morning}nothing relevant in memory");
             if let Some(n) = note.filter(|n| !n.is_empty()) {
                 content = format!("{content} ({n})");
             }
@@ -1211,7 +1224,10 @@ impl ToolHost {
         Response {
             id: req.id.clone(),
             ok: true,
-            content: wrap_untrusted(Source::Memory, &lines.join("\n")),
+            content: format!(
+                "{morning}{}",
+                wrap_untrusted(Source::Memory, &lines.join("\n"))
+            ),
             data: json!({ "ids": ids, "count": ids.len(), "masked": masked }),
             decision: out,
             tainted: self.is_tainted(&req.session),
