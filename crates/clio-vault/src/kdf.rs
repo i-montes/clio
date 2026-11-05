@@ -230,10 +230,12 @@ mod tests {
     fn a_secret_that_cannot_be_opened_stops_the_upgrade_and_loses_nothing() {
         let t = tempfile::tempdir().unwrap();
         let path = legacy_file(t.path());
-        // Damage one sealed value in the file.
+        // Damage one sealed value in the file: flip a bit, so the byte always changes (setting it
+        // to a fixed value left it as it was once in 256 runs).
         let mut json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        json["secrets"][0]["blob"][30] = serde_json::json!(7);
+        let byte = json["secrets"][0]["blob"][30].as_u64().unwrap();
+        json["secrets"][0]["blob"][30] = serde_json::json!(byte ^ 1);
         let damaged = serde_json::to_vec(&json).unwrap();
         std::fs::write(&path, &damaged).unwrap();
         let v = open(&path);
