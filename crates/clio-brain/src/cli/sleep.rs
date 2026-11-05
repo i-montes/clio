@@ -28,10 +28,10 @@ fn merger(dirs: &Dirs) -> Option<ModelMerger> {
             .map(|c| key.scrub(&c))
             .map_err(|e| e.to_string())
     });
-    let judge = (cfg.jev.enabled && cfg.jev.memory)
-        .then(|| jev::client(dirs, &cfg.jev))
-        .flatten()
-        .map(|j| Arc::new(MemoryJudge::new(j, scrub.clone())));
+    let judge = judge_for(cfg.jev.enabled && cfg.jev.memory, || {
+        jev::client(dirs, &cfg.jev)
+    })?
+    .map(|j| Arc::new(MemoryJudge::new(j, scrub.clone())));
     ModelMerger::from_command(
         &cfg.model.command,
         &cfg.model.model,
@@ -39,6 +39,15 @@ fn merger(dirs: &Dirs) -> Option<ModelMerger> {
         scrub,
         SLEEP_TOKENS,
     )
+}
+
+/// Jev for the merges: `Some(None)` when it is off, `Some(Some(_))` when it is on and there, and
+/// `None` when it is on but out of reach: a doubt, so no merges that night.
+fn judge_for<J>(on: bool, client: impl FnOnce() -> Option<J>) -> Option<Option<J>> {
+    if !on {
+        return Some(None);
+    }
+    client().map(Some)
 }
 
 pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> Res<i32> {
@@ -108,4 +117,18 @@ pub fn setup(dirs: &Dirs, remove: bool) -> Res<i32> {
     let at = install_sleep(&dirs.home, &exe, &["memory", "sleep"], &service_command)?;
     println!("sueño nocturno instalado: {}", at.display());
     Ok(0)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jev_on_but_out_of_reach_means_no_merges() {
+        // Off: merges without it. On and there: with it. On and not there: a doubt, no merges.
+        assert!(matches!(judge_for(false, || Some(1)), Some(None)));
+        assert!(matches!(judge_for(true, || Some(1)), Some(Some(1))));
+        assert!(judge_for::<u8>(true, || None).is_none());
+    }
 }
