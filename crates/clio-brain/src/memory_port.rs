@@ -421,6 +421,15 @@ impl MemoryPort for LinkPort {
         })
     }
 
+    fn morning(&self) -> Option<String> {
+        let report = clio_memory::sleep::last_report(&self.data)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        clio_memory::sleep::morning_line(&report, i64::try_from(now).ok()?)
+    }
+
     /// The last session's summary of the project (or the person's place), what is pinned in any
     /// place, and the most recent of the project: what a model needs after a compaction.
     fn context(&self) -> Result<Vec<MemoryItem>, String> {

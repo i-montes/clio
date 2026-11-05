@@ -72,6 +72,13 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   create the memory while a session runs). Tests: `tests/memory_port.rs` (real database, the real
   service over its socket) and `tests/pi_stack/memory.rs` (the real Pi in its jail: a smoke test and
   attacks 56 to 61, which `tests/attacks.rs` leaves out through `MEMORY_CASES`; ADR 0010).
+- `sleep_merger`: the model step of the memory's sleep (`clio memory sleep`, `src/cli/sleep.rs`;
+  S-66). `ModelMerger` implements `clio_memory::sleep::Merger` with the person's configured model
+  (`config.model`, whatever connector, through `CommandModel`), the memories cleaned by the vault
+  and sent as JSON inside a `<datos>` block they cannot close, a fixed instruction, no tools and
+  `SLEEP_TOKENS` a night; with Jev, `MemoryJudge::preserved` asks one closed question per
+  original. `LinkPort::morning` gives `memory_context` its first line, last night's. Tests:
+  `tests/sleep.rs`.
 - `models`: pinned model catalog, routing by level and privacy, sanitized payloads (S-44),
   rate limits and cost ledger in integer micro-USD.
 

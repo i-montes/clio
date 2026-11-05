@@ -391,6 +391,7 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
             Some("`clio memory list --pending`, y `clio memory promote ID` o `archive ID`.".into()),
         );
     }
+    sleep_report(o, &dirs.data, now_secs());
     if due > 0 {
         o.say(
             Level::Warn,
@@ -401,6 +402,46 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
             ),
         );
     }
+}
+
+/// When the memory last slept, whether the night was complete, and what it warned about.
+fn sleep_report(o: &mut Report, data: &Path, now: i64) {
+    let setup = "`clio memory setup sleep` instala el timer que la hace dormir de noche.";
+    let Some(r) = clio_memory::sleep::last_report(data) else {
+        o.say(
+            Level::Warn,
+            "sueño: la memoria todavía no durmió".into(),
+            Some(setup.into()),
+        );
+        return;
+    };
+    let days = (now - r.ended) / 86_400;
+    let msg = format!(
+        "sueño: última noche {} ({})",
+        clio_memory::sleep::night_of(r.started),
+        if r.complete { "completa" } else { "incompleta" }
+    );
+    if !r.alarms.is_empty() {
+        o.say(
+            Level::Warn,
+            format!("{msg}; alarmas: {}", sanitize::line(&r.alarms.join("; "))),
+            Some("`clio memory sleep --report` muestra el informe.".into()),
+        );
+    } else if days > 3 {
+        o.say(
+            Level::Warn,
+            format!("{msg}, hace {days} días"),
+            Some(format!("¿Está el timer? {setup}")),
+        );
+    } else {
+        o.say(Level::Pass, msg, None);
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
 }
 
 fn kdf_warning(status: &serde_json::Value) -> Option<String> {
@@ -812,6 +853,55 @@ mod tests {
         v.as_object_mut().unwrap().remove("jev");
         let c: Config = serde_json::from_value(v).unwrap();
         assert!(!c.jev.enabled && c.jev.memory && c.jev.tool_hints);
+    }
+
+    #[test]
+    fn doctor_says_when_the_memory_last_slept() {
+        let t = tempfile::tempdir().unwrap();
+        let said = |now| {
+            let mut o = Report::default();
+            sleep_report(&mut o, t.path(), now);
+            let c = o.checks.pop().unwrap();
+            (c.level, c.msg)
+        };
+        let (level, msg) = said(1_800_000_000);
+        assert!(
+            matches!(level, Level::Warn) && msg.contains("todavía no durmió"),
+            "{msg}"
+        );
+        let mut r = clio_memory::sleep::Report {
+            started: 1_800_000_000,
+            ended: 1_800_000_600,
+            complete: true,
+            ..Default::default()
+        };
+        let write = |r: &clio_memory::sleep::Report| {
+            let dir = t.path().join("sleep");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{}.json", clio_memory::sleep::night_of(r.started))),
+                serde_json::to_string(r).unwrap(),
+            )
+            .unwrap();
+        };
+        write(&r);
+        let (level, msg) = said(1_800_003_600);
+        assert!(
+            matches!(level, Level::Pass) && msg.contains("completa"),
+            "{msg}"
+        );
+        let (level, msg) = said(1_800_000_000 + 5 * 86_400);
+        assert!(
+            matches!(level, Level::Warn) && msg.contains("hace 4 días"),
+            "{msg}"
+        );
+        r.alarms.push("la copia falló".into());
+        write(&r);
+        let (level, msg) = said(1_800_003_600);
+        assert!(
+            matches!(level, Level::Warn) && msg.contains("la copia falló"),
+            "{msg}"
+        );
     }
 
     #[test]

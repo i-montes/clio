@@ -7,6 +7,7 @@ pub mod memory_link;
 pub mod memory_port;
 pub mod models;
 pub mod pi;
+pub mod sleep_merger;
 /// Which project a folder is: the memory library's own detection (one for Clio and clio-memory).
 pub use clio_memory::agent::project;
 pub mod vault_link;

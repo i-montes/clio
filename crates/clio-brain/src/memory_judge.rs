@@ -46,6 +46,9 @@ const PLACE: f64 = 0.6;
 /// Confidence needed to note how two memories stand (a note, not a change of either).
 const RELATION: f64 = 0.7;
 
+/// Confidence needed to say a merged text keeps everything of an original (the sleep's merge).
+const PRESERVED: f64 = 0.9;
+
 impl MemoryJudge {
     pub fn new(jev: Arc<Jev>, scrub: Scrub) -> Self {
         Self { jev, scrub }
@@ -170,6 +173,24 @@ impl MemoryJudge {
             }
             _ => None,
         }
+    }
+
+    /// Does `merged` keep everything `original` says (the sleep merging memories)? `Some(true)`
+    /// only when Jev is sure; `None` when it cannot be asked.
+    pub fn preserved(&self, original: &str, merged: &str) -> Option<bool> {
+        let qs = Questions::new()
+            .noul(
+                "se_conserva",
+                "Todo lo que dice `original` está también en `unido`, aunque sea con otras palabras.",
+            )
+            .ok()?;
+        let state = Clean::try_new(
+            json!({ "original": original, "unido": merged }),
+            &*self.scrub,
+        )
+        .ok()?;
+        let p = self.jev.ask(&state, &qs).ok()?.noul("se_conserva")?;
+        Some(p >= PRESERVED)
     }
 
     /// Where a memory belongs, when there is a project: `proyecto`, `personal` or `leccion`; `None`
