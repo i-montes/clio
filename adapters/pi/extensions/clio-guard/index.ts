@@ -374,7 +374,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 	const part = (description: string) => ({ type: "string", minLength: 1, maxLength: 600, description });
 	memoryTool(
 		"memory_session_summary",
-		"Save the summary of this session for the next one: Clio keeps it as this project's episode. Use it when Clio asks (the session closes or the conversation was compacted) or after a long piece of work; only what was verified, no secrets.",
+		"Save the summary of this session for the next one: Clio keeps it as this project's episode. Use it when Clio asks (the session closes or the conversation was compacted) or after a long piece of work; only what was verified, no secrets. Each part may have 600 characters, but all of them together, with their labels, at most 1200 (about 1115 of your own).",
 		{
 			goal: part("What the session was for."),
 			instructions: part("What the person asked about how to work (optional)."),

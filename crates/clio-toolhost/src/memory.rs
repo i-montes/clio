@@ -54,8 +54,7 @@ const GET_DESCRIPTION: &str = "Read one active memory of the person by id (read-
 const SAVE_DESCRIPTION: &str =
     "Save a memory: it is memory at once (Clio may refuse something unsafe or not worth keeping)";
 
-const SUMMARY_DESCRIPTION: &str =
-    "Save the summary of this session (goal, what was done, discoveries, next steps, files)";
+const SUMMARY_DESCRIPTION: &str = "Save the summary of this session (goal, what was done, discoveries, next steps, files): the parts together, with their labels, may have 1200 characters (about 1115 of your own)";
 /// The parts of a session summary, in the order they are written, and the two it cannot lack.
 const SUMMARY_PARTS: [(&str, &str); 6] = [
     ("goal", "Objetivo"),
@@ -88,6 +87,9 @@ const NO_CHANGES: &str =
 
 /// Longest proposal, in characters, after cleaning (`Qué: … · Por qué: … · Dónde: … · Aprendido: …`).
 const MAX_PROPOSAL_CHARS: usize = 1200;
+/// Longest part of a session summary; the six parts with their labels must still fit in
+/// `MAX_PROPOSAL_CHARS` (the labels and separators take 85).
+const MAX_SUMMARY_PART_CHARS: usize = 600;
 /// Longest title.
 const MAX_TITLE_CHARS: usize = 120;
 /// The categories a proposal may have (the same names as the memory's).
@@ -446,18 +448,106 @@ fn merge_ids(s: &str) -> Option<Vec<i64>> {
 
 /// The parts of a summary that were given, as typed, each after its label: the vault and the
 /// checks of a proposal see it whole, then it is flattened like any proposal.
-fn summary_text(args: &Map<String, Value>) -> Result<String, &'static str> {
+fn summary_text(args: &Map<String, Value>) -> Result<String, String> {
     let mut parts = Vec::new();
     for (name, label) in SUMMARY_PARTS {
         match args.get(name).and_then(Value::as_str).map(str::trim) {
+            Some(v) if one_line(v).chars().count() > MAX_SUMMARY_PART_CHARS => {
+                return Err(format!(
+                    "{name} has {} characters; a part may have {MAX_SUMMARY_PART_CHARS}",
+                    one_line(v).chars().count()
+                ));
+            }
             Some(v) if !v.is_empty() => parts.push(format!("{label}: {v}")),
             _ if matches!(name, "goal" | "accomplished") => {
-                return Err("a summary needs its goal and what was accomplished");
+                return Err("a summary needs its goal and what was accomplished".into());
             }
             _ => {}
         }
     }
     Ok(parts.join(" · "))
+}
+
+/// A write's own arguments, checked before the write is counted.
+struct Asked {
+    typed: String,
+    kind: ProposalKind,
+    category: Option<String>,
+    merge: Option<Vec<i64>>,
+    target: Option<i64>,
+}
+
+/// Checks a write's arguments without the vault or the memory: kind, text length (measured
+/// flattened, as it will be proposed), title length, category, ids. A refusal here is the model's
+/// own mistake and does not spend a save; the secret checks come after the count.
+fn asked(req: &Request, args: &Map<String, Value>) -> Result<Asked, String> {
+    let (typed, kind) = if req.tool == "memory_session_summary" {
+        (summary_text(args)?, ProposalKind::Session)
+    } else if matches!(req.tool.as_str(), "memory_update" | "memory_consolidate") {
+        let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
+        (text.to_owned(), ProposalKind::Semantic)
+    } else {
+        let kind = match args.get("kind").and_then(Value::as_str) {
+            Some("semantic") => ProposalKind::Semantic,
+            Some("procedural") => ProposalKind::Procedural,
+            _ => return Err("kind must be semantic or procedural".into()),
+        };
+        let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
+        (text.to_owned(), kind)
+    };
+    let chars = one_line(&typed).chars().count();
+    if chars == 0 || chars > MAX_PROPOSAL_CHARS {
+        return Err(if kind == ProposalKind::Session {
+            format!(
+                "the summary has {chars} characters with its labels; the limit is {MAX_PROPOSAL_CHARS}"
+            )
+        } else {
+            format!("the text has {chars} characters; it must have 1 to {MAX_PROPOSAL_CHARS}")
+        });
+    }
+    if let Some(t) = args.get("title").and_then(Value::as_str).map(one_line)
+        && (t.chars().count() > MAX_TITLE_CHARS || t.len() > 256)
+    {
+        return Err(format!(
+            "the title must have at most {MAX_TITLE_CHARS} characters"
+        ));
+    }
+    let category = match args.get("category").and_then(Value::as_str) {
+        None => None,
+        Some(c) => match CATEGORIES.iter().find(|k| k.eq_ignore_ascii_case(c.trim())) {
+            Some(k) => Some((*k).to_owned()),
+            None => return Err(format!("category must be one of {}", CATEGORIES.join(", "))),
+        },
+    };
+    // A merge names two to five memories ("12, m15"), each once.
+    let merge = if req.tool == "memory_consolidate" {
+        match merge_ids(args.get("ids").and_then(Value::as_str).unwrap_or_default()) {
+            Some(v) => Some(v),
+            None => {
+                return Err(format!(
+                    "ids must be 2 to {MAX_MERGE} different memory numbers, like \"12, 15\""
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    // An update names the memory it is for.
+    let target = if req.tool == "memory_update" {
+        match args.get("id").and_then(Value::as_i64).filter(|n| *n > 0) {
+            Some(id) => Some(id),
+            None => return Err("id must be a positive number".into()),
+        }
+    } else {
+        None
+    };
+    Ok(Asked {
+        typed,
+        kind,
+        category,
+        merge,
+        target,
+    })
 }
 
 /// Whitespace of any kind becomes one space and what is left of the control characters goes: one
@@ -726,6 +816,12 @@ impl ToolHost {
     /// and the log has to be kept or the call is denied. A save never marks the session: it carries
     /// what the model decided to say, not what a memory said.
     fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
+        // What the model got wrong in its own arguments is refused before anything is counted: it
+        // asks neither the vault nor the memory, so it tells a probe nothing (S-61).
+        let asked = match asked(req, args) {
+            Ok(a) => a,
+            Err(why) => return self.memory_failed(req, out, &why),
+        };
         // A merge forgets memories: it is also one of the session's ten changes (S-65).
         if req.tool == "memory_consolidate" {
             let path = self.run_dir.join("memory-changes.json");
@@ -762,7 +858,7 @@ impl ToolHost {
             return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
         }
         let mut facts = Facts::default();
-        let resp = self.propose_answer(req, args, out, &mut facts);
+        let resp = self.propose_answer(req, args, asked, out, &mut facts);
         match self.log_facts(req, &facts, 0) {
             Ok(()) => resp,
             Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
@@ -773,29 +869,20 @@ impl ToolHost {
         &self,
         req: &Request,
         args: &Map<String, Value>,
+        asked: Asked,
         out: DecisionOut,
         facts: &mut Facts,
     ) -> Response {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
         };
-        let (typed, kind) = if req.tool == "memory_session_summary" {
-            match summary_text(args) {
-                Ok(t) => (t, ProposalKind::Session),
-                Err(why) => return self.memory_failed(req, out, why),
-            }
-        } else if matches!(req.tool.as_str(), "memory_update" | "memory_consolidate") {
-            let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
-            (text.to_owned(), ProposalKind::Semantic)
-        } else {
-            let kind = match args.get("kind").and_then(Value::as_str) {
-                Some("semantic") => ProposalKind::Semantic,
-                Some("procedural") => ProposalKind::Procedural,
-                _ => return self.memory_failed(req, out, "kind must be semantic or procedural"),
-            };
-            let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
-            (text.to_owned(), kind)
-        };
+        let Asked {
+            typed,
+            kind,
+            category,
+            merge,
+            target,
+        } = asked;
         let typed = typed.as_str();
         // The vault's cleaner sees the text before anything is proposed, as typed AND as it will be
         // proposed (flattened to one line): a secret with spaces in it must not get through by
@@ -851,53 +938,13 @@ impl ToolHost {
                 Some(cleaned).filter(|t| !t.is_empty())
             }
         };
-        let category = match args.get("category").and_then(Value::as_str) {
-            None => None,
-            Some(c) => match CATEGORIES.iter().find(|k| k.eq_ignore_ascii_case(c.trim())) {
-                Some(k) => Some((*k).to_owned()),
-                None => {
-                    return self.memory_failed(
-                        req,
-                        out,
-                        &format!("category must be one of {}", CATEGORIES.join(", ")),
-                    );
-                }
-            },
-        };
         let draft = ProposalDraft {
             text,
             title,
             category,
             kind,
         };
-        // A merge names two to five memories ("12, m15"), each once.
-        let merge: Option<Vec<i64>> = if req.tool == "memory_consolidate" {
-            let ids = merge_ids(args.get("ids").and_then(Value::as_str).unwrap_or_default());
-            match ids {
-                Some(v) => Some(v),
-                None => {
-                    return self.memory_failed(
-                        req,
-                        out,
-                        &format!(
-                            "ids must be 2 to {MAX_MERGE} different memory numbers, like \"12, 15\""
-                        ),
-                    );
-                }
-            }
-        } else {
-            None
-        };
         let merged_ids = merge.clone().unwrap_or_default();
-        // An update names the memory it is for; a bad id is refused before anyone is asked.
-        let target = if req.tool == "memory_update" {
-            match args.get("id").and_then(Value::as_i64).filter(|n| *n > 0) {
-                Some(id) => Some(id),
-                None => return self.memory_failed(req, out, "id must be a positive number"),
-            }
-        } else {
-            None
-        };
         let session = req.session.clone();
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
