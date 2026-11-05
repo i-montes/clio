@@ -20,8 +20,9 @@ granite = ["clio-memory/granite"]
 telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-# clio-memory v0.5.0, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "1f434a6edf6368e2726cab5ed8ce667fdc3ecb26" }
+# clio-memory v0.6.2, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
+# Without `cli` (default): that is the setup screen of its binary, nothing the library needs.
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "924b3f4db203c3ea049f3c5754ec5d4a0ab448fa", default-features = false }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }
