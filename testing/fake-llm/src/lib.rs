@@ -72,15 +72,31 @@ pub trait Llm {
     fn complete(&self, request: &Request) -> Result<Response, Error>;
 }
 
-/// SHA-256 of the request as JSON with sorted keys (serde_json's default map is ordered), so
-/// the order of fields in the source never changes the hash.
+/// SHA-256 of the request as JSON with sorted keys, so the order of fields in the source never
+/// changes the hash. Sorted here, not left to serde_json's map: a dependency that turns on its
+/// `preserve_order` feature changes that map for the whole build.
 pub fn request_hash(request: &Request) -> String {
-    let value = serde_json::to_value(request).unwrap_or_default();
+    let value = sorted(serde_json::to_value(request).unwrap_or_default());
     let canonical = serde_json::to_string(&value).unwrap_or_default();
     Sha256::digest(canonical.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// The same value with every object's keys inserted in order (which is how they stay, whether or
+/// not the map preserves insertion order).
+fn sorted(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            let mut kv: Vec<_> = m.into_iter().collect();
+            kv.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(kv.into_iter().map(|(k, v)| (k, sorted(v))).collect())
+        }
+        Value::Array(a) => Value::Array(a.into_iter().map(sorted).collect()),
+        v => v,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
