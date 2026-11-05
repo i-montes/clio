@@ -391,7 +391,7 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
             Some("`clio memory list --pending`, y `clio memory promote ID` o `archive ID`.".into()),
         );
     }
-    sleep_report(o, &dirs.data, now_secs());
+    sleep_report(o, &dirs.data, &dirs.home, now_secs());
     if due > 0 {
         o.say(
             Level::Warn,
@@ -405,9 +405,18 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
 }
 
 /// When the memory last slept, whether the night was complete, and what it warned about.
-fn sleep_report(o: &mut Report, data: &Path, now: i64) {
+fn sleep_report(o: &mut Report, data: &Path, home: &Path, now: i64) {
     let setup = "`clio memory setup sleep` instala el timer que la hace dormir de noche.";
     let Some(r) = clio_memory::sleep::last_report(data) else {
+        // A timer is there (this one or clio-memory's): it only has not run yet.
+        if clio_memory::setup::sleep_present(home) {
+            o.say(
+                Level::Pass,
+                "sueño: todavía no durmió (el timer ya está instalado)".into(),
+                None,
+            );
+            return;
+        }
         o.say(
             Level::Warn,
             "sueño: la memoria todavía no durmió".into(),
@@ -860,13 +869,28 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let said = |now| {
             let mut o = Report::default();
-            sleep_report(&mut o, t.path(), now);
+            sleep_report(&mut o, t.path(), t.path(), now);
             let c = o.checks.pop().unwrap();
             (c.level, c.msg)
         };
         let (level, msg) = said(1_800_000_000);
         assert!(
             matches!(level, Level::Warn) && msg.contains("todavía no durmió"),
+            "{msg}"
+        );
+        // With the timer installed it only has not run yet: no warning, nothing to install.
+        let unit = if cfg!(target_os = "macos") {
+            t.path()
+                .join("Library/LaunchAgents/com.clio-memory.sleep.plist")
+        } else {
+            t.path()
+                .join(".config/systemd/user/clio-memory-sleep.service")
+        };
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(&unit, "").unwrap();
+        let (level, msg) = said(1_800_000_000);
+        assert!(
+            matches!(level, Level::Pass) && msg.contains("el timer ya está instalado"),
             "{msg}"
         );
         let mut r = clio_memory::sleep::Report {
