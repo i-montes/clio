@@ -20,8 +20,8 @@ granite = ["clio-memory/granite"]
 telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-# clio-memory v0.5.0 (the sleep), pinned by its commit (a tag can move): to move up, put the new tag's commit here.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "94637442fbcdde21f5ebf26a9f16ee0bf8c52758" }
+# clio-memory v0.5.0, pinned by its commit (a tag can move): to move up, put the new tag's commit here.
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "1f434a6edf6368e2726cab5ed8ce667fdc3ecb26" }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }
