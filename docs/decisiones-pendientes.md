@@ -28,6 +28,8 @@ Se pegó en el chat de una sesión de la fase 1. **Decidido el 2026-11-02: no se
 | 161 | El anti-bucle cuenta solo repeticiones | contar también pasos «sin avance» |
 | 221 | Formato de reglas de la pasarela: JSON propio | unificar con las políticas (fase 5) |
 | 270 | Vault: implementación propia en Rust (XChaCha20-Poly1305 y Argon2id) | OpenBao o Infisical |
+| 303 | Memoria sin cifrar por el motor: la protegen el disco LUKS del equipo y restic en las copias ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); vale solo donde el disco está cifrado | SQLCipher, con la llave en el vault |
+| 304, 310, 314–316 | El daemon de la memoria (y su API remota) se aplaza a la fase 4: Clio usa la librería y los demás agentes, MCP por stdio | hacerlo en la fase 2 |
 | 271 | Desbloqueo del vault: frase por terminal | passkey (fase 4), o llave en otro equipo |
 | 205 | Aprobaciones por terminal | passkey con la PWA (fase 4) |
 | — | `/rápido` fuerza nivel 1 y gana sobre «posible irreversible» | que lo irreversible siempre suba a 2 |

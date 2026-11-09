@@ -393,13 +393,15 @@ Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a pro
 
 ## Fase 2 · Memoria
 
+Plan: [`docs/plans/fase-2.md`](plans/fase-2.md). La lista se escribió antes del rediseño del 2026-11-04 («la memoria es del agente»); donde una tarea dice algo que ya no es el diseño, la nota al final dice qué cambió.
+
 ### Cerrar lo que quedó abierto de clio-memory v1
 
 - [x] **300** El nombre `clio-memory`: el repositorio es https://github.com/i-montes/clio-memory (crates.io queda sin publicar)
 - [x] **301** Documentar `remember` en el spec (§8) y en el README
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
-- [ ] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones)
-- [ ] **304** Decidir API remota: HTTP + JSON o gRPC
+- [x] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones) — decidido por defecto el 2026-11-09: ninguno ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); se reabre si la memoria sale de este equipo
+- [ ] **304** Decidir API remota: HTTP + JSON o gRPC — aplazada a la fase 4 con el daemon (310)
 - [ ] **305** Decidir índice vectorial: sqlite-vec plano, DiskANN o vec1; medir a 50 000 y a 500 000 recuerdos
 - [ ] **306** Verificar si model2vec-rs puede cargar a menor precisión y bajar la RAM
 - [ ] **307** Investigar los ~550 MB que quedan retenidos tras soltar el modelo y reportarlo a model2vec-rs
@@ -408,13 +410,13 @@ Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a pro
 
 ### Daemon y MCP
 
-- [ ] **310** Daemon de clio-memory con HTTP + JSON y token
-- [ ] **311** Servidor MCP con `memory_recall`, `memory_propose` y retroalimentación
-- [ ] **312** PROMOTE, PURGE y REVERT nunca expuestos por MCP (S-25)
-- [ ] **313** prueba: llamar PROMOTE por MCP no es posible (S-25)
-- [ ] **314** Daemon como proceso aparte con su propio usuario (S-39)
-- [ ] **315** Token de vida corta y rotación para el daemon (S-21)
-- [ ] **316** Daemon accesible solo por socket o por la tailnet
+- [ ] **310** Daemon de clio-memory con HTTP + JSON y token — aplazada a la fase 4: Clio usa la librería dentro del servicio (ADR 0010) y los demás agentes, MCP por stdio; un daemon hace falta cuando haya nodos y red
+- [x] **311** Servidor MCP con `memory_recall`, `memory_propose` y retroalimentación — hecho con otro alcance: `clio-memory mcp` (13 herramientas: leer, guardar, corregir, unir, olvidar, fijar, deshacer lo propio, resumen de sesión) y `clio memory mcp`; no hay herramienta de retroalimentación, las señales de uso salen de leer
+- [x] **312** PROMOTE, PURGE y REVERT nunca expuestos por MCP (S-25) — con el S-25 de hoy: PROMOTE, PURGE y el REVERT **de lo ajeno** nunca; `memory_revert` deshace solo lo que firmó el agente (`clio-memory`: `tests/agent.rs`, `tests/agent_authority.rs`)
+- [x] **313** prueba: llamar PROMOTE por MCP no es posible (S-25) — `crates/clio-brain/tests/memory_mcp.rs` y ataque 60 (`pi_stack/memory.rs`); en `clio-memory`, `tests/mcp.rs`
+- [ ] **314** Daemon como proceso aparte con su propio usuario (S-39) — aplazada a la fase 4 con el daemon (310)
+- [ ] **315** Token de vida corta y rotación para el daemon (S-21) — aplazada a la fase 4 con el daemon (310)
+- [ ] **316** Daemon accesible solo por socket o por la tailnet — aplazada a la fase 4 con el daemon (310)
 
 ### PURGE y borrado real
 
@@ -427,11 +429,11 @@ Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a pro
 ### Gestor de memoria (conexión con el agente)
 
 - [x] **322** Gestor de memoria como único escritor desde el agente
-- [ ] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento — hecho el lote al cerrar; no hay memoria de trabajo inmediata porque el bucle no escribe nada
-- [x] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25)
+- [x] **323** Escritura al cerrar el episodio, en lote; la memoria de trabajo se escribe al momento — hecho el lote al cerrar; lo inmediato lo cubren `memory_save` y `memory_session_summary` durante la sesión (S-61)
+- [x] **324** Lo de fuera entra siempre en cuarentena y nunca se promueve solo (S-25) — cambió el 2026-11-04 (la memoria es del agente): lo de fuera entra activo y marcado `externo`, y leerlo contamina la sesión (S-25, S-61)
 - [x] **325** Distinguir un hecho de la persona de contenido externo
-- [x] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26)
-- [x] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26)
+- [x] **326** Los recuerdos procedimentales propuestos por el agente quedan pendientes hasta que la persona los apruebe (S-26) — cambió el 2026-11-04: entran activos y marcados con su origen; el bucle de `clio run` no ve lo `externo` (S-26)
+- [x] **327** prueba: un procedimiento propuesto por el agente queda pendiente hasta aprobarlo (S-26) — la prueba sigue el S-26 de hoy (`crates/clio-brain/tests/memory_agent.rs`): activo, marcado `externo` y fuera del contexto del siguiente run
 - [x] **328** ataque: una inyección que intenta guardar un procedimiento en la memoria
 - [x] **329** Actores: agente, sesión, persona, importador, cada uno con su cuota
 - [x] **330** ataque: una inundación de propuestas a la memoria desde un mismo actor
@@ -439,7 +441,7 @@ Cierre acordado el 2026-11-02: las tareas abiertas de esta fase se aplazan a pro
 - [ ] **332** Que las respuestas de la persona a una pregunta de ruteo queden como preferencia procedimental
 - [x] **333** Conectar `context()` al arranque de cada sesión con presupuestos separados para bloques fijos y recall
 - [x] **334** Conectar la retroalimentación útil/equivocado a las respuestas del agente
-- [ ] **335** Conectar la memoria a Pi por MCP o por el adaptador
+- [x] **335** Conectar la memoria a Pi por MCP o por el adaptador — por el tool host, con 12 herramientas registradas por la guardia ([ADR 0010](decisions/0010-the-agent-reads-memory-through-the-tool-host.md))
 
 ### Evaluación de la memoria
 
