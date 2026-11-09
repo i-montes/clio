@@ -402,7 +402,7 @@ Plan: [`docs/plans/fase-2.md`](plans/fase-2.md). La lista se escribió antes del
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
 - [x] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones) — decidido por defecto el 2026-11-09: ninguno ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); se reabre si la memoria sale de este equipo
 - [ ] **304** Decidir API remota: HTTP + JSON o gRPC — aplazada a la fase 4 con el daemon (310)
-- [ ] **305** Decidir índice vectorial: sqlite-vec plano, DiskANN o vec1; medir a 50 000 y a 500 000 recuerdos · *2026-11-09: medido (clio-memory, `bench/vector-scale/results.md`, PR por fusionar). La búsqueda plana alcanza: 98 ms a 50 000 en una VM lenta; no hace falta índice en la fase 2. Se revisa si una memoria real pasa de 20 000.*
+- [ ] **305** Decidir índice vectorial: sqlite-vec plano, DiskANN o vec1; medir a 50 000 y a 500 000 recuerdos · *2026-11-09: medido (clio-memory, `bench/vector-scale/results.md`, PR por fusionar). La búsqueda plana alcanza: 98 ms a 50 000 en una VM lenta (2,2 s a 500 000); no hace falta índice en la fase 2. Se revisa si una memoria real pasa de 20 000.*
 - [ ] **306** Verificar si model2vec-rs puede cargar a menor precisión y bajar la RAM
 - [ ] **307** Investigar los ~550 MB que quedan retenidos tras soltar el modelo y reportarlo a model2vec-rs
 - [ ] **308** Fuzzing del tokenizador y de los importadores de clio-memory (S-48)

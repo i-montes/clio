@@ -126,8 +126,8 @@ A, B, C1 y C2 no necesitan a la persona. C3 se construye y se prueba sin ella, p
   - El PR añade un piso por modelo de 0,84 (`relevance_floor`). En el banco mejora a la vez lo que responde y lo que calla.
   - Se afinó con el mismo banco que lo mide: hay que validarlo con uso real.
   - El piso de casi-duplicados no se tocó: 0,87 frente a 0,90 queda para decidir.
-- **C1:** clio-memory, `bench/vector-scale/results.md`. La búsqueda plana crece en línea: unos 12 ms con 5 000 recuerdos y 98 ms con 50 000. No hace falta índice.
-- **C2:** clio-memory, `bench/concurrency/results.md`.
+- **C1:** clio-memory PR #11, `bench/vector-scale/results.md`. La búsqueda plana crece en línea hasta 50 000 recuerdos: unos 12 ms con 5 000 y 98 ms con 50 000. Con 500 000 tarda 2,2 s. No hace falta índice en la fase 2.
+- **C2:** clio-memory PR #11, `bench/concurrency/results.md`.
   - No se pierde ni se duplica nada.
   - Bajo carga extrema, del 2 al 5 % de los guardados se rinde a los 2 s.
   - El brazo «sin candado» no se pudo armar (el motor no lo permite), así que no hace falta un gestor único.
