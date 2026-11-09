@@ -1,0 +1,19 @@
+{
+  "id": "mem-04",
+  "sessions": [
+    "Una convención de este proyecto: todo archivo que el programa genere va en la carpeta salidas/ (se crea si no existe) y con extensión .txt. Recuérdalo. Hoy no hay nada más que hacer: solo confirma que entendiste."
+  ],
+  "input": "Escribe en resumen.py una función guardar(texto, nombre) que guarde el texto en un archivo con ese nombre y devuelva la ruta del archivo.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

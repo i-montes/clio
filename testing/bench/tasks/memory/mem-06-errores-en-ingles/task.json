@@ -1,0 +1,19 @@
+{
+  "id": "mem-06",
+  "sessions": [
+    "En este proyecto los mensajes de error que ve el usuario van en inglés y empiezan con «Error: ». Es una regla fija; guárdala en memoria. Hoy solo agrega a validar.py un docstring de módulo que diga «Validaciones de formularios.»."
+  ],
+  "input": "En validar.py haz validar_edad(edad): que lance ValueError con un mensaje claro si la edad es negativa o mayor que 150, y que devuelva True si es válida.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

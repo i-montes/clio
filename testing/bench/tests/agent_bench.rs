@@ -50,6 +50,7 @@ fn a_run_copies_the_workspace_runs_the_hidden_check_and_is_traced() {
         price_in_micro_per_mtok: 0,
         price_out_micro_per_mtok: 0,
         backoff_ms: vec![],
+        memory: None,
         pi: None,
     };
     let trace = Trace::open(tmp.path().join("trace.db"), SystemClock).unwrap();

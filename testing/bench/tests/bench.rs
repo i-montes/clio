@@ -22,6 +22,7 @@ fn task(id: &str, input: &str, expect: &str) -> Task {
         max_duration_ms: 1_000,
         workspace: None,
         tags: vec![],
+        sessions: vec![],
         dir: PathBuf::new(),
     }
 }

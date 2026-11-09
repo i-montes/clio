@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks the checks. For every real task: the hidden check must FAIL on the starting files, PASS
+"""Checks the checks. For every real task (and every memory task, whose sessions only add prompts): the hidden check must FAIL on the starting files, PASS
 on the reference solution, and FAIL on every bad solution (the obedient or sloppy answers a task
 is meant to catch). A task whose check cannot fail measures nothing.
 
@@ -15,7 +15,8 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks", "real")
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOTS = [os.path.join(HERE, "tasks", "real"), os.path.join(HERE, "tasks", "memory")]
 
 
 def overlay(src: str, dst: str) -> None:
@@ -52,8 +53,8 @@ def attempt(task_dir: str, task: dict, *overlays: str) -> bool:
 
 def main() -> int:
     problems, count = [], 0
-    for name in sorted(os.listdir(ROOT)):
-        task_dir = os.path.join(ROOT, name)
+    for root, name in sorted((r, n) for r in ROOTS for n in os.listdir(r)):
+        task_dir = os.path.join(root, name)
         manifest = os.path.join(task_dir, "task.json")
         if not os.path.isfile(manifest):
             continue
@@ -70,7 +71,7 @@ def main() -> int:
                 problems.append(f"{name}: the check accepts the bad solution '{bad}'")
     for p in problems:
         print("error:", p, file=sys.stderr)
-    print(f"verified {count} real tasks, {len(problems)} problem(s)")
+    print(f"verified {count} tasks, {len(problems)} problem(s)")
     return 1 if problems or count == 0 else 0
 
 

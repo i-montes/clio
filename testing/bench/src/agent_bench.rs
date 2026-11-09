@@ -42,6 +42,10 @@ pub struct AgentBenchConfig {
     /// Run the task checks without the jail when there is none (see `run_check`). Off by default:
     /// the check runs code the model wrote.
     pub unjailed_checks: bool,
+    /// `Some(models)`: every run gets an empty memory of its own (in its run folder) that all its
+    /// sessions read and write through the toolhost; the vector models best first, none for text
+    /// only. `None`: no memory tools, the baseline. Pi only.
+    pub memory: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,33 +342,74 @@ fn one_run(task: &Task, n: u32, cfg: &AgentBenchConfig) -> Result<(Done, bool, S
     copy_tree(&task.dir.join(ws), &work)?;
     let sink = base.join("sink.log");
     std::fs::write(&sink, "").map_err(|e| e.to_string())?;
+    if cfg.pi.is_none() && cfg.memory.is_some() {
+        return Err("the memory needs --harness pi".into());
+    }
     let done = if let Some(pi) = &cfg.pi {
         let id = format!("{}-{n}-{}", task.id, std::process::id());
-        let d = pi.run(
-            &id,
-            &work,
-            &run_dir,
-            &task.input,
-            task.max_steps,
-            task.max_duration_ms,
-        )?;
+        let memory_dir = base.join("memory");
+        let memory = cfg
+            .memory
+            .as_deref()
+            .map(|models| (memory_dir.as_path(), models));
+        // Earlier sessions first, then the task's own prompt; one session keeps the old layout.
+        let prompts: Vec<&str> = task
+            .sessions
+            .iter()
+            .map(String::as_str)
+            .chain([task.input.as_str()])
+            .collect();
+        let many = prompts.len() > 1;
+        let mut total = Done {
+            steps: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            ending: String::new(),
+            level: String::new(),
+            denied: 0,
+            protocol_errors: 0,
+            tainted: false,
+            tool_calls: 0,
+            setup_ms: 0,
+        };
+        let (mut endings, mut transcripts) = (Vec::new(), Vec::new());
+        for (i, prompt) in prompts.iter().enumerate() {
+            let (sid, dir) = if many {
+                (format!("{id}-s{i}"), run_dir.join(format!("s{i}")))
+            } else {
+                (id.clone(), run_dir.clone())
+            };
+            let d = pi.run(
+                &sid,
+                &work,
+                &dir,
+                prompt,
+                task.max_steps,
+                task.max_duration_ms,
+                memory,
+            )?;
+            total.steps += d.steps;
+            total.input_tokens += d.input_tokens;
+            total.output_tokens += d.output_tokens;
+            total.denied += d.denied;
+            total.tainted |= d.tainted;
+            total.tool_calls += d.tool_calls;
+            total.setup_ms += d.setup_ms;
+            endings.push(d.ending);
+            transcripts.push(d.transcript);
+        }
+        total.ending = endings.join(" -> ");
+        let transcript = if many {
+            serde_json::Value::Array(transcripts)
+        } else {
+            transcripts.pop().unwrap_or_default()
+        };
         std::fs::write(
             base.join("transcript.json"),
-            serde_json::to_string_pretty(&d.transcript).map_err(|e| e.to_string())?,
+            serde_json::to_string_pretty(&transcript).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-        Done {
-            steps: d.steps,
-            input_tokens: d.input_tokens,
-            output_tokens: d.output_tokens,
-            ending: d.ending,
-            level: String::new(),
-            denied: d.denied,
-            protocol_errors: 0,
-            tainted: d.tainted,
-            tool_calls: d.tool_calls,
-            setup_ms: d.setup_ms,
-        }
+        total
     } else {
         let mut acfg = AgentConfig::new(&format!("{}-{n}", task.id), &cfg.system_prompt, &run_dir);
         acfg.prompt_version = cfg.prompt_version.clone();
@@ -419,7 +464,12 @@ pub fn run_agent(
 ) -> Result<AgentReport, String> {
     let t = |e: clio_trace::Error| e.to_string();
     let mut report = AgentReport {
-        harness: if cfg.pi.is_some() { "pi" } else { "builtin" }.into(),
+        harness: match (&cfg.pi, &cfg.memory) {
+            (Some(_), Some(_)) => "pi+memory",
+            (Some(_), None) => "pi",
+            (None, _) => "builtin",
+        }
+        .into(),
         prompt_version: cfg.prompt_version.clone(),
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
@@ -429,8 +479,10 @@ pub fn run_agent(
         duration_ms: 0,
         tasks: vec![],
     };
+    // The builtin loop has no sessions: a task with earlier sessions is Pi's only.
     let wanted = |task: &Task| {
         task.workspace.is_some()
+            && (cfg.pi.is_some() || task.sessions.is_empty())
             && (cfg.tags.is_empty() || task.tags.iter().any(|g| cfg.tags.contains(g)))
             && (cfg.only.is_empty() || cfg.only.contains(&task.id))
     };
@@ -576,6 +628,7 @@ sys.exit(1 if bad else 0)
             max_duration_ms: 1,
             workspace: None,
             tags: vec![],
+            sessions: vec![],
             dir: dir.to_path_buf(),
         }
     }
@@ -610,8 +663,9 @@ sys.exit(1 if bad else 0)
             eprintln!("SKIPPED (no jail on this machine, nothing was tested)");
             return;
         }
-        let tasks =
-            crate::load_tasks(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks/real")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tasks");
+        let mut tasks = crate::load_tasks(&root.join("real")).unwrap();
+        tasks.extend(crate::load_tasks(&root.join("memory")).unwrap());
         let mut problems = Vec::new();
         let mut n = 0;
         for t in tasks.iter().filter(|t| t.dir.join("solution").is_dir()) {
@@ -629,7 +683,7 @@ sys.exit(1 if bad else 0)
                 }
             }
         }
-        assert!(n >= 20, "only {n} tasks have a solution");
+        assert!(n >= 28, "only {n} tasks have a solution");
         assert!(problems.is_empty(), "{problems:#?}");
     }
 

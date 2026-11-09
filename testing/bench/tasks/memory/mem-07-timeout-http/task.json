@@ -1,0 +1,19 @@
+{
+  "id": "mem-07",
+  "sessions": [
+    "Una decisión de este proyecto: toda llamada HTTP usa un timeout de exactamente 7 segundos. Recuérdala. Por ahora no hay que cambiar nada; solo dime que la tienes."
+  ],
+  "input": "En cliente.py agrega una función descargar(url) que use urllib.request.urlopen y devuelva el contenido como texto (utf-8).",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

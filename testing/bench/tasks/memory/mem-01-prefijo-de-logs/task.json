@@ -1,0 +1,19 @@
+{
+  "id": "mem-01",
+  "sessions": [
+    "Una regla de este proyecto para siempre: todo mensaje que el programa imprima empieza con el prefijo «[inventario] » (con el espacio). Guárdalo en tu memoria. Por ahora solo agrega un docstring corto a la función total de stock.py."
+  ],
+  "input": "En stock.py agrega una función avisar_bajo_stock(producto, cantidad) que imprima un aviso cuando la cantidad es menor que 5 y no imprima nada si no. Usa print.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

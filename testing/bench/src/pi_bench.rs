@@ -104,6 +104,9 @@ impl PiBench {
 
     /// One task prompt on a working copy. `run_dir` takes the toolhost's folders and log.
     /// `max_steps` (model calls) and `max_ms` are the task's limits: crossing one aborts the run.
+    /// `memory` is a memory folder and the vector models (best first) for the toolhost's memory
+    /// tools; `None` offers none.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         id: &str,
@@ -112,6 +115,7 @@ impl PiBench {
         prompt: &str,
         max_steps: u32,
         max_ms: i64,
+        memory: Option<(&Path, &[PathBuf])>,
     ) -> Result<PiDone, String> {
         let t0 = std::time::Instant::now();
         std::fs::create_dir_all(run_dir).map_err(|e| e.to_string())?;
@@ -122,7 +126,10 @@ impl PiBench {
             run_dir,
             work,
             &self.key,
-            ToolhostOpts::default(), // the bench uses no memory and no Jev
+            ToolhostOpts {
+                memory,
+                ..ToolhostOpts::default() // and no Jev
+            },
         )?;
         let launch = Launch {
             guard: Some(ensure_guard(&self.install)?),

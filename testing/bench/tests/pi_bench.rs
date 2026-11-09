@@ -61,8 +61,9 @@ fn missing() -> Option<String> {
     locate_clio().err()
 }
 
-/// A task dir: `workspace/a.txt`, a hidden check that wants `out.txt` to say `hi`.
-fn tiny_task(root: &Path, max_steps: u32) {
+/// A task dir: `workspace/a.txt`, a hidden check that wants `out.txt` to say `hi`. `sessions` is
+/// the JSON list of earlier prompts.
+fn tiny_task(root: &Path, max_steps: u32, sessions: &str) {
     let t = root.join("t-01");
     std::fs::create_dir_all(t.join("workspace")).unwrap();
     std::fs::write(t.join("workspace/a.txt"), "hola\n").unwrap();
@@ -76,7 +77,8 @@ fn tiny_task(root: &Path, max_steps: u32) {
         format!(
             r#"{{"id":"tiny","input":"escribe hi en out.txt","workspace":"workspace",
 "check":{{"kind":"command","value":"python3 {{task_dir}}/check.py"}},
-"max_steps":{max_steps},"max_cost_micro_usd":100000,"max_duration_ms":120000,"tags":[]}}"#
+"max_steps":{max_steps},"max_cost_micro_usd":100000,"max_duration_ms":120000,"tags":[],
+"sessions":{sessions}}}"#
         ),
     )
     .unwrap();
@@ -116,11 +118,21 @@ fn bench(tmp: &Path, base_url: &str) -> AgentBenchConfig {
         price_in_micro_per_mtok: 0,
         price_out_micro_per_mtok: 0,
         backoff_ms: vec![],
+        memory: None,
         pi: Some(pi),
     }
 }
 
 fn go(max_steps: u32, script: &str) -> Option<(clio_bench::agent_bench::AgentReport, PathBuf)> {
+    go_with(max_steps, script, "[]", false)
+}
+
+fn go_with(
+    max_steps: u32,
+    script: &str,
+    sessions: &str,
+    memory: bool,
+) -> Option<(clio_bench::agent_bench::AgentReport, PathBuf)> {
     if let Some(why) = missing() {
         assert!(
             std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
@@ -132,9 +144,11 @@ fn go(max_steps: u32, script: &str) -> Option<(clio_bench::agent_bench::AgentRep
     let tmp = tempfile::tempdir().unwrap();
     // The folder lives on past this function: the caller reads the run folder.
     let root = tmp.keep();
-    tiny_task(&root.join("tasks"), max_steps);
+    tiny_task(&root.join("tasks"), max_steps, sessions);
     let (_fake, url) = start_fake(&root, script);
-    let cfg = bench(&root, &url);
+    let mut cfg = bench(&root, &url);
+    // Text search only: the test must not depend on a model being installed.
+    cfg.memory = memory.then(Vec::new);
     let tasks = load_tasks(&root.join("tasks")).unwrap();
     let trace = Trace::open(root.join("trace.db"), SystemClock).unwrap();
     trace.set_price("fake", "replay-1", 0, 0, 0).unwrap();
@@ -176,5 +190,70 @@ fn pi_is_aborted_when_it_crosses_the_step_limit_and_a_denial_is_counted() {
     assert_eq!(report.successes, 0, "{d:?}");
     assert!(d.ending.starts_with("Stopped(Steps)"), "{d:?}");
     assert!(d.denied >= 1, "{d:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Session 0 saves a fact; session 1 searches for it and writes the file. The fake model says the
+/// same in both arms: only the memory decides what the search finds.
+const TWO_DAYS: &str = r#"[
+{"tool_calls":[{"name":"memory_save","arguments":{"reason":"guardar","title":"Base de datos del proyecto","text":"El proyecto usa PostgreSQL 16","category":"config","kind":"semantic"}}],"usage":[10,2]},
+{"text":"anotado","usage":[10,2]},
+{"tool_calls":[{"name":"memory_search","arguments":{"reason":"buscar","query":"PostgreSQL"}}],"usage":[10,2]},
+{"tool_calls":[{"name":"write","arguments":{"reason":"r","path":"out.txt","content":"hi\n"}}],"usage":[10,2]},
+{"text":"listo","usage":[10,2]}]"#;
+
+/// What `memory_search` answered in the second session.
+fn found_later(root: &Path) -> String {
+    let t: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("runs/tiny-0/transcript.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        t.as_array().map(Vec::len),
+        Some(2),
+        "one transcript per session"
+    );
+    t[1].as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["toolName"] == "memory_search")
+        .map(|m| m["content"].to_string())
+        .unwrap_or_default()
+}
+
+#[test]
+fn with_memory_a_later_session_finds_what_an_earlier_one_saved() {
+    let Some((report, root)) = go_with(10, TWO_DAYS, r#"["recuerda: usamos PostgreSQL 16"]"#, true)
+    else {
+        return;
+    };
+    let d = &report.tasks[0].details[0];
+    assert_eq!(
+        (report.harness.as_str(), report.successes),
+        ("pi+memory", 1),
+        "{d:?}"
+    );
+    assert_eq!(d.ending, "Settled -> Settled", "{d:?}");
+    assert_eq!(d.tool_calls, 3, "{d:?}");
+    let found = found_later(&root);
+    assert!(found.contains("El proyecto usa PostgreSQL 16"), "{found}");
+    // The memory is the run's own, in its folder.
+    assert!(root.join("runs/tiny-0/memory/memory.db").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn without_memory_the_sessions_share_only_the_files() {
+    let Some((report, root)) =
+        go_with(10, TWO_DAYS, r#"["recuerda: usamos PostgreSQL 16"]"#, false)
+    else {
+        return;
+    };
+    let d = &report.tasks[0].details[0];
+    assert_eq!(report.harness, "pi", "{d:?}");
+    // Pi has no such tool: the call fails and nothing is found.
+    let found = found_later(&root);
+    assert!(!found.contains("El proyecto usa"), "{found}");
+    assert!(!root.join("runs/tiny-0/memory").exists());
     let _ = std::fs::remove_dir_all(root);
 }
