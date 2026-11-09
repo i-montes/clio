@@ -15,11 +15,12 @@ use clio_trace::{FixedClock, SystemClock, Trace};
 const HELP: &str = "usage: clio-bench <replay|record|real|synthetic-tape|agent> --tasks DIR [--tape FILE] [--prices FILE] \
 [--repeats N] [--trace DB] [--provider P] [--model M] [--cmd PROGRAM [ARG...]] \
 [--baseline FILE --thresholds FILE] [--save-baseline FILE] \
-(agent: [--harness builtin|pi] [--prompt FILE] [--tags A,B] [--only ID,ID] [--keep DIR]) \
+(agent: [--harness builtin|pi] [--memory] [--prompt FILE] [--tags A,B] [--only ID,ID] [--keep DIR]) \
 (--cmd takes the rest of the line, so it goes last)";
 
-const FLAGS: [&str; 16] = [
+const FLAGS: [&str; 17] = [
     "harness",
+    "memory",
     "prompt",
     "tags",
     "only",
@@ -190,6 +191,16 @@ fn agent_mode(
         ));
     }
     let pi_harness = harness == "pi";
+    // --memory takes no value: each run gets an empty memory with the installed vector models.
+    let memory = match flags.get("memory").map(Vec::as_slice) {
+        None => None,
+        Some([]) if pi_harness => {
+            let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
+            Some(clio_brain::memory_link::MemoryLink::model_dirs(&home))
+        }
+        Some([]) => return Err("--memory needs --harness pi".into()),
+        Some([v, ..]) => return Err(format!("--memory takes no value (got {v})")),
+    };
     // Pi talks to the provider itself: --cmd is the builtin loop's model adapter.
     let no_cmd = Vec::new();
     let cmd = flags.get("cmd").filter(|v| !v.is_empty());
@@ -257,6 +268,7 @@ fn agent_mode(
         price_in_micro_per_mtok: price.input_per_mtok,
         price_out_micro_per_mtok: price.output_per_mtok,
         backoff_ms: vec![5_000, 20_000, 60_000],
+        memory,
         pi: if pi_harness {
             Some(clio_bench::pi_bench::PiBench::from_env(
                 &provider_name,

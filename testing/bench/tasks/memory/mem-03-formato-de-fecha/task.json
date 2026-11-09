@@ -1,0 +1,19 @@
+{
+  "id": "mem-03",
+  "sessions": [
+    "Para este proyecto: cuando el programa le muestra una fecha a una persona, el formato es siempre día-mes-año con guiones y ceros, por ejemplo 09-11-2026. Guárdalo en memoria. Ahora solo cambia el título de README.md a «Reportes de ventas»."
+  ],
+  "input": "Agrega a reporte.py una función encabezado(fecha) que reciba un datetime.date y devuelva el texto «Reporte del » seguido de la fecha.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

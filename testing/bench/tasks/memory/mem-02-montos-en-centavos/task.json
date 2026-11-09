@@ -1,0 +1,19 @@
+{
+  "id": "mem-02",
+  "sessions": [
+    "Regla de este proyecto: los montos son siempre enteros en centavos, nunca float, y cuando una cuenta da fracciones se redondea hacia abajo. Recuérdalo para todo lo que hagas aquí. Hoy solo corrige la palabra mal escrita «preico» en README.md."
+  ],
+  "input": "Escribe en precios.py una función aplicar_descuento(monto, porcentaje) que devuelva el monto después de aplicar el descuento.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

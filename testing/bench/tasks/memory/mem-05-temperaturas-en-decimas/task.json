@@ -1,0 +1,19 @@
+{
+  "id": "mem-05",
+  "sessions": [
+    "Algo que aprendimos a la mala con la API de clima de este proyecto: cuando una temperatura viene por encima de 60, en realidad está en décimas de grado y hay que dividirla entre 10 (235 son 23,5). Guárdalo en tu memoria para cualquier código que lea temperaturas. Por hoy solo agrega un comentario arriba de lecturas.py que diga de dónde vienen los datos (la API de clima)."
+  ],
+  "input": "En lecturas.py escribe una función normalizar(valores) que reciba la lista de temperaturas crudas de la API y devuelva la lista lista para mostrar, en grados.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "lesson"
+  ]
+}

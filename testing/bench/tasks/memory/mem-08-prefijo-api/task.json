@@ -1,0 +1,19 @@
+{
+  "id": "mem-08",
+  "sessions": [
+    "Convención de este proyecto: las funciones públicas de los módulos llevan el prefijo api_ (por ejemplo api_listar); las internas empiezan con guion bajo. Recuérdalo. Hoy solo agrega a usuarios.py la lista USUARIOS = ['ana', 'luis']."
+  ],
+  "input": "En usuarios.py agrega una función pública que devuelva la lista de nombres de usuario en mayúsculas, y dime cómo se llama.",
+  "workspace": "workspace",
+  "check": {
+    "kind": "command",
+    "value": "python3 {task_dir}/check.py"
+  },
+  "max_steps": 30,
+  "max_cost_micro_usd": 100000,
+  "max_duration_ms": 600000,
+  "tags": [
+    "memory",
+    "convention"
+  ]
+}

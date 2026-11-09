@@ -56,6 +56,11 @@ pub struct Task {
     pub workspace: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Prompts sent before `input`, each in a session of its own on the same working copy: what
+    /// the person said on earlier days. Pi only. With `--memory` the sessions share a memory, so
+    /// the last one can know what an earlier one was told; without it, they share only the files.
+    #[serde(default)]
+    pub sessions: Vec<String>,
     /// The folder of the task file; filled in by `load_tasks`.
     #[serde(skip)]
     pub dir: std::path::PathBuf,
