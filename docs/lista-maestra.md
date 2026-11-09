@@ -402,7 +402,7 @@ Plan: [`docs/plans/fase-2.md`](plans/fase-2.md). La lista se escribió antes del
 - [ ] **302** Respaldos y exportaciones cifrados (S-23, parte que falta)
 - [x] **303** Decidir cifrado en reposo: ninguno o SQLCipher (coste en rendimiento y compatibilidad de extensiones) — decidido por defecto el 2026-11-09: ninguno ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); se reabre si la memoria sale de este equipo
 - [ ] **304** Decidir API remota: HTTP + JSON o gRPC — aplazada a la fase 4 con el daemon (310)
-- [ ] **305** Decidir índice vectorial: sqlite-vec plano, DiskANN o vec1; medir a 50 000 y a 500 000 recuerdos
+- [ ] **305** Decidir índice vectorial: sqlite-vec plano, DiskANN o vec1; medir a 50 000 y a 500 000 recuerdos · *2026-11-09: medido (clio-memory, `bench/vector-scale/results.md`, PR por fusionar). La búsqueda plana alcanza: 98 ms a 50 000 en una VM lenta; no hace falta índice en la fase 2. Se revisa si una memoria real pasa de 20 000.*
 - [ ] **306** Verificar si model2vec-rs puede cargar a menor precisión y bajar la RAM
 - [ ] **307** Investigar los ~550 MB que quedan retenidos tras soltar el modelo y reportarlo a model2vec-rs
 - [ ] **308** Fuzzing del tokenizador y de los importadores de clio-memory (S-48)
@@ -445,13 +445,13 @@ Plan: [`docs/plans/fase-2.md`](plans/fase-2.md). La lista se escribió antes del
 
 ### Evaluación de la memoria
 
-- [ ] **336** Arnés de evaluación: banco de preguntas con resultado conocido
-- [ ] **337** Medir recall@k, precisión de la abstención, tasa de NOOP y de revisión
-- [ ] **338** Banco en español, incluyendo consultas con términos en inglés (el caso «scope» frente a «ámbito»)
+- [ ] **336** Arnés de evaluación: banco de preguntas con resultado conocido · *2026-11-09: hecho en clio-memory PR #10 (`bench/recall/`, `tests/recall_eval.rs`), por fusionar.*
+- [ ] **337** Medir recall@k, precisión de la abstención, tasa de NOOP y de revisión · *2026-11-09: medido en clio-memory PR #10 (`bench/recall/results.md`). Con Granite la memoria nunca se callaba; el PR añade un piso de 0,84 por modelo, por confirmar.*
+- [ ] **338** Banco en español, incluyendo consultas con términos en inglés (el caso «scope» frente a «ámbito») · *2026-11-09: hecho en clio-memory PR #10 (24 preguntas mezcladas).*
 - [ ] **339** Correr LongMemEval y LoCoMo para comparar con otros motores con números
 - [ ] **340** Comparar decisores en modo sombra
-- [ ] **341** medir D10: tareas de varias sesiones con memoria y sin memoria, contra la línea base
-- [ ] **342** medir D11: escrituras concurrentes forzadas, con y sin gestor único
+- [ ] **341** medir D10: tareas de varias sesiones con memoria y sin memoria, contra la línea base · *2026-11-09: la mecánica está en clio PR #62 (`sessions`, `--memory`, 8 tareas en `tasks/memory/`); falta la corrida real, que necesita la clave del proveedor.*
+- [ ] **342** medir D11: escrituras concurrentes forzadas, con y sin gestor único · *2026-11-09: medido (clio-memory, `bench/concurrency/results.md`, PR por fusionar). No se pierde ni duplica nada; con 8 o más escritores sin pausa, del 2 al 5 % se rinde a los 2 s con un error claro. «Sin gestor único» no se puede armar: el motor no admite un segundo escritor.*
 
 ### Cierre de la fase 2
 

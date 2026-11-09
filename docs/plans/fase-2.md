@@ -119,12 +119,27 @@ A ─► B ─► C1 ─► C2 ─► C3 (mecánica) ─► [persona: corrida re
 
 A, B, C1 y C2 no necesitan a la persona. C3 se construye y se prueba sin ella, pero el número que cierra la fase sí la necesita.
 
+## Resultado de la tanda (2026-11-09)
+- **A:** PR #61 (este).
+- **B:** clio-memory PR #10.
+  - Con Granite, `recall` nunca se abstenía: los cosenos de Granite viven entre 0,78 y 0,98, y el umbral de 0,30 no filtra nada.
+  - El PR añade un piso por modelo de 0,84 (`relevance_floor`). En el banco mejora a la vez lo que responde y lo que calla.
+  - Se afinó con el mismo banco que lo mide: hay que validarlo con uso real.
+  - El piso de casi-duplicados no se tocó: 0,87 frente a 0,90 queda para decidir.
+- **C1:** clio-memory, `bench/vector-scale/results.md`. La búsqueda plana crece en línea: unos 12 ms con 5 000 recuerdos y 98 ms con 50 000. No hace falta índice.
+- **C2:** clio-memory, `bench/concurrency/results.md`.
+  - No se pierde ni se duplica nada.
+  - Bajo carga extrema, del 2 al 5 % de los guardados se rinde a los 2 s.
+  - El brazo «sin candado» no se pudo armar (el motor no lo permite), así que no hace falta un gestor único.
+- **C3:** clio PR #62. Mecánica y 8 tareas listas y probadas con el proveedor falso. La corrida real queda pendiente de la clave.
+
 ## Lo que queda para la persona al final
 
 1. Revisar y fusionar los PRs (A en clio; B, C1 y C2 en clio-memory; C3 en clio).
 2. La clave del proveedor en `~/.config/clio/opencode-api-key` (0600) de esta máquina, o correr C3 en su PC: `cargo run --release -p clio-bench -- agent --harness pi --memory …`.
 3. Confirmar o cambiar:
    - el cifrado en reposo (ADR 0011);
-   - los umbrales nuevos de `recall`, si B propone moverlos;
+   - el piso de 0,84 para Granite (B) y el piso de casi-duplicados (0,87 o 0,90);
+   - la lectura de D11 de C2 (no hace falta un gestor único);
    - el aplazamiento del daemon a la fase 4.
 4. Si sube la versión de clio-memory, subir el pin de Clio al commit del tag nuevo (un `Cargo.toml`: lo revisa la persona).
