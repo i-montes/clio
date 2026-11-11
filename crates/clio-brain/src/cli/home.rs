@@ -65,6 +65,8 @@ pub struct ModelCfg {
     pub provider: String,
     pub model: String,
     /// Program and arguments of the model adapter (reads a request on stdin, answers on stdout).
+    /// Empty (what `init` writes): the adapter inside this binary (`Config::model_command`).
+    #[serde(default)]
     pub command: Vec<String>,
     /// `name@version`: the built-in prompt, or `<config>/prompts/<name>@<version>.md`.
     pub prompt: String,
@@ -183,6 +185,16 @@ impl Config {
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
     }
 
+    /// The model adapter's program and arguments as a run starts it: the adapter inside this
+    /// binary (`names_builtin_adapter`) as `python3 <its copy>`, any other command as written.
+    pub fn model_command(&self, dirs: &Dirs) -> Res<Vec<String>> {
+        if names_builtin_adapter(&self.model.command) {
+            let p = builtin_adapter(dirs)?;
+            return Ok(vec!["python3".into(), p.display().to_string()]);
+        }
+        Ok(self.model.command.clone())
+    }
+
     /// The system prompt (name for the trace, text) for `model.prompt`. The default one becomes
     /// `clio-agent@3` when the jail is proven; a prompt the person chose is never swapped.
     pub fn prompt_text(&self, dirs: &Dirs, jail: bool) -> Res<(String, String)> {
@@ -221,21 +233,44 @@ pub fn key_status(dirs: &Dirs) -> KeyStatus {
     }
 }
 
-/// The adapter script: `CLIO_ADAPTER`, or `adapters/models/openai_compat.py` found above the
-/// executable (never in the working directory), or else the copy installed by `init`.
-fn find_adapter(dirs: &Dirs) -> Res<PathBuf> {
+/// The file name of the adapter that travels inside this binary.
+const ADAPTER_FILE: &str = "openai_compat.py";
+
+/// Whether `command` names the adapter inside this binary: empty (what `init` writes), or
+/// `python3` and an `openai_compat.py` in an `adapters/` folder, which is what older versions of
+/// `init` wrote (a checkout's file, or the copy in the data folder). That path is not run: it can
+/// be gone (the checkout moved) or changed, and the adapter receives the model key on every call
+/// and runs outside the jail.
+pub fn names_builtin_adapter(command: &[String]) -> bool {
+    match command {
+        [] => true,
+        [python, script] if python == "python3" => {
+            let p = Path::new(script);
+            p.file_name().is_some_and(|n| n == ADAPTER_FILE)
+                && p.ancestors()
+                    .any(|a| a.file_name().is_some_and(|n| n == "adapters"))
+        }
+        _ => false,
+    }
+}
+
+/// Where the adapter inside this binary is written: `<data>/adapters/openai_compat.py`.
+pub fn builtin_adapter_path(dirs: &Dirs) -> PathBuf {
+    dirs.data.join("adapters").join(ADAPTER_FILE)
+}
+
+/// The adapter inside this binary, on disk: written private, and written again when the file
+/// differs (a newer Clio brings its adapter along). `CLIO_ADAPTER` puts another script in its
+/// place (for working on the adapter).
+fn builtin_adapter(dirs: &Dirs) -> Res<PathBuf> {
     if let Some(p) = std::env::var_os("CLIO_ADAPTER") {
         return Ok(PathBuf::from(p));
     }
-    // Only next to the executable, never in the working directory: the adapter receives the
-    // model key on every run and runs outside the jail.
-    if let Some(c) = super::find_above_exe(Path::new("adapters/models/openai_compat.py")) {
-        return c.canonicalize().map_err(|e| io_err(&c, &e));
+    let p = builtin_adapter_path(dirs);
+    if std::fs::read_to_string(&p).ok().as_deref() != Some(ADAPTER_SOURCE) {
+        mkdir_private(&dirs.data.join("adapters"))?;
+        write_private(&p, ADAPTER_SOURCE.as_bytes())?;
     }
-    let dir = dirs.data.join("adapters");
-    mkdir_private(&dir)?;
-    let p = dir.join("openai_compat.py");
-    write_private(&p, ADAPTER_SOURCE.as_bytes())?;
     Ok(p)
 }
 
@@ -276,8 +311,9 @@ pub fn init(dirs: &Dirs) -> Res<()> {
     if cfg.exists() {
         println!("{ok}  ya existe    {} (se deja como está)", cfg.display());
     } else {
-        let adapter = find_adapter(dirs)?;
-        let c = Config::default_with(vec!["python3".into(), adapter.display().to_string()]);
+        // No path in the file: an empty command is the adapter inside this binary, so the file
+        // keeps working when Clio is updated or moved to another machine.
+        let c = Config::default_with(Vec::new());
         let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
         write_private(&cfg, text.as_bytes())?;
         println!("{ok}  creada       {} (0600)", cfg.display());
@@ -312,4 +348,69 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         st.bold("clio")
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    fn what_names_the_builtin_adapter() {
+        assert!(names_builtin_adapter(&[]));
+        // What older versions of `init` wrote: a checkout's file, or the copy in the data folder.
+        assert!(names_builtin_adapter(&cmd(&[
+            "python3",
+            "/home/ana/clio/adapters/models/openai_compat.py"
+        ])));
+        assert!(names_builtin_adapter(&cmd(&[
+            "python3",
+            "/home/ana/.local/share/clio/adapters/openai_compat.py"
+        ])));
+        // Anything else is the person's own adapter, run as written.
+        for other in [
+            cmd(&["python3", "/home/ana/mi_adaptador.py"]),
+            cmd(&["python3", "/tmp/openai_compat.py"]),
+            cmd(&[
+                "python3.12",
+                "/home/ana/clio/adapters/models/openai_compat.py",
+            ]),
+            cmd(&["python3", "/x/adapters/models/openai_compat.py", "--debug"]),
+            cmd(&["./adapter"]),
+        ] {
+            assert!(!names_builtin_adapter(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_builtin_adapter_is_written_and_refreshed_when_it_differs() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            config: t.path().join("config"),
+            data: t.path().join("data"),
+            runs: t.path().join("data/runs"),
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        let mut c = Config::default_with(Vec::new());
+        let got = c.model_command(&dirs).unwrap();
+        let copy = builtin_adapter_path(&dirs);
+        assert_eq!(got, cmd(&["python3", &copy.display().to_string()]));
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), ADAPTER_SOURCE);
+        assert_eq!(mode(&copy), Some(0o600));
+        // A copy changed on disk (or left by an older Clio) is not what runs: it is written again.
+        std::fs::write(&copy, "print('otro')").unwrap();
+        c.model.command = cmd(&["python3", "/movido/adapters/models/openai_compat.py"]);
+        assert_eq!(
+            c.model_command(&dirs).unwrap()[1],
+            copy.display().to_string()
+        );
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), ADAPTER_SOURCE);
+        // The person's own command is left as it is.
+        c.model.command = cmd(&["python3", "/home/ana/mi_adaptador.py"]);
+        assert_eq!(c.model_command(&dirs).unwrap(), c.model.command);
+    }
 }

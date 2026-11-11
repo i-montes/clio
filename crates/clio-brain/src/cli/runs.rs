@@ -376,7 +376,9 @@ fn random_u16() -> u16 {
 
 /// Validates the workspace, scans it and makes the copy. Nothing of the original is touched.
 pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
-    let cfg = Config::load(dirs)?;
+    let mut cfg = Config::load(dirs)?;
+    // From here on the command is the one that runs (the built-in adapter resolved to its copy).
+    cfg.model.command = cfg.model_command(dirs)?;
     let ws = work::validate(&o.workspace, dirs)?;
     let (mf, mb) = if o.allow_broad {
         (u64::MAX, u64::MAX)

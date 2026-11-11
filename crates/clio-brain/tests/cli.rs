@@ -479,6 +479,50 @@ fn init_checks_the_key_without_printing_it() {
     );
 }
 
+// The model adapter is the one inside the binary: `init` writes no path into the config (so it
+// keeps working when Clio is updated, moved or installed on another machine), and the path an
+// older `init` wrote, of a checkout that has since moved, is not run nor a failure.
+#[test]
+fn the_model_adapter_is_the_one_inside_the_binary() {
+    let e = Env::new();
+    let cfg_path = e.home().join(".config/clio/config.json");
+    std::fs::remove_file(&cfg_path).unwrap();
+    e.clio(&["init"]);
+    let text_cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    let mut cfg: Value = serde_json::from_str(&text_cfg).unwrap();
+    assert_eq!(cfg["model"]["command"], json!([]), "{text_cfg}");
+    assert!(!text_cfg.contains("openai_compat"), "{text_cfg}");
+    let o = e.try_clio(&["doctor"]);
+    let out = text(&o.stdout);
+    assert!(o.status.success(), "{out}{}", text(&o.stderr));
+    assert!(
+        out.contains("el adaptador del modelo es el que trae este binario"),
+        "{out}"
+    );
+
+    cfg["model"]["command"] = json!([
+        "python3",
+        "/ya/no/esta/clio/adapters/models/openai_compat.py"
+    ]);
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    let o = e.try_clio(&["doctor"]);
+    let out = text(&o.stdout);
+    assert!(o.status.success(), "{out}{}", text(&o.stderr));
+    assert!(
+        out.contains("el adaptador del modelo es el que trae este binario"),
+        "{out}"
+    );
+    assert!(out.contains("ya no se usa"), "{out}");
+    assert!(!out.contains("openai_compat.py no existe"), "{out}");
+
+    // Another adapter, written by the person, is theirs: missing, it is a failure.
+    cfg["model"]["command"] = json!(["python3", "/ya/no/esta/mi_adaptador.py"]);
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+    let o = e.try_clio(&["doctor"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stdout).contains("mi_adaptador.py no existe"));
+}
+
 #[test]
 fn doctor_passes_when_clean_and_fails_on_open_permissions() {
     let e = Env::new();

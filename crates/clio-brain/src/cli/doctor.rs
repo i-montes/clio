@@ -10,7 +10,9 @@ use clio_vault::proto::Request;
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::json;
 
-use super::home::{Config, Dirs, KeyStatus, key_status};
+use super::home::{
+    Config, Dirs, KeyStatus, builtin_adapter_path, key_status, names_builtin_adapter,
+};
 use super::mode;
 use super::tui::app::plural;
 use super::tui::sanitize;
@@ -693,13 +695,26 @@ pub fn collect(dirs: &Dirs) -> Report {
                 None,
             );
             jev_report(&mut o, dirs, &c.jev);
-            if let Some(script) = c.model.command.get(1)
+            if names_builtin_adapter(&c.model.command) {
+                // A path older versions of `init` wrote is not run: said, so it can be removed.
+                let old = c.model.command.get(1).map_or_else(String::new, |p| {
+                    format!("; model.command nombra {p}, que ya no se usa y puede quedar en []")
+                });
+                o.say(
+                    Level::Pass,
+                    format!(
+                        "el adaptador del modelo es el que trae este binario ({}){old}",
+                        builtin_adapter_path(dirs).display()
+                    ),
+                    None,
+                );
+            } else if let Some(script) = c.model.command.get(1)
                 && !Path::new(script).is_file()
             {
                 o.say(
                     Level::Fail,
                     format!("el adaptador del modelo {script} no existe"),
-                    Some("Corrige model.command en ~/.config/clio/config.json.".into()),
+                    Some("Corrige model.command en ~/.config/clio/config.json, o déjalo en [] para usar el que trae Clio.".into()),
                 );
             }
         }
