@@ -312,8 +312,8 @@ dependencies = [
 
 [[package]]
 name = "clio-memory"
-version = "0.8.0"
-source = "git+https://github.com/i-montes/clio-memory?rev=b9ae1fc6e47c5c1ac949fbbb03733ae0a5deaead#b9ae1fc6e47c5c1ac949fbbb03733ae0a5deaead"
+version = "0.9.0"
+source = "git+https://github.com/i-montes/clio-memory?rev=2a73134041d9289ed84b351e9cbf0f015d36e6a4#2a73134041d9289ed84b351e9cbf0f015d36e6a4"
 dependencies = [
  "model2vec-rs",
  "ort",
