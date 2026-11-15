@@ -1196,3 +1196,36 @@ fn doctor_shows_each_check_once_and_in_spanish_with_the_real_host_script() {
         alone_out.contains("equipo: hay FAIL")
     );
 }
+
+/// ONNX Runtime turns its telemetry on by itself; clio-memory refuses to start it (Granite) unless
+/// `ORT_DISABLE_TELEMETRY=1`. `clio` started without it runs again with it set: a program it
+/// starts (here the `node` that `clio pi doctor` asks for its version) sees the variable.
+#[test]
+fn clio_runs_with_the_runtime_telemetry_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let seen = tmp.path().join("seen");
+    let node = bin.join("node");
+    std::fs::write(
+        &node,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"${{ORT_DISABLE_TELEMETRY-unset}}\" > '{}'\necho v22.20.0\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let o = Command::new(CLIO)
+        .args(["pi", "doctor"])
+        .env("HOME", tmp.path())
+        .env("XDG_RUNTIME_DIR", tmp.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env_remove("ORT_DISABLE_TELEMETRY")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = std::fs::read_to_string(&seen)
+        .unwrap_or_else(|_| panic!("node was not run: {}{}", text(&o.stdout), text(&o.stderr)));
+    assert_eq!(said, "1");
+}

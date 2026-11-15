@@ -182,6 +182,9 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
 }
 
 fn main() {
+    // Granite refuses ONNX Runtime with its telemetry on: run again with it off. Returns only if
+    // that could not be done, and then the memory goes on without Granite.
+    let _ = clio_memory::private_runtime();
     match dispatch(std::env::args().skip(1).collect()) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -222,7 +225,7 @@ mod tests {
 
     /// Jev on the relations bench of clio-memory (needs the vault open and Jev on): for each
     /// memory's 5 nearest by Granite, what Jev says, against the pairs a person marked.
-    /// `CLIO_BENCH_RELATIONS=<absolute path to clio-memory>/bench/relations cargo test -p clio-brain --bin clio
+    /// `ORT_DISABLE_TELEMETRY=1 CLIO_BENCH_RELATIONS=<absolute path to clio-memory>/bench/relations cargo test -p clio-brain --bin clio
     /// jev_relations_on_the_bench -- --ignored --nocapture`
     #[test]
     #[ignore = "asks Jev over the network; needs the vault open"]
