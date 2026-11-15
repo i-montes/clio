@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod control;
+pub mod memory_daemon;
 pub mod memory_judge;
 pub mod memory_link;
 pub mod memory_port;

@@ -130,7 +130,10 @@ impl MemoryRecall {
     pub fn new(data: &Path, model_dirs: &[PathBuf], project: Option<&str>) -> Self {
         Self {
             data: data.to_path_buf(),
-            model: EmbedModel::with_dirs(model_dirs.to_vec()),
+            model: clio_brain::memory_daemon::shared(
+                data,
+                EmbedModel::with_dirs(model_dirs.to_vec()),
+            ),
             project: project.map(str::to_owned),
         }
     }

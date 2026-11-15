@@ -52,6 +52,14 @@ impl LinkPort {
         }
     }
 
+    /// Its vectors from the clio-memory daemon ([`crate::memory_daemon::shared`]). Not in the tool
+    /// host of a Pi session: its environment holds the model key, which the daemon would keep.
+    #[must_use]
+    pub fn from_daemon(mut self) -> Self {
+        self.model = crate::memory_daemon::shared(&self.data, self.model);
+        self
+    }
+
     /// In a project (the brain's, never the model's).
     #[must_use]
     pub fn in_project(mut self, project: Option<String>) -> Self {

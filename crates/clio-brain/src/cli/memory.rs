@@ -87,7 +87,7 @@ fn id_of(s: &str) -> Res<MemoryId> {
 
 fn open_read(dirs: &Dirs, model: bool) -> Res<Option<MemoryLink>> {
     let m = if model {
-        EmbedModel::of_home(&dirs.home)
+        clio_brain::memory_daemon::shared(&dirs.data, EmbedModel::of_home(&dirs.home))
     } else {
         EmbedModel::none()
     };

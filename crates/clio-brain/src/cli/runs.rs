@@ -429,7 +429,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         jail_note: jail.summary(),
         program,
         data: dirs.data.clone(),
-        model: EmbedModel::of_home(&dirs.home),
+        model: clio_brain::memory_daemon::shared(&dirs.data, EmbedModel::of_home(&dirs.home)),
     })
 }
 

@@ -54,7 +54,7 @@ impl NodeInfo {
     }
 }
 
-fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
+pub(crate) fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
     path_var
         .split(':')
         .filter(|d| !d.is_empty())
