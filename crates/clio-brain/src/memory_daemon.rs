@@ -5,11 +5,13 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use clio_memory::Embedder;
 use clio_memory::agent::EmbedModel;
-use clio_memory::daemon::{Launch, RemoteEmbedder};
+use clio_memory::daemon::proto::newer;
+use clio_memory::daemon::{Launch, RemoteEmbedder, request};
 
 type Connect = Box<dyn Fn() -> Result<Arc<dyn Embedder>, String> + Send + Sync>;
 
@@ -26,6 +28,9 @@ pub fn shared(data: &Path, local: Arc<EmbedModel>) -> Arc<EmbedModel> {
     with_daemon(
         local,
         Box::new(move || {
+            if !may_connect(&request(&data, None, &serde_json::json!({"op": "status"}))) {
+                return Err("el demonio es de una versión anterior".into());
+            }
             let launch = Launch {
                 exe: exe.clone(),
                 env: vec![],
@@ -33,6 +38,20 @@ pub fn shared(data: &Path, local: Arc<EmbedModel>) -> Arc<EmbedModel> {
             RemoteEmbedder::connect(&data, launch).map(|r| Arc::new(r) as Arc<dyn Embedder>)
         }),
     )
+}
+
+/// The version of the clio-memory library Clio is built with (the pin in Cargo.toml).
+const LIBRARY: &str = "0.10.1";
+
+/// Whether to connect, from the `status` of the daemon of the folder (asked without launching
+/// one; `status` never makes it leave). A daemon older than [`LIBRARY`] would leave on the first
+/// request ("stale") and the agents would lose it: it is left alone. None running: connect, and
+/// the installed binary is the one launched.
+fn may_connect(status: &Result<serde_json::Value, String>) -> bool {
+    match status.as_ref().ok().and_then(|s| s["bin"].as_str()) {
+        Some(bin) => !newer(LIBRARY, bin),
+        None => true,
+    }
 }
 
 /// The clio-memory binary in `path_var`, absolute; none when `no_daemon` is `1`.
@@ -54,6 +73,7 @@ fn with_daemon(local: Arc<EmbedModel>, connect: Connect) -> Arc<EmbedModel> {
         own,
         connect,
         daemon: OnceLock::new(),
+        broken: AtomicBool::new(false),
     }))
 }
 
@@ -62,7 +82,12 @@ fn with_daemon(local: Arc<EmbedModel>, connect: Connect) -> Arc<EmbedModel> {
 struct FromDaemon {
     own: Arc<dyn Embedder>,
     connect: Connect,
+    /// A failed connect is kept for the life of the process on purpose: asking again would cost
+    /// seconds each time, and under a version skew it would stop the agents' daemon again.
     daemon: OnceLock<Option<Arc<dyn Embedder>>>,
+    /// The daemon failed to embed once: Clio's own model from then on, without trying (and maybe
+    /// launching) it again on every call.
+    broken: AtomicBool,
 }
 
 impl FromDaemon {
@@ -85,10 +110,16 @@ impl Embedder for FromDaemon {
         self.own.dim()
     }
     fn embed(&self, texts: &[&str]) -> clio_memory::Result<Vec<Vec<f32>>> {
-        match self.daemon() {
-            Some(d) => d.embed(texts).or_else(|_| self.own.embed(texts)),
-            None => self.own.embed(texts),
+        if let Some(d) = self
+            .daemon()
+            .filter(|_| !self.broken.load(Ordering::SeqCst))
+        {
+            match d.embed(texts) {
+                Ok(v) => return Ok(v),
+                Err(_) => self.broken.store(true, Ordering::SeqCst),
+            }
         }
+        self.own.embed(texts)
     }
 }
 
@@ -100,11 +131,12 @@ mod tests {
 
     use super::*;
 
-    /// A model that answers `value` for each text, or fails.
+    /// A model that answers `value` for each text, or fails; counts the calls.
     struct Fake {
         id: &'static str,
         value: f32,
         fails: bool,
+        calls: AtomicUsize,
     }
 
     impl Embedder for Fake {
@@ -115,6 +147,7 @@ mod tests {
             2
         }
         fn embed(&self, texts: &[&str]) -> clio_memory::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fails {
                 return Err(clio_memory::Error::Embedding("caído".into()));
             }
@@ -123,7 +156,12 @@ mod tests {
     }
 
     fn fake(id: &'static str, value: f32, fails: bool) -> Arc<dyn Embedder> {
-        Arc::new(Fake { id, value, fails })
+        Arc::new(Fake {
+            id,
+            value,
+            fails,
+            calls: AtomicUsize::new(0),
+        })
     }
 
     fn local() -> Arc<EmbedModel> {
@@ -175,6 +213,48 @@ mod tests {
     fn a_daemon_that_fails_to_embed_leaves_it_to_clio() {
         let (m, _) = model(Ok(fake("granite", 2.0, true)));
         assert_eq!(first_value(&m), 1.0);
+    }
+
+    #[test]
+    fn after_a_failed_embed_the_daemon_is_not_asked_again() {
+        let daemon = Arc::new(Fake {
+            id: "granite",
+            value: 2.0,
+            fails: true,
+            calls: AtomicUsize::new(0),
+        });
+        let (m, asked) = model(Ok(daemon.clone() as Arc<dyn Embedder>));
+        assert_eq!(first_value(&m), 1.0);
+        assert_eq!(first_value(&m), 1.0);
+        assert_eq!(daemon.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+    }
+
+    /// A daemon older than this library would leave on the first request ("stale"), and the agents
+    /// that use it would lose it: Clio leaves it alone. None running, or one as new: connect.
+    #[test]
+    fn an_older_daemon_is_left_alone() {
+        let status = |bin: &str| Ok(serde_json::json!({"ok": true, "bin": bin}));
+        assert!(!may_connect(&status("0.0.1")));
+        assert!(may_connect(&status(LIBRARY)));
+        assert!(may_connect(&status("999.0.0")));
+        assert!(may_connect(&Err("no hay demonio en /x/daemon.sock".into())));
+    }
+
+    /// The library's version, written here because clio-memory does not export it: moving the pin
+    /// without changing it fails here.
+    #[test]
+    fn library_is_the_pinned_version() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .unwrap();
+        let pinned = lock
+            .split("[[package]]")
+            .find(|p| p.contains("name = \"clio-memory\""))
+            .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = \"")))
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap();
+        assert_eq!(LIBRARY, pinned);
     }
 
     #[test]
