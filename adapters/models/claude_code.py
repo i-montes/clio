@@ -12,6 +12,7 @@ Claude Code only in its environment, never in argv, and is never printed. Clio p
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,18 @@ QUIET = {
     "DISABLE_AUTOUPDATER": "1",
     "DISABLE_TELEMETRY": "1",
 }
+# A person behind a proxy still reaches Anthropic through it.
+PROXY = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy")
+
+
+def stop(signum, frame):
+    """Clio sends SIGTERM when a call runs past its deadline: leave through `finally`, which stops
+    Claude Code and removes its HOME (the default action would skip both)."""
+    raise SystemExit(1)
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
 
 
 def fail(message: str) -> None:
@@ -76,28 +89,45 @@ argv = [
     "--no-session-persistence",
     "--setting-sources", "",  # none of the person's settings, hooks or CLAUDE.md
     "--strict-mcp-config",
-    "--system-prompt", "\n\n".join(system),
 ]
 # A HOME of its own, so nothing of the person's (~/.claude, their login) is read or written.
 home = tempfile.mkdtemp(prefix="clio-claude-")
 env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": home, "CLAUDE_CODE_OAUTH_TOKEN": key, **QUIET}
+env.update({k: os.environ[k] for k in PROXY if os.environ.get(k)})
+proc = None
 try:
-    done = subprocess.run(argv, input=prompt, capture_output=True, text=True, env=env, cwd=home, timeout=TIMEOUT)
+    # In a file: one argument may not pass 128 KiB (E2BIG), a system prompt can.
+    system_file = os.path.join(home, "system-prompt.txt")
+    with open(system_file, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(system))
+    argv += ["--system-prompt-file", system_file]
+    # Its own process group, so everything it starts is stopped with it. Never its stderr: what it
+    # says there is not ours to show and could quote the request.
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, errors="replace", env=env, cwd=home, start_new_session=True,
+    )
+    stdout, _ = proc.communicate(prompt, timeout=TIMEOUT)
 except subprocess.TimeoutExpired:
     fail(f"Claude Code no respondió en {TIMEOUT} s")
 except OSError as e:
     fail(f"no pude ejecutar Claude Code: {type(e).__name__}")
 finally:
+    if proc is not None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass  # the group is already gone
+        proc.wait()
     shutil.rmtree(home, ignore_errors=True)
 
-# Never its stderr: what it says there is not ours to show and could quote the request.
 try:
-    answer = json.loads(done.stdout)
+    answer = json.loads(stdout)
 except ValueError:
     answer = None
 if not isinstance(answer, dict):
-    fail(f"Claude Code no devolvió JSON válido (código {done.returncode})")
-if answer.get("is_error") or done.returncode != 0:
+    fail(f"Claude Code no devolvió JSON válido (código {proc.returncode})")
+if answer.get("is_error") or proc.returncode != 0:
     why = answer.get("result")
     if not isinstance(why, str):
         errors = answer.get("errors")

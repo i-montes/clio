@@ -180,6 +180,15 @@ impl CommandModel {
             match child.try_wait().map_err(|e| fail(e.to_string()))? {
                 Some(s) => break s,
                 None if std::time::Instant::now() >= deadline => {
+                    // Asked to stop first, so it can end what it started and clean up (the Claude
+                    // adapter's Claude Code and private HOME); killed if it is still there.
+                    let pid = rustix::process::Pid::from_child(&child);
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+                    let grace = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < grace
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(fail(format!(

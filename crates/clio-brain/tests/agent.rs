@@ -448,6 +448,31 @@ fn a_hung_model_program_is_killed_at_its_deadline() {
     assert!(took < std::time::Duration::from_secs(10), "{took:?}");
 }
 
+// A program past its deadline is asked to stop first (SIGTERM), so it can stop what it started
+// and clean up (the Claude adapter's Claude Code and private HOME); it is killed after a grace.
+#[test]
+fn a_program_past_its_deadline_gets_sigterm_before_it_is_killed() {
+    let t = tempfile::tempdir().unwrap();
+    let mark = t.path().join("cleaned");
+    let mut m = CommandModel::new(
+        "sh",
+        &[
+            "-c".into(),
+            format!(
+                "trap 'echo yes > \"{}\"; exit 1' TERM; sleep 1000 & wait",
+                mark.display()
+            ),
+        ],
+        "m",
+    );
+    m.backoff_ms = vec![];
+    m.timeout = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    assert!(m.complete(&[]).unwrap_err().contains("timed out"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_eq!(std::fs::read_to_string(&mark).unwrap_or_default(), "yes\n");
+}
+
 #[test]
 fn empty_answers_are_protocol_errors_bounded_by_the_step_budget() {
     let r = setup("real-01");

@@ -185,7 +185,9 @@ fn probe(dirs: &Dirs, mut cfg: Config, c: &Connector, model: &str, key: &Secret)
     let mut m = CommandModel::new(program, args, model).with_key(Secret::new(key.expose()));
     m.max_tokens = 16;
     m.backoff_ms = Vec::new();
-    m.timeout = std::time::Duration::from_secs(30);
+    // Claude Code starts a large binary and signs in before it asks: give it room. On the
+    // deadline the adapter is stopped with SIGTERM and stops Claude Code itself.
+    m.timeout = std::time::Duration::from_secs(if c.pi_extension.is_some() { 90 } else { 30 });
     let msg = Msg {
         role: "user".into(),
         content: "Responde solo: ok".into(),
