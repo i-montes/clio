@@ -94,7 +94,7 @@ fn bench(tmp: &Path, base_url: &str) -> AgentBenchConfig {
     .unwrap();
     let mut provider = clio_brain::connector::by_name("opencode")
         .unwrap()
-        .pi_provider("fm");
+        .pi_launch_provider("fm");
     provider.id = "opencode-go".into();
     provider.base_url = base_url.into();
     let pi = PiBench::new(

@@ -250,7 +250,7 @@ fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
     // `Config::load` guarantees `m.provider` is a connector.
     let mut p = connector::by_provider(&m.provider)
         .expect("a connector")
-        .pi_provider(&m.model);
+        .pi_launch_provider(&m.model);
     if let Some(u) = &m.base_url {
         p.base_url.clone_from(u);
     }

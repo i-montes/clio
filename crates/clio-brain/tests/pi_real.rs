@@ -485,7 +485,7 @@ fn claude_subscription_answers() {
     let mut launch = rig.launch("", None);
     launch.provider = clio_brain::connector::by_name("claude")
         .unwrap()
-        .pi_provider(&model);
+        .pi_launch_provider(&model);
     launch.api_key = Some(key.clone());
     let mut p = start(&launch).unwrap_or_else(|e| panic!("Pi no arrancó: {}", hide(e.to_string())));
     // A short answer: a stuck turn fails in two minutes instead of the default hour.

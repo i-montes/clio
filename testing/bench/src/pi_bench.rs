@@ -70,7 +70,7 @@ impl PiBench {
             .ok_or("falta la clave del modelo: OPENCODE_API_KEY")?;
         let mut p = clio_brain::connector::by_name("opencode")
             .ok_or("no hay conector opencode")?
-            .pi_provider(model);
+            .pi_launch_provider(model);
         p.id = provider.into();
         p.dollars_per_mtok = (price.0 as f64 / 1e6, price.1 as f64 / 1e6);
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")

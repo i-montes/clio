@@ -289,7 +289,7 @@ fn launch_of(
     };
     let mut provider = clio_brain::connector::by_name("opencode")
         .unwrap()
-        .pi_provider("fake-model");
+        .pi_launch_provider("fake-model");
     provider.id = "fake".into();
     provider.base_url = format!("http://{}/v1", model.addr);
     provider.context_window = 32_000;

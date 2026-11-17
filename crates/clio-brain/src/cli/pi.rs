@@ -109,7 +109,7 @@ pub fn init_lines(dirs: &Dirs) {
         println!("{}  Pi: {e}", st.mark(Level::Warn));
         return;
     }
-    let already = install::locate(&p).is_ok();
+    let already = install::locate(&p).is_ok_and(|i| install::is_current(&i));
     match install::install(&p, &path_var()) {
         Ok(i) => println!(
             "{}  Pi {} {} {} (0700)",

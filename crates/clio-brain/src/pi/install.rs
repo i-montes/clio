@@ -155,11 +155,19 @@ fn lock_down(dir: &Path) -> Result<(), PiError> {
         .map_err(|e| io_err(dir, &e))
 }
 
-/// Installs the pinned Pi (a no-op when it is already there). Needs the network the first time.
-/// Installs into a temporary sibling folder and renames it, so a failed install leaves nothing
-/// that looks installed.
+/// Whether `i` was installed from the embedded lockfile: a Pi of the right version without a
+/// package added since (the Claude bridge) is not.
+pub fn is_current(i: &PiInstall) -> bool {
+    std::fs::read_to_string(i.dir.join("package-lock.json")).is_ok_and(|l| l == PACKAGE_LOCK)
+}
+
+/// Installs the pinned Pi (a no-op when it is already there, from the same lockfile). Needs the
+/// network the first time. Installs into a temporary sibling folder and renames it, so a failed
+/// install leaves nothing that looks installed.
 pub fn install(paths: &PiPaths, path_var: &str) -> Result<PiInstall, PiError> {
-    if let Ok(i) = locate(paths) {
+    if let Ok(i) = locate(paths)
+        && is_current(&i)
+    {
         return Ok(i);
     }
     let node = find_node(path_var)?;
@@ -296,6 +304,21 @@ mod tests {
                 .to_string()
                 .contains("hay Pi 0.0.1")
         );
+    }
+
+    #[test]
+    fn an_install_from_another_lockfile_is_not_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let i = PiInstall {
+            version: pinned_version().unwrap(),
+            dir: tmp.path().to_owned(),
+            bin: tmp.path().join("node_modules/.bin/pi"),
+        };
+        assert!(!is_current(&i));
+        std::fs::write(tmp.path().join("package-lock.json"), "{}").unwrap();
+        assert!(!is_current(&i));
+        std::fs::write(tmp.path().join("package-lock.json"), PACKAGE_LOCK).unwrap();
+        assert!(is_current(&i));
     }
 
     #[test]

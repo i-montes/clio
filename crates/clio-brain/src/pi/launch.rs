@@ -2,13 +2,14 @@
 //! time, `models.json` written from Clio's configuration without the API key inside, and a
 //! check at startup that fails closed.
 //!
-//! Flags, always: `--mode rpc --no-builtin-tools --no-extensions` (plus `-e <guard>` when given)
+//! Flags, always: `--mode rpc --no-builtin-tools --no-extensions` (plus `-e <guard>` when given,
+//! and `-e <provider's extension>` for a provider an extension registers)
 //! `--no-mcp --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve
 //! --offline --provider P --model M` and the session (`--session-id`, `--session`, `--fork`),
 //! `--name`. Environment, only: `PATH` (Node's folder + `/usr/bin:/bin`), `HOME` (Clio's own
 //! folder for Pi), `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `PI_OFFLINE=1`,
-//! `PI_TELEMETRY=0`, `PI_SKIP_VERSION_CHECK=1`, `NO_COLOR=1`, `CLIO_SESSION_ID`, and the API key
-//! under its variable name. The key is never written to disk nor put on the command line.
+//! `PI_TELEMETRY=0`, `PI_SKIP_VERSION_CHECK=1`, `NO_COLOR=1`, `CLIO_SESSION_ID`, the API key
+//! under its variable name, and the provider's `child_env`. The key is never written to disk nor put on the command line.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -57,11 +58,19 @@ pub struct Provider {
     pub api_key_env: String,
     /// Price in US dollars per million tokens, `(input, output)`: Pi computes the cost from it.
     pub dollars_per_mtok: (f64, f64),
+    /// A Pi extension that registers this provider, relative to the Pi install folder; then
+    /// `models.json` does not declare it.
+    pub extension: Option<String>,
+    /// Extra variables for Pi's environment (what the extension's child processes need).
+    pub child_env: Vec<(String, String)>,
 }
 
 impl Provider {
     /// The `models.json` content. The key appears only as a reference to its variable.
     pub fn models_json(&self) -> Value {
+        if self.extension.is_some() {
+            return json!({"providers": {}});
+        }
         json!({"providers": {self.id.clone(): {
             "baseUrl": self.base_url,
             "api": self.api,
@@ -208,6 +217,9 @@ pub fn hardened_args(l: &Launch, session_args: &[OsString]) -> Vec<OsString> {
     if let Some(g) = &l.guard {
         a.extend(["-e".into(), g.clone().into_os_string()]);
     }
+    if let Some(x) = &l.provider.extension {
+        a.extend(["-e".into(), l.install.dir.join(x).into_os_string()]);
+    }
     a.extend(
         [
             "--no-mcp",
@@ -262,6 +274,7 @@ pub fn hardened_env(l: &Launch, session_id: &str) -> Vec<(String, String)> {
     if let Some(k) = &l.api_key {
         e.push((l.provider.api_key_env.clone(), k.expose().to_owned()));
     }
+    e.extend(l.provider.child_env.iter().cloned());
     e.extend(l.extra_env.iter().cloned());
     e
 }
@@ -300,6 +313,13 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
             "no encuentro la extensión de guardia {}",
             text::line(&g.display().to_string(), 120)
         )));
+    }
+    if let Some(x) = &l.provider.extension
+        && !l.install.dir.join(x).is_file()
+    {
+        return Err(PiError::NotInstalled(
+            "falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into(),
+        ));
     }
     let r = resolve(l)?;
     l.paths.ensure()?;
@@ -452,7 +472,7 @@ mod tests {
             },
             provider: crate::connector::by_name("opencode")
                 .unwrap()
-                .pi_provider("beam-free"),
+                .pi_launch_provider("beam-free"),
             api_key: Some(Secret::new("decoy-key")),
             cwd: "/proj".into(),
             session: SessionTarget::New { id: None },
@@ -523,7 +543,7 @@ mod tests {
     fn models_json_has_no_key_only_its_reference() {
         let t = crate::connector::by_name("opencode")
             .unwrap()
-            .pi_provider("beam-free")
+            .pi_launch_provider("beam-free")
             .models_json()
             .to_string();
         assert!(t.contains("${OPENCODE_API_KEY}") && t.contains("${CLIO_SESSION_ID}"));
@@ -532,6 +552,79 @@ mod tests {
             format!("{:?}", Secret::new("decoy-key")),
             "Secret(<oculta>)"
         );
+    }
+
+    fn claude(dir: &str) -> Launch {
+        let mut l = launch(Some("/g/guard.ts"));
+        l.install.dir = dir.into();
+        l.provider = crate::connector::by_name("claude")
+            .unwrap()
+            .pi_launch_provider("claude-sonnet-5-5");
+        l.api_key = Some(Secret::new("decoy-oat-token"));
+        l
+    }
+
+    #[test]
+    fn claude_runs_through_the_bridge() {
+        let l = claude("/p/1.4.0");
+        let a: Vec<String> = hardened_args(&l, &[])
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let g = a.iter().position(|x| x == "/g/guard.ts").unwrap();
+        assert_eq!(
+            a[g + 1..g + 3],
+            [
+                "-e",
+                "/p/1.4.0/node_modules/pi-claude-agent-sdk/src/index.ts"
+            ]
+        );
+        let p = a.iter().position(|x| x == "--provider").unwrap();
+        assert_eq!(a[p + 1], "claude-bridge");
+        assert!(!a.join(" ").contains("decoy-oat-token"));
+
+        let e = hardened_env(&l, "sid");
+        for want in [
+            ("ANTHROPIC_OAUTH_TOKEN", "decoy-oat-token"),
+            ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+            ("DISABLE_AUTOUPDATER", "1"),
+            ("DISABLE_TELEMETRY", "1"),
+        ] {
+            assert!(e.contains(&(want.0.into(), want.1.into())), "{want:?}");
+        }
+        assert!(!e.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN"));
+
+        let t = l.provider.models_json();
+        assert_eq!(t, json!({"providers": {}}));
+    }
+
+    #[test]
+    fn the_bridge_must_be_installed() {
+        let d = tempfile::tempdir().unwrap();
+        let mut l = claude(&d.path().display().to_string());
+        l.guard = None;
+        l.cwd = d.path().into();
+        l.paths.root = d.path().join("pi");
+        let Err(e) = build(&l) else {
+            panic!("build started without the bridge")
+        };
+        assert_eq!(
+            e.to_string(),
+            "falta el puente de Claude (pi-claude-agent-sdk): clio pi install"
+        );
+    }
+
+    #[test]
+    fn anthropic_api_is_a_plain_provider() {
+        let t = crate::connector::by_name("anthropic-api")
+            .unwrap()
+            .pi_launch_provider("claude-sonnet-5-5")
+            .models_json();
+        let a = &t["providers"]["anthropic"];
+        assert_eq!(a["api"], "anthropic-messages");
+        assert_eq!(a["apiKey"], "${ANTHROPIC_API_KEY}");
+        assert_eq!(a["headers"], json!({}));
+        assert_eq!(t["providers"].as_object().unwrap().len(), 1);
     }
 
     #[test]

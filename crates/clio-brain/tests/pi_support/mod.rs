@@ -132,7 +132,7 @@ impl Rig {
     pub fn launch(&self, base_url: &str, key: Option<&str>) -> Launch {
         let mut provider = clio_brain::connector::by_name("opencode")
             .unwrap()
-            .pi_provider("fm");
+            .pi_launch_provider("fm");
         provider.id = "opencode-go".into();
         provider.base_url = base_url.into();
         Launch {

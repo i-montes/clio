@@ -1043,12 +1043,12 @@ fn closing_a_session_of_four_messages_saves_its_summary() {
     assert!(summary.title.as_deref().unwrap().starts_with("Sesión "));
 }
 
-/// A Claude OAuth token decoy (Pi takes `sk-ant-oat` as OAuth), built at run time.
+/// An Anthropic API key decoy (the `anthropic-api` connector), built at run time.
 fn claude_token() -> String {
-    format!("sk-ant-oat01-decoy-{}-{}", "key", "3333")
+    format!("sk-ant-api03-decoy-{}-{}", "key", "3333")
 }
 
-/// Points `config.json` at a connector (`opencode-go` or `claude`) served by a fake server.
+/// Points `config.json` at a connector (`opencode-go` or `anthropic`) served by a fake server.
 fn use_connector(w: &World, provider: &str, base_url: &str) {
     let cfg_path = w.home().join(".config/clio/config.json");
     let mut cfg: Value =
@@ -1126,9 +1126,9 @@ fn a_session_moves_from_opencode_to_claude() {
     // Not vacuous: Pi kept the reasoning and gave it back to the same model.
     body_with(&w._provider, "razonamiento de opencode");
     let claude = fake_claude(&w, &json!([{"text": "segunda respuesta"}]));
-    use_connector(&w, "claude", claude.base_url.trim_end_matches("/v1"));
+    use_connector(&w, "anthropic", claude.base_url.trim_end_matches("/v1"));
     let tok = claude_token();
-    reopen(&w, &[("CLAUDE_CODE_OAUTH_TOKEN", &tok)], &tok);
+    reopen(&w, &[("ANTHROPIC_API_KEY", &tok)], &tok);
 
     let body = body_with(&claude, "segunda pregunta");
     let text = body.to_string();
@@ -1189,9 +1189,9 @@ fn a_session_moves_from_claude_to_opencode() {
         ]),
     );
     let opencode = w._provider.base_url.clone();
-    use_connector(&w, "claude", claude.base_url.trim_end_matches("/v1"));
+    use_connector(&w, "anthropic", claude.base_url.trim_end_matches("/v1"));
     let tok = claude_token();
-    first_turn(&w, &[("CLAUDE_CODE_OAUTH_TOKEN", &tok)], &tok);
+    first_turn(&w, &[("ANTHROPIC_API_KEY", &tok)], &tok);
     // Not vacuous: Pi kept the signed thinking and gave it back to the same model.
     body_with(&claude, "firma-de-claude-1");
     use_connector(&w, "opencode-go", &opencode);
