@@ -13,10 +13,38 @@
       "tier": "fast",
       "levels": ["Direct", "Simple"],
       "bench": { "run": "example-run", "passed": true }
+    },
+    {
+      "provider": "claude",
+      "id": "claude-sonnet-5-5",
+      "version": "2026-11-17",
+      "context_window": 200000,
+      "input_micro_per_mtok": 0,
+      "output_micro_per_mtok": 0,
+      "tools": true,
+      "vision": true,
+      "retention": "retains",
+      "tier": "fast",
+      "levels": ["Direct", "Simple"],
+      "bench": { "run": "example-run", "passed": true }
+    },
+    {
+      "provider": "claude",
+      "id": "claude-opus-5-5",
+      "version": "2026-11-17",
+      "context_window": 200000,
+      "input_micro_per_mtok": 0,
+      "output_micro_per_mtok": 0,
+      "tools": true,
+      "vision": true,
+      "retention": "retains",
+      "tier": "strong",
+      "levels": ["Direct", "Simple"],
+      "bench": { "run": "example-run", "passed": true }
     }
   ],
   "data_routes": {
-    "public": ["opencode-go"],
-    "personal": ["opencode-go"]
+    "public": ["opencode-go", "claude"],
+    "personal": ["opencode-go", "claude"]
   }
 }

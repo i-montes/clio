@@ -13,7 +13,7 @@ use clio_bench::load_tasks;
 use clio_bench::pi_bench::{PiBench, locate_clio};
 use clio_brain::pi::PiPaths;
 use clio_brain::pi::install::{find_node, pinned_version};
-use clio_brain::pi::launch::{Provider, Secret};
+use clio_brain::pi::launch::Secret;
 use clio_trace::{SystemClock, Trace};
 
 fn repo() -> PathBuf {
@@ -92,8 +92,10 @@ fn bench(tmp: &Path, base_url: &str) -> AgentBenchConfig {
         paths.install_dir(&pinned_version().unwrap()),
     )
     .unwrap();
-    let mut provider = Provider::opencode_go("fm");
-    provider.id = "fakeprov".into();
+    let mut provider = clio_brain::connector::by_name("opencode")
+        .unwrap()
+        .pi_provider("fm");
+    provider.id = "opencode-go".into();
     provider.base_url = base_url.into();
     let pi = PiBench::new(
         paths,

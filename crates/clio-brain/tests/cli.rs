@@ -524,6 +524,26 @@ fn the_model_adapter_is_the_one_inside_the_binary() {
 }
 
 #[test]
+fn a_config_with_an_unknown_provider_says_to_connect() {
+    let e = Env::new();
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["model"]["provider"] = json!("fakeprov");
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    let o = e.try_clio(&["doctor"]);
+    let out = format!("{}{}", text(&o.stdout), text(&o.stderr));
+    assert!(out.contains("clio connect"), "{out}");
+
+    cfg["model"]["provider"] = json!("opencode-go");
+    cfg["model"]["base_url"] = json!("https://evil.test");
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+    let o = e.try_clio(&["doctor"]);
+    let out = format!("{}{}", text(&o.stdout), text(&o.stderr));
+    assert!(out.contains("esta máquina"), "{out}");
+}
+
+#[test]
 fn doctor_passes_when_clean_and_fails_on_open_permissions() {
     let e = Env::new();
     let o = e.try_clio(&["doctor"]);

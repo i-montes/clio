@@ -62,6 +62,7 @@ impl Dirs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCfg {
+    /// A connector's provider id (`crate::connector`): `opencode-go` or `claude`.
     pub provider: String,
     pub model: String,
     /// Program and arguments of the model adapter (reads a request on stdin, answers on stdout).
@@ -73,7 +74,8 @@ pub struct ModelCfg {
     pub price_in_micro_per_mtok: u64,
     pub price_out_micro_per_mtok: u64,
     /// Where Pi reaches the model (the `pi` harness; the builtin adapter has its own address).
-    /// `None`: the provider's usual address. Meant for a local fake model in tests.
+    /// `None`: the connector's usual address. Meant for a local fake model in tests, so it may
+    /// only be a loopback address (checked when the config is loaded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
@@ -153,6 +155,28 @@ impl Default for MemoryCfg {
     }
 }
 
+impl ModelCfg {
+    /// The provider must be a connector, and `base_url` may only point at this machine: the key
+    /// goes to the connector's own server, never to an address a config file names.
+    fn check(&self, file: &Path) -> Res<()> {
+        let at = file.display();
+        if clio_brain::connector::by_provider(&self.provider).is_none() {
+            return Err(format!(
+                "{at}: model.provider {:?} no es un conector: usa clio connect opencode|claude",
+                self.provider
+            ));
+        }
+        if let Some(u) = &self.base_url
+            && !clio_brain::connector::is_loopback(u)
+        {
+            return Err(format!(
+                "{at}: model.base_url solo puede apuntar a esta máquina (127.0.0.1, localhost, [::1])"
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Config {
     pub fn default_with(command: Vec<String>) -> Self {
         Self {
@@ -183,7 +207,9 @@ impl Config {
         let p = dirs.config_file();
         let text = std::fs::read_to_string(&p)
             .map_err(|e| format!("{}: {e} (ejecuta `clio init` primero)", p.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
+        let cfg: Self = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+        cfg.model.check(&p)?;
+        Ok(cfg)
     }
 
     /// The model adapter's program and arguments as a run starts it: the adapter inside this

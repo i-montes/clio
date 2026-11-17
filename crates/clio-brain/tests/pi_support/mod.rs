@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 
 use clio_brain::pi::PiPaths;
 use clio_brain::pi::install::{NodeInfo, PiInstall, find_node};
-use clio_brain::pi::launch::{Launch, Provider, Secret, SessionTarget};
+use clio_brain::pi::launch::{Launch, Secret, SessionTarget};
 
 pub fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -124,8 +124,10 @@ impl Rig {
     }
 
     pub fn launch(&self, base_url: &str, key: Option<&str>) -> Launch {
-        let mut provider = Provider::opencode_go("fm");
-        provider.id = "fakeprov".into();
+        let mut provider = clio_brain::connector::by_name("opencode")
+            .unwrap()
+            .pi_provider("fm");
+        provider.id = "opencode-go".into();
         provider.base_url = base_url.into();
         Launch {
             install: PiInstall {

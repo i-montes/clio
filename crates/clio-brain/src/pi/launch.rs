@@ -60,27 +60,6 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// The provider Clio uses by default (see the feasibility run).
-    pub fn opencode_go(model: &str) -> Self {
-        Self {
-            id: "opencode-go".into(),
-            base_url: "https://opencode.ai/inference/go/openai/v1".into(),
-            api: "openai-completions".into(),
-            model: model.into(),
-            context_window: 128_000,
-            reasoning: true,
-            headers: BTreeMap::from([
-                ("User-Agent".to_owned(), "clio/0.1".to_owned()),
-                (
-                    "x-opencode-session".to_owned(),
-                    "${CLIO_SESSION_ID}".to_owned(),
-                ),
-            ]),
-            api_key_env: "OPENCODE_API_KEY".into(),
-            dollars_per_mtok: (0.0, 0.0),
-        }
-    }
-
     /// The `models.json` content. The key appears only as a reference to its variable.
     pub fn models_json(&self) -> Value {
         json!({"providers": {self.id.clone(): {
@@ -499,7 +478,9 @@ mod tests {
             paths: PiPaths {
                 root: "/d/pi".into(),
             },
-            provider: Provider::opencode_go("beam-free"),
+            provider: crate::connector::by_name("opencode")
+                .unwrap()
+                .pi_provider("beam-free"),
             api_key: Some(Secret::new("decoy-key")),
             cwd: "/proj".into(),
             session: SessionTarget::New { id: None },
@@ -601,7 +582,11 @@ mod tests {
 
     #[test]
     fn models_json_has_no_key_only_its_reference() {
-        let t = Provider::opencode_go("beam-free").models_json().to_string();
+        let t = crate::connector::by_name("opencode")
+            .unwrap()
+            .pi_provider("beam-free")
+            .models_json()
+            .to_string();
         assert!(t.contains("${OPENCODE_API_KEY}") && t.contains("${CLIO_SESSION_ID}"));
         assert!(!t.contains("decoy-key") && t.contains("beam-free"));
         assert_eq!(

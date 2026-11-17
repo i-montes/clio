@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use clio_brain::pi::PiPaths;
 use clio_brain::pi::install::{NodeInfo, PiInstall};
 use clio_brain::pi::jail::PiJail;
-use clio_brain::pi::launch::{Built, Launch, Provider, Secret, SessionTarget, build};
+use clio_brain::pi::launch::{Built, Launch, Secret, SessionTarget, build};
 use clio_brain::pi::session::{GUARD_TOOLS, PROMPT_NAME, ensure_guard, write_prompt};
 use clio_canaries::Canaries;
 use fake_model::FakeModel;
@@ -287,7 +287,9 @@ fn launch_of(
         dir: pi_dir(),
         bin: pi_dir().join("node_modules/.bin/pi"),
     };
-    let mut provider = Provider::opencode_go("fake-model");
+    let mut provider = clio_brain::connector::by_name("opencode")
+        .unwrap()
+        .pi_provider("fake-model");
     provider.id = "fake".into();
     provider.base_url = format!("http://{}/v1", model.addr);
     provider.context_window = 32_000;

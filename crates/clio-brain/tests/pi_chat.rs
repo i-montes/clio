@@ -52,7 +52,7 @@ impl World {
         let cfg_path = w.home().join(".config/clio/config.json");
         let mut cfg: Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
-        cfg["model"]["provider"] = json!("fakeprov");
+        cfg["model"]["provider"] = json!("opencode-go");
         cfg["model"]["model"] = json!("fm");
         cfg["model"]["base_url"] = json!(w._provider.base_url);
         cfg["model"]["price_in_micro_per_mtok"] = json!(1_000_000);

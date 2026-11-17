@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use clio_core::SystemClock;
 
 use clio_brain::agent::AgentConfig;
+use clio_brain::connector;
 use clio_brain::control::{Budget, DayBudget};
 use clio_brain::memory_link::MemoryLink;
 use clio_brain::pi::PiError;
@@ -247,8 +248,10 @@ impl SessionSource for LocalSource {
 
 fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
     let m = &cfg.model;
-    let mut p = Provider::opencode_go(&m.model);
-    p.id.clone_from(&m.provider);
+    // `Config::load` guarantees `m.provider` is a connector.
+    let mut p = connector::by_provider(&m.provider)
+        .expect("a connector")
+        .pi_provider(&m.model);
     if let Some(u) = &m.base_url {
         p.base_url.clone_from(u);
     }
