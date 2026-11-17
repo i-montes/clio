@@ -363,7 +363,11 @@ fn header(dirs: &Dirs) -> Header {
     };
     let (window, window_known) = usage::window_for(dirs, &provider, &model);
     let active = clio_brain::connector::by_provider(&provider);
-    let key = if active.is_some_and(|c| super::vault::model_key(dirs, c).is_ok()) {
+    // Whether the key is there, without pulling its value.
+    let key = if active.is_some_and(|c| {
+        std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty())
+            || super::vault::has_model_key(dirs, c)
+    }) {
         KeyState::Present
     } else {
         KeyState::Missing

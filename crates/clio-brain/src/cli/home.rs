@@ -203,10 +203,25 @@ impl Config {
     }
 
     pub fn load(dirs: &Dirs) -> Res<Self> {
+        Self::load_inner(dirs, None)
+    }
+
+    /// The config as `clio connect` will leave it: `provider` in place of the file's, so a
+    /// provider that is not a connector (what connect repairs) does not stop it. Every other
+    /// check still holds.
+    pub fn load_with_provider(dirs: &Dirs, provider: &str) -> Res<Self> {
+        Self::load_inner(dirs, Some(provider))
+    }
+
+    fn load_inner(dirs: &Dirs, provider: Option<&str>) -> Res<Self> {
         let p = dirs.config_file();
         let text = std::fs::read_to_string(&p)
             .map_err(|e| format!("{}: {e} (ejecuta `clio init` primero)", p.display()))?;
-        let cfg: Self = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+        let mut cfg: Self =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+        if let Some(provider) = provider {
+            cfg.model.provider = provider.into();
+        }
         cfg.model.check(&p)?;
         Ok(cfg)
     }

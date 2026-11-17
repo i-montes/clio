@@ -1451,6 +1451,14 @@ fn connect_claude_refuses_a_token_that_is_not_oauth() {
     assert!(!o.status.success());
     assert!(!all_text(&o).contains("sk-ant-api03"), "{}", all_text(&o));
     assert!(all_text(&o).contains("sk-ant-oat"), "{}", all_text(&o));
+    // It must start with the prefix, not merely contain it.
+    let o = e.with_stdin(
+        &["connect", "claude"],
+        "x-sk-ant-oat01-decoy
+",
+        &[],
+    );
+    assert!(!o.status.success(), "{}", all_text(&o));
     assert!(!e.vault_list().contains("claude"));
     assert_eq!(e.config_bytes(), before);
 }
@@ -1587,4 +1595,169 @@ fn connect_keeps_the_key_when_the_probe_fails() {
     assert!(e.vault_list().contains("api.anthropic.com"));
     let cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
     assert_eq!(cfg["model"]["provider"], "claude");
+}
+
+// An upgrading person may have any provider id in config.json; `clio connect` is what the error
+// tells them to run, so it must repair exactly that.
+#[test]
+fn connect_repairs_a_provider_that_is_not_a_connector() {
+    let e = Env::new();
+    let _v = e.vault();
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    cfg["model"]["provider"] = json!("fakeprov");
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    // Every other command still refuses it, and points at connect.
+    let o = e.try_clio(&["run", "--workspace", &e.path("proj"), "hazlo"]);
+    assert!(
+        !o.status.success() && all_text(&o).contains("clio connect opencode|claude"),
+        "{}",
+        all_text(&o)
+    );
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, None);
+    let o = e.with_stdin(
+        &["connect", "opencode"],
+        "oc-decoy-key-0123456789\n",
+        &[("LLM_BASE_URL", &fake.base_url)],
+    );
+    assert!(o.status.success(), "{}", all_text(&o));
+    let after: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    assert_eq!(after["model"]["provider"], "opencode-go");
+    e.run_fix(); // the config loads again
+}
+
+/// `clio-vault`'s own `lock`, on the person's socket: the vault keeps running, locked.
+fn lock_vault(e: &Env) {
+    let sock = e.tmp.path().join("run/clio/vault-person.sock");
+    let st = Command::new(vault_bin())
+        .args(["--sock", &sock.display().to_string(), "lock"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(st.success());
+}
+
+// A running but locked vault: every message says `clio vault start`, and that opens it.
+#[test]
+fn a_locked_vault_is_opened_by_vault_start() {
+    let e = Env::new();
+    let _v = e.vault();
+    lock_vault(&e);
+    // `unlocked` (connect) and `model_key` (a run with the built-in adapter) say it is locked.
+    let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy\n", &[]);
+    assert!(!o.status.success());
+    assert!(
+        all_text(&o).contains("el baúl está cerrado: clio vault start"),
+        "{}",
+        all_text(&o)
+    );
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    cfg["model"]["command"] = json!([]);
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    let o = e.try_clio(&[
+        "run",
+        "--harness",
+        "builtin",
+        "--workspace",
+        &e.path("proj"),
+        "hazlo",
+    ]);
+    assert!(
+        !o.status.success() && text(&o.stderr).contains("el baúl está cerrado: clio vault start"),
+        "{}",
+        all_text(&o)
+    );
+    // A wrong passphrase leaves it locked and running.
+    let o = e.with_stdin(&["vault", "start"], "wrong phrase\n", &[]);
+    assert!(!o.status.success(), "{}", all_text(&o));
+    assert!(
+        all_text(&o).contains("clio vault start"),
+        "{}",
+        all_text(&o)
+    );
+    // The right one opens it.
+    let o = e.with_stdin(&["vault", "start"], &format!("{PASS}\n"), &[]);
+    assert!(o.status.success(), "{}", all_text(&o));
+    let o = e.with_stdin(&["connect", "claude"], "", &[]);
+    assert!(
+        !all_text(&o).contains("el baúl está cerrado"),
+        "{}",
+        all_text(&o)
+    );
+    // Running and open: nothing to do, and it says so.
+    let o = e.with_stdin(&["vault", "start"], &format!("{PASS}\n"), &[]);
+    assert!(
+        !o.status.success() && all_text(&o).contains("ya está corriendo"),
+        "{}",
+        all_text(&o)
+    );
+}
+
+/// The `clio-vault` processes serving this test's vault file.
+fn vault_servers(e: &Env) -> Vec<String> {
+    let mark = e.home().join(".local/share/clio/vault.bin");
+    let mark = mark.to_string_lossy().into_owned();
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|p| std::fs::read(p.path().join("cmdline")).ok())
+        .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+        .filter(|c| c.contains("serve") && c.contains(&mark))
+        .collect()
+}
+
+#[test]
+fn a_wrong_passphrase_at_start_leaves_no_server_behind() {
+    let e = Env::new();
+    drop(e.vault()); // created, then stopped
+    assert!(vault_servers(&e).is_empty());
+    let o = e.with_stdin(&["vault", "start"], "wrong phrase\n", &[]);
+    assert!(!o.status.success(), "{}", all_text(&o));
+    assert!(
+        all_text(&o).contains("no se pudo abrir el baúl"),
+        "{}",
+        all_text(&o)
+    );
+    assert!(vault_servers(&e).is_empty(), "{:?}", vault_servers(&e));
+    // And a normal start works afterwards.
+    let _v = e.vault();
+}
+
+#[test]
+fn doctor_says_a_key_file_already_in_the_vault_can_go() {
+    let e = Env::new();
+    let _v = e.vault();
+    let key = e.home().join(".config/clio/opencode-api-key");
+    std::fs::write(&key, "not-a-real-key").unwrap();
+    let o = e.with_stdin(
+        &["vault", "put", "opencode", "--dest", "model:opencode.ai"],
+        "oc-decoy-key-0123456789\n",
+        &[],
+    );
+    assert!(o.status.success(), "{}", all_text(&o));
+    let out = text(&e.try_clio(&["doctor"]).stdout);
+    let line = out
+        .lines()
+        .find(|l| l.contains("queda una llave"))
+        .unwrap_or_default();
+    assert!(
+        line.contains("ya está en el baúl") && line.contains(&format!("rm {}", key.display())),
+        "{out}"
+    );
+    // connect, which reuses the stored key, says the same.
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, None);
+    let o = e.with_stdin(
+        &["connect", "opencode"],
+        "",
+        &[("LLM_BASE_URL", &fake.base_url)],
+    );
+    assert!(o.status.success(), "{}", all_text(&o));
+    assert!(
+        all_text(&o).contains(&format!("rm {}", key.display())),
+        "{}",
+        all_text(&o)
+    );
+    assert!(!all_text(&o).contains("oc-decoy-key"));
 }

@@ -29,8 +29,9 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let model = model_arg.unwrap_or_else(|| c.default_model.to_owned());
 
     vault::unlocked(dirs)?;
-    // Read now, so a broken config stops us before the vault changes.
-    let cfg = Config::load(dirs)?;
+    // Read now, so a broken config stops us before the vault changes; its provider is what we
+    // are about to replace, so it may be anything.
+    let cfg = Config::load_with_provider(dirs, c.provider)?;
 
     let mut key = None;
     if new_key || !vault::has_model_key(dirs, c) {
@@ -47,6 +48,15 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
             println!("borrado {}", f.display());
         }
         key = Some(Secret::new(value));
+    } else if c.name == "opencode" {
+        let f = dirs.config.join("opencode-api-key");
+        if f.exists() {
+            println!(
+                "la llave ya está en el baúl; {} ya no se usa: rm {}",
+                f.display(),
+                f.display()
+            );
+        }
     }
 
     switch_config(dirs, c, &model)?;
@@ -84,9 +94,9 @@ fn ask_key(dirs: &Dirs, c: &Connector) -> Res<(String, Option<std::path::PathBuf
     if c.name == "claude" {
         println!("{CLAUDE_WARNING}");
         let v = vault::read_secret("token")?.trim().to_owned();
-        if !v.contains("sk-ant-oat") {
+        if !v.starts_with("sk-ant-oat") {
             return Err(
-                "eso no es un token de suscripción (debe contener sk-ant-oat): nada se guardó. Sale de: claude setup-token"
+                "eso no es un token de suscripción (debe empezar por sk-ant-oat): nada se guardó. Sale de: claude setup-token"
                     .into(),
             );
         }

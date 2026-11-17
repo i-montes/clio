@@ -299,6 +299,7 @@ fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
         .map_err(|_| "el baúl no está corriendo".to_owned())
         .and_then(|s| {
             VaultClient::new(&s)
+                .with_timeout(std::time::Duration::from_secs(2))
                 .check(c.secret, "model", Some(c.domain), "")
                 .map_err(|e| match e {
                     E::Locked => "el baúl está cerrado".to_owned(),
@@ -328,10 +329,23 @@ fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
     }
 }
 
-/// The old key file is never read any more; if one is still there, say how to move it.
+/// The old key file is never read any more; if one is still there, say how to move it, or, when
+/// the vault already holds the key, that it can go.
 fn old_key_file(o: &mut Report, dirs: &Dirs) {
     let file = dirs.config.join("opencode-api-key");
-    if file.exists() {
+    let in_vault = clio_brain::connector::by_name("opencode")
+        .is_some_and(|c| super::vault::has_model_key(dirs, c));
+    if file.exists() && in_vault {
+        o.say(
+            Level::Warn,
+            format!(
+                "queda una llave en {} y ya está en el baúl: rm {}",
+                file.display(),
+                file.display()
+            ),
+            Some("Clio ya no lee ese archivo y el baúl ya tiene la llave: bórralo.".into()),
+        );
+    } else if file.exists() {
         o.say(
             Level::Warn,
             format!(

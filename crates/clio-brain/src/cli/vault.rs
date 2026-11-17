@@ -98,7 +98,12 @@ fn key_from(env: Option<String>, dirs: &Dirs, c: &Connector) -> Res<Secret> {
     if let Some(v) = env.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) {
         return Ok(Secret::new(v));
     }
-    let not_running = || "el baúl no está corriendo: clio vault start".to_owned();
+    let not_running = || {
+        format!(
+            "el baúl no está corriendo: clio vault start (y luego clio connect {} si aún no guardaste la llave)",
+            c.name
+        )
+    };
     let p = paths(dirs).map_err(|_| not_running())?;
     if running(&p).is_none() {
         return Err(not_running());
@@ -150,7 +155,25 @@ fn start(dirs: &Dirs) -> Res<()> {
     let p = paths(dirs)?;
     mkdir_private(&p.dir)?;
     if let Some(pid) = running(&p) {
-        return Err(format!("the vault is already running (pid {pid})"));
+        // Running but locked (a mistyped passphrase, a `lock`): open it here, so every "el baúl
+        // está cerrado: clio vault start" is an answer.
+        if locked(&p) != Some(true) {
+            return Err(format!("el baúl ya está corriendo (pid {pid}) y abierto"));
+        }
+        let pass = read_secret("vault passphrase")?;
+        call(
+            &[
+                "--sock".into(),
+                p.person.display().to_string(),
+                "unlock".into(),
+            ],
+            Some(&pass),
+        )
+        .map_err(|_| {
+            "no se pudo abrir el baúl (¿frase equivocada?): clio vault start".to_owned()
+        })?;
+        println!("vault running (pid {pid}), unlocked");
+        return Ok(());
     }
     let pass = read_secret("vault passphrase")?;
     let bin = vault_bin()?;
@@ -169,7 +192,7 @@ fn start(dirs: &Dirs) -> Res<()> {
         .open(&log)
         .map_err(|e| io_err(&log, &e))?;
     // setsid: the server must outlive this terminal.
-    let child = Command::new("setsid")
+    let mut child = Command::new("setsid")
         .arg(&bin)
         .args([
             "serve",
@@ -186,17 +209,30 @@ fn start(dirs: &Dirs) -> Res<()> {
         .spawn()
         .map_err(|e| format!("setsid {}: {e}", bin.display()))?;
     write_private(&p.pid, child.id().to_string().as_bytes())?;
+    // A server that did not come up or did not unlock is stopped: no locked orphan stays behind.
+    let mut abort = |why: String| {
+        let _ = child.kill();
+        let _ = child.wait();
+        for f in [&p.gateway, &p.person, &p.pid] {
+            let _ = std::fs::remove_file(f);
+        }
+        why
+    };
     let t = Instant::now();
     while !p.person.exists() {
         if t.elapsed() > Duration::from_secs(10) {
-            return Err(format!("the vault did not come up; see {}", log.display()));
+            return Err(abort(format!(
+                "the vault did not come up; see {}",
+                log.display()
+            )));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     call(
         &["--sock".into(), s(&p.person), "unlock".into()],
         Some(&pass),
-    )?;
+    )
+    .map_err(|_| abort("no se pudo abrir el baúl (¿frase equivocada?): clio vault start".into()))?;
     println!("vault running (pid {}), unlocked", child.id());
     Ok(())
 }
@@ -255,15 +291,20 @@ pub fn unlocked(dirs: &Dirs) -> Res<()> {
     if running(&p).is_none() {
         return Err(not_running());
     }
+    match locked(&p) {
+        None => Err(not_running()),
+        Some(false) => Ok(()),
+        Some(true) => Err("el baúl está cerrado: clio vault start".into()),
+    }
+}
+
+/// Whether the running vault is locked; `None` when it does not answer.
+fn locked(p: &Paths) -> Option<bool> {
     let status = VaultClient::new(&p.person)
         .with_timeout(Duration::from_secs(2))
         .call(&Request::Status)
-        .map_err(|_| not_running())?;
-    if status.data.and_then(|d| d["locked"].as_bool()) == Some(false) {
-        Ok(())
-    } else {
-        Err("el baúl está cerrado: clio vault start".into())
-    }
+        .ok()?;
+    Some(status.data.and_then(|d| d["locked"].as_bool()) != Some(false))
 }
 
 /// Whether the vault already lets `model` send connector `c`'s secret to its domain. The
@@ -344,6 +385,7 @@ mod tests {
         ] {
             let e = key_from(None, &dirs, by_name("opencode").unwrap()).unwrap_err();
             assert!(e.contains("clio vault start"), "{e}");
+            assert!(e.contains("clio connect opencode"), "{e}");
             assert!(!e.contains("sk-"), "{e}");
         }
     }
