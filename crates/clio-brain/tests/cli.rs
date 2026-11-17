@@ -9,6 +9,8 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::{Value, json};
 
+mod pi_support;
+
 const CLIO: &str = env!("CARGO_BIN_EXE_clio");
 
 const ADAPTER: &str = r#"import json, os, sys, time
@@ -1248,4 +1250,178 @@ fn clio_runs_with_the_runtime_telemetry_off() {
     let said = std::fs::read_to_string(&seen)
         .unwrap_or_else(|_| panic!("node was not run: {}{}", text(&o.stdout), text(&o.stderr)));
     assert_eq!(said, "1");
+}
+
+// ---------------------------------------------------------------- clio connect
+
+/// The `clio-vault` binary (another package): next to this test's executable, built if missing.
+fn vault_bin() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
+    let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cmd.args(["build", "-q", "-p", "clio-vault", "--bin", "clio-vault"]);
+    if profile_dir.file_name().is_some_and(|n| n == "release") {
+        cmd.arg("--release");
+    }
+    assert!(cmd.status().unwrap().success(), "cannot build clio-vault");
+    profile_dir.join("clio-vault")
+}
+
+const PASS: &str = "correct horse battery staple";
+
+impl Env {
+    /// Runs `clio` with `stdin` and extra environment variables.
+    fn with_stdin(&self, args: &[&str], stdin: &str, env: &[(&str, &str)]) -> Output {
+        use std::io::Write;
+        let mut c = self.cmd(args);
+        c.env("CLIO_VAULT_BIN", vault_bin())
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// A real vault (created and unlocked by `clio vault start`), stopped when the guard drops.
+    fn vault(&self) -> VaultGuard<'_> {
+        let o = self.with_stdin(&["vault", "start"], &format!("{PASS}\n"), &[]);
+        assert!(o.status.success(), "{}{}", text(&o.stdout), text(&o.stderr));
+        VaultGuard(self)
+    }
+
+    fn config_bytes(&self) -> Vec<u8> {
+        std::fs::read(self.home().join(".config/clio/config.json")).unwrap()
+    }
+
+    fn vault_list(&self) -> String {
+        let o = self.with_stdin(&["vault", "list"], "", &[]);
+        assert!(o.status.success(), "{}{}", text(&o.stdout), text(&o.stderr));
+        text(&o.stdout)
+    }
+}
+
+struct VaultGuard<'a>(&'a Env);
+
+impl Drop for VaultGuard<'_> {
+    fn drop(&mut self) {
+        self.0.with_stdin(&["vault", "stop"], "", &[]);
+    }
+}
+
+fn all_text(o: &Output) -> String {
+    format!("{}{}", text(&o.stdout), text(&o.stderr))
+}
+
+#[test]
+fn connect_without_the_vault_changes_nothing() {
+    let e = Env::new();
+    let before = e.config_bytes();
+    let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy\n", &[]);
+    assert!(!o.status.success());
+    assert!(
+        all_text(&o).contains("clio vault start"),
+        "{}",
+        all_text(&o)
+    );
+    assert_eq!(e.config_bytes(), before);
+}
+
+#[test]
+fn connect_claude_refuses_a_token_that_is_not_oauth() {
+    let e = Env::new();
+    let _v = e.vault();
+    let before = e.config_bytes();
+    let o = e.with_stdin(&["connect", "claude"], "sk-ant-api03-x-not-oauth\n", &[]);
+    assert!(!o.status.success());
+    assert!(!all_text(&o).contains("sk-ant-api03"), "{}", all_text(&o));
+    assert!(all_text(&o).contains("sk-ant-oat"), "{}", all_text(&o));
+    assert!(!e.vault_list().contains("claude"));
+    assert_eq!(e.config_bytes(), before);
+}
+
+#[test]
+fn connect_claude_trims_stores_and_switches() {
+    let e = Env::new();
+    let _v = e.vault();
+    let fake = pi_support::FakeProvider::start(
+        e.tmp.path(),
+        r#"[{"text": "ok"}]"#,
+        Some("sk-ant-oat01-decoy-token"),
+    );
+    let before: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    let o = e.with_stdin(
+        &["connect", "claude"],
+        "  sk-ant-oat01-decoy-token  \n",
+        &[("LLM_BASE_URL", &fake.base_url)],
+    );
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
+    assert!(out.contains("Anthropic puede suspender la cuenta"), "{out}");
+    assert!(
+        out.contains("conectado: claude / claude-sonnet-5-5 respondió"),
+        "{out}"
+    );
+    let list = e.vault_list();
+    assert!(
+        list.contains("claude") && list.contains("api.anthropic.com"),
+        "{list}"
+    );
+    assert!(list.contains("model"), "{list}");
+    let after: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    assert_eq!(after["model"]["provider"], "claude");
+    assert_eq!(after["model"]["model"], "claude-sonnet-5-5");
+    let mut want = before.clone();
+    want["model"]["provider"] = json!("claude");
+    want["model"]["model"] = json!("claude-sonnet-5-5");
+    assert_eq!(after, want);
+    assert_eq!(mode(&e.home().join(".config/clio/config.json")), 0o600);
+    // The probe carried the trimmed token and the question.
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0]["headers"]["authorization_matches"], json!(true));
+    assert_eq!(seen[0]["last_user"], "Responde solo: ok");
+}
+
+#[test]
+fn connect_opencode_takes_the_old_file_and_deletes_it_only_on_yes() {
+    let e = Env::new();
+    let _v = e.vault();
+    let file = e.home().join(".config/clio/opencode-api-key");
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, None);
+    let env = [("LLM_BASE_URL", fake.base_url.as_str())];
+    std::fs::write(&file, "oc-decoy-key-0123456789\n").unwrap();
+    let o = e.with_stdin(&["connect", "opencode"], "s\nN\n", &env);
+    assert!(o.status.success(), "{}", all_text(&o));
+    assert!(!all_text(&o).contains("oc-decoy-key"), "{}", all_text(&o));
+    assert!(e.vault_list().contains("opencode.ai"));
+    assert!(file.exists(), "kept on N");
+    let o = e.with_stdin(&["connect", "opencode", "--new-key"], "s\ns\n", &env);
+    assert!(o.status.success(), "{}", all_text(&o));
+    assert!(!file.exists(), "deleted on s");
+}
+
+#[test]
+fn connect_with_an_unknown_model_warns() {
+    let e = Env::new();
+    let _v = e.vault();
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, None);
+    let o = e.with_stdin(
+        &["connect", "claude", "--model", "claude-nada"],
+        "sk-ant-oat01-decoy-token\n",
+        &[("LLM_BASE_URL", &fake.base_url)],
+    );
+    assert!(o.status.success(), "{}", all_text(&o));
+    assert!(
+        all_text(&o).contains("ventana de contexto desconocida"),
+        "{}",
+        all_text(&o)
+    );
 }

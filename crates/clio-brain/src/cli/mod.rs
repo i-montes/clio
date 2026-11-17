@@ -5,6 +5,7 @@
 
 pub mod apply;
 pub mod chat;
+pub mod connect;
 pub mod debug;
 pub mod diff;
 pub mod doctor;

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use clio_vault::proto::Request;
 use clio_vault::{VaultClient, VaultError};
 
 use super::home::Dirs;
@@ -46,7 +47,7 @@ fn vault_bin_from(env: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Res<
 }
 
 /// One line from stdin; with echo off when stdin is a terminal.
-fn read_secret(prompt: &str) -> Res<String> {
+pub(super) fn read_secret(prompt: &str) -> Res<String> {
     let tty = std::io::stdin().is_terminal();
     if tty {
         eprint!("{prompt}: ");
@@ -220,6 +221,62 @@ fn stop(dirs: &Dirs) -> Res<()> {
     Ok(())
 }
 
+fn running_paths(dirs: &Dirs) -> Res<Paths> {
+    let p = paths(dirs)?;
+    if running(&p).is_none() {
+        return Err("the vault is not running (clio vault start)".into());
+    }
+    Ok(p)
+}
+
+/// Runs `clio-vault` against the person's socket. The vault must be running; it may be locked.
+fn person_call(dirs: &Dirs, sub: &str, args: Vec<String>, stdin: Option<&str>) -> Res<()> {
+    let p = running_paths(dirs)?;
+    let mut full = vec![
+        "--sock".to_owned(),
+        p.person.display().to_string(),
+        sub.into(),
+    ];
+    full.extend(args);
+    call(&full, stdin)
+}
+
+/// Stores `value` as the secret `name`, allowed only for `dest` (`TOOL:DOMAIN`). The value goes to
+/// `clio-vault` on its input, never in an argument.
+pub fn put(dirs: &Dirs, name: &str, dest: &str, value: &str) -> Res<()> {
+    let args = vec![name.to_owned(), "--dest".into(), dest.into()];
+    person_call(dirs, "put", args, Some(value))
+}
+
+/// Ok only if the vault is running AND unlocked; the error says which of the two it is.
+pub fn unlocked(dirs: &Dirs) -> Res<()> {
+    let not_running = || "el baúl no está corriendo: clio vault start".to_owned();
+    let p = paths(dirs).map_err(|_| not_running())?;
+    if running(&p).is_none() {
+        return Err(not_running());
+    }
+    let status = VaultClient::new(&p.person)
+        .with_timeout(Duration::from_secs(2))
+        .call(&Request::Status)
+        .map_err(|_| not_running())?;
+    if status.data.and_then(|d| d["locked"].as_bool()) == Some(false) {
+        Ok(())
+    } else {
+        Err("el baúl está cerrado: clio vault start".into())
+    }
+}
+
+/// Whether the vault already lets `model` send connector `c`'s secret to its domain. The
+/// connector's variable does not count: this is about the vault.
+pub fn has_model_key(dirs: &Dirs, c: &Connector) -> bool {
+    paths(dirs).is_ok_and(|p| {
+        VaultClient::new(&p.gateway)
+            .with_timeout(Duration::from_secs(2))
+            .check(c.secret, "model", Some(c.domain), "")
+            .is_ok()
+    })
+}
+
 pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
     if args.is_empty() {
         return Err(
@@ -232,23 +289,14 @@ pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
         "start" => start(dirs),
         "stop" => stop(dirs),
         "status" | "list" | "revoke" | "put" | "upgrade-kdf" => {
-            let p = paths(dirs)?;
-            if running(&p).is_none() {
-                return Err("the vault is not running (clio vault start)".into());
-            }
-            let mut full = vec![
-                "--sock".to_owned(),
-                p.person.display().to_string(),
-                sub.clone(),
-            ];
-            full.extend(args);
+            running_paths(dirs)?; // before asking for a value that would go nowhere
             // For `put` the value is read here (echo off) so the child never touches the terminal.
             let value = match sub.as_str() {
                 "put" => Some(read_secret("value")?),
                 "upgrade-kdf" => Some(read_secret("vault passphrase")?),
                 _ => None,
             };
-            call(&full, value.as_deref())
+            person_call(dirs, &sub, args, value.as_deref())
         }
         other => Err(format!("unknown vault command {other:?}")),
     }

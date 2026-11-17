@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 
 use cli::chat;
 use cli::home::Dirs;
-use cli::{Args, Res, apply, debug, doctor, home, memory, pi, runs, tui, vault};
+use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
@@ -19,6 +19,8 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
   clio runs [--all] [--json] | clio show <id> [--json]
+  clio connect opencode|claude [--model M] [--new-key]
+                                              elige el modelo (opencode o tu suscripción de Claude) y guarda su llave en el baúl
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
                                               lo que Clio recuerda (clio memory --help)
@@ -79,6 +81,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "runs"
             | "show"
             | "vault"
+            | "connect"
             | "doctor"
             | "memory"
             | "pi"
@@ -169,6 +172,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             runs::show(&dirs, &id_arg(args)?, json)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
+        "connect" => return connect::run(&dirs, args.into_raw()),
         "memory" => return memory::run(&dirs, args.into_raw()),
         "pi" => return pi::run(&dirs, args.into_raw()),
         "doctor" => {
