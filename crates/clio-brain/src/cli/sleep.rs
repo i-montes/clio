@@ -58,10 +58,10 @@ pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> R
     }
     let merger = if dry_run { None } else { merger(dirs) };
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    // Temis with its key from the vault, else what `clio-memory setup temis` kept; a dry run never
-    // asks it.
+    // Temis, its key from the vault or else what `clio-memory setup temis` kept (clio-memory picks);
+    // a dry run never asks it.
     let temis = (!dry_run)
-        .then(|| jev::temis(dirs).or_else(|| clio_memory::temis::from_data(&dirs.data)))
+        .then(|| clio_memory::temis::from_data(&dirs.data))
         .flatten();
     let out = run_judged(
         &dirs.data,

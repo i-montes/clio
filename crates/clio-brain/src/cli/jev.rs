@@ -106,25 +106,6 @@ pub fn client(dirs: &Dirs, cfg: &JevCfg) -> Option<Arc<Jev>> {
     Some(build_client(script, &socket, cfg.base_url.clone()))
 }
 
-/// Temis for the memory's sleep, with its key from the vault (S-18) instead of clio-memory's
-/// `temis.json`; `None` without the vault or the key. The key is held for this one process.
-pub fn temis(dirs: &Dirs) -> Option<clio_memory::temis::Temis> {
-    use clio_memory::temis::{Config, DEFAULT_MODEL, Temis, curl_post};
-    let (secret, domain) = key_for(Some(TEMIS_URL));
-    let token = VaultClient::new(&gateway_socket(dirs).ok()?)
-        .with_timeout(Duration::from_secs(2))
-        .resolve(secret, TOOL, domain, "")
-        .ok()?
-        .expose()
-        .to_owned();
-    let cfg = Config {
-        url: TEMIS_URL.into(),
-        token,
-        model: DEFAULT_MODEL.into(),
-    };
-    Some(Temis::new(cfg, curl_post("curl".into())))
-}
-
 const ENV_ADAPTER: &str = "CLIO_JEV_ADAPTER";
 const ENV_BASE: &str = "CLIO_JEV_BASE_URL";
 const ENV_VAULT: &str = "CLIO_JEV_VAULT_SOCKET";

@@ -20,11 +20,11 @@ granite = ["clio-memory/granite"]
 telemetry = ["clio-memory/telemetry"]
 
 [dependencies]
-# clio-memory v0.12.0, pinned by its commit (a tag can move): to move up, put the new tag's commit here
+# clio-memory v0.12.1, pinned by its commit (a tag can move): to move up, put the new tag's commit here
 # and its version in LIBRARY (src/memory_daemon.rs). Install the clio-memory binary of the new tag
 # first (`clio memory update`): Clio leaves an older daemon alone and loads the model itself.
 # Without `cli` (default): that is the setup screen of its binary, nothing the library needs.
-clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "b80bca24d0fd57d0119bfbbb2b7c5f86743a7e0e", default-features = false }
+clio-memory = { git = "https://github.com/i-montes/clio-memory", rev = "047544280bb35f923bc3383b5fb0bca1fad2fbfe", default-features = false }
 clio-contract = { path = "../clio-contract" }
 clio-core = { path = "../clio-core" }
 clio-gateway = { path = "../clio-gateway" }
