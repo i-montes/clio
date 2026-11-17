@@ -132,6 +132,7 @@ impl SessionSource for LocalSource {
                         max_steps: None,
                         allow_broad: false,
                         instruction: "sesión de Pi".into(),
+                        adapter_key: false,
                     },
                 )?;
                 (p.id.clone(), SessionTarget::New { id: Some(p.id) })

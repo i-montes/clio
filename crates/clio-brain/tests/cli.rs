@@ -97,6 +97,7 @@ impl Env {
                 self.tmp.path().join("script/host-check.sh"),
             )
             .env_remove("OPENCODE_API_KEY")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
             .current_dir(self.tmp.path())
             .stdin(Stdio::null());
         c
@@ -461,24 +462,24 @@ fn init_is_idempotent_and_private() {
 }
 
 #[test]
-fn init_checks_the_key_without_printing_it() {
+fn init_without_a_key_says_to_connect_and_never_names_the_key_file() {
     let e = Env::new();
+    let out = e.clio(&["init"]);
+    assert!(out.contains("clio connect opencode"), "{out}");
+    assert!(!out.contains("opencode-api-key"), "{out}");
+    // The variable is a key too: said, and never shown.
     let secret = format!("sk-{}", "q".repeat(20));
-    let key = e.home().join(".config/clio/opencode-api-key");
-    std::fs::write(&key, &secret).unwrap();
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let out = e.clio(&["init"]);
+    let o = e
+        .cmd(&["init"])
+        .env("OPENCODE_API_KEY", &secret)
+        .output()
+        .unwrap();
+    let out = text(&o.stdout);
     assert!(
-        out.contains("ADVERTENCIA") && out.contains("chmod 600"),
+        o.status.success() && out.contains("OPENCODE_API_KEY") && !out.contains(&secret),
         "{out}"
     );
-    assert!(!out.contains(&secret));
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let out = e.clio(&["init"]);
-    assert!(
-        out.contains("clave del modelo encontrada") && !out.contains(&secret),
-        "{out}"
-    );
+    assert!(!out.contains("clio connect opencode"), "{out}");
 }
 
 // The model adapter is the one inside the binary: `init` writes no path into the config (so it
@@ -556,13 +557,125 @@ fn doctor_passes_when_clean_and_fails_on_open_permissions() {
     assert_eq!(o.status.code(), Some(1));
     assert!(text(&o.stdout).contains("FAIL"));
     std::fs::set_permissions(&cfg_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // A key file that others can read is a FAIL too.
-    let key = cfg_dir.join("opencode-api-key");
+}
+
+/// Makes `claude` the active connector of this Env.
+fn use_claude(e: &Env) {
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["model"]["provider"] = json!("claude");
+    cfg["model"]["model"] = json!("claude-sonnet-5-5");
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+}
+
+fn connector_line(e: &Env, extra_env: &[(&str, &str)]) -> String {
+    let o = e
+        .cmd(&["doctor"])
+        .envs(extra_env.iter().copied())
+        .output()
+        .unwrap();
+    text(&o.stdout)
+        .lines()
+        .find(|l| l.contains("conector "))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn doctor_says_a_connector_key_is_in_the_vault_and_where_it_may_go() {
+    let e = Env::new();
+    use_claude(&e);
+    let _v = e.vault();
+    let line = connector_line(&e, &[]);
+    assert!(
+        line.starts_with("WARN") && line.contains("clio connect claude"),
+        "{line}"
+    );
+    let tok = "sk-ant-oat01-decoy-token";
+    let o = e.with_stdin(
+        &[
+            "vault",
+            "put",
+            "claude",
+            "--dest",
+            "model:api.anthropic.com",
+        ],
+        &format!("{tok}\n"),
+        &[],
+    );
+    assert!(o.status.success(), "{}", all_text(&o));
+    let line = connector_line(&e, &[]);
+    assert!(
+        line.starts_with("PASS")
+            && line.contains(
+                "conector claude: la llave está en el baúl y solo puede ir a api.anthropic.com"
+            ),
+        "{line}"
+    );
+    assert!(!line.contains(tok));
+    // The variable wins over the vault, and the doctor says so.
+    let line = connector_line(&e, &[("CLAUDE_CODE_OAUTH_TOKEN", "from-the-variable")]);
+    assert!(
+        line.starts_with("PASS")
+            && line.contains("conector claude: la llave viene de CLAUDE_CODE_OAUTH_TOKEN")
+            && !line.contains("from-the-variable"),
+        "{line}"
+    );
+}
+
+#[test]
+fn doctor_warns_about_a_key_file_left_behind() {
+    let e = Env::new();
+    let key = e.home().join(".config/clio/opencode-api-key");
     std::fs::write(&key, "not-a-real-key").unwrap();
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     let o = e.try_clio(&["doctor"]);
-    assert_eq!(o.status.code(), Some(1));
-    assert!(!text(&o.stdout).contains("not-a-real-key"));
+    let out = text(&o.stdout);
+    let line = out
+        .lines()
+        .find(|l| l.contains("queda una llave"))
+        .unwrap_or_default();
+    assert!(
+        line.starts_with("WARN")
+            && line.contains(&format!(
+                "queda una llave en {}: clio connect opencode la pasa al baúl",
+                key.display()
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("not-a-real-key"));
+}
+
+// The built-in adapter needs the model key before anything is copied: without a vault and without
+// the variable the run says how to fix it and leaves nothing behind.
+#[test]
+fn run_with_the_builtin_adapter_without_a_key_fails_before_copying() {
+    let e = Env::new();
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["model"]["command"] = json!([]);
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    let o = e.try_clio(&[
+        "run",
+        "--harness",
+        "builtin",
+        "--workspace",
+        &e.path("proj"),
+        "hazlo",
+    ]);
+    assert!(!o.status.success());
+    assert!(
+        text(&o.stderr).contains("clio vault start"),
+        "{}",
+        text(&o.stderr)
+    );
+    assert_eq!(
+        std::fs::read_dir(e.home().join(".local/share/clio/runs"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
 
 #[test]

@@ -196,9 +196,8 @@ clio · proyecto · beam-free                                              docto
  doctor: 1 ok · 1 aviso · 1 fallo
 
  ✓  /home/ivan/.config/clio es privada (700)
- !  no hay clave del modelo
-    → Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key (chmod
- 600).
+ !  conector opencode: la llave no está lista en el baúl (NotFound): clio connect opencode
+    → Abre el baúl (`clio vault start`) y ejecuta `clio connect opencode`.
  ✗  /x/y tiene modo 755, debe ser 700 (S-23)
     → chmod 700 /x/y
 
@@ -286,7 +285,7 @@ clio · proyecto · beam-free                                       debug en viv
 
 Además, con debug encendido se escribe un `debug.log` en la carpeta del run (`~/.local/share/clio/runs/<id>/debug.log`): JSON por línea (`started`, `context`, `memory`, `usage`, `exchange`, `step`, `decision`, `tool`, `protocol_error`, `final`), con permisos 0600, nacido 0600, y con cada texto largo cortado a 8000 caracteres con el aviso de cuánto falta. En `clio run --debug` las mismas líneas (saneadas) salen por la salida de errores con el prefijo `[debug]`, y la ruta del log se imprime al empezar. **Sin debug no se escribe nada de esto.**
 
-**Qué garantiza.** Todo lo que sale en la vista, en `debug.log` y en la salida de errores pasa primero por el limpiador de secretos (`Scrubber`), que conoce la clave del modelo (la de `OPENCODE_API_KEY` o la del archivo `opencode-api-key`) y reconoce un secreto conocido en claro, en base64 y codificado para URL; y después por el saneado de terminal (secuencias de escape, `\r`, bidireccionales). La clave de la API nunca aparece. Las pruebas lo comprueban con señuelos (`clio-canaries`) en la respuesta del modelo, en un archivo leído, en un nombre de archivo, en los argumentos y razón de la pasarela y en un error de protocolo: ni la pantalla (en cuatro tamaños), ni `debug.log`, ni la salida de errores, ni `summary.json`, `transcript.json` o `usage.json` los contienen. Limitación: el limpiador solo conoce los secretos que se le enseñaron (la clave del modelo y lo que la bóveda le entrega) y los patrones de claves de proveedores; un secreto que Clio no conozca y no tenga forma de clave no se puede ocultar.
+**Qué garantiza.** Todo lo que sale en la vista, en `debug.log` y en la salida de errores pasa primero por el limpiador de secretos (`Scrubber`), que conoce la llave del modelo (la de la variable del conector o la del baúl) y reconoce un secreto conocido en claro, en base64 y codificado para URL; y después por el saneado de terminal (secuencias de escape, `\r`, bidireccionales). La clave de la API nunca aparece. Las pruebas lo comprueban con señuelos (`clio-canaries`) en la respuesta del modelo, en un archivo leído, en un nombre de archivo, en los argumentos y razón de la pasarela y en un error de protocolo: ni la pantalla (en cuatro tamaños), ni `debug.log`, ni la salida de errores, ni `summary.json`, `transcript.json` o `usage.json` los contienen. Limitación: el limpiador solo conoce los secretos que se le enseñaron (la clave del modelo y lo que la bóveda le entrega) y los patrones de claves de proveedores; un secreto que Clio no conozca y no tenga forma de clave no se puede ocultar.
 
 ### Qué guarda cada run
 
@@ -428,16 +427,25 @@ PASS  creada       /home/tu/.local/share/clio (0700)
 PASS  creada       /home/tu/.local/share/clio/runs (0700)
 PASS  creada       /run/user/1000/clio (0700)
 PASS  creada       /home/tu/.config/clio/config.json (0600)
-PASS  clave del modelo encontrada en /home/tu/.config/clio/opencode-api-key (0600, no se muestra)
+WARN  falta la llave del modelo: abre el baúl (clio vault start) y ejecuta clio connect opencode
 
 siguiente: clio doctor, y luego clio
 ```
 
 (En una terminal con Unicode, `PASS`/`WARN`/`FAIL` se ven como `✓`/`⚠`/`✗` y en colores; sin terminal el texto es plano y estable.)
 
-`init` es idempotente: no pisa lo que ya existe (si cambias `config.json`, queda como lo dejaste). Deja las carpetas en 0700, nunca imprime la clave y avisa si el archivo de la clave tiene permisos abiertos.
+`init` es idempotente: no pisa lo que ya existe (si cambias `config.json`, queda como lo dejaste). Deja las carpetas en 0700, nunca imprime la llave y avisa si falta la del conector activo.
 
-**La clave del modelo.** Está en la variable `OPENCODE_API_KEY` o en `~/.config/clio/opencode-api-key` (`chmod 600`: si otra persona del equipo puede leer el archivo, el chat se niega a arrancar y te dice que la cambies). La lee el adaptador del modelo (`clio run`) o Clio, que se la da a Pi dentro de su jaula (chat); Clio no la imprime ni la guarda en ningún run.
+**La llave del modelo y los conectores.** Clio habla con un solo modelo a la vez, por uno de dos conectores: `opencode` (OpenCode Go) o `claude` (tu suscripción de Claude). La llave vive en el baúl, que tiene que estar abierto: `clio vault start` una vez por arranque (en un servidor, `loginctl enable-linger $USER` para que la carpeta de ejecución del baúl no se borre al cerrar sesión). Después, una vez por conector:
+
+```sh
+clio vault start
+clio connect opencode        # pide la llave sin eco, la guarda en el baúl solo para opencode.ai y prueba el modelo
+clio connect claude          # pega el token que da `claude setup-token`; solo irá a api.anthropic.com
+clio connect claude --model claude-sonnet-5-5   # otro modelo; --new-key cambia la llave guardada
+```
+
+`clio connect` escribe `model.provider` y `model.model` en `config.json` (el conector activo) y nunca la llave. Si había un `~/.config/clio/opencode-api-key`, `clio connect opencode` ofrece pasarlo al baúl y borrarlo: Clio ya no lee ese archivo. **Riesgo de Claude:** las condiciones de Anthropic solo permiten el token de suscripción dentro de Claude Code, así que usarlo aquí puede costar la suspensión de la cuenta. Las variables `OPENCODE_API_KEY` y `CLAUDE_CODE_OAUTH_TOKEN` (la del conector activo), si están definidas, mandan sobre el baúl (pruebas, bench, CI). La llave la lee el adaptador del modelo (`clio run`) o Clio, que se la da a Pi dentro de su jaula (chat); Clio no la imprime ni la guarda en ningún run.
 
 **Configuración** (`~/.config/clio/config.json`): proveedor `opencode-go`, modelo `beam-free` (gratuito), el comando del adaptador (`model.command`), el prompt `clio-agent@2` (con la jaula probada se usa `clio-agent@3`, que explica `run_tests`), y los límites: 40 pasos, 600 segundos, 0,10 USD por tarea, y para la copia 5000 archivos y 200 MB. `init` deja `model.command` en `[]`: el adaptador es el que viene dentro del binario, que se escribe en `~/.local/share/clio/adapters/openai_compat.py` (0600) y se vuelve a escribir si el archivo difiere, así que el config no guarda ninguna ruta y sigue sirviendo al actualizar Clio, mover el repositorio o instalarlo en otra máquina. Un `model.command` que apunte a un `adapters/…/openai_compat.py` (lo que escribían versiones anteriores de `init`) también se lee como el incluido: ese archivo no se ejecuta. Otro comando es un adaptador propio y se ejecuta tal cual; `CLIO_ADAPTER` cambia el incluido por otro script (para trabajar en el adaptador).
 
@@ -565,7 +573,7 @@ Qué hay en la carpeta de un run: `sandbox/` (la copia, con los cambios del agen
 
 ## La bóveda de secretos (opcional)
 
-`clio run` funciona sin secretos y hoy no usa la bóveda. Si quieres guardar claves:
+La bóveda guarda la llave del modelo (`clio connect`, arriba) y, si quieres, otras claves:
 
 ```sh
 clio vault start            # pide la frase; crea la bóveda la primera vez, la lanza y la desbloquea
@@ -587,7 +595,7 @@ Pi (decisión 0007) corre el bucle del agente, los proveedores, las sesiones y l
 
 **El selector** lista «nueva sesión» (una copia del proyecto actual) y las sesiones de la carpeta de Pi de Clio (`Enter` abre, `n` nueva); una fila `remoto: pendiente` ya está para las sesiones por `ssh <host> clio serve-rpc`, que todavía no existen. **El chat** muestra el texto del agente según llega, una línea por herramienta (nombre, argumentos resumidos, duración, `negado` o `falló` si no), líneas discretas para compactación y reintentos, notas cuando la jaula de Pi niega una conexión (`la jaula negó una conexión de Pi a …`) o el filtro tacha valores de lo que Pi leyó (`Clio tachó 2 valores …`), y un aviso cuando la sesión leyó contenido externo (`externo` en la barra de estado). `Enter` envía; con el agente trabajando, `Enter` lo orienta (steer) y `Esc` aborta el turno. La barra de estado muestra tokens, costo, pasos (llamadas al modelo), tiempo y el contexto, de las cifras de Pi. `Ctrl-D` muestra debajo los eventos de Pi tal como llegan.
 
-**Qué arranca una sesión** (todo en un solo lugar, `src/cli/chat/local.rs`): una copia del proyecto como un run (`~/.local/share/clio/runs/<id>/sandbox`, así que `clio diff|apply|undo <id>` sirven para lo que Pi cambió), `clio toolhost` sobre esa copia (el único que toca archivos y corre comandos, dentro de la jaula) y Pi con la guardia `clio-guard`. Todo se detiene al salir de la sesión, al salir de `clio`, con un pánico y también si matan a `clio` (Pi y el toolhost terminan solos al cerrarse su entrada). Una sesión que no es una copia de Clio (la creó otra herramienta) se lista pero no se abre aquí. La clave sale solo de `OPENCODE_API_KEY` o de `~/.config/clio/opencode-api-key`.
+**Qué arranca una sesión** (todo en un solo lugar, `src/cli/chat/local.rs`): una copia del proyecto como un run (`~/.local/share/clio/runs/<id>/sandbox`, así que `clio diff|apply|undo <id>` sirven para lo que Pi cambió), `clio toolhost` sobre esa copia (el único que toca archivos y corre comandos, dentro de la jaula) y Pi con la guardia `clio-guard`. Todo se detiene al salir de la sesión, al salir de `clio`, con un pánico y también si matan a `clio` (Pi y el toolhost terminan solos al cerrarse su entrada). Una sesión que no es una copia de Clio (la creó otra herramienta) se lista pero no se abre aquí. La llave sale solo de la variable del conector o del baúl, nunca de un archivo.
 
 **La jaula de Pi (ADR 0009).** Pi y sus ~120 dependencias de npm corren con tu usuario; por eso, en Linux, Pi solo arranca dentro de una jaula `bwrap`:
 
@@ -617,7 +625,7 @@ clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo
 clio doctor
 ```
 
-Revisa: Node y Pi (ver «Pi, el arnés del agente»), la jaula (autoprueba, una línea por comprobación, ver arriba), la jaula de Pi (si `bwrap` arranca; apagada con `CLIO_PI_JAIL=off` es un fallo; ver «La jaula de Pi»), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la clave del modelo (permisos), sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, que en lo que Clio escribió (sus runs, transcripciones, sesiones de Pi y memoria; no las copias de tus proyectos) no haya nada con forma de llave ni, si el baúl está corriendo y desbloqueado, ningún valor del baúl (te dice el archivo y el nombre del secreto, nunca el valor; con el baúl cerrado o apagado avisa de que no pudo comprobarlo), y ejecuta `infra/local/check-host.sh` (lo busca en `CLIO_HOST_CHECK` o por encima del ejecutable de `clio`, nunca en la carpeta donde estás: un repositorio ajeno podría traer uno) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, ya en español). Clio lo corre con `CLIO_DOCTOR_EMBEDDED=1`, que le hace omitir las dos comprobaciones que `clio` ya hizo por su cuenta (permisos de las carpetas y archivos de Clio, S-23, y procesos de Clio que escuchan fuera de loopback, S-38): cada una sale una sola vez. Si corres el script solo, hace todas y termina con `equipo: sin FAIL` (o `equipo: hay FAIL, mira arriba`), con el mismo código de salida de siempre. Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}` (las mismas claves de siempre; cambia que los mensajes del script del equipo están en español y que ya no hay comprobaciones repetidas). La TUI muestra lo mismo con `D`.
+Revisa: Node y Pi (ver «Pi, el arnés del agente»), la jaula (autoprueba, una línea por comprobación, ver arriba), la jaula de Pi (si `bwrap` arranca; apagada con `CLIO_PI_JAIL=off` es un fallo; ver «La jaula de Pi»), permisos de las carpetas de Clio (0700) y de sus archivos (0600), la llave del conector activo (en el baúl o en su variable) y si queda un archivo `opencode-api-key` sin pasar al baúl, sockets 0600, que ningún proceso `clio*` escuche fuera de loopback, que en lo que Clio escribió (sus runs, transcripciones, sesiones de Pi y memoria; no las copias de tus proyectos) no haya nada con forma de llave ni, si el baúl está corriendo y desbloqueado, ningún valor del baúl (te dice el archivo y el nombre del secreto, nunca el valor; con el baúl cerrado o apagado avisa de que no pudo comprobarlo), y ejecuta `infra/local/check-host.sh` (lo busca en `CLIO_HOST_CHECK` o por encima del ejecutable de `clio`, nunca en la carpeta donde estás: un repositorio ajeno podría traer uno) mostrando su salida (las líneas `PASS`/`WARN`/`FAIL` del script entran como comprobaciones más, ya en español). Clio lo corre con `CLIO_DOCTOR_EMBEDDED=1`, que le hace omitir las dos comprobaciones que `clio` ya hizo por su cuenta (permisos de las carpetas y archivos de Clio, S-23, y procesos de Clio que escuchan fuera de loopback, S-38): cada una sale una sola vez. Si corres el script solo, hace todas y termina con `equipo: sin FAIL` (o `equipo: hay FAIL, mira arriba`), con el mismo código de salida de siempre. Bajo cada aviso o fallo imprime una línea `->` con qué hacer, y al final un resumen (`doctor: bien (5 ok, 1 aviso; ...)`). Sale con 1 si hay algún FAIL; los WARN son decisión tuya. Con `--json` escribe `{ok, pass, warn, fail, host_script, jail, checks: [{level, message, hint}]}` (las mismas claves de siempre; cambia que los mensajes del script del equipo están en español y que ya no hay comprobaciones repetidas). La TUI muestra lo mismo con `D`.
 
 ## Qué NO hace Clio todavía
 

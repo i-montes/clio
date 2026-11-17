@@ -2,13 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use clio_brain::connector::{Connector, by_provider};
+use clio_brain::connector::{CONNECTORS, Connector, by_provider};
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::launch::Secret;
 use serde::{Deserialize, Serialize};
 
 use super::ui::{Level, Style};
-use super::{Res, io_err, mkdir_private, mode, write_private};
+use super::{Res, io_err, mkdir_private, write_private};
 
 /// The adapter that ships with the repository; `init` installs this copy when it cannot find the
 /// repository's own file.
@@ -50,10 +50,6 @@ impl Dirs {
 
     pub fn config_file(&self) -> PathBuf {
         self.config.join("config.json")
-    }
-
-    pub fn key_file(&self) -> PathBuf {
-        self.config.join("opencode-api-key")
     }
 
     pub fn need_runtime(&self) -> Res<&Path> {
@@ -261,24 +257,6 @@ impl Config {
     }
 }
 
-pub enum KeyStatus {
-    Env,
-    File { open_mode: Option<u32> },
-    Missing,
-}
-
-pub fn key_status(dirs: &Dirs) -> KeyStatus {
-    if std::env::var_os("OPENCODE_API_KEY").is_some_and(|v| !v.is_empty()) {
-        return KeyStatus::Env;
-    }
-    match mode(&dirs.key_file()) {
-        Some(m) => KeyStatus::File {
-            open_mode: (m & 0o077 != 0).then_some(m),
-        },
-        None => KeyStatus::Missing,
-    }
-}
-
 /// The file name of the OpenCode adapter that travels inside this binary.
 const ADAPTER_FILE: &str = "openai_compat.py";
 /// The file name of the Claude adapter.
@@ -310,10 +288,9 @@ fn adapter_copy(dirs: &Dirs, file: &str) -> PathBuf {
     dirs.data.join("adapters").join(file)
 }
 
-/// Where the OpenCode adapter is written (`doctor` checks that one until it follows the active
-/// connector).
-pub fn builtin_adapter_path(dirs: &Dirs) -> PathBuf {
-    adapter_copy(dirs, ADAPTER_FILE)
+/// Where the adapter of connector `c` is written.
+pub fn builtin_adapter_path(dirs: &Dirs, c: &Connector) -> PathBuf {
+    adapter_copy(dirs, c.adapter)
 }
 
 /// The source of the adapter of connector `c`, which travels inside this binary.
@@ -386,28 +363,24 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         println!("{ok}  creada       {} (0600)", cfg.display());
     }
     super::pi::init_lines(dirs);
-    let key = dirs.key_file();
-    match key_status(dirs) {
-        KeyStatus::Env => {
-            println!("{ok}  clave del modelo encontrada en OPENCODE_API_KEY (no se muestra)")
-        }
-        KeyStatus::File { open_mode: None } => {
-            println!(
-                "{ok}  clave del modelo encontrada en {} (0600, no se muestra)",
-                key.display()
-            );
-        }
-        KeyStatus::File { open_mode: Some(m) } => println!(
-            "{}  ADVERTENCIA: {} tiene modo {m:o} y otros pueden leerla. Ejecuta: chmod 600 {}",
+    // The active connector (a new config is OpenCode); the key is never shown.
+    let c = Config::load(dirs)
+        .ok()
+        .and_then(|c| by_provider(&c.model.provider))
+        .unwrap_or(&CONNECTORS[0]);
+    if std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty()) {
+        println!(
+            "{ok}  llave del modelo: viene de {} (no se muestra)",
+            c.key_env
+        );
+    } else if super::vault::has_model_key(dirs, c) {
+        println!("{ok}  llave del modelo: está en el baúl (no se muestra)");
+    } else {
+        println!(
+            "{}  falta la llave del modelo: abre el baúl (clio vault start) y ejecuta clio connect {}",
             st.mark(Level::Warn),
-            key.display(),
-            key.display()
-        ),
-        KeyStatus::Missing => println!(
-            "{}  falta la clave del modelo. Ponla en OPENCODE_API_KEY o en {} (chmod 600)",
-            st.mark(Level::Warn),
-            key.display()
-        ),
+            c.name
+        );
     }
     println!(
         "\nsiguiente: {}, y luego {}",
@@ -420,6 +393,7 @@ pub fn init(dirs: &Dirs) -> Res<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::mode;
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
@@ -468,7 +442,7 @@ mod tests {
         };
         let mut c = Config::default_with(Vec::new());
         let got = c.model_command(&dirs).unwrap();
-        let copy = builtin_adapter_path(&dirs);
+        let copy = builtin_adapter_path(&dirs, &CONNECTORS[0]);
         assert_eq!(got, cmd(&["python3", &copy.display().to_string()]));
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), ADAPTER_SOURCE);
         assert_eq!(mode(&copy), Some(0o600));

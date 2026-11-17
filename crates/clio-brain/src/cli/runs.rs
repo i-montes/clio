@@ -319,6 +319,9 @@ pub struct RunOpts {
     pub max_steps: Option<u32>,
     pub allow_broad: bool,
     pub instruction: String,
+    /// Resolve the key of the adapter inside Clio. A Pi chat sends its own key to Pi and runs no
+    /// adapter, so it asks for none: one vault round trip and one copy of the key fewer.
+    pub adapter_key: bool,
 }
 
 /// A run that is validated and copied, ready for the agent.
@@ -382,7 +385,11 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     let mut cfg = Config::load(dirs)?;
     // From here on the command is the one that runs (the built-in adapter resolved to its copy).
     cfg.model.command = cfg.model_command(dirs)?;
-    let key = cfg.model_key(dirs, &cfg.model.command)?;
+    let key = if o.adapter_key {
+        cfg.model_key(dirs, &cfg.model.command)?
+    } else {
+        None
+    };
     let ws = work::validate(&o.workspace, dirs)?;
     let (mf, mb) = if o.allow_broad {
         (u64::MAX, u64::MAX)
@@ -1081,6 +1088,37 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    // A Pi chat prepares a copy but runs no adapter, so it must not ask the vault for a key
+    // (here there is no vault at all: asking would fail unless the variable is set).
+    #[test]
+    fn a_copy_for_pi_resolves_no_adapter_key() {
+        let t = tempfile::tempdir().unwrap();
+        let (home, ws) = (t.path().join("home"), t.path().join("proj"));
+        let data = home.join("data");
+        let dirs = Dirs {
+            config: home.join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home,
+        };
+        for d in [&dirs.config, &dirs.runs, &ws] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(ws.join("a.txt"), "x").unwrap();
+        let cfg = serde_json::to_string(&Config::default_with(Vec::new())).unwrap();
+        std::fs::write(dirs.config_file(), cfg).unwrap();
+        let opts = |adapter_key| RunOpts {
+            workspace: ws.clone(),
+            max_steps: None,
+            allow_broad: false,
+            instruction: "x".into(),
+            adapter_key,
+        };
+        let p = prepare(&dirs, &opts(false)).unwrap();
+        assert!(p.key.is_none());
+    }
 
     // Two runs in one second (a script, a test) must both get an id. The old suffix came from the
     // millisecond and the process id and sometimes matched; a taken id is now replaced, not reported.

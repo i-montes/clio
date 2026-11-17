@@ -17,12 +17,10 @@ use crate::cli::usage::{RunLimits, RunUsage};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyState {
     Present,
-    /// The key file can be read by others.
-    OpenPermissions,
     Missing,
 }
 
-/// What the header shows. The key itself is never read into memory here, only its state.
+/// What the header shows. Only whether the model key can be had, never the key itself.
 #[derive(Debug, Clone)]
 pub struct Header {
     pub model: String,
@@ -207,9 +205,6 @@ pub(super) fn state_line(app: &App, t: Theme, width: usize) -> Vec<Line<'static>
     }
     let key = match h.key {
         KeyState::Present => Span::styled("clave presente", t.dim()),
-        KeyState::OpenPermissions => {
-            Span::styled("clave presente, pero otros pueden leerla", t.fail())
-        }
         KeyState::Missing => Span::styled("falta la clave del modelo", t.warn()),
     };
     let doctor = match app.home.doctor {

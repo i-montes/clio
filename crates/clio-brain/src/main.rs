@@ -149,6 +149,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                     max_steps,
                     allow_broad,
                     instruction,
+                    adapter_key: true,
                 },
                 dbg,
             );

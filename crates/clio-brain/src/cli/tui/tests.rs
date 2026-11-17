@@ -924,11 +924,8 @@ pub(super) fn report() -> Report {
             },
             Check {
                 level: Level::Warn,
-                msg: "no hay clave del modelo".into(),
-                hint: Some(
-                    "Ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key (chmod 600)."
-                        .into(),
-                ),
+                msg: "conector opencode: falta la llave en el baúl".into(),
+                hint: Some("Con el baúl en marcha: clio connect opencode".into()),
             },
             Check {
                 level: Level::Fail,
@@ -1117,11 +1114,14 @@ fn doctor_draws_marks_and_one_hint_per_warning() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("✓  /home") && t.contains("!  no hay clave") && t.contains("✗  /x/y"),
+                t.contains("✓  /home")
+                    && t.contains("!  conector opencode: falta")
+                    && t.contains("✗  /x/y"),
                 "{t}"
             );
             assert!(
-                t.contains("→ Ponla en OPENCODE_API_KEY") && t.contains("→ chmod 700 /x/y"),
+                t.contains("→ Con el baúl en marcha: clio connect opencode")
+                    && t.contains("→ chmod 700 /x/y"),
                 "{t}"
             );
             assert!(t.contains("doctor: 1 ok · 1 aviso · 1 fallo"), "{t}");

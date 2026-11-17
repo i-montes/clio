@@ -57,7 +57,7 @@ use self::new_run::Preview;
 use super::apply;
 use super::chat::{Harness, Session, SessionSource, Target};
 use super::debug::DebugCtl;
-use super::home::{Config, Dirs, KeyStatus, key_status};
+use super::home::{Config, Dirs};
 use super::runs::{self, RunOpts};
 use super::usage::{self, RunLimits, RunUsage};
 use super::{Res, work};
@@ -362,10 +362,12 @@ fn header(dirs: &Dirs) -> Header {
         Err(e) => (String::new(), String::new(), Some(e), RunLimits::default()),
     };
     let (window, window_known) = usage::window_for(dirs, &provider, &model);
-    let key = match key_status(dirs) {
-        KeyStatus::Env | KeyStatus::File { open_mode: None } => KeyState::Present,
-        KeyStatus::File { open_mode: Some(_) } => KeyState::OpenPermissions,
-        KeyStatus::Missing => KeyState::Missing,
+    let key = if clio_brain::connector::by_provider(&provider)
+        .is_some_and(|c| super::vault::model_key(dirs, c).is_ok())
+    {
+        KeyState::Present
+    } else {
+        KeyState::Missing
     };
     let vault = if dirs
         .runtime
@@ -677,6 +679,7 @@ impl Ctx {
                             max_steps: None,
                             allow_broad: false,
                             instruction: instruction.clone(),
+                            adapter_key: true,
                         };
                         let p = runs::prepare(d, &opts)?;
                         let _ = tx.send(Input::Bg(Bg::Started {

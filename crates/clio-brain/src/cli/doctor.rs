@@ -6,13 +6,12 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use clio_brain::connector::{Connector, by_provider};
 use clio_vault::proto::Request;
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::json;
 
-use super::home::{
-    Config, Dirs, KeyStatus, builtin_adapter_path, key_status, names_builtin_adapter,
-};
+use super::home::{Config, Dirs, builtin_adapter_path, names_builtin_adapter};
 use super::mode;
 use super::tui::app::plural;
 use super::tui::sanitize;
@@ -285,6 +284,62 @@ fn jail_lines(o: &mut Report) {
 
 /// Jev is optional: off, it is said and nothing else is checked; on, what it needs is: Python for
 /// the adapter and the secret `jev` in the vault, allowed for the API's host and no other.
+/// The active connector's key: the variable if set (it wins over the vault), else whether the
+/// vault holds it and lets `model` send it to the connector's domain. No value moves.
+fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
+    let name = c.name;
+    if std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty()) {
+        o.say(
+            Level::Pass,
+            format!("conector {name}: la llave viene de {}", c.key_env),
+            None,
+        );
+        return;
+    }
+    let ready = super::vault::gateway_socket(dirs)
+        .map_err(|e| e.to_string())
+        .and_then(|s| {
+            VaultClient::new(&s)
+                .check(c.secret, "model", Some(c.domain), "")
+                .map_err(|e| e.to_string())
+        });
+    match ready {
+        Ok(()) => o.say(
+            Level::Pass,
+            format!(
+                "conector {name}: la llave está en el baúl y solo puede ir a {}",
+                c.domain
+            ),
+            None,
+        ),
+        Err(why) => o.say(
+            Level::Warn,
+            format!(
+                "conector {name}: la llave no está lista en el baúl ({}): clio connect {name}",
+                sanitize::line(&why)
+            ),
+            Some(format!(
+                "Abre el baúl (`clio vault start`) y ejecuta `clio connect {name}`."
+            )),
+        ),
+    }
+}
+
+/// The old key file is never read any more; if one is still there, say how to move it.
+fn old_key_file(o: &mut Report, dirs: &Dirs) {
+    let file = dirs.config.join("opencode-api-key");
+    if file.exists() {
+        o.say(
+            Level::Warn,
+            format!(
+                "queda una llave en {}: clio connect opencode la pasa al baúl",
+                file.display()
+            ),
+            Some("Clio ya no lee ese archivo. Pásala al baúl con `clio connect opencode`.".into()),
+        );
+    }
+}
+
 fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
     if !jev.enabled {
         o.say(
@@ -696,6 +751,9 @@ pub fn collect(dirs: &Dirs) -> Report {
                 None,
             );
             jev_report(&mut o, dirs, &c.jev);
+            // `Config::load` guarantees `model.provider` is a connector.
+            let conn = by_provider(&c.model.provider).expect("a connector");
+            connector_report(&mut o, dirs, conn);
             if names_builtin_adapter(&c.model.command) {
                 // A path older versions of `init` wrote is not run: said, so it can be removed.
                 let old = c.model.command.get(1).map_or_else(String::new, |p| {
@@ -705,7 +763,7 @@ pub fn collect(dirs: &Dirs) -> Report {
                     Level::Pass,
                     format!(
                         "el adaptador del modelo es el que trae este binario ({}){old}",
-                        builtin_adapter_path(dirs).display()
+                        builtin_adapter_path(dirs, conn).display()
                     ),
                     None,
                 );
@@ -721,32 +779,7 @@ pub fn collect(dirs: &Dirs) -> Report {
         }
         Err(e) => o.say(Level::Warn, e, Some("Ejecuta `clio init`.".into())),
     }
-    match key_status(dirs) {
-        KeyStatus::Env => o.say(
-            Level::Pass,
-            "clave del modelo en OPENCODE_API_KEY".into(),
-            None,
-        ),
-        KeyStatus::File { open_mode: None } => {
-            o.say(Level::Pass, "el archivo de la clave es 600".into(), None);
-        }
-        KeyStatus::File { open_mode: Some(m) } => o.say(
-            Level::Fail,
-            format!(
-                "{} tiene modo {m:o}, otros pueden leer la clave",
-                dirs.key_file().display()
-            ),
-            Some(format!("chmod 600 {}", dirs.key_file().display())),
-        ),
-        KeyStatus::Missing => o.say(
-            Level::Warn,
-            "no hay clave del modelo".into(),
-            Some(format!(
-                "Ponla en OPENCODE_API_KEY o en {} (chmod 600).",
-                dirs.key_file().display()
-            )),
-        ),
-    }
+    old_key_file(&mut o, dirs);
     if let Some(rt) = &dirs.runtime
         && let Ok(rd) = std::fs::read_dir(rt)
     {
