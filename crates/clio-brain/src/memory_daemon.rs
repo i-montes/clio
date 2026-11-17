@@ -41,7 +41,7 @@ pub fn shared(data: &Path, local: Arc<EmbedModel>) -> Arc<EmbedModel> {
 }
 
 /// The version of the clio-memory library Clio is built with (the pin in Cargo.toml).
-const LIBRARY: &str = "0.10.1";
+const LIBRARY: &str = "0.12.0";
 
 /// Whether to connect, from the `status` of the daemon of the folder (asked without launching
 /// one; `status` never makes it leave). A daemon older than [`LIBRARY`] would leave on the first
