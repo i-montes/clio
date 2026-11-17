@@ -98,6 +98,7 @@ pub(super) fn with_runs() -> App {
     a.home.header = Some(Header {
         model: "beam-free".into(),
         key: KeyState::Present,
+        connector: "opencode".into(),
         vault: "sin crear (opcional)".into(),
         config_error: None,
         limits: LIMITS,
@@ -946,7 +947,7 @@ fn home_draws_state_and_runs_without_overflow() {
         assert_fits(&t, w, h);
         if w >= 80 {
             assert!(t.contains("clio · proyecto · beam-free"), "{t}");
-            assert!(t.contains("clave presente"), "{t}");
+            assert!(t.contains("llave presente"), "{t}");
             assert!(t.contains("doctor: 12 ok · 3 avisos · 0 fallos"), "{t}");
             assert!(
                 t.contains("1031-1816-5a67") && t.contains("pendiente de revisar"),
@@ -971,7 +972,16 @@ fn home_draws_state_and_runs_without_overflow() {
 fn home_reports_a_missing_key_and_a_broken_config() {
     let mut a = with_runs();
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
-    assert!(screen_text(&a, 80, 24).contains("falta la clave"));
+    let t = screen_text(&a, 80, 24);
+    assert!(
+        t.contains("falta la llave del modelo: clio connect opencode"),
+        "{t}"
+    );
+    // A config with no connector still says where to start.
+    a.home.header.as_mut().unwrap().connector = String::new();
+    let t = screen_text(&a, 80, 24);
+    assert!(t.contains("falta la llave del modelo: clio connect"), "{t}");
+    assert!(!t.contains("clio connect opencode"), "{t}");
     a.home.header.as_mut().unwrap().config_error =
         Some("config.json: no existe (ejecuta `clio init` primero)".into());
     assert!(screen_text(&a, 100, 24).contains("ejecuta `clio init` primero"));

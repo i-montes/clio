@@ -24,7 +24,7 @@ Solo las **2 últimas** (`restic forget --keep-last 2 --prune` después de cada 
 - `~/.config/clio/config.json`.
 - `~/.local/share/clio/runs/` sin las copias de trabajo (`sandbox/` y `scratch/`): quedan los registros, diffs y logs de efectos.
 
-No se respaldan la clave del modelo (`opencode-api-key`), la frase de restic ni lo que se puede reinstalar (`pi/`).
+La llave del modelo vive en el baúl (`vault.bin`, que ya va en la copia, cifrado); Clio ya no usa un archivo `opencode-api-key`. No se respaldan la frase de restic ni lo que se puede reinstalar (`pi/`).
 
 ## Puesta en marcha (una vez)
 

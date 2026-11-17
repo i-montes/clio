@@ -282,8 +282,6 @@ fn jail_lines(o: &mut Report) {
     o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
 }
 
-/// Jev is optional: off, it is said and nothing else is checked; on, what it needs is: Python for
-/// the adapter and the secret `jev` in the vault, allowed for the API's host and no other.
 /// The active connector's key: the variable if set (it wins over the vault), else whether the
 /// vault holds it and lets `model` send it to the connector's domain. No value moves.
 fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
@@ -296,12 +294,20 @@ fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
         );
         return;
     }
+    use clio_vault::VaultError as E;
     let ready = super::vault::gateway_socket(dirs)
-        .map_err(|e| e.to_string())
+        .map_err(|_| "el baúl no está corriendo".to_owned())
         .and_then(|s| {
             VaultClient::new(&s)
                 .check(c.secret, "model", Some(c.domain), "")
-                .map_err(|e| e.to_string())
+                .map_err(|e| match e {
+                    E::Locked => "el baúl está cerrado".to_owned(),
+                    E::NotFound => "no está en el baúl".to_owned(),
+                    E::Denied(_) => format!("el baúl no la deja ir a {}", c.domain),
+                    E::Revoked => "está revocada".to_owned(),
+                    E::Expired => "caducó".to_owned(),
+                    _ => "el baúl no está corriendo".to_owned(),
+                })
         });
     match ready {
         Ok(()) => o.say(
@@ -314,10 +320,7 @@ fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
         ),
         Err(why) => o.say(
             Level::Warn,
-            format!(
-                "conector {name}: la llave no está lista en el baúl ({}): clio connect {name}",
-                sanitize::line(&why)
-            ),
+            format!("conector {name}: la llave no se puede usar ({why}): clio connect {name}"),
             Some(format!(
                 "Abre el baúl (`clio vault start`) y ejecuta `clio connect {name}`."
             )),
@@ -340,6 +343,8 @@ fn old_key_file(o: &mut Report, dirs: &Dirs) {
     }
 }
 
+/// Jev is optional: off, it is said and nothing else is checked; on, what it needs is: Python for
+/// the adapter and the secret `jev` in the vault, allowed for the API's host and no other.
 fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
     if !jev.enabled {
         o.say(

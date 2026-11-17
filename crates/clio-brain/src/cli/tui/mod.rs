@@ -362,9 +362,8 @@ fn header(dirs: &Dirs) -> Header {
         Err(e) => (String::new(), String::new(), Some(e), RunLimits::default()),
     };
     let (window, window_known) = usage::window_for(dirs, &provider, &model);
-    let key = if clio_brain::connector::by_provider(&provider)
-        .is_some_and(|c| super::vault::model_key(dirs, c).is_ok())
-    {
+    let active = clio_brain::connector::by_provider(&provider);
+    let key = if active.is_some_and(|c| super::vault::model_key(dirs, c).is_ok()) {
         KeyState::Present
     } else {
         KeyState::Missing
@@ -383,6 +382,7 @@ fn header(dirs: &Dirs) -> Header {
     Header {
         model,
         key,
+        connector: active.map_or(String::new(), |c| c.name.to_owned()),
         vault: vault.into(),
         config_error,
         limits,

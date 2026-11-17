@@ -25,6 +25,8 @@ pub enum KeyState {
 pub struct Header {
     pub model: String,
     pub key: KeyState,
+    /// The active connector's name (`clio connect <name>`), empty when the config has none.
+    pub connector: String,
     pub vault: String,
     /// The configuration did not load: the message.
     pub config_error: Option<String>,
@@ -204,8 +206,13 @@ pub(super) fn state_line(app: &App, t: Theme, width: usize) -> Vec<Line<'static>
         ])];
     }
     let key = match h.key {
-        KeyState::Present => Span::styled("clave presente", t.dim()),
-        KeyState::Missing => Span::styled("falta la clave del modelo", t.warn()),
+        KeyState::Present => Span::styled("llave presente", t.dim()),
+        KeyState::Missing => Span::styled(
+            format!("falta la llave del modelo: clio connect {}", h.connector)
+                .trim_end()
+                .to_owned(),
+            t.warn(),
+        ),
     };
     let doctor = match app.home.doctor {
         None => Span::styled("doctor: comprobando…", t.dim()),

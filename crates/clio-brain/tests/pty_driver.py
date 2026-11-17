@@ -258,7 +258,8 @@ elif scenario in ("views", "debug_env"):
         out["debug_on"] = pump(fd, lambda: b"debug" in buf[mark:], 8)
         mark = len(buf)
         os.write(fd, b"c")
-        out["context"] = pump(fd, lambda: b"prompt de sistema" in buf[mark:], 8)
+        # One word of a layer: the diff skips unchanged cells, so a phrase can arrive in pieces.
+        out["context"] = pump(fd, lambda: b"objetivo" in buf[mark:], 8)
         mark = len(buf)
         os.write(fd, b"U")
         out["usage"] = pump(fd, lambda: b"acum." in buf[mark:], 8)

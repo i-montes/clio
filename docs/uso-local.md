@@ -26,12 +26,12 @@ En una terminal, `clio` sin argumentos abre una interfaz de pantalla completa (T
 
 En una terminal angosta la barra abrevia (`tok` se va, `pasos` pasa a `p`, `contexto` a `ctx`, `externo` a `ext`, la barra desaparece) pero no pierde ninguno de los cuatro datos; a 60 columnas sigue completa. El tamaño mínimo es 60x16; con menos, la pantalla lo dice en vez de dibujar mal.
 
-**Inicio**: una línea de estado (clave, vault, doctor; solo un problema lleva color) y los runs recientes. `/` filtra la lista por id, estado, instrucción o carpeta mientras escribes (`Enter` deja el filtro y vuelve a los atajos, `Esc` lo borra).
+**Inicio**: una línea de estado (llave, vault, doctor; solo un problema lleva color) y los runs recientes. `/` filtra la lista por id, estado, instrucción o carpeta mientras escribes (`Enter` deja el filtro y vuelve a los atajos, `Esc` lo borra).
 
 ```
 clio · proyecto · beam-free                                              inicio
 
- clave presente · vault sin crear (opcional)
+ llave presente · vault sin crear (opcional)
  doctor: 12 ok · 3 avisos · 0 fallos
 
  ─ recientes ──────────────────────────────────────────────────────────────────
@@ -196,7 +196,7 @@ clio · proyecto · beam-free                                              docto
  doctor: 1 ok · 1 aviso · 1 fallo
 
  ✓  /home/ivan/.config/clio es privada (700)
- !  conector opencode: la llave no está lista en el baúl (NotFound): clio connect opencode
+ !  conector opencode: la llave no se puede usar (no está en el baúl): clio connect opencode
     → Abre el baúl (`clio vault start`) y ejecuta `clio connect opencode`.
  ✗  /x/y tiene modo 755, debe ser 700 (S-23)
     → chmod 700 /x/y
