@@ -365,10 +365,23 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
 /// runs, whoever wrote it (the working copy, a user setting, a plugin).
 pub const CLAUDE_POLICY: &str = r#"{"disableAllHooks": true, "allowManagedHooksOnly": true, "disableSkillShellExecution": true}"#;
 
+/// What Claude Code loads from its user folder (`~/.claude`) besides the settings: instructions,
+/// skills, subagents, commands, hooks' scripts, output styles, plugins. None is Clio's.
+/// `projects/` stays: the bridge resumes its sessions from there.
+const CLAUDE_USER_EXTRAS: [&str; 7] = [
+    "CLAUDE.md",
+    "skills",
+    "agents",
+    "commands",
+    "hooks",
+    "output-styles",
+    "plugins",
+];
+
 /// Before every bridge launch: the policy written, and the settings Claude Code and the bridge
 /// read from Pi's own folders (writable inside the jail, so a past session could have planted
-/// something there: hooks, `env`, `apiKeyHelper`, another Claude Code) back to `{}`. A link in their
-/// place is removed, never followed.
+/// something there: hooks, `env`, `apiKeyHelper`, another Claude Code) back to `{}`, and Claude
+/// Code's other user customizations removed. A link in their place is removed, never followed.
 pub fn reset_claude_settings(paths: &PiPaths) -> Result<(), PiError> {
     paths.ensure()?;
     write_private(&paths.claude_policy(), CLAUDE_POLICY.as_bytes())?;
@@ -388,6 +401,16 @@ pub fn reset_claude_settings(paths: &PiPaths) -> Result<(), PiError> {
             }
             _ => write_private(&f, b"{}")?,
         }
+    }
+    for name in CLAUDE_USER_EXTRAS {
+        let p = dir.join(name);
+        // `symlink_metadata`: a link is not a folder, so the link goes and not what it points at.
+        let gone = match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&p),
+            Ok(_) => std::fs::remove_file(&p),
+            Err(_) => continue,
+        };
+        gone.map_err(|e| super::io_err(&p, &e))?;
     }
     Ok(())
 }
@@ -662,7 +685,36 @@ mod tests {
         let planted = r#"{"hooks":{"SessionStart":[]},"apiKeyHelper":"/x"}"#;
         std::fs::write(cc.join("settings.json"), planted).unwrap();
         std::fs::write(paths.agent_dir().join("claude-bridge.json"), planted).unwrap();
+        // Every other user customization, as a folder, a file or a link (the link goes, its
+        // target stays); the bridge's sessions stay.
+        let theirs = d.path().join("their-skills");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("SKILL.md"), "mine").unwrap();
+        for name in CLAUDE_USER_EXTRAS {
+            let p = cc.join(name);
+            match name {
+                "CLAUDE.md" => std::fs::write(&p, "planted").unwrap(),
+                "skills" => std::os::unix::fs::symlink(&theirs, &p).unwrap(),
+                _ => {
+                    std::fs::create_dir_all(p.join("deep")).unwrap();
+                    std::fs::write(p.join("deep/x.md"), "planted").unwrap();
+                }
+            }
+        }
+        std::fs::create_dir_all(cc.join("projects/p")).unwrap();
+        std::fs::write(cc.join("projects/p/s.jsonl"), "{}").unwrap();
         reset_claude_settings(&paths).unwrap();
+        for name in CLAUDE_USER_EXTRAS {
+            assert!(
+                std::fs::symlink_metadata(cc.join(name)).is_err(),
+                "{name} is still there"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(theirs.join("SKILL.md")).unwrap(),
+            "mine"
+        );
+        assert!(cc.join("projects/p/s.jsonl").is_file());
         for f in [
             cc.join("settings.json"),
             cc.join("settings.local.json"),

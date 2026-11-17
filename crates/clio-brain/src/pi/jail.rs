@@ -9,7 +9,8 @@
 //! - the prompt file, read-only, and the folder of the toolhost's socket (made for it alone),
 //!   the only way out to an effect;
 //! - the working copy, **read-only**: every change goes through the toolhost.
-//! - with the claude connector, the copy's `.claude/`, `.pi/` and `.mcp.json` covered, and Clio's
+//! - with the claude connector, the copy's `.claude/`, `.pi/` and `.mcp.json` covered read-only
+//!   (a copy where one is a link does not start), and Clio's
 //!   managed settings for Claude Code at `/etc/claude-code/managed-settings.json`, read-only.
 //!
 //! - the `clio` binary and the folder of the egress proxy's socket (see `net`): the only way out
@@ -18,7 +19,7 @@
 //!
 //! It fails closed: on Linux Pi starts only if `bwrap` works, the proxy starts, and a self-test
 //! from inside passes. `CLIO_PI_JAIL=off` is the only way around it, and `clio doctor` shows it
-//! as a FAIL.
+//! as a FAIL. With the claude connector there is no way around it: no jail, no Claude Code.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -84,12 +85,22 @@ pub struct PiJail {
 /// The policy. `Ok(None)`: Pi runs without a jail (switched off, or a system that cannot have
 /// one). `Err`: it must not start.
 pub fn prepare(l: &Launch) -> Result<Option<PiJail>, PiError> {
-    if switched_off() || !cfg!(target_os = "linux") {
+    if unjailed(l, switched_off(), cfg!(target_os = "linux"))? {
         return Ok(None);
     }
+    let bridge = l.provider.extension.is_some();
+    if bridge {
+        refuse_claude_links(&l.cwd)?;
+    }
     let refuse = |why: String| {
+        // With the bridge there is no way around it: `CLIO_PI_JAIL=off` is refused too.
+        let off = if bridge {
+            ""
+        } else {
+            ", o pon CLIO_PI_JAIL=off bajo tu responsabilidad"
+        };
         PiError::Spawn(format!(
-            "Pi no arranca: la jaula de Pi no se pudo preparar ({why}). Sin la jaula Pi tendría tus mismos permisos; instala bubblewrap (bwrap) y habilita los espacios de nombres de usuario, o pon CLIO_PI_JAIL=off bajo tu responsabilidad (ADR 0009)"
+            "Pi no arranca: la jaula de Pi no se pudo preparar ({why}). Sin la jaula Pi tendría tus mismos permisos; instala bubblewrap (bwrap) y habilita los espacios de nombres de usuario{off} (ADR 0009)"
         ))
     };
     let jail = Jail::detect().map_err(&refuse)?;
@@ -103,6 +114,41 @@ pub fn prepare(l: &Launch) -> Result<Option<PiJail>, PiError> {
     j.selftest(l).map_err(refuse)?;
     j.proxy.clear_denied();
     Ok(Some(j))
+}
+
+/// Whether Pi runs without a jail: only when it is switched off or the system cannot have one,
+/// and never with the Claude bridge, whose Claude Code would then run as the person on the
+/// working copy's settings (ADR 0009).
+fn unjailed(l: &Launch, off: bool, linux: bool) -> Result<bool, PiError> {
+    if !off && linux {
+        return Ok(false);
+    }
+    if l.provider.extension.is_none() {
+        return Ok(true);
+    }
+    Err(PiError::Spawn(if off {
+        "el conector claude necesita la jaula de Pi: quita CLIO_PI_JAIL=off (ADR 0009)".into()
+    } else {
+        "el conector claude necesita la jaula de Pi, que solo existe en Linux con bubblewrap (ADR 0009)".into()
+    }))
+}
+
+/// What the bridge's Claude Code (and the bridge) load from the working copy.
+const CLAUDE_PATHS: [&str; 3] = [".claude", ".pi", ".mcp.json"];
+
+/// `claude_masks` would mask a link's target as the host sees it, Claude Code follows it inside
+/// the jail: a copy with one of these as a link is not launched at all.
+fn refuse_claude_links(cwd: &Path) -> Result<(), PiError> {
+    for name in CLAUDE_PATHS {
+        let p = cwd.join(name);
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_symlink()) {
+            return Err(PiError::Spawn(format!(
+                "la copia de trabajo tiene {} como enlace simbólico: Clio no arranca Claude Code así",
+                p.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Where the proxy's folder goes: next to the toolhost's (both short-lived, both 0700, both in
@@ -358,26 +404,28 @@ impl PiJail {
 /// The bridge runs Claude Code in the working copy, and Claude Code (and the bridge) load code
 /// and settings from there: `.claude/` (hooks, `env`, `apiKeyHelper`), `.pi/claude-bridge.json`
 /// (another Claude Code binary, MCP turned back on) and `.mcp.json`. The copy is hostile content
-/// (ADR 0009): they are covered with an empty folder or `/dev/null`. A link is followed only to
-/// a target inside the copy; one outside it points at something the jail does not mount, or at
-/// Pi's own folders, which `launch::reset_claude_settings` empties. Claude Code also gets Clio's
-/// managed settings, read-only: no hook runs, whatever any other source says.
+/// (ADR 0009): they are covered with an empty, read-only folder or `/dev/null`. A link is never
+/// followed (`prepare` refuses a copy that has one). One that does not exist cannot be covered
+/// (`bwrap` would have to create it in the read-only copy); the copy is read-only in here and
+/// the toolhost does not write `.claude` or `.pi` (S-16). Claude Code also gets Clio's managed
+/// settings, read-only: no hook runs, whatever any other source says.
 fn claude_masks(a: &mut Vec<String>, l: &Launch) {
-    let inside = |name: &str| {
-        let root = l.cwd.canonicalize().ok()?;
-        let real = l.cwd.join(name).canonicalize().ok()?;
-        real.strip_prefix(&root).ok().map(|r| l.cwd.join(r))
+    let kind = |name: &str| {
+        std::fs::symlink_metadata(l.cwd.join(name))
+            .ok()
+            .map(|m| m.file_type())
     };
     for d in [".claude", ".pi"] {
-        if let Some(p) = inside(d).filter(|p| p.is_dir()) {
-            a.extend(["--tmpfs".into(), p.display().to_string()]);
+        if kind(d).is_some_and(|t| t.is_dir()) {
+            let p = l.cwd.join(d).display().to_string();
+            a.extend(["--tmpfs".into(), p.clone(), "--remount-ro".into(), p]);
         }
     }
-    if let Some(p) = inside(".mcp.json").filter(|p| p.is_file()) {
+    if kind(".mcp.json").is_some_and(|t| t.is_file()) {
         a.extend([
             "--ro-bind".into(),
             "/dev/null".into(),
-            p.display().to_string(),
+            l.cwd.join(".mcp.json").display().to_string(),
         ]);
     }
     a.extend([
@@ -432,8 +480,8 @@ mod tests {
     use crate::pi::install::{NodeInfo, PiInstall};
     use crate::pi::launch::SessionTarget;
 
-    fn args_for(connector: &str, cwd: &Path, data: &Path) -> Vec<String> {
-        let l = Launch {
+    fn launch_for(connector: &str, cwd: &Path, data: &Path) -> Launch {
+        Launch {
             install: PiInstall {
                 version: "1.4.0".into(),
                 dir: "/p/1.4.0".into(),
@@ -455,7 +503,11 @@ mod tests {
             guard_tools: vec![],
             extra_env: vec![],
             helper: "/p/clio".into(),
-        };
+        }
+    }
+
+    fn args_for(connector: &str, cwd: &Path, data: &Path) -> Vec<String> {
+        let l = launch_for(connector, cwd, data);
         let j = PiJail {
             bwrap: "/usr/bin/bwrap".into(),
             proxy: EgressProxy::start(data, "api.anthropic.com:443").unwrap(),
@@ -477,9 +529,15 @@ mod tests {
         let a = args_for("claude", &cwd, t.path());
         let at = |want: &[String]| a.windows(want.len()).position(|w| w == want).unwrap();
         let copy = at(&["--ro-bind".into(), s(&cwd), s(&cwd)]);
+        // Covered, and the cover is read-only: a writable tmpfs would take what a process in the
+        // jail puts there and show it to the next Claude Code of the session.
+        let ro = |d: &str| {
+            let p = s(&cwd.join(d));
+            vec!["--tmpfs".into(), p.clone(), "--remount-ro".into(), p]
+        };
         for want in [
-            vec!["--tmpfs".into(), s(&cwd.join(".claude"))],
-            vec!["--tmpfs".into(), s(&cwd.join(".pi"))],
+            ro(".claude"),
+            ro(".pi"),
             vec![
                 "--ro-bind".into(),
                 "/dev/null".into(),
@@ -497,7 +555,7 @@ mod tests {
                 "/etc/claude-code/managed-settings.json".into()
             ]
         ));
-        // A link to a folder outside the copy is not followed (that folder is not mounted).
+        // A link is never followed: its host target is not what Claude Code sees in the jail.
         std::fs::remove_dir(cwd.join(".pi")).unwrap();
         std::os::unix::fs::symlink("/usr", cwd.join(".pi")).unwrap();
         let a = args_for("claude", &cwd, t.path());
@@ -515,6 +573,56 @@ mod tests {
             1,
             "only /tmp: {o:?}"
         );
+    }
+
+    // ...and the launch refuses such a copy before any jail is built, whichever of the three it is.
+    #[test]
+    fn a_copy_with_a_claude_path_as_a_link_does_not_launch_the_bridge() {
+        let t = tempfile::tempdir().unwrap();
+        let cwd = t.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(t.path().join("elsewhere")).unwrap();
+        for name in CLAUDE_PATHS {
+            let link = cwd.join(name);
+            std::os::unix::fs::symlink(t.path().join("elsewhere"), &link).unwrap();
+            let Err(e) = prepare(&launch_for("claude", &cwd, t.path())) else {
+                panic!("{name} as a link: the bridge launched")
+            };
+            assert_eq!(
+                e.to_string(),
+                format!(
+                    "la copia de trabajo tiene {} como enlace simbólico: Clio no arranca Claude Code así",
+                    link.display()
+                )
+            );
+            std::fs::remove_file(&link).unwrap();
+        }
+        // A dangling link is a link too.
+        std::os::unix::fs::symlink("/nowhere", cwd.join(".claude")).unwrap();
+        assert!(refuse_claude_links(&cwd).is_err());
+        // Other connectors do not run Claude Code: no such check.
+        assert!(refuse_claude_links(&t.path().join("elsewhere")).is_ok());
+    }
+
+    // No jail, no Claude: switched off or impossible, the claude connector refuses; the others
+    // keep running without it, as before.
+    #[test]
+    fn without_a_jail_the_claude_connector_does_not_start_and_the_others_do() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = launch_for("claude", t.path(), t.path());
+        let msg = |r: Result<bool, PiError>| r.err().map(|e| e.to_string()).unwrap_or_default();
+        assert_eq!(
+            msg(unjailed(&claude, true, true)),
+            "el conector claude necesita la jaula de Pi: quita CLIO_PI_JAIL=off (ADR 0009)"
+        );
+        assert!(msg(unjailed(&claude, false, false)).contains("solo existe en Linux"));
+        assert!(!unjailed(&claude, false, true).unwrap());
+        for other in ["opencode", "anthropic-api"] {
+            let l = launch_for(other, t.path(), t.path());
+            assert!(unjailed(&l, true, true).unwrap(), "{other}");
+            assert!(unjailed(&l, false, false).unwrap(), "{other}");
+            assert!(!unjailed(&l, false, true).unwrap(), "{other}");
+        }
     }
 
     #[test]

@@ -582,6 +582,37 @@ fn connector_line(e: &Env, extra_env: &[(&str, &str)]) -> String {
         .to_owned()
 }
 
+// ADR 0009: with the claude connector Pi does not start without its jail; `CLIO_PI_JAIL=off`
+// is a FAIL that says so. Another connector: the same FAIL, without that.
+#[test]
+fn doctor_says_the_claude_connector_will_not_start_with_the_jail_off() {
+    let e = Env::new();
+    let jail_line = |e: &Env| {
+        let o = e
+            .cmd(&["doctor"])
+            .env("CLIO_PI_JAIL", "off")
+            .output()
+            .unwrap();
+        text(&o.stdout)
+            .lines()
+            .find(|l| l.contains("jaula de Pi"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let other = jail_line(&e);
+    assert!(
+        other.starts_with("FAIL") && other.contains("CLIO_PI_JAIL=off"),
+        "{other}"
+    );
+    assert!(!other.contains("conector"), "{other}");
+    use_claude(&e);
+    let claude = jail_line(&e);
+    assert!(
+        claude.starts_with("FAIL") && claude.contains("el conector claude NO arrancará sin ella"),
+        "{claude}"
+    );
+}
+
 #[test]
 fn doctor_says_a_connector_key_is_in_the_vault_and_where_it_may_go() {
     let e = Env::new();

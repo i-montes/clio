@@ -666,9 +666,16 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
     }
 }
 
-/// Pi's own jail (ADR 0009): on Linux Pi starts only inside it.
-fn pi_jail_line(o: &mut Report) {
+/// Pi's own jail (ADR 0009): on Linux Pi starts only inside it. With a connector that runs
+/// Claude Code (the bridge) Pi does not start without it at all, switched off or not.
+fn pi_jail_line(o: &mut Report, dirs: &Dirs) {
     use clio_brain::pi::jail::{Status, status};
+    let bridge = Config::load(dirs)
+        .ok()
+        .and_then(|c| by_provider(&c.model.provider))
+        .filter(|c| c.pi_extension.is_some())
+        .map(|c| c.name);
+    let no_claude = |name: &str| format!("; el conector {name} NO arrancará sin ella");
     match status() {
         Status::Ready(v) => o.say(
             Level::Pass,
@@ -677,14 +684,24 @@ fn pi_jail_line(o: &mut Report) {
         ),
         Status::Off => o.say(
             Level::Fail,
-            "jaula de Pi: CLIO_PI_JAIL=off, Pi corre con tus mismos permisos y puede ver el baúl y tus archivos".into(),
+            format!(
+                "jaula de Pi: CLIO_PI_JAIL=off, Pi corre con tus mismos permisos y puede ver el baúl y tus archivos{}",
+                bridge.map(no_claude).unwrap_or_default()
+            ),
             Some("Quita CLIO_PI_JAIL=off del entorno.".into()),
         ),
-        Status::Unsupported => o.say(
-            Level::Warn,
-            "jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap), Pi corre con tus mismos permisos".into(),
-            None,
-        ),
+        Status::Unsupported => match bridge {
+            Some(name) => o.say(
+                Level::Fail,
+                format!("jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap){}", no_claude(name)),
+                Some("Usa otro conector en este sistema, por ejemplo `clio connect opencode`.".into()),
+            ),
+            None => o.say(
+                Level::Warn,
+                "jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap), Pi corre con tus mismos permisos".into(),
+                None,
+            ),
+        },
         Status::Unavailable(why) => o.say(
             Level::Fail,
             format!("jaula de Pi: no puede arrancar aquí, Pi NO arrancará ({why})"),
@@ -864,7 +881,7 @@ pub fn collect(dirs: &Dirs) -> Report {
         o.say(level, msg, hint);
     }
     jail_lines(&mut o);
-    pi_jail_line(&mut o);
+    pi_jail_line(&mut o, dirs);
     match find_host_check() {
         Some(script) => {
             o.host_script = Some(script.display().to_string());
