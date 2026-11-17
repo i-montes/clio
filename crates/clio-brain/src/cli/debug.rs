@@ -65,16 +65,26 @@ pub fn env_enabled() -> bool {
     })
 }
 
-/// A scrubber that knows the model's API key (from its variable or the vault), so the key can
-/// never reach the debug view, the log or stderr. The key is read into memory only here; with
-/// no key to be had, it knows none.
+/// A scrubber that knows the model's API key, so the key can never reach the debug view, the log
+/// or stderr: every connector's variable if set (whatever the config says), plus the active
+/// connector's key from the vault. The key is read into memory only here. Each caller (a run, the
+/// sleep, the MCP host) calls it once per process, so the vault is asked once.
 pub fn scrubber(dirs: &Dirs) -> Scrubber {
+    scrubber_from(dirs, |n| std::env::var(n).ok())
+}
+
+fn scrubber_from(dirs: &Dirs, env: impl Fn(&str) -> Option<String>) -> Scrubber {
     let s = Scrubber::default();
-    let key = super::home::Config::load(dirs)
+    for c in clio_brain::connector::CONNECTORS.iter() {
+        if let Some(k) = env(c.key_env).filter(|k| !k.trim().is_empty()) {
+            s.add("model-api-key", k.trim());
+        }
+    }
+    let active = super::home::Config::load(dirs)
         .ok()
         .and_then(|c| clio_brain::connector::by_provider(&c.model.provider))
         .and_then(|c| super::vault::model_key(dirs, c).ok());
-    if let Some(k) = key {
+    if let Some(k) = active {
         s.add("model-api-key", k.expose());
     }
     s
@@ -366,6 +376,27 @@ impl Observer for Tee {
 mod tests {
     use super::*;
     use clio_canaries::Canaries;
+
+    // With no config at all, a key in either connector's variable is still struck out.
+    #[test]
+    fn a_key_in_any_connector_variable_is_scrubbed_without_a_config() {
+        let d = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            config: d.path().join("config"),
+            data: d.path().join("data"),
+            runs: d.path().join("data/runs"),
+            runtime: None,
+            home: d.path().to_path_buf(),
+        };
+        let sentinel = format!("sentinel-{}-{}", "key", "4242");
+        for var in ["OPENCODE_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            let s = scrubber_from(&dirs, |n| (n == var).then(|| format!(" {sentinel}\n")));
+            let out = s.scrub(&format!("x {sentinel} y"));
+            assert!(!out.contains(&sentinel), "{var}: {out}");
+        }
+        let none = scrubber_from(&dirs, |_| None).scrub(&format!("x {sentinel} y"));
+        assert!(none.contains(&sentinel));
+    }
 
     struct Sink(Arc<Mutex<Vec<Event>>>);
     impl Observer for Sink {
