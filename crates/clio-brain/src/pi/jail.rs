@@ -90,7 +90,7 @@ pub fn prepare(l: &Launch) -> Result<Option<PiJail>, PiError> {
     }
     let bridge = l.provider.extension.is_some();
     if bridge {
-        refuse_claude_links(&l.cwd)?;
+        refuse_odd_claude_paths(&l.cwd)?;
     }
     let refuse = |why: String| {
         // With the bridge there is no way around it: `CLIO_PI_JAIL=off` is refused too.
@@ -129,7 +129,7 @@ fn unjailed(l: &Launch, off: bool, linux: bool) -> Result<bool, PiError> {
     Err(PiError::Spawn(if off {
         "el conector claude necesita la jaula de Pi: quita CLIO_PI_JAIL=off (ADR 0009)".into()
     } else {
-        "el conector claude necesita la jaula de Pi, que solo existe en Linux con bubblewrap (ADR 0009)".into()
+        "el conector claude necesita la jaula de Pi, que solo existe en Linux con bubblewrap: usa otro conector en este sistema, por ejemplo `clio connect opencode` (ADR 0009)".into()
     }))
 }
 
@@ -137,16 +137,25 @@ fn unjailed(l: &Launch, off: bool, linux: bool) -> Result<bool, PiError> {
 const CLAUDE_PATHS: [&str; 3] = [".claude", ".pi", ".mcp.json"];
 
 /// `claude_masks` would mask a link's target as the host sees it, Claude Code follows it inside
-/// the jail: a copy with one of these as a link is not launched at all.
-fn refuse_claude_links(cwd: &Path) -> Result<(), PiError> {
+/// the jail: a copy with one of these as a link is not launched at all. Nor one whose `.mcp.json`
+/// is not a plain file (a folder or a FIFO): `/dev/null` is bound only over a plain file.
+fn refuse_odd_claude_paths(cwd: &Path) -> Result<(), PiError> {
     for name in CLAUDE_PATHS {
         let p = cwd.join(name);
-        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_symlink()) {
-            return Err(PiError::Spawn(format!(
-                "la copia de trabajo tiene {} como enlace simbólico: Clio no arranca Claude Code así",
-                p.display()
-            )));
-        }
+        let Ok(m) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        let what = if m.is_symlink() {
+            "como enlace simbólico"
+        } else if name == ".mcp.json" && !m.is_file() {
+            "y no es un archivo normal"
+        } else {
+            continue;
+        };
+        return Err(PiError::Spawn(format!(
+            "la copia de trabajo tiene {} {what}: Clio no arranca Claude Code así",
+            p.display()
+        )));
     }
     Ok(())
 }
@@ -405,7 +414,7 @@ impl PiJail {
 /// and settings from there: `.claude/` (hooks, `env`, `apiKeyHelper`), `.pi/claude-bridge.json`
 /// (another Claude Code binary, MCP turned back on) and `.mcp.json`. The copy is hostile content
 /// (ADR 0009): they are covered with an empty, read-only folder or `/dev/null`. A link is never
-/// followed (`prepare` refuses a copy that has one). One that does not exist cannot be covered
+/// followed (`prepare` refuses a copy that has one, and a `.mcp.json` that is not a plain file). One that does not exist cannot be covered
 /// (`bwrap` would have to create it in the read-only copy); the copy is read-only in here and
 /// the toolhost does not write `.claude` or `.pi` (S-16). Claude Code also gets Clio's managed
 /// settings, read-only: no hook runs, whatever any other source says.
@@ -577,7 +586,7 @@ mod tests {
 
     // ...and the launch refuses such a copy before any jail is built, whichever of the three it is.
     #[test]
-    fn a_copy_with_a_claude_path_as_a_link_does_not_launch_the_bridge() {
+    fn a_copy_with_a_claude_path_as_a_link_or_an_odd_mcp_json_does_not_launch_the_bridge() {
         let t = tempfile::tempdir().unwrap();
         let cwd = t.path().join("proj");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -599,9 +608,27 @@ mod tests {
         }
         // A dangling link is a link too.
         std::os::unix::fs::symlink("/nowhere", cwd.join(".claude")).unwrap();
-        assert!(refuse_claude_links(&cwd).is_err());
+        assert!(refuse_odd_claude_paths(&cwd).is_err());
+        std::fs::remove_file(cwd.join(".claude")).unwrap();
+        // A `.mcp.json` that is a folder or a FIFO would not be covered: refused too.
+        let mcp = cwd.join(".mcp.json");
+        let odd = format!(
+            "la copia de trabajo tiene {} y no es un archivo normal: Clio no arranca Claude Code así",
+            mcp.display()
+        );
+        std::fs::create_dir(&mcp).unwrap();
+        assert_eq!(refuse_odd_claude_paths(&cwd).unwrap_err().to_string(), odd);
+        std::fs::remove_dir(&mcp).unwrap();
+        let fifo = Command::new("mkfifo").arg(&mcp).status().unwrap();
+        assert!(fifo.success());
+        assert_eq!(refuse_odd_claude_paths(&cwd).unwrap_err().to_string(), odd);
+        std::fs::remove_file(&mcp).unwrap();
+        // Plain ones are fine.
+        std::fs::write(&mcp, "{}").unwrap();
+        std::fs::create_dir(cwd.join(".claude")).unwrap();
+        assert!(refuse_odd_claude_paths(&cwd).is_ok());
         // Other connectors do not run Claude Code: no such check.
-        assert!(refuse_claude_links(&t.path().join("elsewhere")).is_ok());
+        assert!(refuse_odd_claude_paths(&t.path().join("elsewhere")).is_ok());
     }
 
     // No jail, no Claude: switched off or impossible, the claude connector refuses; the others

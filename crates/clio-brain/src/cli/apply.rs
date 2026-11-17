@@ -605,6 +605,9 @@ mod tests {
             ".cargo/config.toml",
             "crates/x/.cargo/config.toml",
             ".devcontainer/devcontainer.json",
+            // MCP servers Claude Code starts from the project.
+            ".mcp.json",
+            "sub/.MCP.json",
             // The memory's project for this folder (and any below it).
             ".clio-project",
             "sub/.CLIO-project",

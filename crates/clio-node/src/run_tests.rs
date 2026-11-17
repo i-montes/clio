@@ -13,8 +13,9 @@ use std::time::Duration;
 /// the toolhost, the built-in agent and `apply` all use it. `.agents` is where Pi looks for
 /// project skills. The last five are loaded AND RUN by tools when a project is opened, built or
 /// committed: an editor's tasks, git hooks, cargo's config (runner, rustc wrapper), a dev
-/// container's commands.
-pub const READ_ONLY: [&str; 11] = [
+/// container's commands. `.mcp.json` is a file, not a folder: Claude Code (the claude connector)
+/// starts the MCP servers it names, and `exec` mounts an empty read-only placeholder for it too.
+pub const READ_ONLY: [&str; 12] = [
     "extensions",
     "skills",
     ".pi",
@@ -26,6 +27,7 @@ pub const READ_ONLY: [&str; 11] = [
     ".githooks",
     ".cargo",
     ".devcontainer",
+    ".mcp.json",
 ];
 
 /// `cargo_test` is NOT offered: a `cargo` under /usr is usually a rustup shim whose toolchains

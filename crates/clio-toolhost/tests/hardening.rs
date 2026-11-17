@@ -182,6 +182,48 @@ fn a_command_in_the_jail_cannot_write_the_folders_that_run_code_when_a_project_o
     }
 }
 
+// S-16: `.mcp.json` names MCP servers that Claude Code (the claude connector) starts from the copy
+// without asking. Neither a write nor a command may create it or change it, whether it exists
+// or not, and the command's placeholder is not left behind.
+#[test]
+fn nothing_the_host_runs_can_write_the_copys_mcp_json() {
+    let e = env(JailMode::Auto, None);
+    let mcp = e.work.join(".mcp.json");
+    let r = call(
+        &e.host,
+        "fs_write",
+        json!({"path": ".mcp.json", "content": "{}"}),
+    );
+    assert!(!r.ok && r.decision.rule == "S-16", "{r:?}");
+    assert!(!mcp.exists());
+    if let Err(why) = e.host.exec_available() {
+        eprintln!("SKIPPED the exec half (the jail cannot run here): {why}");
+        assert!(
+            std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+            "CLIO_REQUIRE_JAIL is set: {why}"
+        );
+        return;
+    }
+    let cmd = "echo {} > .mcp.json; echo rc=$?";
+    let r = call(&e.host, "exec", json!({ "command": cmd }));
+    assert!(r.ok && !r.content.contains("rc=0"), "{r:?}");
+    assert!(
+        std::fs::symlink_metadata(&mcp).is_err(),
+        "the placeholder or a file was left"
+    );
+    // One the person has: it stays as it was.
+    std::fs::write(&mcp, "theirs").unwrap();
+    let r = call(&e.host, "exec", json!({ "command": cmd }));
+    assert!(r.ok && !r.content.contains("rc=0"), "{r:?}");
+    let r = call(
+        &e.host,
+        "fs_write",
+        json!({"path": ".mcp.json", "content": "{}"}),
+    );
+    assert!(!r.ok && r.decision.rule == "S-16", "{r:?}");
+    assert_eq!(std::fs::read_to_string(&mcp).unwrap(), "theirs");
+}
+
 const GH: &str = concat!("ghp_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
 
 // Finding 1 (attack-52), S-18, S-44, S-57: a token inside an ordinary file reaches the model masked, and

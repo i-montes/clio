@@ -362,14 +362,17 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
 }
 
 /// Claude Code's managed settings inside the jail (ADR 0009): no source can widen them, so no hook
-/// runs, whoever wrote it (the working copy, a user setting, a plugin).
-pub const CLAUDE_POLICY: &str = r#"{"disableAllHooks": true, "allowManagedHooksOnly": true, "disableSkillShellExecution": true}"#;
+/// runs, whoever wrote it (the working copy, a user setting, a plugin), and no instructions file
+/// of the copy reaches the model as Claude Code's own: `CLAUDE.local.md` arrives as "private
+/// instructions" that "OVERRIDE any default behavior" (the bridge excludes only the other two).
+pub const CLAUDE_POLICY: &str = r#"{"disableAllHooks": true, "allowManagedHooksOnly": true, "disableSkillShellExecution": true, "claudeMdExcludes": ["**/CLAUDE.md", "**/CLAUDE.local.md", "**/.claude/rules/**"]}"#;
 
-/// What Claude Code loads from its user folder (`~/.claude`) besides the settings: instructions,
-/// skills, subagents, commands, hooks' scripts, output styles, plugins. None is Clio's.
-/// `projects/` stays: the bridge resumes its sessions from there.
-const CLAUDE_USER_EXTRAS: [&str; 7] = [
+/// What Claude Code loads from its user folder (`~/.claude`) besides the settings: instructions
+/// (`CLAUDE.md`, `rules/`), skills, subagents, commands, hooks' scripts, output styles, plugins.
+/// None is Clio's. `projects/` stays: the bridge resumes its sessions from there.
+const CLAUDE_USER_EXTRAS: [&str; 8] = [
     "CLAUDE.md",
+    "rules",
     "skills",
     "agents",
     "commands",
@@ -731,6 +734,12 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(paths.claude_policy()).unwrap()).unwrap();
         assert_eq!(policy["disableAllHooks"], true);
         assert_eq!(policy["allowManagedHooksOnly"], true);
+        assert!(
+            policy["claudeMdExcludes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("**/CLAUDE.local.md"))
+        );
         // `.claude` as a link to the person's own folder: the link goes, their settings stay.
         let theirs = d.path().join("theirs");
         std::fs::create_dir_all(&theirs).unwrap();
