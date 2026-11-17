@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::agent::{CommandModel, Model, Msg};
 use crate::memory_judge::MemoryJudge;
+use crate::pi::launch::Secret;
 use crate::pi::preprompt::Scrub;
 
 /// Tokens the model may spend in one night (sent and received).
@@ -51,12 +52,16 @@ impl ModelMerger {
     pub fn from_command(
         command: &[String],
         model: &str,
+        key: Option<Secret>,
         judge: Option<Arc<MemoryJudge>>,
         scrub: Scrub,
         budget: u64,
     ) -> Option<Self> {
         let (program, args) = command.split_first()?;
         let mut m = CommandModel::new(program, args, model);
+        if let Some(k) = key {
+            m = m.with_key(k);
+        }
         // A night has time; a model that does not answer must not hold it.
         m.backoff_ms = vec![5_000];
         m.max_tokens = 2048;

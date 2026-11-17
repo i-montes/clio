@@ -151,6 +151,107 @@ fn a_plain_http_url_to_another_host_is_refused_before_any_request() {
     }
 }
 
+fn adapter_path() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/models/openai_compat.py")
+}
+
+/// Runs the adapter with an empty environment plus `env`, feeding it `stdin`.
+fn run_adapter(env: &[(&str, &str)], home: Option<&Path>, stdin: &str) -> std::process::Output {
+    let mut c = Command::new("python3");
+    c.arg("-I")
+        .arg(adapter_path())
+        .env_clear()
+        .envs(env.iter().copied());
+    if let Some(h) = home {
+        c.env("HOME", h);
+    }
+    let mut child = c
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+// The key comes in an envelope on stdin, with no variable: the server it was sent to gets it.
+#[test]
+fn the_adapter_takes_the_key_from_the_envelope() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    serve_once(
+        l,
+        respond(
+            "200 OK",
+            "",
+            r#"{"choices":[{"message":{"content":"hi"}}],"usage":{}}"#,
+        ),
+        tx,
+    );
+    let envelope = format!(
+        r#"{{"key":"{KEY}","request":{{"model":"m","messages":[{{"role":"user","content":"x"}}]}}}}"#
+    );
+    let base = format!("http://127.0.0.1:{port}/v1");
+    let o = run_adapter(
+        &[("LLM_BASE_URL", &base), ("LLM_TIMEOUT_SECONDS", "10")],
+        None,
+        &envelope,
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let auth = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(auth.is_some_and(|a| a.contains(KEY)));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("hi"));
+}
+
+// A key is never read from a file: the one older versions read is there and is ignored.
+#[test]
+fn the_adapter_never_reads_the_old_key_file() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".config/clio");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("opencode-api-key"), KEY).unwrap();
+    std::fs::set_permissions(
+        dir.join("opencode-api-key"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let o = run_adapter(&[], Some(home.path()), r#"{"model":"m","messages":[]}"#);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        !o.status.success() && err.contains("OPENCODE_API_KEY"),
+        "{err}"
+    );
+    assert!(!err.contains(KEY));
+}
+
+// `LLM_BASE_URL` is the connector's own server or this machine: anything else is refused before
+// the key is read, let alone sent.
+#[test]
+fn llm_base_url_only_to_its_server_or_this_machine() {
+    let envelope = format!(r#"{{"key":"{KEY}","request":{{"model":"m","messages":[]}}}}"#);
+    for base in [
+        "https://evil.test/v1",
+        "https://opencode.ai.evil.test/v1",
+        "https://opencode.ai@evil.test/v1",
+        "http://opencode.ai/v1",
+    ] {
+        let o = run_adapter(&[("LLM_BASE_URL", base)], None, &envelope);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            !o.status.success() && err.contains("LLM_BASE_URL"),
+            "{base}: {err}"
+        );
+        assert!(!err.contains(KEY));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The attack case of this file, through clio-attacks (the gate of the battery)
 // ---------------------------------------------------------------------------------------------

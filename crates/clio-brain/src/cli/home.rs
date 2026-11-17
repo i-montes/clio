@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use clio_brain::connector::{Connector, by_provider};
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
+use clio_brain::pi::launch::Secret;
 use serde::{Deserialize, Serialize};
 
 use super::ui::{Level, Style};
@@ -212,14 +214,30 @@ impl Config {
         Ok(cfg)
     }
 
-    /// The model adapter's program and arguments as a run starts it: the adapter inside this
-    /// binary (`names_builtin_adapter`) as `python3 <its copy>`, any other command as written.
+    /// The connector of `model.provider` (`load` checks that there is one).
+    fn connector(&self) -> Res<&'static Connector> {
+        by_provider(&self.model.provider)
+            .ok_or_else(|| format!("model.provider {:?} no es un conector", self.model.provider))
+    }
+
+    /// The model adapter's program and arguments as a run starts it: the adapter of the active
+    /// connector, inside this binary (`names_builtin_adapter`), as `python3 <its copy>`, any
+    /// other command as written.
     pub fn model_command(&self, dirs: &Dirs) -> Res<Vec<String>> {
         if names_builtin_adapter(&self.model.command) {
-            let p = builtin_adapter(dirs)?;
+            let p = builtin_adapter(dirs, self.connector()?)?;
             return Ok(vec!["python3".into(), p.display().to_string()]);
         }
         Ok(self.model.command.clone())
+    }
+
+    /// The model key for `command` (as `model_command` returned it): only the adapter inside this
+    /// binary gets it, in its envelope; the person's own command never does.
+    pub fn model_key(&self, dirs: &Dirs, command: &[String]) -> Res<Option<Secret>> {
+        if !names_builtin_adapter(command) {
+            return Ok(None);
+        }
+        super::vault::model_key(dirs, self.connector()?).map(Some)
     }
 
     /// The system prompt (name for the trace, text) for `model.prompt`. The default one becomes
@@ -260,11 +278,13 @@ pub fn key_status(dirs: &Dirs) -> KeyStatus {
     }
 }
 
-/// The file name of the adapter that travels inside this binary.
+/// The file name of the OpenCode adapter that travels inside this binary.
 const ADAPTER_FILE: &str = "openai_compat.py";
+/// The file names of the adapters that travel inside this binary, one per connector.
+const ADAPTER_FILES: [&str; 2] = [ADAPTER_FILE, "anthropic_oauth.py"];
 
-/// Whether `command` names the adapter inside this binary: empty (what `init` writes), or
-/// `python3` and an `openai_compat.py` in an `adapters/` folder, which is what older versions of
+/// Whether `command` names an adapter inside this binary: empty (what `init` writes), or
+/// `python3` and one of their files in an `adapters/` folder, which is what older versions of
 /// `init` wrote (a checkout's file, or the copy in the data folder). That path is not run: it can
 /// be gone (the checkout moved) or changed, and the adapter receives the model key on every call
 /// and runs outside the jail.
@@ -273,7 +293,8 @@ pub fn names_builtin_adapter(command: &[String]) -> bool {
         [] => true,
         [python, script] if python == "python3" => {
             let p = Path::new(script);
-            p.file_name().is_some_and(|n| n == ADAPTER_FILE)
+            p.file_name()
+                .is_some_and(|n| ADAPTER_FILES.iter().any(|f| n == *f))
                 && p.ancestors()
                     .any(|a| a.file_name().is_some_and(|n| n == "adapters"))
         }
@@ -286,17 +307,26 @@ pub fn builtin_adapter_path(dirs: &Dirs) -> PathBuf {
     dirs.data.join("adapters").join(ADAPTER_FILE)
 }
 
-/// The adapter inside this binary, on disk: written private, and written again when the file
-/// differs (a newer Clio brings its adapter along). `CLIO_ADAPTER` puts another script in its
-/// place (for working on the adapter).
-fn builtin_adapter(dirs: &Dirs) -> Res<PathBuf> {
+/// The source of the adapter of connector `c`, which travels inside this binary.
+fn adapter_source(c: &Connector) -> Res<&'static str> {
+    match c.adapter {
+        ADAPTER_FILE => Ok(ADAPTER_SOURCE),
+        _ => Err(format!("el adaptador de {} todavía no está", c.name)),
+    }
+}
+
+/// The adapter of connector `c` inside this binary, on disk: written private, and written again
+/// when the file differs (a newer Clio brings its adapter along). `CLIO_ADAPTER` puts another
+/// script in its place (for working on the adapter).
+fn builtin_adapter(dirs: &Dirs, c: &Connector) -> Res<PathBuf> {
     if let Some(p) = std::env::var_os("CLIO_ADAPTER") {
         return Ok(PathBuf::from(p));
     }
-    let p = builtin_adapter_path(dirs);
-    if std::fs::read_to_string(&p).ok().as_deref() != Some(ADAPTER_SOURCE) {
+    let source = adapter_source(c)?;
+    let p = dirs.data.join("adapters").join(c.adapter);
+    if std::fs::read_to_string(&p).ok().as_deref() != Some(source) {
         mkdir_private(&dirs.data.join("adapters"))?;
-        write_private(&p, ADAPTER_SOURCE.as_bytes())?;
+        write_private(&p, source.as_bytes())?;
     }
     Ok(p)
 }
@@ -397,6 +427,10 @@ mod tests {
             "python3",
             "/home/ana/.local/share/clio/adapters/openai_compat.py"
         ])));
+        assert!(names_builtin_adapter(&cmd(&[
+            "python3",
+            "/home/ana/.local/share/clio/adapters/anthropic_oauth.py"
+        ])));
         // Anything else is the person's own adapter, run as written.
         for other in [
             cmd(&["python3", "/home/ana/mi_adaptador.py"]),
@@ -439,5 +473,14 @@ mod tests {
         // The person's own command is left as it is.
         c.model.command = cmd(&["python3", "/home/ana/mi_adaptador.py"]);
         assert_eq!(c.model_command(&dirs).unwrap(), c.model.command);
+        // Only the adapter inside this binary is handed the key.
+        assert!(c.model_key(&dirs, &c.model.command).unwrap().is_none());
+        // The claude adapter is not in this binary yet.
+        c.model.command = Vec::new();
+        c.model.provider = "claude".into();
+        assert_eq!(
+            c.model_command(&dirs).unwrap_err(),
+            "el adaptador de claude todavía no está"
+        );
     }
 }

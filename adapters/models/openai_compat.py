@@ -2,9 +2,10 @@
 """The model adapter of Clio (also the program behind `clio-bench real|record --cmd`): reads a Request as JSON on stdin, asks an
 OpenAI-compatible chat completions API, writes a Response as JSON on stdout.
 
-The key comes from the environment (OPENCODE_API_KEY) or, when that is not set, from
-~/.config/clio/opencode-api-key (mode 0600; a file others can read is refused). It is never
-printed. Defaults point at OpenCode Go; LLM_BASE_URL changes the API. Standard library only.
+The key comes in an envelope on stdin, {"key": ..., "request": <Request>}, which is how Clio calls
+it; given a bare Request it comes from the environment (OPENCODE_API_KEY), which is how the bench
+calls it. It is never read from a file and never printed. Defaults point at OpenCode Go;
+LLM_BASE_URL changes the API, but only to that server or to this machine. Standard library only.
 """
 import json
 import os
@@ -28,12 +29,14 @@ def fail(message: str) -> None:
 
 
 def check_base() -> None:
-    """The key travels in a header: over TLS, or to this machine. `http://` to another host (or any
-    other scheme, `file://` included) would send it readable, or somewhere unintended."""
+    """The key travels in a header: to OpenCode over TLS, or to this machine. Any other host (an
+    `http://` one, or any other scheme, `file://` included) would get it readable, or be somewhere
+    unintended."""
     u = urllib.parse.urlsplit(BASE)
     local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
-    if u.scheme != "https" and not local:
-        fail("LLM_BASE_URL must be https (http only for 127.0.0.1 or localhost)")
+    own = u.scheme == "https" and u.hostname == "opencode.ai"
+    if not own and not local:
+        fail("LLM_BASE_URL must be https://opencode.ai/... (or http://127.0.0.1 or localhost)")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -44,27 +47,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def read_key() -> str:
-    key = os.environ.get("OPENCODE_API_KEY")
-    if key:
-        return key
-    path = os.path.expanduser("~/.config/clio/opencode-api-key")
-    try:
-        if os.stat(path).st_mode & 0o077:
-            fail(f"{path} must not be readable by group or others (chmod 600)")
-        with open(path) as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        fail("OPENCODE_API_KEY is not set and ~/.config/clio/opencode-api-key does not exist")
-    return ""
-
-
 check_base()
-key = read_key()
+sent = json.load(sys.stdin)
+if "key" in sent and "request" in sent:
+    key, request = sent["key"], sent["request"]
+else:
+    key, request = os.environ.get("OPENCODE_API_KEY"), sent
 if not key:
-    fail("the API key is empty")
+    fail("the API key is missing: Clio sends it in the envelope, or set OPENCODE_API_KEY")
 
-request = json.load(sys.stdin)
 body = {
     "model": request["model"],
     "messages": request["messages"],

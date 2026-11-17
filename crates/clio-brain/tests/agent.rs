@@ -12,7 +12,7 @@ use clio_brain::agent::{
 use clio_brain::control::Stop;
 use clio_contract::{Contract, State};
 use clio_core::{Clock, FixedClock, Level};
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn tasks() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/bench/tasks/real")
@@ -391,6 +391,38 @@ print(json.dumps({"content": "{\"final\": \"ok\"}", "input_tokens": 3, "output_t
     );
     bad.backoff_ms = vec![1, 1];
     assert!(bad.complete(&[]).unwrap_err().contains("exit"));
+}
+
+#[test]
+fn the_key_travels_in_the_envelope_only_when_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("stdin.json");
+    let run = |key: Option<&str>| -> Value {
+        let mut m = CommandModel::new(
+            "sh",
+            &[
+                "-c".into(),
+                format!(
+                    r#"cat > '{}'; echo '{{"content":"","input_tokens":0,"output_tokens":0}}'"#,
+                    out.display()
+                ),
+            ],
+            "m",
+        );
+        m.backoff_ms = vec![];
+        if let Some(k) = key {
+            m = m.with_key(clio_brain::pi::launch::Secret::new(k));
+        }
+        m.complete(&[]).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap()
+    };
+    let with = run(Some("sk-envelope"));
+    assert_eq!(with["key"], "sk-envelope");
+    assert_eq!(with["request"]["model"], "m");
+    assert!(with.get("model").is_none());
+    let without = run(None);
+    assert_eq!(without["model"], "m");
+    assert!(without.get("key").is_none() && without.get("request").is_none());
 }
 
 // S-47 (second audit, finding 5): the time cap is useless if a call to the model program can wait

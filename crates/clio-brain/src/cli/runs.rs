@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use clio_brain::agent::{AgentConfig, AgentLoop, CommandModel, Event, MemoryInput, Observer};
 use clio_brain::control::OutputFilter;
 use clio_brain::memory_link::{EmbedModel, MemoryLink, RunFacts};
+use clio_brain::pi::launch::Secret;
 use clio_brain::pi::text;
 use clio_core::SystemClock;
 use serde::{Deserialize, Serialize};
@@ -345,6 +346,8 @@ pub struct Prepared {
     pub jail: bool,
     pub jail_note: String,
     program: String,
+    /// The model key, for the adapter inside Clio only.
+    key: Option<Secret>,
 }
 
 /// A run id: the second it started and four random hex digits, asking `taken` until one is free.
@@ -379,6 +382,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     let mut cfg = Config::load(dirs)?;
     // From here on the command is the one that runs (the built-in adapter resolved to its copy).
     cfg.model.command = cfg.model_command(dirs)?;
+    let key = cfg.model_key(dirs, &cfg.model.command)?;
     let ws = work::validate(&o.workspace, dirs)?;
     let (mf, mb) = if o.allow_broad {
         (u64::MAX, u64::MAX)
@@ -428,6 +432,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         jail: jail.ready(),
         jail_note: jail.summary(),
         program,
+        key,
         data: dirs.data.clone(),
         model: clio_brain::memory_daemon::shared(&dirs.data, EmbedModel::of_home(&dirs.home)),
     })
@@ -521,6 +526,9 @@ pub fn execute(
         }),
     }
     let mut model = CommandModel::new(&p.program, &cfg.model.command[1..], &cfg.model.model);
+    if let Some(k) = &p.key {
+        model = model.with_key(k.clone());
+    }
     let mut outcome = agent.run(&mut model, instruction)?;
     // What the model said can carry a secret it was shown or made up: scrub what is saved and shown.
     // ...and what it said is shown on a terminal: no escape sequences or hidden characters either.

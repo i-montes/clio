@@ -186,9 +186,43 @@ fn a_vault_that_cannot_clean_the_text_sends_nothing() {
 
 #[test]
 fn no_configured_model_still_sleeps_without_merging() {
-    assert!(ModelMerger::from_command(&[], "modelo", None, clean(), 1_000).is_none());
+    assert!(ModelMerger::from_command(&[], "modelo", None, None, clean(), 1_000).is_none());
     let cmd = vec!["adapters/models/cualquiera.py".to_owned()];
-    assert!(ModelMerger::from_command(&cmd, "modelo", None, clean(), 1_000).is_some());
+    assert!(ModelMerger::from_command(&cmd, "modelo", None, None, clean(), 1_000).is_some());
+}
+
+// Without the vault or a key variable the night still sleeps and says it does not merge.
+#[test]
+fn without_the_vault_the_night_sleeps_without_merging() {
+    let t = tempfile::tempdir().unwrap();
+    for d in ["home", "run"] {
+        std::fs::create_dir(t.path().join(d)).unwrap();
+    }
+    std::fs::write(t.path().join("host-check.sh"), "exit 0\n").unwrap();
+    let clio = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_clio"))
+            .args(args)
+            .env("HOME", t.path().join("home"))
+            .env("XDG_RUNTIME_DIR", t.path().join("run"))
+            .env("CLIO_SKIP_PI_INSTALL", "1")
+            .env("CLIO_HOST_CHECK", t.path().join("host-check.sh"))
+            .env_remove("OPENCODE_API_KEY")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+            .env_remove("CLIO_ADAPTER")
+            .current_dir(t.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert!(clio(&["init"]).status.success());
+    let o = clio(&["memory", "sleep", "--now"]);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        o.status.success(),
+        "{out}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(out.contains("sin modelo para unir"), "{out}");
 }
 
 /// A bag of words: two texts that share most words are near.

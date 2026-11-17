@@ -21,10 +21,11 @@ use clio_node::{Action as NodeAction, EffectLog, Registry, Sandbox};
 use clio_triage::{PersonMessage, TriageInput, Triager};
 use clio_vault::Scrubber;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::control::{Budget, Controller, DayBudget, OutputFilter, Stop};
+use crate::pi::launch::Secret;
 use crate::verify::{Checklist, Criterion, ExternalSignal, Scope, Signal};
 
 /// One chat message. Same JSON as the bench's `Request` messages.
@@ -104,6 +105,9 @@ pub struct CommandModel {
     pub timeout: std::time::Duration,
     /// Retries done by the last `complete`.
     pub last_retries: u32,
+    /// The model key, for the adapter inside Clio: it travels in an envelope on stdin, never in
+    /// the arguments or the environment.
+    key: Option<Secret>,
 }
 
 /// Most a model program may print: an answer is a few kilobytes, and a program that floods its
@@ -120,7 +124,15 @@ impl CommandModel {
             backoff_ms: vec![5_000, 20_000, 60_000],
             timeout: std::time::Duration::from_secs(180),
             last_retries: 0,
+            key: None,
         }
+    }
+
+    /// Sends `{"key", "request"}` instead of the bare request.
+    #[must_use]
+    pub fn with_key(mut self, key: Secret) -> Self {
+        self.key = Some(key);
+        self
     }
 
     fn once(&self, messages: &[Msg]) -> Result<Reply, String> {
@@ -132,12 +144,16 @@ impl CommandModel {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| fail(e.to_string()))?;
-        let body = serde_json::to_vec(&WireRequest {
+        let request = WireRequest {
             model: &self.model,
             messages,
             tools: vec![],
             max_tokens: Some(self.max_tokens),
-        })
+        };
+        let body = match &self.key {
+            Some(k) => serde_json::to_vec(&json!({"key": k.expose(), "request": request})),
+            None => serde_json::to_vec(&request),
+        }
         .map_err(|e| fail(e.to_string()))?;
         // The program is fed and read on threads of their own and waited for with a deadline: one
         // that never reads its input or never ends must not hold this call (or the task) for ever.

@@ -19,6 +19,8 @@ use super::{debug, jev, vault};
 fn merger(dirs: &Dirs) -> Option<ModelMerger> {
     let cfg = Config::load(dirs).ok()?;
     let command = cfg.model_command(dirs).ok()?;
+    // No key (no variable, no vault): no merges tonight, the sleep goes on.
+    let secret = cfg.model_key(dirs, &command).ok()?;
     let socket = vault::gateway_socket(dirs).ok()?;
     let client = VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
     // The vault's cleaning, then the model's own key (it lives outside the vault).
@@ -33,7 +35,14 @@ fn merger(dirs: &Dirs) -> Option<ModelMerger> {
         jev::client(dirs, &cfg.jev)
     })?
     .map(|j| Arc::new(MemoryJudge::new(j, scrub.clone())));
-    ModelMerger::from_command(&command, &cfg.model.model, judge, scrub, SLEEP_TOKENS)
+    ModelMerger::from_command(
+        &command,
+        &cfg.model.model,
+        secret,
+        judge,
+        scrub,
+        SLEEP_TOKENS,
+    )
 }
 
 /// Jev for the merges: `Some(None)` when it is off, `Some(Some(_))` when it is on and there, and
