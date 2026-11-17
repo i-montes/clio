@@ -12,12 +12,16 @@ The script is a JSON list; each item is one reply:
     {"text": "hello"}                                   plain answer
     {"text": "...", "usage": [100, 5]}                  with [prompt_tokens, completion_tokens]
     {"tool_calls": [{"name": "t", "arguments": {...}}]} the model asks for tools
+    {"tool_calls": [{"id": "x", "name": "t", ...}]}     with that call id (default call_N / toolu_fake_N)
+    {"thinking": "...", ...}                            streamed reasoning before the answer
     {"status": 500, "body": "boom"}                     an HTTP error
     {"delay_ms": 200, ...}                              wait before answering (any item)
     {"hang": true}                                      never answer (for timeout tests)
 
 POST .../v1/messages answers in Anthropic's format (the same script items: "text", "usage" as
-[input_tokens, output_tokens], "status"), plain or with `stream: true`. With --log-body each log
+[input_tokens, output_tokens], "status", "tool_calls" as `tool_use` blocks, "thinking" as a
+`thinking` block signed with "signature", default "sig-fake"), plain or with `stream: true`.
+In the OpenAI format "thinking" streams as `reasoning_content`. With --log-body each log
 line also has the request's JSON body ("body"; the Authorization header is still never written).
 
 Both `stream: true` (SSE, what Pi uses) and plain JSON answers are supported. The log has one
@@ -48,13 +52,32 @@ def usage_of(item):
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
+def call_id(c, k, prefix="call_"):
+    return c.get("id", "%s%d" % (prefix, k))
+
+
+def anthropic_blocks(item):
+    """The content blocks of an Anthropic reply: thinking, text, then tool_use."""
+    blocks = []
+    if "thinking" in item:
+        blocks.append({"type": "thinking", "thinking": item["thinking"],
+                       "signature": item.get("signature", "sig-fake")})
+    calls = item.get("tool_calls", [])
+    if item.get("text") or not (blocks or calls):
+        blocks.append({"type": "text", "text": item.get("text") or ""})
+    for k, c in enumerate(calls):
+        blocks.append({"type": "tool_use", "id": call_id(c, k, "toolu_fake_"), "name": c["name"],
+                       "input": c.get("arguments", {})})
+    return blocks
+
+
 def message_of(item):
     msg = {"role": "assistant", "content": item.get("text")}
     calls = item.get("tool_calls")
     if calls:
         msg["tool_calls"] = [
             {
-                "id": "call_%d" % k,
+                "id": call_id(c, k),
                 "type": "function",
                 "function": {"name": c["name"], "arguments": json.dumps(c.get("arguments", {}))},
             }
@@ -97,11 +120,12 @@ def make_handler(script, log_path, expect_key, log_body=False):
 
         def _anthropic(self, req, item):
             p, c = item.get("usage", [10, 2])
-            model, text = req.get("model", "fake"), item.get("text") or ""
+            model, blocks = req.get("model", "fake"), anthropic_blocks(item)
+            stop = "tool_use" if item.get("tool_calls") else "end_turn"
             if not req.get("stream"):
                 return self._send(200, json.dumps({
                     "id": "msg_fake", "type": "message", "role": "assistant", "model": model,
-                    "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
+                    "content": blocks, "stop_reason": stop,
                     "usage": {"input_tokens": p, "output_tokens": c}}))
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -116,10 +140,22 @@ def make_handler(script, log_path, expect_key, log_body=False):
             event("message_start", {"message": {"id": "msg_fake", "type": "message", "role": "assistant",
                                                 "model": model, "content": [],
                                                 "usage": {"input_tokens": p, "output_tokens": 1}}})
-            event("content_block_start", {"index": 0, "content_block": {"type": "text", "text": ""}})
-            event("content_block_delta", {"index": 0, "delta": {"type": "text_delta", "text": text}})
-            event("content_block_stop", {"index": 0})
-            event("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": c}})
+            for i, b in enumerate(blocks):
+                if b["type"] == "thinking":
+                    start = {"type": "thinking", "thinking": "", "signature": ""}
+                    deltas = [{"type": "thinking_delta", "thinking": b["thinking"]},
+                              {"type": "signature_delta", "signature": b["signature"]}]
+                elif b["type"] == "tool_use":
+                    start = dict(b, input={})
+                    deltas = [{"type": "input_json_delta", "partial_json": json.dumps(b["input"])}]
+                else:
+                    start = {"type": "text", "text": ""}
+                    deltas = [{"type": "text_delta", "text": b["text"]}]
+                event("content_block_start", {"index": i, "content_block": start})
+                for d in deltas:
+                    event("content_block_delta", {"index": i, "delta": d})
+                event("content_block_stop", {"index": i})
+            event("message_delta", {"delta": {"stop_reason": stop}, "usage": {"output_tokens": c}})
             event("message_stop", {})
             self.close_connection = True
 
@@ -127,7 +163,9 @@ def make_handler(script, log_path, expect_key, log_body=False):
             n = int(self.headers.get("Content-Length") or 0)
             req = json.loads(self.rfile.read(n) or b"{}")
             if log_path:
-                headers = {k.lower(): v for k, v in self.headers.items() if k.lower() != "authorization"}
+                # Neither carrier of a key is ever written (Anthropic API keys travel in x-api-key).
+                headers = {k.lower(): v for k, v in self.headers.items()
+                           if k.lower() not in ("authorization", "x-api-key")}
                 headers["authorization_present"] = self.headers.get("Authorization") is not None
                 headers["authorization_matches"] = (
                     expect_key is not None and self.headers.get("Authorization") == "Bearer " + expect_key
@@ -145,8 +183,10 @@ def make_handler(script, log_path, expect_key, log_body=False):
                     entry["body"] = req
                 with LOCK, open(log_path, "a") as f:
                     f.write(json.dumps(entry) + "\n")
-            anthropic = self.path.rstrip("/").endswith("/v1/messages")
-            if not anthropic and not self.path.rstrip("/").endswith("/chat/completions"):
+            # The Anthropic SDK may add a query (`?beta=true` for OAuth).
+            route = self.path.split("?")[0].rstrip("/")
+            anthropic = route.endswith("/v1/messages")
+            if not anthropic and not route.endswith("/chat/completions"):
                 return self._send(404, "{}")
             item = reply_for(script)
             if item.get("hang"):
@@ -184,11 +224,13 @@ def make_handler(script, log_path, expect_key, log_body=False):
                 self.wfile.flush()
 
             chunk({"role": "assistant", "content": ""})
+            if item.get("thinking"):
+                chunk({"reasoning_content": item["thinking"]})
             text = item.get("text") or ""
             for k in range(0, len(text), 8):
                 chunk({"content": text[k:k + 8]})
             for k, c in enumerate(item.get("tool_calls", [])):
-                chunk({"tool_calls": [{"index": k, "id": "call_%d" % k, "type": "function",
+                chunk({"tool_calls": [{"index": k, "id": call_id(c, k), "type": "function",
                                        "function": {"name": c["name"],
                                                     "arguments": json.dumps(c.get("arguments", {}))}}]})
             chunk({}, finish)

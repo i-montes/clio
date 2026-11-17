@@ -31,6 +31,11 @@ struct World {
 
 impl World {
     fn new(script: &str) -> Self {
+        Self::new_with(script, &[])
+    }
+
+    /// Like `new`, with more flags for the fake server (`--log-body`).
+    fn new_with(script: &str, flags: &[&str]) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let r = tmp.path();
         for d in ["home", "run", "proj"] {
@@ -42,7 +47,7 @@ impl World {
         )
         .unwrap();
         std::fs::write(r.join("proj/app.py"), "print('hola')\n").unwrap();
-        let provider = FakeProvider::start(r, script, Some(&decoy()));
+        let provider = FakeProvider::start_with(r, script, Some(&decoy()), flags);
         let w = Self {
             tmp,
             _provider: provider,
@@ -101,14 +106,28 @@ impl World {
     }
 
     fn pty(&self, scenario: &str) -> Value {
-        let cfg = json!({
+        self.pty_with(scenario, json!({}), &[], &decoy())
+    }
+
+    /// `pty` with more driver settings in `extra`, more variables, and the `key` that must reach
+    /// no screen.
+    fn pty_with(&self, scenario: &str, extra: Value, env: &[(&str, &str)], key: &str) -> Value {
+        let mut vars = self
+            .envs()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        vars.extend(env.iter().map(|(k, v)| (*k, (*v).to_owned())));
+        let mut cfg = json!({
             "clio": CLIO,
             "cwd": self.root().join("proj").display().to_string(),
             "root": self.root().display().to_string(),
             "dump": self.root().join("screen.txt").display().to_string(),
-            "key": decoy(),
-            "env": self.envs().into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+            "key": key,
+            "env": vars,
         });
+        cfg.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pty_chat_driver.py");
         let o = Command::new("python3")
             .arg("-I")
@@ -148,10 +167,14 @@ impl World {
     }
 
     fn assert_key_nowhere(&self) {
+        self.assert_nowhere(&decoy());
+    }
+
+    fn assert_nowhere(&self, key: &str) {
         for f in self.files() {
             let b = std::fs::read(&f).unwrap();
             assert!(
-                !String::from_utf8_lossy(&b).contains(&decoy()),
+                !String::from_utf8_lossy(&b).contains(key),
                 "the API key is in {}",
                 f.display()
             );
@@ -1018,4 +1041,186 @@ fn closing_a_session_of_four_messages_saves_its_summary() {
     );
     assert_eq!(link.place_label(summary), "proyecto proj");
     assert!(summary.title.as_deref().unwrap().starts_with("Sesión "));
+}
+
+/// A Claude OAuth token decoy (Pi takes `sk-ant-oat` as OAuth), built at run time.
+fn claude_token() -> String {
+    format!("sk-ant-oat01-decoy-{}-{}", "key", "3333")
+}
+
+/// Points `config.json` at a connector (`opencode-go` or `claude`) served by a fake server.
+fn use_connector(w: &World, provider: &str, base_url: &str) {
+    let cfg_path = w.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["model"]["provider"] = json!(provider);
+    cfg["model"]["base_url"] = json!(base_url);
+    std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+}
+
+/// A fake Anthropic server, logging bodies, under `<root>/claude`.
+fn fake_claude(w: &World, script: &Value) -> FakeProvider {
+    let dir = w.root().join("claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    FakeProvider::start_with(&dir, &script.to_string(), None, &["--log-body"])
+}
+
+/// The body of the first request whose JSON contains `text`.
+fn body_with(p: &FakeProvider, text: &str) -> Value {
+    let reqs = p.requests();
+    reqs.iter()
+        .map(|r| r["body"].clone())
+        .find(|b| b.to_string().contains(text))
+        .unwrap_or_else(|| panic!("no request carried {text:?}: {reqs:#?}"))
+}
+
+/// Turn 1 in a new session, which is then left.
+fn first_turn(w: &World, env: &[(&str, &str)], key: &str) {
+    let v = w.pty_with(
+        "one_turn",
+        json!({"ask": "primera pregunta", "answer": "primera respuesta"}),
+        env,
+        key,
+    );
+    ok(&v, &["opened", "answered"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+}
+
+/// Turn 2 in the same session, reopened from the selector.
+fn reopen(w: &World, env: &[(&str, &str)], key: &str) {
+    let v = w.pty_with(
+        "reopen_turn",
+        json!({"row": "primera pregunta", "ask": "segunda pregunta", "answer": "segunda respuesta"}),
+        env,
+        key,
+    );
+    ok(&v, &["selector", "row_listed", "reopened", "answered"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+}
+
+fn messages(body: &Value) -> &Vec<Value> {
+    body["messages"].as_array().unwrap()
+}
+
+// A session goes on with the connector of now: Pi drops the other model's reasoning and makes
+// its tool-call ids valid for Anthropic.
+#[test]
+fn a_session_moves_from_opencode_to_claude() {
+    if can_run("opencode_to_claude", true).is_none() {
+        return;
+    }
+    // An id Anthropic would refuse: `|`, `/`, `+`, `=` and more than 64 characters.
+    let odd_id = format!("call_7|fc/{}+=", "x".repeat(80));
+    let w = World::new_with(
+        &json!([
+            {"thinking": "razonamiento de opencode", "tool_calls": [
+                {"id": odd_id, "name": "read", "arguments": {"reason": "leer", "path": "app.py"}}]},
+            {"thinking": "razonamiento final de opencode", "text": "primera respuesta"},
+        ])
+        .to_string(),
+        &["--log-body"],
+    );
+    first_turn(&w, &[], &decoy());
+    // Not vacuous: Pi kept the reasoning and gave it back to the same model.
+    body_with(&w._provider, "razonamiento de opencode");
+    let claude = fake_claude(&w, &json!([{"text": "segunda respuesta"}]));
+    use_connector(&w, "claude", claude.base_url.trim_end_matches("/v1"));
+    let tok = claude_token();
+    reopen(&w, &[("CLAUDE_CODE_OAUTH_TOKEN", &tok)], &tok);
+
+    let body = body_with(&claude, "segunda pregunta");
+    let text = body.to_string();
+    assert!(!text.contains("razonamiento"), "{body:#}");
+    let msgs = messages(&body);
+    let mut tool_uses = 0;
+    for (i, m) in msgs.iter().enumerate() {
+        for b in m["content"].as_array().into_iter().flatten() {
+            assert!(
+                !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")),
+                "{b:#}"
+            );
+            if b["type"] != "tool_use" {
+                continue;
+            }
+            tool_uses += 1;
+            let id = b["id"].as_str().unwrap();
+            assert!(
+                (1..=64).contains(&id.len())
+                    && id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
+                "{id}"
+            );
+            let next = &msgs[i + 1];
+            assert_eq!(next["role"], "user", "{body:#}");
+            assert!(
+                next["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["type"] == "tool_result" && r["tool_use_id"] == id),
+                "{body:#}"
+            );
+        }
+    }
+    assert_eq!(tool_uses, 1, "{body:#}");
+    w.assert_key_nowhere();
+    w.assert_nowhere(&tok);
+    assert!(!std::fs::read_to_string(&claude.log).unwrap().contains(&tok));
+}
+
+// The other way: Claude's signed thinking never reaches the OpenAI-format model, and every tool
+// result still answers a call it can see.
+#[test]
+fn a_session_moves_from_claude_to_opencode() {
+    if can_run("claude_to_opencode", true).is_none() {
+        return;
+    }
+    let w = World::new_with(r#"[{"text":"segunda respuesta"}]"#, &["--log-body"]);
+    let claude = fake_claude(
+        &w,
+        &json!([
+            {"thinking": "razonamiento de claude", "signature": "firma-de-claude-1", "tool_calls": [
+                {"id": "toolu_01AbCdEf", "name": "read", "arguments": {"reason": "leer", "path": "app.py"}}]},
+            {"thinking": "razonamiento final de claude", "signature": "firma-de-claude-2",
+             "text": "primera respuesta"},
+        ]),
+    );
+    let opencode = w._provider.base_url.clone();
+    use_connector(&w, "claude", claude.base_url.trim_end_matches("/v1"));
+    let tok = claude_token();
+    first_turn(&w, &[("CLAUDE_CODE_OAUTH_TOKEN", &tok)], &tok);
+    // Not vacuous: Pi kept the signed thinking and gave it back to the same model.
+    body_with(&claude, "firma-de-claude-1");
+    use_connector(&w, "opencode-go", &opencode);
+    reopen(&w, &[], &decoy());
+
+    let body = body_with(&w._provider, "segunda pregunta");
+    let text = body.to_string();
+    assert!(
+        !text.contains("firma-de-claude") && !text.contains("razonamiento"),
+        "{body:#}"
+    );
+    let msgs = messages(&body);
+    let mut calls = Vec::new();
+    let mut results = 0;
+    for m in msgs {
+        assert!(m.get("reasoning_details").is_none(), "{m:#}");
+        for f in ["reasoning_content", "reasoning", "reasoning_text"] {
+            assert!(m[f].as_str().unwrap_or("").is_empty(), "{m:#}");
+        }
+        for c in m["tool_calls"].as_array().into_iter().flatten() {
+            calls.push(c["id"].clone());
+        }
+        if m["role"] == "tool" {
+            results += 1;
+            assert!(calls.contains(&m["tool_call_id"]), "{body:#}");
+        }
+    }
+    assert_eq!((calls.len(), results), (1, 1), "{body:#}");
+    w.assert_key_nowhere();
+    w.assert_nowhere(&tok);
+    assert!(!std::fs::read_to_string(&claude.log).unwrap().contains(&tok));
 }

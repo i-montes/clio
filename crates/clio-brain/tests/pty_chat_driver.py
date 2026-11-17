@@ -2,7 +2,7 @@
 prints a JSON verdict. Stdlib only. Linux only (it reads /proc).
 
 usage: python3 -I pty_chat_driver.py SCENARIO CONFIG_JSON
-SCENARIO: new_chat | abort | steer | reopen | sigkill
+SCENARIO: new_chat | abort | steer | reopen | sigkill | one_turn | reopen_turn
 
 The terminal stream is a diff and is not parsed. In a debug build `clio` writes the text of every
 frame to the file named by CLIO_TUI_SCREEN_DUMP: that is what the waits read. Every wait is
@@ -257,6 +257,30 @@ elif scenario == "reopen":
     send(fd, b"q")
     out["code2"] = wait_exit(fd, pid)
     out["procs_after_quit"] = len(pi_procs())
+elif scenario == "one_turn":
+    # A new session, one turn (cfg "ask" / "answer"), and leave.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, cfg["ask"], cfg["answer"])
+    if not out["answered"]:
+        out["screen"] = screen()
+    send(fd, CTRL_C)
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "reopen_turn":
+    # Reopen the session listed as cfg "row" (the first after "nueva sesión") for one more turn.
+    out["selector"] = wait_screen(fd, "sesiones de Pi")
+    out["row_listed"] = wait_screen(fd, cfg["row"], 20)
+    send(fd, b"j")
+    send(fd, ENTER)
+    out["reopened"] = wait_screen(fd, "listo", 60)
+    out["answered"] = ask(fd, cfg["ask"], cfg["answer"])
+    if not out["answered"]:
+        out["screen"] = screen()
+    send(fd, ESC)
+    time.sleep(0.5)
+    send(fd, b"q")
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "summary":
     # Four messages, back to the selector (the chat closes on its own thread and asks for the
     # summary), and leave at once: leaving waits for that close.
