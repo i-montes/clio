@@ -50,7 +50,7 @@ a los adaptadores por un sobre en stdin.
 
 ---
 
-### Tarea 1: La tabla de conectores y la configuración que la usa
+### Task 1: La tabla de conectores y la configuración que la usa
 
 **Archivos:**
 - Crear: `crates/clio-brain/src/connector.rs` (+ `pub mod connector;` en `src/lib.rs`)
@@ -117,7 +117,7 @@ a los adaptadores por un sobre en stdin.
   `run_tests`, que ya falla en `main`).
 - [ ] **Paso 5:** commit `feat(models): one table of model connectors, OpenCode and Claude`.
 
-### Tarea 2: La llave sale del baúl
+### Task 2: La llave sale del baúl
 
 **Archivos:**
 - Modificar: `crates/clio-brain/src/cli/vault.rs` (nueva `model_key`)
@@ -147,7 +147,7 @@ a los adaptadores por un sobre en stdin.
 - [ ] **Paso 4:** `cargo test -p clio-brain` → pasan.
 - [ ] **Paso 5:** commit `feat(models): the model key comes from the vault`.
 
-### Tarea 3: Los adaptadores reciben la llave en un sobre
+### Task 3: Los adaptadores reciben la llave en un sobre
 
 **Archivos:**
 - Modificar: `crates/clio-brain/src/agent.rs:96-125` (`CommandModel`)
@@ -190,7 +190,7 @@ a los adaptadores por un sobre en stdin.
 - [ ] **Paso 4:** `cargo test -p clio-brain` → pasan.
 - [ ] **Paso 5:** commit `feat(models): adapters take the key in an envelope on stdin`.
 
-### Tarea 4: El adaptador `anthropic_oauth.py`
+### Task 4: El adaptador `anthropic_oauth.py`
 
 **Archivos:**
 - Crear: `adapters/models/anthropic_oauth.py`
@@ -228,7 +228,7 @@ a los adaptadores por un sobre en stdin.
 - [ ] **Paso 4:** `cargo test -p clio-brain --test adapter_anthropic` → pasan.
 - [ ] **Paso 5:** commit `feat(models): the Anthropic adapter for the Claude connector`.
 
-### Tarea 5: `clio connect`
+### Task 5: `clio connect`
 
 **Archivos:**
 - Crear: `crates/clio-brain/src/cli/connect.rs` (+ registrarlo en `cli/mod.rs`, `main.rs` y `USAGE`)
@@ -276,7 +276,7 @@ Flujo (en este orden; cada fallo sale antes de cambiar nada):
 - [ ] **Paso 4:** `cargo test -p clio-brain --test cli connect` → pasan.
 - [ ] **Paso 5:** commit `feat(cli): clio connect opencode|claude`.
 
-### Tarea 6: Doctor, init, interfaz y documentación
+### Task 6: Doctor, init, interfaz y documentación
 
 **Archivos:**
 - Modificar: `crates/clio-brain/src/cli/doctor.rs:724-750` (y el chequeo S-18 de archivos)
@@ -304,7 +304,7 @@ Flujo (en este orden; cada fallo sale antes de cambiar nada):
 - [ ] **Paso 4:** `cargo test -p clio-brain` y `cargo clippy --all-targets` → limpios.
 - [ ] **Paso 5:** commit `feat(cli): doctor, init and the TUI speak of connectors`.
 
-### Tarea 7: Una sesión sigue al cambiar de conector
+### Task 7: Una sesión sigue al cambiar de conector
 
 **Archivos:**
 - Modificar: `testing/fake-provider/server.py` (si la Tarea 4 no cubrió `stream` de Anthropic con
@@ -327,7 +327,7 @@ Flujo (en este orden; cada fallo sale antes de cambiar nada):
   quedan como garantía. Si fallan, corregir del lado de Clio (no de Pi) o anotar el fallo y parar.
 - [ ] **Paso 3:** commit `test(pi): a session survives a change of connector, both ways`.
 
-### Tarea 8: Prueba real contra Anthropic
+### Task 8: Prueba real contra Anthropic
 
 **Archivos:**
 - Test: `crates/clio-brain/tests/pi_real.rs` (prueba `#[ignore]`)
