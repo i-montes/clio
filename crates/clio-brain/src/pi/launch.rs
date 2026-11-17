@@ -329,6 +329,9 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
             .unwrap_or_default()
             .as_bytes(),
     )?;
+    if l.provider.extension.is_some() {
+        reset_claude_settings(&l.paths)?;
+    }
     // The jail first (ADR 0009): if it cannot be built or fails its self-test, Pi does not start.
     let jail = super::jail::prepare(l)?;
     // `umask 077` so the session files Pi creates are born 0600; `exec` keeps the pid; `env -u`
@@ -356,6 +359,37 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
         jail,
         session_id: r.session_id,
     })
+}
+
+/// Claude Code's managed settings inside the jail (ADR 0009): no source can widen them, so no hook
+/// runs, whoever wrote it (the working copy, a user setting, a plugin).
+pub const CLAUDE_POLICY: &str = r#"{"disableAllHooks": true, "allowManagedHooksOnly": true, "disableSkillShellExecution": true}"#;
+
+/// Before every bridge launch: the policy written, and the settings Claude Code and the bridge
+/// read from Pi's own folders (writable inside the jail, so a past session could have planted
+/// something there: hooks, `env`, `apiKeyHelper`, another Claude Code) back to `{}`. A link in their
+/// place is removed, never followed.
+pub fn reset_claude_settings(paths: &PiPaths) -> Result<(), PiError> {
+    paths.ensure()?;
+    write_private(&paths.claude_policy(), CLAUDE_POLICY.as_bytes())?;
+    let dir = paths.home_dir().join(".claude");
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) {
+        std::fs::remove_file(&dir).map_err(|e| super::io_err(&dir, &e))?;
+    }
+    super::private_dir(&dir)?;
+    for f in [
+        dir.join("settings.json"),
+        dir.join("settings.local.json"),
+        paths.agent_dir().join("claude-bridge.json"),
+    ] {
+        match std::fs::remove_file(&f) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(super::io_err(&f, &e));
+            }
+            _ => write_private(&f, b"{}")?,
+        }
+    }
+    Ok(())
 }
 
 /// Starts Pi hardened and verifies it. On any failure the process is killed and nothing is left.
@@ -611,6 +645,51 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "falta el puente de Claude (pi-claude-agent-sdk): clio pi install"
+        );
+    }
+
+    // What a hook of a past session could have left in Pi's own (writable) folders does not
+    // reach the next one; a link in place of `.claude` is removed, its target left alone.
+    #[test]
+    fn every_bridge_launch_starts_from_empty_claude_settings_and_the_policy() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = PiPaths {
+            root: d.path().join("pi"),
+        };
+        paths.ensure().unwrap();
+        let cc = paths.home_dir().join(".claude");
+        std::fs::create_dir_all(&cc).unwrap();
+        let planted = r#"{"hooks":{"SessionStart":[]},"apiKeyHelper":"/x"}"#;
+        std::fs::write(cc.join("settings.json"), planted).unwrap();
+        std::fs::write(paths.agent_dir().join("claude-bridge.json"), planted).unwrap();
+        reset_claude_settings(&paths).unwrap();
+        for f in [
+            cc.join("settings.json"),
+            cc.join("settings.local.json"),
+            paths.agent_dir().join("claude-bridge.json"),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                "{}",
+                "{}",
+                f.display()
+            );
+        }
+        let policy: Value =
+            serde_json::from_str(&std::fs::read_to_string(paths.claude_policy()).unwrap()).unwrap();
+        assert_eq!(policy["disableAllHooks"], true);
+        assert_eq!(policy["allowManagedHooksOnly"], true);
+        // `.claude` as a link to the person's own folder: the link goes, their settings stay.
+        let theirs = d.path().join("theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("settings.json"), "mine").unwrap();
+        std::fs::remove_dir_all(&cc).unwrap();
+        std::os::unix::fs::symlink(&theirs, &cc).unwrap();
+        reset_claude_settings(&paths).unwrap();
+        assert!(!std::fs::symlink_metadata(&cc).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(theirs.join("settings.json")).unwrap(),
+            "mine"
         );
     }
 

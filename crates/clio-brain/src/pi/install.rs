@@ -13,6 +13,8 @@ use super::{PiError, PiPaths, io_err, private_dir, text, write_private};
 pub const PACKAGE_JSON: &str = include_str!("../../../../adapters/pi/package.json");
 pub const PACKAGE_LOCK: &str = include_str!("../../../../adapters/pi/package-lock.json");
 pub const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent";
+/// How long `npm ci` may take: it downloads Pi and the bridge's Claude Code, about 400 MB.
+const NPM_CI_SECS: u64 = 1800;
 /// Pi needs Node 22.19 or newer.
 pub const MIN_NODE: (u32, u32, u32) = (22, 19, 0);
 
@@ -246,7 +248,7 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
         }
         String::from_utf8_lossy(&buf).into_owned()
     });
-    let deadline = Instant::now() + Duration::from_secs(600);
+    let deadline = Instant::now() + Duration::from_secs(NPM_CI_SECS);
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
@@ -254,8 +256,8 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(PiError::Timeout {
-                    what: "npm ci".into(),
-                    secs: 600,
+                    what: "npm ci (descarga unos 400 MB; revisa la red)".into(),
+                    secs: NPM_CI_SECS,
                 });
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
@@ -267,7 +269,7 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
         Ok(())
     } else {
         Err(PiError::NotInstalled(format!(
-            "`npm ci` falló ({status}); revisa la red y vuelve a intentar. {}",
+            "`npm ci` falló ({status}); descarga unos 400 MB (Claude Code): revisa la red y vuelve a intentar. {}",
             text::block(&err, 600)
         )))
     }

@@ -25,6 +25,7 @@ Lo que encontré al revisar cada pieza del diagrama, ordenado por gravedad. Cada
 - **Cada mensaje sale a Jev**: El triaje manda cada mensaje a un tercero; sin limpieza, ahí van datos personales o secretos. (S-44)
 - **Fatiga y urgencia falsa**: Una inyección puede provocar notificaciones «urgentes» para que apruebes sin leer. (S-36)
 - **Autonomía que se crea sola**: Un trabajo programado o una política permanente es autonomía que sigue corriendo cuando nadie mira; si una inyección logra crearlos, se queda para siempre. (S-49 a S-52)
+- **Claude Code lee la copia**: El conector claude corre el Claude Code oficial dentro de la jaula de Pi, en la copia de trabajo, y Claude Code carga hooks, `env`, `apiKeyHelper` y servidores MCP de `.claude/`, `.mcp.json` y (el puente) `.pi/claude-bridge.json`. La jaula los tapa, Claude Code recibe la política de Clio como configuración administrada (ningún hook corre) y cada arranque vacía la configuración que una sesión anterior pudo dejar en la carpeta de Pi (ADR 0009). (S-16, S-59)
 - **El equipo anfitrión como punto único** (este PC o, si algún día se usa, un VPS): si cae, cae todo; si lo comprometen, tienen el cerebro. Las listas propias de cada nodo limitan el daño. (S-29, S-30, S-38 a S-40)
 
 ### Reglas obligatorias

@@ -9,6 +9,8 @@
 //! - the prompt file, read-only, and the folder of the toolhost's socket (made for it alone),
 //!   the only way out to an effect;
 //! - the working copy, **read-only**: every change goes through the toolhost.
+//! - with the claude connector, the copy's `.claude/`, `.pi/` and `.mcp.json` covered, and Clio's
+//!   managed settings for Claude Code at `/etc/claude-code/managed-settings.json`, read-only.
 //!
 //! - the `clio` binary and the folder of the egress proxy's socket (see `net`): the only way out
 //!   to the network, which is a private one. Pi reaches the provider's address through them and
@@ -237,6 +239,9 @@ impl PiJail {
             bind(&mut a, "--bind", &rw);
         }
         bind(&mut a, "--ro-bind", &l.cwd);
+        if l.provider.extension.is_some() {
+            claude_masks(&mut a, l);
+        }
         a.extend(["--chdir".into(), l.cwd.display().to_string()]);
         a
     }
@@ -350,6 +355,41 @@ impl PiJail {
     }
 }
 
+/// The bridge runs Claude Code in the working copy, and Claude Code (and the bridge) load code
+/// and settings from there: `.claude/` (hooks, `env`, `apiKeyHelper`), `.pi/claude-bridge.json`
+/// (another Claude Code binary, MCP turned back on) and `.mcp.json`. The copy is hostile content
+/// (ADR 0009): they are covered with an empty folder or `/dev/null`. A link is followed only to
+/// a target inside the copy; one outside it points at something the jail does not mount, or at
+/// Pi's own folders, which `launch::reset_claude_settings` empties. Claude Code also gets Clio's
+/// managed settings, read-only: no hook runs, whatever any other source says.
+fn claude_masks(a: &mut Vec<String>, l: &Launch) {
+    let inside = |name: &str| {
+        let root = l.cwd.canonicalize().ok()?;
+        let real = l.cwd.join(name).canonicalize().ok()?;
+        real.strip_prefix(&root).ok().map(|r| l.cwd.join(r))
+    };
+    for d in [".claude", ".pi"] {
+        if let Some(p) = inside(d).filter(|p| p.is_dir()) {
+            a.extend(["--tmpfs".into(), p.display().to_string()]);
+        }
+    }
+    if let Some(p) = inside(".mcp.json").filter(|p| p.is_file()) {
+        a.extend([
+            "--ro-bind".into(),
+            "/dev/null".into(),
+            p.display().to_string(),
+        ]);
+    }
+    a.extend([
+        "--ro-bind".into(),
+        l.paths.claude_policy().display().to_string(),
+        CLAUDE_POLICY_IN_JAIL.into(),
+    ]);
+}
+
+/// Where Claude Code 2.1 reads managed settings on Linux.
+pub const CLAUDE_POLICY_IN_JAIL: &str = "/etc/claude-code/managed-settings.json";
+
 /// An abstract unix socket on the host (Linux only): the jail must not be able to connect to it.
 #[cfg(target_os = "linux")]
 fn abstract_listener() -> Option<(String, std::os::unix::net::UnixListener)> {
@@ -385,8 +425,97 @@ fn proxy_env() -> Vec<(&'static str, &'static str)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::pi::PiPaths;
+    use crate::pi::install::{NodeInfo, PiInstall};
+    use crate::pi::launch::SessionTarget;
+
+    fn args_for(connector: &str, cwd: &Path, data: &Path) -> Vec<String> {
+        let l = Launch {
+            install: PiInstall {
+                version: "1.4.0".into(),
+                dir: "/p/1.4.0".into(),
+                bin: "/p/1.4.0/node_modules/.bin/pi".into(),
+            },
+            node: NodeInfo {
+                path: "/n/bin/node".into(),
+                version: (22, 23, 2),
+            },
+            paths: PiPaths::under_data(data),
+            provider: crate::connector::by_name(connector)
+                .unwrap()
+                .pi_launch_provider("m"),
+            api_key: None,
+            cwd: cwd.into(),
+            session: SessionTarget::New { id: None },
+            name: None,
+            guard: None,
+            guard_tools: vec![],
+            extra_env: vec![],
+            helper: "/p/clio".into(),
+        };
+        let j = PiJail {
+            bwrap: "/usr/bin/bwrap".into(),
+            proxy: EgressProxy::start(data, "api.anthropic.com:443").unwrap(),
+        };
+        j.args(&l)
+    }
+
+    // Finding 1 of the claude-bridge review: a working copy's `.claude/settings.json` hooks ran in
+    // the jail and read the token. With the bridge they are covered, and the policy is mounted.
+    #[test]
+    fn with_the_bridge_the_copys_claude_settings_are_masked_and_the_policy_is_mounted() {
+        let t = tempfile::tempdir().unwrap();
+        let cwd = t.path().join("proj");
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        std::fs::create_dir_all(cwd.join(".pi")).unwrap();
+        std::fs::write(cwd.join(".mcp.json"), "{}").unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let has = |a: &[String], want: &[String]| a.windows(want.len()).any(|w| w == want);
+        let a = args_for("claude", &cwd, t.path());
+        let at = |want: &[String]| a.windows(want.len()).position(|w| w == want).unwrap();
+        let copy = at(&["--ro-bind".into(), s(&cwd), s(&cwd)]);
+        for want in [
+            vec!["--tmpfs".into(), s(&cwd.join(".claude"))],
+            vec!["--tmpfs".into(), s(&cwd.join(".pi"))],
+            vec![
+                "--ro-bind".into(),
+                "/dev/null".into(),
+                s(&cwd.join(".mcp.json")),
+            ],
+        ] {
+            assert!(at(&want) > copy, "{want:?} after the copy: {a:?}");
+        }
+        let policy = PiPaths::under_data(t.path()).claude_policy();
+        assert!(has(
+            &a,
+            &[
+                "--ro-bind".into(),
+                s(&policy),
+                "/etc/claude-code/managed-settings.json".into()
+            ]
+        ));
+        // A link to a folder outside the copy is not followed (that folder is not mounted).
+        std::fs::remove_dir(cwd.join(".pi")).unwrap();
+        std::os::unix::fs::symlink("/usr", cwd.join(".pi")).unwrap();
+        let a = args_for("claude", &cwd, t.path());
+        assert!(!has(&a, &["--tmpfs".into(), "/usr".into()]));
+        assert!(!has(&a, &["--tmpfs".into(), s(&cwd.join(".pi"))]));
+        // Another connector: nothing of this.
+        let o = args_for("opencode", &cwd, t.path());
+        assert!(
+            !o.iter()
+                .any(|x| x.contains(".claude") || x.contains(".mcp.json"))
+        );
+        assert!(!o.iter().any(|x| x.contains("claude-code")));
+        assert_eq!(
+            o.iter().filter(|x| *x == "--tmpfs").count(),
+            1,
+            "only /tmp: {o:?}"
+        );
+    }
 
     #[test]
     fn the_probe_script_has_no_unbalanced_quotes() {

@@ -371,6 +371,19 @@ fn builtin_adapter(dirs: &Dirs, c: &Connector) -> Res<PathBuf> {
         mkdir_private(&dirs.data.join("adapters"))?;
         write_private(&p, source.as_bytes())?;
     }
+    // Copies an older Clio wrote of adapters it no longer has (`anthropic_oauth.py`) go away.
+    for e in std::fs::read_dir(dirs.data.join("adapters"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let n = e.file_name();
+        if Path::new(&n).extension().is_some_and(|x| x == "py")
+            && !ADAPTER_FILES.iter().any(|f| n == *f)
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     Ok(p)
 }
 
@@ -453,6 +466,28 @@ mod tests {
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn writing_an_adapter_removes_copies_of_retired_ones() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let dirs = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data: data.clone(),
+            runtime: None,
+            home: t.path().into(),
+        };
+        let a = data.join("adapters");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(a.join("anthropic_oauth.py"), "old").unwrap();
+        std::fs::write(a.join("notas.txt"), "x").unwrap();
+        let c = clio_brain::connector::by_name("opencode").unwrap();
+        let p = builtin_adapter(&dirs, c).unwrap();
+        assert!(p.is_file() && !a.join("anthropic_oauth.py").exists());
+        assert!(a.join("notas.txt").exists());
     }
 
     #[test]

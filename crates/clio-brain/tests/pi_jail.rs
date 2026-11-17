@@ -390,3 +390,147 @@ fn pi_starts_with_the_claude_bridge_inside_the_jail() {
     // Starting asks nothing of the network: the jail's proxy refused nothing.
     assert!(p.jail.as_ref().unwrap().egress_denied().is_empty());
 }
+
+/// Claude Code settings that run code when it starts: hooks that leave a mark in HOME.
+fn hooks(tag: &str) -> String {
+    let hook = |event: &str| {
+        serde_json::json!([{"hooks": [{"type": "command",
+            "command": format!("touch \"$HOME/mark-{tag}-{event}\"")}]}])
+    };
+    let s = serde_json::json!({"hooks": {
+        "SessionStart": hook("SessionStart"),
+        "UserPromptSubmit": hook("UserPromptSubmit"),
+    }});
+    s.to_string()
+}
+
+fn plant_hooks(settings: &Path, tag: &str) {
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(settings, hooks(tag)).unwrap();
+}
+
+fn marks(home: &Path) -> Vec<String> {
+    std::fs::read_dir(home)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("mark-"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// Finding 1 of the claude-bridge review: the bridge runs Claude Code in the working copy, and the
+// copy's `.claude/settings.json` hooks ran inside the jail (where a hook can read the token).
+// The same Claude Code, the same settings: outside the jail its hooks run (the control); inside
+// the jail the product builds for the claude connector, none runs: not the copy's, not one left
+// in Pi's HOME by a past session, not one given on the command line (the managed policy). No
+// API call: a decoy token, and outside no network at all, inside a proxy that refuses everything.
+#[test]
+fn hooks_of_the_working_copy_do_not_run_in_the_bridges_claude_code() {
+    let test = "pi jail: claude hooks";
+    let Some(node) = pi_support::need(test, true) else {
+        return;
+    };
+    let dir = pi_support::repo().join("adapters/pi");
+    let Some(claude) = clio_brain::pi::install::claude_code_bin(&dir) else {
+        assert!(
+            std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
+            "CLIO_REQUIRE_PI=1 and Claude Code is not installed"
+        );
+        eprintln!("SKIPPED {test}: falta Claude Code (cd adapters/pi && npm ci --ignore-scripts)");
+        return;
+    };
+    if !Path::new("/usr/bin/unshare").exists() || !Path::new("/usr/bin/timeout").exists() {
+        eprintln!("SKIPPED {test}: no /usr/bin/unshare or /usr/bin/timeout");
+        return;
+    }
+    if let jail::Status::Unavailable(why) = jail::status() {
+        assert!(std::env::var_os("CLIO_REQUIRE_JAIL").is_none(), "{why}");
+        eprintln!("SKIPPED {test} (the jail cannot run here, nothing was tested): {why}");
+        return;
+    }
+    let rig = Rig::new(node);
+    let decoy = "sk-ant-oat01-decoy-0123456789abcdef";
+    plant_hooks(&rig.proj.join(".claude/settings.json"), "copy");
+    let flag = hooks("flag");
+    let quiet = [
+        ("CLAUDE_CODE_OAUTH_TOKEN", decoy),
+        ("CLAUDE_CODE_MAX_RETRIES", "0"),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+        ("DISABLE_AUTOUPDATER", "1"),
+        ("DISABLE_TELEMETRY", "1"),
+    ];
+
+    // The control: this Claude Code runs these hooks (no network namespace: nothing gets out).
+    let home = rig.tmp.path().join("control-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let c = std::process::Command::new("/usr/bin/unshare")
+        .args(["-rn", "/usr/bin/timeout", "-s", "KILL", "90"])
+        .arg(&claude)
+        .args(["-p", "hola", "--settings", &flag])
+        .current_dir(&rig.proj)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .envs(quiet)
+        .output()
+        .unwrap();
+    let mut seen = marks(&home);
+    seen.sort();
+    if seen.is_empty() && !c.status.success() && c.stdout.is_empty() {
+        eprintln!(
+            "SKIPPED {test}: the control did not run here: {}",
+            String::from_utf8_lossy(&c.stderr)
+        );
+        return;
+    }
+    assert_eq!(
+        seen,
+        [
+            "mark-copy-SessionStart",
+            "mark-copy-UserPromptSubmit",
+            "mark-flag-SessionStart",
+            "mark-flag-UserPromptSubmit"
+        ],
+        "the control must run every hook, or this test proves nothing"
+    );
+
+    // Inside: as the product launches the claude connector.
+    let mut l = rig.launch("http://127.0.0.1:1/v1", Some(decoy));
+    l.provider = clio_brain::connector::by_name("claude")
+        .unwrap()
+        .pi_launch_provider("claude-sonnet-5-5");
+    // The only address the proxy lets through: one that does not exist.
+    l.provider.base_url = "https://nowhere.invalid".into();
+    rig.paths.ensure().unwrap();
+    plant_hooks(&rig.paths.home_dir().join(".claude/settings.json"), "home");
+    let built = match clio_brain::pi::launch::build(&l) {
+        Ok(b) => b,
+        Err(e) => panic!("{test}: the launch did not build: {e}"),
+    };
+    let j = built.jail.expect("on Linux Pi runs in the jail");
+    let argv: Vec<OsString> = vec![
+        "/usr/bin/timeout".into(),
+        "-s".into(),
+        "KILL".into(),
+        "90".into(),
+        claude.into_os_string(),
+        "-p".into(),
+        "hola".into(),
+        "--settings".into(),
+        flag.into(),
+    ];
+    let o = j
+        .command(&l, &built.session_id, &argv)
+        .envs(quiet)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).into_owned();
+    // It got as far as asking the model (past every hook) and was refused by the proxy.
+    assert!(
+        !j.egress_denied().is_empty(),
+        "Claude Code never reached the model: {said}"
+    );
+    assert_eq!(marks(&rig.paths.home_dir()), Vec::<String>::new(), "{said}");
+}

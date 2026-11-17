@@ -453,24 +453,51 @@ fn a_hung_model_program_is_killed_at_its_deadline() {
 #[test]
 fn a_program_past_its_deadline_gets_sigterm_before_it_is_killed() {
     let t = tempfile::tempdir().unwrap();
-    let mark = t.path().join("cleaned");
+    let (mark, ready, pid) = (
+        t.path().join("cleaned"),
+        t.path().join("ready"),
+        t.path().join("child"),
+    );
+    // The trap is set before `ready` is written, and the child it started is stopped with it:
+    // nothing is left behind. The deadline is long enough for a loaded machine to reach `ready`.
     let mut m = CommandModel::new(
         "sh",
         &[
             "-c".into(),
             format!(
-                "trap 'echo yes > \"{}\"; exit 1' TERM; sleep 1000 & wait",
-                mark.display()
+                "trap 'kill $!; echo yes > \"{}\"; exit 1' TERM; sleep 1000 </dev/null >/dev/null 2>&1 & echo $! > \"{}\"; : > \"{}\"; wait",
+                mark.display(),
+                pid.display(),
+                ready.display()
             ),
         ],
         "m",
     );
     m.backoff_ms = vec![];
-    m.timeout = std::time::Duration::from_millis(300);
+    m.timeout = std::time::Duration::from_secs(2);
     let started = std::time::Instant::now();
     assert!(m.complete(&[]).unwrap_err().contains("timed out"));
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(
+        ready.exists(),
+        "the program never got ready: the test proves nothing"
+    );
     assert_eq!(std::fs::read_to_string(&mark).unwrap_or_default(), "yes\n");
+    let child: u32 = std::fs::read_to_string(&pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let gone = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::path::Path::new(&format!("/proc/{child}")).exists()
+        && std::time::Instant::now() < gone
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !std::path::Path::new(&format!("/proc/{child}")).exists(),
+        "sleep {child} was left running"
+    );
 }
 
 #[test]

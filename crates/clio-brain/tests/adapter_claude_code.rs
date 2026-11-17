@@ -19,7 +19,7 @@ fn fake_claude(dir: &Path, reply: &str, code: i32) -> PathBuf {
     std::fs::write(
         &bin,
         format!(
-            "#!/usr/bin/env python3\nimport json, os, sys\na = sys.argv[1:]\nf = a[a.index('--system-prompt-file') + 1] if '--system-prompt-file' in a else None\njson.dump({{'argv': a, 'env': dict(os.environ), 'cwd': os.getcwd(), 'stdin': sys.stdin.read(), 'system_file': f, 'system': open(f).read() if f else None}}, open({seen:?}, 'w'))\nsys.stdout.write({reply:?})\nsys.exit({code})\n",
+            "#!/usr/bin/env python3\nimport json, os, sys\na = sys.argv[1:]\nf = a[a.index('--system-prompt-file') + 1] if '--system-prompt-file' in a else None\njson.dump({{'argv': a, 'env': dict(os.environ), 'cwd': os.getcwd(), 'stdin': sys.stdin.read(), 'system_file': f, 'system': open(f).read() if f else None, 'system_mode': os.stat(f).st_mode & 0o777 if f else None}}, open({seen:?}, 'w'))\nsys.stdout.write({reply:?})\nsys.exit({code})\n",
             seen = seen.display().to_string(),
         ),
     )
@@ -121,8 +121,9 @@ fn runs_claude_code_with_the_token_only_in_its_env() {
         "{stdin}"
     );
     assert!(!stdin.contains("Eres Clio"), "{stdin}");
-    // The system prompt goes in a file inside Claude Code's private HOME.
+    // The system prompt goes in a file inside Claude Code's private HOME, readable by its owner only.
     assert_eq!(s["system"], "Eres Clio.");
+    assert_eq!(s["system_mode"], 0o600);
     assert!(
         Path::new(s["system_file"].as_str().unwrap()).starts_with(s["cwd"].as_str().unwrap()),
         "{s}"

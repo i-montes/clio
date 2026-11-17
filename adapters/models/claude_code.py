@@ -90,22 +90,25 @@ argv = [
     "--setting-sources", "",  # none of the person's settings, hooks or CLAUDE.md
     "--strict-mcp-config",
 ]
-# A HOME of its own, so nothing of the person's (~/.claude, their login) is read or written.
-home = tempfile.mkdtemp(prefix="clio-claude-")
-env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": home, "CLAUDE_CODE_OAUTH_TOKEN": key, **QUIET}
+env = {"PATH": os.environ.get("PATH", os.defpath), "CLAUDE_CODE_OAUTH_TOKEN": key, **QUIET}
 env.update({k: os.environ[k] for k in PROXY if os.environ.get(k)})
 proc = None
+# A HOME of its own, so nothing of the person's (~/.claude, their login) is read or written. The
+# `try` starts right after it is made: a SIGTERM from here on still removes it.
+home = tempfile.mkdtemp(prefix="clio-claude-")
 try:
-    # In a file: one argument may not pass 128 KiB (E2BIG), a system prompt can.
+    env["HOME"] = home
+    # In a file: one argument may not pass 128 KiB (E2BIG), a system prompt can. Born 0600.
     system_file = os.path.join(home, "system-prompt.txt")
-    with open(system_file, "w", encoding="utf-8") as f:
+    fd = os.open(system_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
         f.write("\n\n".join(system))
     argv += ["--system-prompt-file", system_file]
     # Its own process group, so everything it starts is stopped with it. Never its stderr: what it
     # says there is not ours to show and could quote the request.
     proc = subprocess.Popen(
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, errors="replace", env=env, cwd=home, start_new_session=True,
+        text=True, encoding="utf-8", errors="replace", env=env, cwd=home, start_new_session=True,
     )
     stdout, _ = proc.communicate(prompt, timeout=TIMEOUT)
 except subprocess.TimeoutExpired:

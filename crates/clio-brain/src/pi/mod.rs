@@ -114,6 +114,11 @@ impl PiPaths {
     pub fn home_dir(&self) -> PathBuf {
         self.root.join("home")
     }
+    /// Claude Code's managed settings for the bridge, written by Clio. Outside every folder the
+    /// jail mounts writable; inside the jail it is `/etc/claude-code/managed-settings.json`.
+    pub fn claude_policy(&self) -> PathBuf {
+        self.root.join("claude-managed-settings.json")
+    }
     /// Creates the folders (0700). Safe to repeat.
     pub fn ensure(&self) -> Result<(), PiError> {
         for d in [
