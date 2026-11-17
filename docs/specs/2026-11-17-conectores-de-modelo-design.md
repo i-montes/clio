@@ -2,6 +2,33 @@
 
 Fecha: 2026-11-17. Repo: `clio`. Pedido por Iván.
 
+## Corrección 2026-11-17
+
+Lo que este diseño decía del conector `claude` falló en la práctica y se corrigió; el resto vale.
+
+- **Qué falló.** Pi hablaba con `api.anthropic.com` presentándose como Claude Code con el token de
+  suscripción, y Anthropic lo rechaza: `400 invalid_request_error: "Third-party apps now draw from
+  extra usage, not plan limits."`. Ese camino (el atajo de Pi, el adaptador `anthropic_oauth.py` y los
+  encabezados y bloque de sistema de Claude Code) se borró.
+- **El puente.** La suscripción pasa ahora por el Claude Code oficial. El paquete de Pi
+  `pi-claude-agent-sdk@0.9.2` (fijado en `adapters/pi`, lo instala `clio pi install`, unos 300 MB una
+  sola vez) registra el proveedor `claude-bridge` y hace cada turno con Claude Code (Agent SDK). El
+  token de `claude setup-token` sigue en el baúl (secreto `claude`) y llega al puente como
+  `ANTHROPIC_OAUTH_TOKEN`, que el puente entrega a Claude Code como `CLAUDE_CODE_OAUTH_TOKEN`. Las
+  llamadas sueltas (sueño, arnés `builtin`, la sonda de `clio connect`) usan el binario de Claude
+  Code que trae el SDK, con `claude -p`: `adapters/models/claude_code.py` reemplaza a
+  `anthropic_oauth.py`. Nada se hace pasar por Claude Code ante la API.
+- **Tres conectores.** `opencode` (`opencode-go`), `claude` (`claude`, por el puente, suscripción) y
+  `anthropic-api` (`anthropic`, llave de la API `sk-ant-api…`, cobro por token, adaptador
+  `anthropic_api.py`, secreto `anthropic-api` hacia `model:api.anthropic.com`). `clio connect` acepta
+  los tres.
+- **Riesgo.** Ya no hay riesgo de suspensión por presentarse como otro programa: se usa Claude Code
+  oficial y la cuota del plan, como al usarlo directamente. El paquete del puente avisa que Anthropic
+  podría cambiar cómo cobra el Agent SDK.
+- Plan: `docs/superpowers/plans/2026-11-17-conector-claude-bridge.md`. Donde el texto de abajo
+  contradice esto (el riesgo aceptado, el enfoque 1, la columna `claude` de la tabla, el adaptador
+  `anthropic_oauth.py`, el aviso de `clio connect claude`), manda esta sección.
+
 ## Por qué
 
 Hoy Clio tiene un solo proveedor de modelo, OpenCode (`opencode-go/beam-free`), escrito a mano en
@@ -15,7 +42,7 @@ Sus condiciones:
 - **Claude es opcional.** Quien nunca lo conecta no ve ningún cambio de comportamiento, salvo que su
   llave de OpenCode pasa al baúl.
 - **Las llaves viven en el baúl, nunca en archivos.** Vale para los dos conectores.
-- **El atajo de Pi** para Claude (ver Enfoques), con su riesgo aceptado.
+- ~~El atajo de Pi para Claude~~ (corregido: ver «Corrección 2026-11-17»; ahora va por Claude Code).
 
 ## Objetivos
 
@@ -54,19 +81,16 @@ Sus condiciones:
   ya deriva lo permitido de `base_url`, así que `api.anthropic.com` sale de la configuración del
   conector.
 - **Pi es el arnés** (ADR 0007). No se cambia.
-- **Riesgo aceptado por Iván:** con el token de suscripción (`sk-ant-oat…`), Pi se presenta ante
-  Anthropic como Claude Code (encabezados `claude-cli/…`, `x-app: cli`, betas
-  `claude-code-20250219,oauth-2025-04-20` y el primer bloque de sistema «You are Claude Code…»).
-  Las condiciones de Anthropic, hasta donde sabemos, solo permiten ese token dentro de Claude Code, y
-  en 2026 bloquearon herramientas de terceros que lo usaban. Puede costar la suspensión de la cuenta.
+- **Riesgo (corregido 2026-11-17):** `claude` usa el Claude Code oficial y la cuota del plan, como
+  Claude Code; el paquete del puente avisa que Anthropic podría cambiar cómo cobra el Agent SDK.
   `clio connect claude` lo dice en una línea antes de pedir el token.
 
 ## Enfoques
 
-1. **Pi con el token de suscripción (elegido).** El Pi instalado (1.4.0, `@earendil-works/pi-ai`,
+1. **Pi con el token de suscripción (elegido; reemplazado por el puente, ver «Corrección»).** El Pi instalado (1.4.0, `@earendil-works/pi-ai`,
    `dist/api/anthropic-messages.js`) ya trata como OAuth cualquier llave que contenga `sk-ant-oat`
    con `api: "anthropic-messages"`, y pone solo la identidad de Claude Code. Para el chat es casi
-   todo configuración. Cambio chico y fiel a ADR 0007. Riesgo de cuenta (arriba).
+   todo configuración. Cambio chico y fiel a ADR 0007. Anthropic lo rechaza (ver «Corrección»).
 2. **Clio maneja el `claude` oficial (`claude -p`).** Es el uso permitido de la suscripción, pero
    para el chat Claude Code reemplaza a Pi como arnés: choca con ADR 0007 y 0009, y las herramientas
    de Clio tendrían que ir por MCP. Descartado por tamaño.
@@ -80,16 +104,16 @@ Un tipo en Rust, una fila por conector, y el único lugar donde aparece cada dat
 
 | | `opencode` | `claude` |
 |---|---|---|
-| id de proveedor (Pi, catálogo, trazas) | `opencode-go` | `claude` |
+| id de proveedor (Pi, catálogo, trazas) | `opencode-go` | `claude` (en Pi: `claude-bridge`) |
 | servidor | `https://opencode.ai/inference/go/openai/v1` | `https://api.anthropic.com` |
-| `api` de Pi | `openai-completions` | `anthropic-messages` |
-| encabezados extra en Pi | `User-Agent: clio/0.1`, `x-opencode-session: ${CLIO_SESSION_ID}` | ninguno (Pi pone los de Claude Code) |
-| variable con la llave dentro de la jaula | `OPENCODE_API_KEY` | `ANTHROPIC_API_KEY` u otra que Pi lea como `apiKey` (decide quien construye) |
-| adaptador de llamadas sueltas | `openai_compat.py` | `anthropic_oauth.py` (nuevo) |
+| `api` de Pi | `openai-completions` | `anthropic-messages` (corregido: el puente) |
+| encabezados extra en Pi | `User-Agent: clio/0.1`, `x-opencode-session: ${CLIO_SESSION_ID}` | ninguno |
+| variable con la llave dentro de la jaula | `OPENCODE_API_KEY` | `ANTHROPIC_OAUTH_TOKEN` |
+| adaptador de llamadas sueltas | `openai_compat.py` | `claude_code.py` (corregido; era `anthropic_oauth.py`) |
 | secreto del baúl → destino | `opencode` → `model:opencode.ai` | `claude` → `model:api.anthropic.com` |
 | modelo por defecto | `beam-free` | `claude-sonnet-5-5` |
 
-`config.json` sigue igual de forma: `model.provider` dice el conector (`opencode-go` o `claude`) y
+`config.json` sigue igual de forma: `model.provider` dice el conector (`opencode-go`, `claude` o `anthropic`) y
 `model.model` el modelo. Un `provider` que no es ninguno de los dos es un error claro al cargar.
 `model.base_url` (para pruebas con un modelo falso) se mantiene.
 
@@ -121,7 +145,7 @@ la fila del conector, no desde OpenCode con el id cambiado.
   hacer (`clio vault start`, o `clio connect <conector>`). El sueño duerme sin el paso de unir y lo
   dice en su línea, como hoy cuando falta el modelo.
 
-### El adaptador `anthropic_oauth.py`
+### El adaptador `anthropic_oauth.py` (borrado: ahora `claude_code.py`, ver «Corrección»)
 
 Mismo contrato que `openai_compat.py`: lee un Request (`model`, `messages`, `max_tokens`) y escribe
 `{"content", "input_tokens", "output_tokens"}`. Solo biblioteca estándar. Llama a
@@ -137,13 +161,14 @@ copia los valores exactos de `anthropic-messages.js` de Pi 1.4.0.
 ```
 clio connect opencode [--model M]
 clio connect claude   [--model M]
+clio connect anthropic-api [--model M]   # añadido en la corrección
 ```
 
 1. Comprueba que el baúl está corriendo y abierto; si no, lo dice y sale.
 2. Si el secreto del conector no está en el baúl, lo pide sin eco y lo guarda con su destino
    (`model:<dominio>`), por el mismo camino que `clio vault put`. Si ya está, no lo pide (una opción
    `--new-key` lo reemplaza).
-   - `claude`: antes de pedirlo, una línea con el riesgo y cómo sacarlo (`claude setup-token`).
+   - `claude`: antes de pedirlo, una línea: «Clio usa tu suscripción a través de Claude Code (oficial). El token sale de: claude setup-token».
      El token tiene que empezar por `sk-ant-oat`; si no, se rechaza sin guardarlo.
    - `opencode`: si existen `OPENCODE_API_KEY` o `~/.config/clio/opencode-api-key`, ofrece tomar la
      llave de ahí. Si la toma desde el archivo, ofrece borrarlo (lo borra solo con un sí).
@@ -183,8 +208,7 @@ Quien hoy tiene la llave en archivo y actualiza Clio queda sin modelo hasta corr
 
 - Por conector: el `models.json` de Pi que sale (sin la llave, con `${VAR}`), el `base_url` y lo que
   permite la jaula.
-- `anthropic_oauth.py` contra un servidor falso en loopback: encabezados, bloque de sistema primero,
-  conversión de mensajes, error sin la llave, redirección rechazada, solo `https` o loopback.
+- `anthropic_oauth.py` (corregido: ahora `claude_code.py` contra un Claude Code falso, y `anthropic_api.py` contra un servidor falso en loopback): conversión de mensajes, error sin la llave, redirección rechazada, solo `https` o loopback.
 - `openai_compat.py`: la llave por stdin, y ya no lee entorno ni archivo.
 - `clio connect`: baúl cerrado; token de Claude sin `sk-ant-oat` rechazado; configuración reescrita
   sin perder campos; el archivo de OpenCode solo se borra con un sí.

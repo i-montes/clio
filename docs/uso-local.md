@@ -436,16 +436,17 @@ siguiente: clio doctor, y luego clio
 
 `init` es idempotente: no pisa lo que ya existe (si cambias `config.json`, queda como lo dejaste). Deja las carpetas en 0700, nunca imprime la llave y avisa si falta la del conector activo.
 
-**La llave del modelo y los conectores.** Clio habla con un solo modelo a la vez, por uno de dos conectores: `opencode` (OpenCode Go) o `claude` (tu suscripción de Claude). La llave vive en el baúl, que tiene que estar abierto: `clio vault start` una vez por arranque (en un servidor, `loginctl enable-linger $USER` para que la carpeta de ejecución del baúl no se borre al cerrar sesión). Después, una vez por conector:
+**La llave del modelo y los conectores.** Clio habla con un solo modelo a la vez, por uno de tres conectores: `opencode` (OpenCode Go), `claude` (tu suscripción de Claude, por Claude Code) o `anthropic-api` (una llave de la API de Anthropic, que cobra por token). La llave vive en el baúl, que tiene que estar abierto: `clio vault start` una vez por arranque (en un servidor, `loginctl enable-linger $USER` para que la carpeta de ejecución del baúl no se borre al cerrar sesión). Después, una vez por conector:
 
 ```sh
 clio vault start
 clio connect opencode        # pide la llave sin eco, la guarda en el baúl solo para opencode.ai y prueba el modelo
-clio connect claude          # pega el token que da `claude setup-token`; solo irá a api.anthropic.com
+clio connect claude          # pega el token que da `claude setup-token`; solo irá a api.anthropic.com, por Claude Code
+clio connect anthropic-api   # pega una llave de la API de Anthropic (sk-ant-api…); cobro por token
 clio connect claude --model claude-sonnet-5-5   # otro modelo; --new-key cambia la llave guardada
 ```
 
-`clio connect` escribe `model.provider` y `model.model` en `config.json` (el conector activo) y nunca la llave. Si había un `~/.config/clio/opencode-api-key`, `clio connect opencode` ofrece pasarlo al baúl y borrarlo: Clio ya no lee ese archivo. **Riesgo de Claude:** las condiciones de Anthropic solo permiten el token de suscripción dentro de Claude Code, así que usarlo aquí puede costar la suspensión de la cuenta. Las variables `OPENCODE_API_KEY` y `CLAUDE_CODE_OAUTH_TOKEN` (la del conector activo), si están definidas, mandan sobre el baúl (pruebas, bench, CI). La llave la lee el adaptador del modelo (`clio run`) o Clio, que se la da a Pi dentro de su jaula (chat); Clio no la imprime ni la guarda en ningún run.
+`clio connect` escribe `model.provider` y `model.model` en `config.json` (el conector activo) y nunca la llave. Si había un `~/.config/clio/opencode-api-key`, `clio connect opencode` ofrece pasarlo al baúl y borrarlo: Clio ya no lee ese archivo. **Claude por Claude Code.** El conector `claude` no habla con la API: cada turno lo hace el Claude Code oficial, que `clio pi install` trae junto con Pi (el paquete `pi-claude-agent-sdk`, fijado en 0.9.2; unos 300 MB, una sola vez), y las llamadas sueltas (sueño, `clio run` con el arnés `builtin`, la prueba de `clio connect`) usan ese mismo binario con `claude -p`. Usa la cuota de tu plan, igual que Claude Code; el paquete avisa que Anthropic podría cambiar cómo cobra el Agent SDK. El token (el de `claude setup-token`) sigue en el baúl y llega a Claude Code solo por entorno. Sin el paquete instalado, `clio connect claude` y el chat dicen que ejecutes `clio pi install`. `clio connect anthropic-api` es la otra vía: una llave de la API (`sk-ant-api…`) que va directo a `api.anthropic.com`, con cobro por token. Las variables `OPENCODE_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` y `ANTHROPIC_API_KEY` (la del conector activo), si están definidas, mandan sobre el baúl (pruebas, bench, CI). La llave la lee el adaptador del modelo (`clio run`) o Clio, que se la da a Pi dentro de su jaula (chat); Clio no la imprime ni la guarda en ningún run.
 
 **Configuración** (`~/.config/clio/config.json`): proveedor `opencode-go`, modelo `beam-free` (gratuito), el comando del adaptador (`model.command`), el prompt `clio-agent@2` (con la jaula probada se usa `clio-agent@3`, que explica `run_tests`), y los límites: 40 pasos, 600 segundos, 0,10 USD por tarea, y para la copia 5000 archivos y 200 MB. `init` deja `model.command` en `[]`: el adaptador es el que viene dentro del binario, que se escribe en `~/.local/share/clio/adapters/openai_compat.py` (0600) y se vuelve a escribir si el archivo difiere, así que el config no guarda ninguna ruta y sigue sirviendo al actualizar Clio, mover el repositorio o instalarlo en otra máquina. Un `model.command` que apunte a un `adapters/…/openai_compat.py` (lo que escribían versiones anteriores de `init`) también se lee como el incluido: ese archivo no se ejecuta. Otro comando es un adaptador propio y se ejecuta tal cual; `CLIO_ADAPTER` cambia el incluido por otro script (para trabajar en el adaptador).
 
@@ -607,7 +608,7 @@ Pi (decisión 0007) corre el bucle del agente, los proveedores, las sesiones y l
 Lo que ya existía:
 
 ```sh
-clio pi install            # instala Pi fijado (1.4.0) con `npm ci --ignore-scripts`; `clio init` y `just install` también
+clio pi install            # instala Pi fijado (1.4.0) y el puente de Claude (pi-claude-agent-sdk, ~300 MB) con `npm ci --ignore-scripts`; `clio init` y `just install` también
 clio pi doctor [--json]    # Node 22.19+, Pi instalado y de la versión fijada, que su carpeta no sea ~/.pi
 clio pi sessions [--json]  # las sesiones que Pi guardó (título, mensajes, carpeta, última actividad)
 clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo si es de Clio

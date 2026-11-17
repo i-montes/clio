@@ -499,7 +499,7 @@ mod tests {
                 "--other",
                 "/x/claude",
             ]),
-            cmd(&["python3", "/x/adapters/anthropic_oauth.py"]),
+            cmd(&["python3", "/x/adapters/anthropic_old.py"]),
             cmd(&["./adapter"]),
         ] {
             assert!(!names_builtin_adapter(&other), "{other:?}");

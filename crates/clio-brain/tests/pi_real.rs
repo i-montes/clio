@@ -440,8 +440,8 @@ fn claude_model_from_config() -> Result<String, String> {
         .to_owned())
 }
 
-/// Manual check, with the person present: it calls Anthropic with their subscription, through the
-/// adapter and through a Pi session. `cargo test -p clio-brain --test pi_real
+/// Manual check, with the person present: it uses their Claude subscription through Claude Code,
+/// once through the adapter for single calls and once through a Pi session (`claude-bridge`). `cargo test -p clio-brain --test pi_real
 /// claude_subscription_answers -- --ignored --nocapture`
 #[test]
 #[ignore = "llama a Anthropic con tu suscripción; necesita el baúl abierto y clio connect claude"]
@@ -452,17 +452,32 @@ fn claude_subscription_answers() {
     let node = need("claude_subscription_answers", true).expect(
         "hacen falta Node y adapters/pi/node_modules (cd adapters/pi && npm ci --ignore-scripts)",
     );
+    // Everything that can be missing is checked before the first paid call.
+    let pi_dir = pi_support::repo().join("adapters/pi");
+    let c = clio_brain::connector::by_name("claude").unwrap();
+    assert!(
+        pi_dir.join(c.pi_extension.unwrap()).is_file(),
+        "falta el puente pi-claude-agent-sdk: clio pi install (o npm ci --ignore-scripts en adapters/pi)"
+    );
+    let claude_bin = clio_brain::pi::install::claude_code_bin(&pi_dir)
+        .expect("falta Claude Code dentro de adapters/pi/node_modules: clio pi install");
     let model = claude_model_from_config().unwrap_or_else(|e| panic!("{e}"));
     let key = claude_key().unwrap_or_else(|e| panic!("{e}"));
     // Never print the key, whatever an error says.
     let hide = |s: String| s.replace(key.expose(), "<oculta>");
 
-    // 1. The adapter, as `clio run` calls it: the key in an envelope on stdin.
-    let adapter = pi_support::repo().join("adapters/models/anthropic_oauth.py");
-    let mut m = CommandModel::new("python3", &[adapter.display().to_string()], &model)
-        .with_key(key.clone());
+    // 1. The adapter, as `clio run` calls it (`Config::model_command`): the key in an envelope on
+    // stdin and Claude Code as `--claude <bin>`.
+    let adapter = pi_support::repo().join("adapters/models/claude_code.py");
+    let args = [
+        adapter.display().to_string(),
+        "--claude".to_owned(),
+        claude_bin.display().to_string(),
+    ];
+    let mut m = CommandModel::new("python3", &args, &model).with_key(key.clone());
     m.backoff_ms = vec![];
     m.max_tokens = 64;
+    m.timeout = std::time::Duration::from_secs(120);
     let r = m
         .complete(&[Msg {
             role: "user".into(),
@@ -480,12 +495,10 @@ fn claude_subscription_answers() {
     );
     assert!(r.output_tokens > 0);
 
-    // 2. A Pi session (own temporary home, the real jail) with the same connector and key.
+    // 2. A Pi session with the bridge (own temporary home, the real jail), same connector and key.
     let rig = Rig::new(node);
     let mut launch = rig.launch("", None);
-    launch.provider = clio_brain::connector::by_name("claude")
-        .unwrap()
-        .pi_launch_provider(&model);
+    launch.provider = c.pi_launch_provider(&model);
     launch.api_key = Some(key.clone());
     let mut p = start(&launch).unwrap_or_else(|e| panic!("Pi no arrancó: {}", hide(e.to_string())));
     // A short answer: a stuck turn fails in two minutes instead of the default hour.
