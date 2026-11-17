@@ -1280,12 +1280,8 @@ impl Env {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = c.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+        // `clio` may exit before reading (EPIPE): that is an answer, not a test failure.
+        let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
         child.wait_with_output().unwrap()
     }
 
@@ -1326,7 +1322,7 @@ fn connect_without_the_vault_changes_nothing() {
     let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy\n", &[]);
     assert!(!o.status.success());
     assert!(
-        all_text(&o).contains("clio vault start"),
+        all_text(&o).contains("el baúl no está corriendo"),
         "{}",
         all_text(&o)
     );
@@ -1383,6 +1379,10 @@ fn connect_claude_trims_stores_and_switches() {
     want["model"]["model"] = json!("claude-sonnet-5-5");
     assert_eq!(after, want);
     assert_eq!(mode(&e.home().join(".config/clio/config.json")), 0o600);
+    // model.command (the scripted adapter of this Env) is the person's own program: warned about,
+    // and the probe did not use it (it would have left its `seen` file).
+    assert!(out.contains("model.command es un programa tuyo"), "{out}");
+    assert!(!e.tmp.path().join("script/seen").exists());
     // The probe carried the trimmed token and the question.
     let seen = fake.requests();
     assert_eq!(seen.len(), 1, "{seen:?}");
@@ -1424,4 +1424,54 @@ fn connect_with_an_unknown_model_warns() {
         "{}",
         all_text(&o)
     );
+}
+
+#[test]
+fn connect_reuses_a_key_already_in_the_vault_and_still_probes() {
+    let e = Env::new();
+    let _v = e.vault();
+    let tok = "sk-ant-oat01-decoy-token";
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, Some(tok));
+    let env = [("LLM_BASE_URL", fake.base_url.as_str())];
+    assert!(
+        e.with_stdin(&["connect", "claude"], &format!("{tok}\n"), &env)
+            .status
+            .success()
+    );
+    // Second time: nothing on stdin, so any prompt would fail; the stored key is used.
+    let o = e.with_stdin(
+        &["connect", "claude", "--model", "claude-opus-5-5"],
+        "",
+        &env,
+    );
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(!out.contains("Aviso") && !out.contains("guardada"), "{out}");
+    assert!(
+        out.contains("conectado: claude / claude-opus-5-5 respondió"),
+        "{out}"
+    );
+    let seen = fake.requests();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[1]["model"], "claude-opus-5-5");
+    assert_eq!(seen[1]["headers"]["authorization_matches"], json!(true));
+}
+
+#[test]
+fn connect_keeps_the_key_when_the_probe_fails() {
+    let e = Env::new();
+    let _v = e.vault();
+    // Nothing listens on port 1.
+    let o = e.with_stdin(
+        &["connect", "claude"],
+        "sk-ant-oat01-decoy-token\n",
+        &[("LLM_BASE_URL", "http://127.0.0.1:1")],
+    );
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("guardado, pero claude no respondió"), "{out}");
+    assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
+    assert!(e.vault_list().contains("api.anthropic.com"));
+    let cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    assert_eq!(cfg["model"]["provider"], "claude");
 }
