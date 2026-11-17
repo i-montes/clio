@@ -104,7 +104,8 @@ pub struct JevCfg {
     /// Suggest tools (only with Jev).
     #[serde(default = "yes")]
     pub tool_hints: bool,
-    /// Only for tests: a loopback URL in place of `https://api.typesafe.ai`.
+    /// `https://api.imontes.dev/temis` to ask Temis instead (its key is the vault's `temis`), or
+    /// for tests a loopback URL, in place of `https://api.typesafe.ai`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }

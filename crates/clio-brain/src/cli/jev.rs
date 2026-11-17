@@ -28,6 +28,21 @@ const ADAPTER_SOURCE: &str = include_str!("../../../../adapters/jev/jev_systemon
 const SECRET: &str = "jev";
 const TOOL: &str = "jev";
 const DOMAIN: &str = "api.typesafe.ai";
+/// Temis speaks Jev's protocol (`/v1/systemone`) here, with a key of its own.
+const TEMIS_URL: &str = "https://api.imontes.dev/temis";
+
+fn is_temis(base_url: Option<&str>) -> bool {
+    base_url.is_some_and(|b| b.trim_end_matches('/') == TEMIS_URL)
+}
+
+/// The vault secret and the domain it may go to, for the service `base_url` names.
+pub fn key_for(base_url: Option<&str>) -> (&'static str, &'static str) {
+    if is_temis(base_url) {
+        ("temis", "api.imontes.dev")
+    } else {
+        (SECRET, DOMAIN)
+    }
+}
 
 /// The adapter script: the copy that travels inside this binary, written private and refreshed
 /// when it differs. A file of the checkout is used only if it is exactly that copy: the adapter
@@ -51,9 +66,19 @@ fn adapter_path(dirs: &Dirs) -> Res<PathBuf> {
 /// The client over `script`; the key is asked of the vault at `socket` on every call and kept
 /// nowhere.
 fn build_client(script: PathBuf, socket: &Path, base_url: Option<String>) -> Arc<Jev> {
+    let (secret, domain) = key_for(base_url.as_deref());
     let vault = VaultClient::new(socket).with_timeout(Duration::from_secs(2));
+    // Temis refuses `jev-latest`.
+    let model = if is_temis(base_url.as_deref()) {
+        clio_memory::temis::DEFAULT_MODEL.into()
+    } else {
+        JevConfig::default().model
+    };
     Arc::new(Jev::new(
-        JevConfig::default(),
+        JevConfig {
+            model,
+            ..JevConfig::default()
+        },
         Box::new(Process {
             python: "python3".into(),
             script,
@@ -61,7 +86,7 @@ fn build_client(script: PathBuf, socket: &Path, base_url: Option<String>) -> Arc
         }),
         Box::new(move || {
             vault
-                .resolve(SECRET, TOOL, DOMAIN, "")
+                .resolve(secret, TOOL, domain, "")
                 .map(|v| v.expose().to_owned())
                 .map_err(|e| e.to_string())
         }),
@@ -79,6 +104,25 @@ pub fn client(dirs: &Dirs, cfg: &JevCfg) -> Option<Arc<Jev>> {
         .ok()?;
     let socket = gateway_socket(dirs).ok()?;
     Some(build_client(script, &socket, cfg.base_url.clone()))
+}
+
+/// Temis for the memory's sleep, with its key from the vault (S-18) instead of clio-memory's
+/// `temis.json`; `None` without the vault or the key. The key is held for this one process.
+pub fn temis(dirs: &Dirs) -> Option<clio_memory::temis::Temis> {
+    use clio_memory::temis::{Config, DEFAULT_MODEL, Temis, curl_post};
+    let (secret, domain) = key_for(Some(TEMIS_URL));
+    let token = VaultClient::new(&gateway_socket(dirs).ok()?)
+        .with_timeout(Duration::from_secs(2))
+        .resolve(secret, TOOL, domain, "")
+        .ok()?
+        .expose()
+        .to_owned();
+    let cfg = Config {
+        url: TEMIS_URL.into(),
+        token,
+        model: DEFAULT_MODEL.into(),
+    };
+    Some(Temis::new(cfg, curl_post("curl".into())))
 }
 
 const ENV_ADAPTER: &str = "CLIO_JEV_ADAPTER";
@@ -293,6 +337,20 @@ fn log_shown(path: &Path, p: &Prepared) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temis_gets_its_own_key_and_everything_else_jevs() {
+        let temis = ("temis", "api.imontes.dev");
+        assert_eq!(key_for(Some("https://api.imontes.dev/temis")), temis);
+        assert_eq!(key_for(Some("https://api.imontes.dev/temis/")), temis);
+        for other in [
+            None,
+            Some("http://127.0.0.1:9"),
+            Some("https://api.imontes.dev/temis/x"),
+        ] {
+            assert_eq!(key_for(other), (SECRET, DOMAIN), "{other:?}");
+        }
+    }
 
     #[test]
     fn the_catalog_is_read_from_the_entry_the_guard_wrote() {

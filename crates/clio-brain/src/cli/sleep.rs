@@ -8,7 +8,7 @@ use std::time::Duration;
 use clio_brain::memory_judge::MemoryJudge;
 use clio_brain::memory_link::{EmbedModel, Res};
 use clio_brain::sleep_merger::{ModelMerger, SLEEP_TOKENS};
-use clio_memory::sleep::{Options, Slept, last_report, morning_line, run as sleep_run};
+use clio_memory::sleep::{Options, PairJudge, Slept, last_report, morning_line, run_judged};
 use clio_memory::{Clock, SystemClock};
 use clio_vault::VaultClient;
 
@@ -58,12 +58,18 @@ pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> R
     }
     let merger = if dry_run { None } else { merger(dirs) };
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let out = sleep_run(
+    // Temis with its key from the vault, else what `clio-memory setup temis` kept; a dry run never
+    // asks it.
+    let temis = (!dry_run)
+        .then(|| jev::temis(dirs).or_else(|| clio_memory::temis::from_data(&dirs.data)))
+        .flatten();
+    let out = run_judged(
         &dirs.data,
         &EmbedModel::of_home(&dirs.home),
         merger
             .as_ref()
             .map(|m| m as &dyn clio_memory::sleep::Merger),
+        temis.as_ref().map(|t| t as &dyn PairJudge),
         &Options {
             now,
             dry_run,

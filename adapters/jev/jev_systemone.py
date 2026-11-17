@@ -3,8 +3,9 @@
 System One API (`POST /v1/systemone`), writes the API's JSON answer on stdout. Standard library only.
 
 The key comes from the caller (the vault, S-18): never from the environment or a file here, and it is
-never printed. It goes in one header, to `api.typesafe.ai` over TLS and nowhere else (S-44):
-`JEV_BASE_URL` may only point at this machine over plain http, for tests. A redirect is an error,
+never printed. It goes in one header, over TLS, only to `api.typesafe.ai` or to Temis at
+`api.imontes.dev/temis`, which speaks the same protocol (S-44): `JEV_BASE_URL` picks one of them,
+or this machine over plain http, for tests. A redirect is an error,
 not something to follow: it would hand the key to whatever host the answer names.
 """
 import json
@@ -15,6 +16,8 @@ import urllib.parse
 import urllib.request
 
 HOST = "api.typesafe.ai"
+# The only places the key may go: (host, path), https on 443.
+SERVICES = {(HOST, ""), ("api.imontes.dev", "/temis")}
 BASE = os.environ.get("JEV_BASE_URL", f"https://{HOST}").rstrip("/")
 TIMEOUT = float(os.environ.get("JEV_TIMEOUT_SECONDS", "3"))
 MAX_BYTES = 1 << 20
@@ -27,10 +30,13 @@ def fail(message: str) -> None:
 
 def check_base() -> None:
     u = urllib.parse.urlsplit(BASE)
-    ours = u.scheme == "https" and u.hostname == HOST and u.port in (None, 443)
-    local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
-    if not (ours or local) or u.username or u.password or u.path not in ("", "/"):
-        fail(f"JEV_BASE_URL must be https://{HOST} (http only for 127.0.0.1 or localhost)")
+    ours = u.scheme == "https" and (u.hostname, u.path) in SERVICES and u.port in (None, 443)
+    local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1") and u.path == ""
+    if not (ours or local) or u.username or u.password or u.query or u.fragment:
+        fail(
+            f"JEV_BASE_URL must be https://{HOST} or https://api.imontes.dev/temis"
+            " (http only for 127.0.0.1 or localhost)"
+        )
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

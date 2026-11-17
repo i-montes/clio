@@ -306,21 +306,22 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
         );
         return;
     }
+    let (secret, domain) = super::jev::key_for(jev.base_url.as_deref());
     let ready = super::vault::gateway_socket(dirs).ok().map(|s| {
         VaultClient::new(&s)
-            .check("jev", "jev", Some("api.typesafe.ai"), "")
+            .check(secret, "jev", Some(domain), "")
             .map_err(|e| e.to_string())
     });
     match ready {
         Some(Ok(())) => o.say(
             Level::Pass,
-            "Jev: encendido; la clave está en el baúl y puede usarse solo hacia api.typesafe.ai".into(),
+            format!("Jev: encendido; la clave está en el baúl y puede usarse solo hacia {domain}"),
             None,
         ),
         Some(Err(why)) => o.say(
             Level::Warn,
             format!("Jev: está encendido pero no se puede usar la clave ({})", sanitize::line(&why)),
-            Some("Con el baúl en marcha y desbloqueado: `clio vault put jev --dest jev:api.typesafe.ai`. Mientras tanto Clio sigue sin Jev.".into()),
+            Some(format!("Con el baúl en marcha y desbloqueado: `clio vault put {secret} --dest jev:{domain}`. Mientras tanto Clio sigue sin Jev.")),
         ),
         None => o.say(
             Level::Warn,

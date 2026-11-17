@@ -192,6 +192,13 @@ fn the_adapter_refuses_to_send_the_key_to_any_other_host() {
         "https://example.com",
         "http://127.0.0.1.evil.test",
         "https://api.typesafe.ai.evil.test",
+        "https://api.typesafe.ai/temis",
+        "https://api.imontes.dev",
+        "http://api.imontes.dev/temis",
+        "https://api.imontes.dev/temis/x",
+        "https://api.imontes.dev:8443/temis",
+        "https://api.imontes.dev.evil.test/temis",
+        "https://api.imontes.dev/temis?to=evil.test",
     ] {
         let e = ask(&jev(base, Duration::from_secs(2))).unwrap_err();
         assert!(
