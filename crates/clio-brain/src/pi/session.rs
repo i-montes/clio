@@ -219,7 +219,7 @@ impl Toolhost {
             .env("PATH", "/usr/bin:/bin")
             .env(
                 "CLIO_TOOLHOST_SCRUB_JSON",
-                json!({"opencode_api_key": key.expose()}).to_string(),
+                json!({"model_api_key": key.expose()}).to_string(),
             )
             .process_group(0)
             .stdin(Stdio::piped())

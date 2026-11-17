@@ -427,6 +427,29 @@ fn clio_run_with_pi_prints_the_answer_and_the_change_shows_in_diff() {
     w.assert_key_nowhere();
 }
 
+// The key is never in a file: with no variable and no vault the run says what to do.
+#[test]
+fn a_chat_without_key_or_vault_says_what_to_do() {
+    if can_run("no_key", false).is_none() {
+        return;
+    }
+    let w = World::new(r#"[{"text":"unused","usage":[1,1]}]"#);
+    // A file with the key where the old versions read it must not be read.
+    let cfg = w.home().join(".config/clio");
+    std::fs::write(cfg.join("opencode-api-key"), decoy()).unwrap();
+    let o = w
+        .clio(&["run", "--harness", "pi", "haz algo"])
+        .env_remove("OPENCODE_API_KEY")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(!o.status.success(), "{err}");
+    assert!(
+        err.contains("clio vault start") && !err.contains(&decoy()),
+        "{err}"
+    );
+}
+
 #[test]
 fn harness_flag_is_validated_and_pi_without_an_install_is_an_error_that_says_why() {
     let tmp = tempfile::tempdir().unwrap();

@@ -27,9 +27,7 @@ use clio_brain::memory_link::MemoryLink;
 use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
-use clio_brain::pi::launch::{
-    Launch, PiProcess, Provider, SessionTarget, read_api_key, start, valid_id,
-};
+use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
 use clio_brain::pi::level::{Assessor, run_assessed};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
@@ -119,11 +117,11 @@ impl SessionSource for LocalSource {
         let paths = crate::cli::pi::paths(d);
         let node = install::find_node(&path_var()).map_err(text)?;
         let install = install::locate(&paths).map_err(text)?;
-        let key = read_api_key("OPENCODE_API_KEY", &d.key_file())
-            .map_err(text)?
-            .ok_or(
-                "falta la clave del modelo: ponla en OPENCODE_API_KEY o en ~/.config/clio/opencode-api-key",
-            )?;
+        // `Config::load` guarantees `cfg.model.provider` is a connector.
+        let key = crate::cli::vault::model_key(
+            d,
+            connector::by_provider(&cfg.model.provider).expect("a connector"),
+        )?;
         // 1. the working copy
         let (id, session) = match target {
             Target::New { project } => {

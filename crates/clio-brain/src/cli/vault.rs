@@ -7,8 +7,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use clio_vault::{VaultClient, VaultError};
+
 use super::home::Dirs;
 use super::{Res, io_err, mkdir_private, write_private};
+use clio_brain::connector::Connector;
+use clio_brain::pi::launch::Secret;
 
 /// The person's socket, inside `$XDG_RUNTIME_DIR/clio/` (`clio doctor` asks the vault through it).
 pub(super) const PERSON_SOCK: &str = "vault-person.sock";
@@ -81,6 +85,37 @@ fn paths(dirs: &Dirs) -> Res<Paths> {
         pid: dir.join("vault.pid"),
         dir,
     })
+}
+
+/// The model key of connector `c`: its variable if set and not empty (tests, bench and CI), else
+/// the vault, which sends it only to `model:<domain>`. Errors never carry the key.
+pub fn model_key(dirs: &Dirs, c: &Connector) -> Res<Secret> {
+    key_from(std::env::var(c.key_env).ok(), dirs, c)
+}
+
+fn key_from(env: Option<String>, dirs: &Dirs, c: &Connector) -> Res<Secret> {
+    if let Some(v) = env.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) {
+        return Ok(Secret::new(v));
+    }
+    let not_running = || "el baúl no está corriendo: clio vault start".to_owned();
+    let p = paths(dirs).map_err(|_| not_running())?;
+    if running(&p).is_none() {
+        return Err(not_running());
+    }
+    VaultClient::new(&p.gateway)
+        .with_timeout(Duration::from_secs(2))
+        .resolve(c.secret, "model", c.domain, "")
+        .map(|v| Secret::new(v.expose()))
+        .map_err(|e| match e {
+            VaultError::Locked => "el baúl está cerrado: clio vault start".to_owned(),
+            VaultError::NotFound
+            | VaultError::Denied(_)
+            | VaultError::Revoked
+            | VaultError::Expired => {
+                format!("falta la llave de {0} en el baúl: clio connect {0}", c.name)
+            }
+            _ => not_running(),
+        })
 }
 
 /// Runs `clio-vault` with `args`, feeding `stdin` to it. Its output goes straight to the terminal.
@@ -223,8 +258,47 @@ pub fn run(dirs: &Dirs, mut args: Vec<String>) -> Res<()> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use clio_brain::connector::by_name;
     use std::ffi::OsString;
     use std::path::Path;
+
+    fn dirs_in(root: &Path) -> Dirs {
+        let data = root.join("data");
+        Dirs {
+            config: root.join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: Some(root.join("run/clio")),
+            home: root.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn the_variable_wins_over_the_vault() {
+        let d = tempfile::tempdir().unwrap();
+        let c = by_name("claude").unwrap();
+        // No vault is running here: the answer can only come from the variable.
+        let k = key_from(Some("  var-value \n".into()), &dirs_in(d.path()), c).unwrap();
+        assert_eq!(k.expose(), "var-value");
+        // An empty variable is as good as none.
+        assert!(key_from(Some("  ".into()), &dirs_in(d.path()), c).is_err());
+    }
+
+    #[test]
+    fn no_vault_says_how_to_start_it() {
+        let d = tempfile::tempdir().unwrap();
+        for dirs in [
+            dirs_in(d.path()),
+            Dirs {
+                runtime: None,
+                ..dirs_in(d.path())
+            },
+        ] {
+            let e = key_from(None, &dirs, by_name("opencode").unwrap()).unwrap_err();
+            assert!(e.contains("clio vault start"), "{e}");
+            assert!(!e.contains("sk-"), "{e}");
+        }
+    }
 
     fn exe_dir_with(vault: bool) -> (tempfile::TempDir, PathBuf) {
         let d = tempfile::tempdir().unwrap();

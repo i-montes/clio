@@ -65,16 +65,17 @@ pub fn env_enabled() -> bool {
     })
 }
 
-/// A scrubber that knows the model's API key (from `OPENCODE_API_KEY` or the key file), so the
-/// key can never reach the debug view, the log or stderr. The key is read into memory only here.
+/// A scrubber that knows the model's API key (from its variable or the vault), so the key can
+/// never reach the debug view, the log or stderr. The key is read into memory only here; with
+/// no key to be had, it knows none.
 pub fn scrubber(dirs: &Dirs) -> Scrubber {
     let s = Scrubber::default();
-    let from_env = std::env::var("OPENCODE_API_KEY").ok();
-    let key = from_env
-        .filter(|k| !k.trim().is_empty())
-        .or_else(|| std::fs::read_to_string(dirs.key_file()).ok());
+    let key = super::home::Config::load(dirs)
+        .ok()
+        .and_then(|c| clio_brain::connector::by_provider(&c.model.provider))
+        .and_then(|c| super::vault::model_key(dirs, c).ok());
     if let Some(k) = key {
-        s.add("model-api-key", k.trim());
+        s.add("model-api-key", k.expose());
     }
     s
 }

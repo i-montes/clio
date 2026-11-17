@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clio_brain::pi::PiPaths;
 use clio_brain::pi::install::{self, NodeInfo, PiInstall};
-use clio_brain::pi::launch::{Launch, Provider, Secret, SessionTarget, read_api_key, start};
+use clio_brain::pi::launch::{Launch, Provider, Secret, SessionTarget, start};
 use clio_brain::pi::rpc::{Cancel, Event};
 use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, guard_env};
 use serde_json::{Value, json};
@@ -59,14 +59,15 @@ pub fn locate_clio() -> Result<PathBuf, String> {
 
 impl PiBench {
     /// The real setup: Clio's data folder under `$HOME`, the pinned Pi install, the key from the
-    /// environment or the key file. `price` is micro-dollars per million tokens, (in, out).
+    /// environment. `price` is micro-dollars per million tokens, (in, out).
     pub fn from_env(provider: &str, model: &str, price: (u64, u64)) -> Result<Self, String> {
         let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME no está definida")?);
-        let key = read_api_key(
-            "OPENCODE_API_KEY",
-            &home.join(".config/clio/opencode-api-key"),
-        )?
-        .ok_or("falta la clave del modelo: OPENCODE_API_KEY o ~/.config/clio/opencode-api-key")?;
+        let key = std::env::var("OPENCODE_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty())
+            .map(Secret::new)
+            .ok_or("falta la clave del modelo: OPENCODE_API_KEY")?;
         let mut p = clio_brain::connector::by_name("opencode")
             .ok_or("no hay conector opencode")?
             .pi_provider(model);
