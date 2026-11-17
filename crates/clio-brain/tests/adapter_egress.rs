@@ -231,6 +231,60 @@ fn the_adapter_never_reads_the_old_key_file() {
     assert!(!err.contains(KEY));
 }
 
+// A key pasted or piped with a trailing newline still works: it is stripped.
+#[test]
+fn a_key_with_a_trailing_newline_is_stripped() {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    serve_once(
+        l,
+        respond(
+            "200 OK",
+            "",
+            r#"{"choices":[{"message":{"content":"hi"}}],"usage":{}}"#,
+        ),
+        tx,
+    );
+    let envelope = format!(
+        r#"{{"key":"{KEY}\n","request":{{"model":"m","messages":[{{"role":"user","content":"x"}}]}}}}"#
+    );
+    let base = format!("http://127.0.0.1:{port}/v1");
+    let o = run_adapter(
+        &[("LLM_BASE_URL", &base), ("LLM_TIMEOUT_SECONDS", "10")],
+        None,
+        &envelope,
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let auth = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    assert!(auth.ends_with(KEY), "{auth}");
+}
+
+// A key `http.client` refuses makes it raise an error that quotes the header: the adapter refuses
+// it first and never prints it.
+#[test]
+fn a_key_with_a_control_or_non_ascii_character_fails_without_printing_it() {
+    for bad in [
+        "sk-SECRET\\nmore",
+        "sk-SECRET\\u00e9",
+        "sk SECRET",
+        "sk-SECRET\\u0007",
+    ] {
+        let envelope = format!(r#"{{"key":"{bad}","request":{{"model":"m","messages":[]}}}}"#);
+        let o = run_adapter(
+            &[("LLM_BASE_URL", "http://127.0.0.1:9/v1")],
+            None,
+            &envelope,
+        );
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            !o.status.success() && err.contains("header"),
+            "{bad}: {err}"
+        );
+        assert!(!err.contains("SECRET"), "{bad}: {err}");
+    }
+}
+
 // `LLM_BASE_URL` is the connector's own server or this machine: anything else is refused before
 // the key is read, let alone sent.
 #[test]

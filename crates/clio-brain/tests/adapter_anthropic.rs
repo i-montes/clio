@@ -210,3 +210,173 @@ fn refuses_a_redirect_and_a_remote_base() {
         assert!(!err.contains(TOKEN));
     }
 }
+
+/// Runs one call against a fake that answers `script`, returns the output and what it saw.
+fn call(script: &str, stdin: &str) -> (std::process::Output, Vec<serde_json::Value>) {
+    let t = tempfile::tempdir().unwrap();
+    let fake = FakeProvider::start_with(t.path(), script, Some(TOKEN), &["--log-body"]);
+    let base = fake.base_url.trim_end_matches("/v1").to_owned();
+    let o = run_adapter(
+        &[("LLM_BASE_URL", &base), ("LLM_TIMEOUT_SECONDS", "10")],
+        stdin,
+    );
+    (o, fake.requests())
+}
+
+#[test]
+fn messages_go_as_plain_text_and_only_what_the_api_takes() {
+    let (o, seen) = call(
+        r#"[{"text":"ok"}]"#,
+        &envelope(
+            r#"[{"role":"system","content":"uno"},
+                {"role":"system","content":[{"type":"text","text":"dos"}]},
+                {"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"text","text":"b"}],"name":"ana"},
+                {"role":"assistant","content":"","tool_calls":[{"id":"1"}]},
+                {"role":"tool","content":"resultado"},
+                {"role":"assistant","content":"r","name":"clio"}]"#,
+        ),
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let body = &seen[0]["body"];
+    assert_eq!(body["system"][1]["text"], "uno\n\ndos");
+    assert_eq!(
+        body["messages"],
+        serde_json::json!([
+            {"role":"user","content":"ab"},
+            {"role":"assistant","content":"r"}
+        ]),
+        "extra fields, empty and other-role messages are left out"
+    );
+}
+
+#[test]
+fn a_request_with_nothing_to_send_fails_before_calling() {
+    let (o, seen) = call(
+        r#"[{"text":"ok"}]"#,
+        &envelope(r#"[{"role":"system","content":"solo"},{"role":"user","content":""}]"#),
+    );
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("ningún mensaje"));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn a_null_usage_counts_zero_and_a_non_object_answer_is_an_error() {
+    // Raw listeners: the fake server always sends a well-formed usage.
+    for (reply, ok) in [
+        (
+            r#"{"content":[{"type":"text","text":"hi"}],"usage":null}"#,
+            true,
+        ),
+        (r#"{"content":null,"usage":{"input_tokens":null}}"#, true),
+        (r#"["no","object"]"#, false),
+    ] {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let sent = reply.to_owned();
+        std::thread::spawn(move || {
+            let Ok((mut s, _)) = l.accept() else { return };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; len];
+            let _ = r.read_exact(&mut body);
+            let _ = s.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sent}",
+                    sent.len()
+                )
+                .as_bytes(),
+            );
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let o = run_adapter(
+            &[("LLM_BASE_URL", &base), ("LLM_TIMEOUT_SECONDS", "10")],
+            &envelope(r#"[{"role":"user","content":"x"}]"#),
+        );
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.success(), ok, "{reply}: {err}");
+        assert!(!err.contains("Traceback"), "{err}");
+        if ok {
+            let out: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+            assert_eq!(out["input_tokens"], 0);
+        }
+    }
+}
+
+#[test]
+fn a_key_with_a_trailing_newline_is_stripped() {
+    let t = tempfile::tempdir().unwrap();
+    let fake = FakeProvider::start(t.path(), r#"[{"text":"ok"}]"#, Some(TOKEN));
+    let base = fake.base_url.trim_end_matches("/v1").to_owned();
+    let stdin =
+        envelope(r#"[{"role":"user","content":"x"}]"#).replace(TOKEN, &format!("{TOKEN}\\n"));
+    let o = run_adapter(&[("LLM_BASE_URL", &base)], &stdin);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(fake.requests()[0]["headers"]["authorization_matches"], true);
+}
+
+#[test]
+fn a_key_with_a_control_or_non_ascii_character_fails_without_printing_it() {
+    for bad in [
+        "sk-ant-SECRET\\nmore",
+        "sk-ant-SECRET\\u00e9",
+        "sk-ant SECRET",
+        "sk-ant-SECRET\\u0007",
+    ] {
+        let stdin = envelope(r#"[{"role":"user","content":"x"}]"#).replace(TOKEN, bad);
+        let o = run_adapter(&[("LLM_BASE_URL", "http://127.0.0.1:9")], &stdin);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            !o.status.success() && err.contains("header"),
+            "{bad}: {err}"
+        );
+        assert!(!err.contains("SECRET"), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn the_fake_server_streams_anthropic_events() {
+    let t = tempfile::tempdir().unwrap();
+    let fake = FakeProvider::start(t.path(), r#"[{"text":"hola","usage":[17,3]}]"#, None);
+    let port = fake
+        .base_url
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .trim_end_matches("/v1");
+    let mut s = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    let body = r#"{"model":"m","stream":true,"messages":[]}"#;
+    write!(
+        s,
+        "POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut got = String::new();
+    s.read_to_string(&mut got).unwrap();
+    let names: Vec<&str> = got
+        .lines()
+        .filter_map(|l| l.strip_prefix("event: "))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop"
+        ]
+    );
+    assert!(got.contains(r#""text": "hola""#) && got.contains(r#""input_tokens": 17"#));
+}

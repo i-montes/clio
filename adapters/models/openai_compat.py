@@ -53,8 +53,13 @@ if "key" in sent and "request" in sent:
     key, request = sent["key"], sent["request"]
 else:
     key, request = os.environ.get("OPENCODE_API_KEY"), sent
+key = key.strip() if isinstance(key, str) else ""
 if not key:
     fail("the API key is missing: Clio sends it in the envelope, or set OPENCODE_API_KEY")
+# A key with a line break or a non-ASCII character makes `http.client` raise an error that quotes
+# the header, token included: refuse it here, without printing it.
+if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
+    fail("the key has a character that cannot go in an HTTP header (a line break, a space, non-ASCII)")
 
 body = {
     "model": request["model"],
@@ -83,9 +88,11 @@ try:
     with urllib.request.build_opener(NoRedirect).open(http, timeout=TIMEOUT) as response:
         answer = json.load(response)
 except urllib.error.HTTPError as e:
-    fail(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}")
-except Exception as e:  # network down, timeout, bad JSON
-    fail(f"{type(e).__name__}: {e}")
+    fail(f"HTTP {e.code} {e.reason}")  # never the body: it can echo the key
+except urllib.error.URLError as e:  # network down
+    fail(f"URLError: {e.reason}")
+except Exception as e:  # timeout, bad JSON: only the kind, a message could quote the request
+    fail(type(e).__name__)
 
 choice = (answer.get("choices") or [{}])[0]
 message = choice.get("message", {})

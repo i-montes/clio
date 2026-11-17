@@ -51,8 +51,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def text_of(content) -> str:
     if isinstance(content, list):
-        return "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    return content or ""
+        return "".join(p.get("text") or "" for p in content if isinstance(p, dict))
+    return content if isinstance(content, str) else ""
 
 
 check_base()
@@ -61,19 +61,36 @@ if "key" in sent and "request" in sent:
     key, request = sent["key"], sent["request"]
 else:
     key, request = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), sent
+key = key.strip() if isinstance(key, str) else ""
 if not key:
     fail("the token is missing: Clio sends it in the envelope, or set CLAUDE_CODE_OAUTH_TOKEN")
+# A key with a line break or a non-ASCII character makes `http.client` raise an error that quotes
+# the header, token included: refuse it here, without printing it.
+if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
+    fail("the token has a character that cannot go in an HTTP header (a line break, a space, non-ASCII)")
 
-# Clio's `system` messages go in the API's `system` (after the identity block), the rest as they are.
+# Clio's `system` messages go in the API's `system` (after the identity block); the API takes only
+# `role` and plain-text `content` in user/assistant messages and rejects empty ones, so that is all
+# that is sent and anything else (other roles, images, extra fields) is left out.
 system = [{"type": "text", "text": IDENTITY}]
-extra = "\n\n".join(t for t in (text_of(m.get("content")) for m in request["messages"] if m.get("role") == "system") if t)
+messages, extra = [], []
+for m in request["messages"]:
+    text = text_of(m.get("content"))
+    if not text:
+        continue
+    if m.get("role") == "system":
+        extra.append(text)
+    elif m.get("role") in ("user", "assistant"):
+        messages.append({"role": m["role"], "content": text})
 if extra:
-    system.append({"type": "text", "text": extra})
+    system.append({"type": "text", "text": "\n\n".join(extra)})
+if not messages:
+    fail("la petición no tiene ningún mensaje de usuario o asistente con texto")
 body = {
     "model": request["model"],
     "max_tokens": request.get("max_tokens") or 4096,
     "system": system,
-    "messages": [m for m in request["messages"] if m.get("role") in ("user", "assistant")],
+    "messages": messages,
 }
 
 http = urllib.request.Request(
@@ -94,15 +111,22 @@ try:
         answer = json.load(response)
 except urllib.error.HTTPError as e:
     fail(f"HTTP {e.code} {e.reason}")  # never the body: it can echo the token
-except Exception as e:  # network down, timeout, bad JSON
-    fail(f"{type(e).__name__}: {e}")
+except urllib.error.URLError as e:  # network down
+    fail(f"URLError: {e.reason}")
+except Exception as e:  # timeout, bad JSON: only the kind, a message could quote the request
+    fail(type(e).__name__)
 
-usage = answer.get("usage", {})
+if not isinstance(answer, dict):
+    fail("la respuesta no es JSON válido")
+usage = answer.get("usage")
+usage = usage if isinstance(usage, dict) else {}
+blocks = answer.get("content")
+blocks = blocks if isinstance(blocks, list) else []
 json.dump(
     {
-        "content": "".join(b.get("text", "") for b in answer.get("content", []) if b.get("type") == "text"),
-        "input_tokens": int(usage.get("input_tokens", 0)),
-        "output_tokens": int(usage.get("output_tokens", 0)),
+        "content": "".join(b.get("text") or "" for b in blocks if isinstance(b, dict) and b.get("type") == "text"),
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
     },
     sys.stdout,
 )
