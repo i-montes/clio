@@ -11,7 +11,7 @@ use clio_vault::proto::Request;
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::json;
 
-use super::home::{Config, Dirs, builtin_adapter_path, names_builtin_adapter};
+use super::home::{Config, Dirs, builtin_adapter_path, lacks_bridge, names_builtin_adapter};
 use super::mode;
 use super::tui::app::plural;
 use super::tui::sanitize;
@@ -280,6 +280,27 @@ fn jail_lines(o: &mut Report) {
         .map(|c| json!({"name": c.name, "passed": c.passed, "detail": c.detail}))
         .collect();
     o.jail = Some(json!({"available": st.ready(), "bwrap": bwrap, "checks": checks}));
+}
+
+/// The Claude bridge, for a connector that runs through it: the chat and the single calls both
+/// need it.
+fn bridge_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
+    let name = c.name;
+    if c.pi_extension.is_some() {
+        if lacks_bridge(dirs, c) {
+            o.say(
+                Level::Warn,
+                format!("conector {name}: falta el puente de Claude o su Claude Code: clio pi install"),
+                Some("El chat y las llamadas sueltas pasan por Claude Code, que trae el puente (pi-claude-agent-sdk).".into()),
+            );
+        } else {
+            o.say(
+                Level::Pass,
+                format!("conector {name}: el puente y Claude Code están en el Pi instalado"),
+                None,
+            );
+        }
+    }
 }
 
 /// The active connector's key: the variable if set (it wins over the vault), else whether the
@@ -773,6 +794,7 @@ pub fn collect(dirs: &Dirs) -> Report {
             // `Config::load` guarantees `model.provider` is a connector.
             let conn = by_provider(&c.model.provider).expect("a connector");
             connector_report(&mut o, dirs, conn);
+            bridge_report(&mut o, dirs, conn);
             if names_builtin_adapter(&c.model.command) {
                 // A path older versions of `init` wrote is not run: said, so it can be removed.
                 let old = c.model.command.get(1).map_or_else(String::new, |p| {

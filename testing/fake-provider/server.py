@@ -170,6 +170,9 @@ def make_handler(script, log_path, expect_key, log_body=False):
                 headers["authorization_matches"] = (
                     expect_key is not None and self.headers.get("Authorization") == "Bearer " + expect_key
                 )
+                headers["x_api_key_matches"] = (
+                    expect_key is not None and self.headers.get("x-api-key") == expect_key
+                )
                 entry = {
                     "path": self.path,
                     "model": req.get("model"),

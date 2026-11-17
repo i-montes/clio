@@ -132,6 +132,28 @@ pub fn locate(paths: &PiPaths) -> Result<PiInstall, PiError> {
     }
 }
 
+/// The Claude Code binary the Agent SDK brings inside the Pi install `dir` (one platform package
+/// is installed: the first that is there and executable).
+pub fn claude_code_bin(dir: &Path) -> Option<PathBuf> {
+    [
+        "linux-x64",
+        "linux-x64-musl",
+        "linux-arm64",
+        "linux-arm64-musl",
+        "darwin-arm64",
+        "darwin-x64",
+    ]
+    .iter()
+    .map(|p| {
+        dir.join(format!(
+            "node_modules/@anthropic-ai/claude-agent-sdk-{p}/claude"
+        ))
+    })
+    .find(|p| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
+}
+
 /// Every folder 0700, every file without group/other access (keeps the owner's exec bit).
 fn lock_down(dir: &Path) -> Result<(), PiError> {
     let rd = std::fs::read_dir(dir).map_err(|e| io_err(dir, &e))?;

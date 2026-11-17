@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
-//! The Anthropic adapter of the Claude connector (`adapters/models/anthropic_oauth.py`): it asks
-//! as Claude Code does (the subscription token only works that way), answers in Clio's shape, and
-//! keeps the contract of the OpenAI one: the token goes only to its server or this machine, a
-//! redirect is an error, an HTTP error never prints the body.
+//! The adapter of the Anthropic API connector (`adapters/models/anthropic_api.py`): it asks with a
+//! plain API key (`x-api-key`) and nothing that passes for another program, answers in Clio's
+//! shape, and keeps the contract of the OpenAI one: the key goes only to its server or this
+//! machine, a redirect is an error, an HTTP error never prints the body.
 
 mod pi_support;
 
@@ -15,12 +15,12 @@ use std::time::Duration;
 
 use pi_support::FakeProvider;
 
-const TOKEN: &str = "sk-ant-oat01-test-token-0123456789";
+const TOKEN: &str = "sk-ant-api03-test-key-0123456789";
 
 /// Runs the adapter with an empty environment plus `env`, feeding it `stdin`.
 fn run_adapter(env: &[(&str, &str)], stdin: &str) -> std::process::Output {
     let adapter =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/models/anthropic_oauth.py");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../adapters/models/anthropic_api.py");
     let mut child = Command::new("python3")
         .arg("-I")
         .arg(adapter)
@@ -47,7 +47,7 @@ fn envelope(messages: &str) -> String {
 }
 
 #[test]
-fn asks_as_claude_code_and_answers_in_clios_shape() {
+fn asks_with_the_api_key_and_answers_in_clios_shape() {
     let t = tempfile::tempdir().unwrap();
     let fake = FakeProvider::start_with(
         t.path(),
@@ -74,20 +74,26 @@ fn asks_as_claude_code_and_answers_in_clios_shape() {
     let r = &seen[0];
     assert_eq!(r["path"], "/v1/messages");
     let h = &r["headers"];
-    assert_eq!(h["authorization_matches"], true, "Bearer <token>");
+    assert_eq!(h["x_api_key_matches"], true, "x-api-key: <key>");
+    assert_eq!(h["authorization_present"], false);
     assert_eq!(h["anthropic-version"], "2023-06-01");
-    assert_eq!(h["anthropic-beta"], "claude-code-20250219,oauth-2025-04-20");
-    assert_eq!(h["user-agent"], "claude-cli/2.1.280");
-    assert_eq!(h["x-app"], "cli");
+    for gone in ["anthropic-beta", "x-app"] {
+        assert!(h.get(gone).is_none(), "{gone}: {h}");
+    }
+    assert!(
+        !h["user-agent"]
+            .as_str()
+            .unwrap_or("")
+            .contains("claude-cli"),
+        "{h}"
+    );
     let body = &r["body"];
     assert_eq!(body["max_tokens"], 123);
-    assert!(
-        body["system"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("You are Claude Code")
+    // Clio's system, and no identity block before it.
+    assert_eq!(
+        body["system"],
+        serde_json::json!([{"type":"text","text":"Eres Clio."}])
     );
-    assert_eq!(body["system"][1]["text"], "Eres Clio.");
     let roles: Vec<_> = body["messages"]
         .as_array()
         .unwrap()
@@ -106,18 +112,17 @@ fn max_tokens_defaults_and_a_bare_request_uses_the_variable() {
         FakeProvider::start_with(t.path(), r#"[{"text":"ok"}]"#, Some(TOKEN), &["--log-body"]);
     let base = fake.base_url.trim_end_matches("/v1").to_owned();
     let o = run_adapter(
-        &[("LLM_BASE_URL", &base), ("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)],
+        &[("LLM_BASE_URL", &base), ("ANTHROPIC_API_KEY", TOKEN)],
         r#"{"model":"m","messages":[{"role":"user","content":"x"}]}"#,
     );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let seen = fake.requests();
     assert_eq!(seen[0]["body"]["max_tokens"], 4096);
-    assert_eq!(seen[0]["headers"]["authorization_matches"], true);
+    assert_eq!(seen[0]["headers"]["x_api_key_matches"], true);
     // No key at all: an error that names the variable, not a request.
     let o = run_adapter(&[("LLM_BASE_URL", &base)], r#"{"model":"m","messages":[]}"#);
     assert!(
-        !o.status.success()
-            && String::from_utf8_lossy(&o.stderr).contains("CLAUDE_CODE_OAUTH_TOKEN")
+        !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("ANTHROPIC_API_KEY")
     );
     assert_eq!(fake.requests().len(), 1);
 }
@@ -238,7 +243,7 @@ fn messages_go_as_plain_text_and_only_what_the_api_takes() {
     );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let body = &seen[0]["body"];
-    assert_eq!(body["system"][1]["text"], "uno\n\ndos");
+    assert_eq!(body["system"][0]["text"], "uno\n\ndos");
     assert_eq!(
         body["messages"],
         serde_json::json!([
@@ -321,7 +326,7 @@ fn a_key_with_a_trailing_newline_is_stripped() {
         envelope(r#"[{"role":"user","content":"x"}]"#).replace(TOKEN, &format!("{TOKEN}\\n"));
     let o = run_adapter(&[("LLM_BASE_URL", &base)], &stdin);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert_eq!(fake.requests()[0]["headers"]["authorization_matches"], true);
+    assert_eq!(fake.requests()[0]["headers"]["x_api_key_matches"], true);
 }
 
 #[test]

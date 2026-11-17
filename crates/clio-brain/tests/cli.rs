@@ -625,6 +625,27 @@ fn doctor_says_a_connector_key_is_in_the_vault_and_where_it_may_go() {
 }
 
 #[test]
+fn doctor_says_whether_the_claude_bridge_is_installed() {
+    let e = Env::new();
+    use_claude(&e);
+    let bridge = |e: &Env| {
+        text(&e.try_clio(&["doctor"]).stdout)
+            .lines()
+            .find(|l| l.contains("Claude Code"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let line = bridge(&e);
+    assert!(
+        line.starts_with("WARN") && line.contains("clio pi install"),
+        "{line}"
+    );
+    e.fake_bridge();
+    let line = bridge(&e);
+    assert!(line.starts_with("PASS"), "{line}");
+}
+
+#[test]
 fn doctor_warns_about_a_key_file_left_behind() {
     let e = Env::new();
     let key = e.home().join(".config/clio/opencode-api-key");
@@ -1428,6 +1449,56 @@ fn all_text(o: &Output) -> String {
     format!("{}{}", text(&o.stdout), text(&o.stderr))
 }
 
+impl Env {
+    /// A Pi install in this Env's data folder with the Claude bridge and a fake Claude Code that
+    /// writes its environment and stdin to `script/claude-seen.json` and answers `ok`. Nothing
+    /// in it runs Pi.
+    fn fake_bridge(&self) {
+        let pkg: Value = serde_json::from_str(
+            &std::fs::read_to_string(pi_support::repo().join("adapters/pi/package.json")).unwrap(),
+        )
+        .unwrap();
+        let version = pkg["dependencies"]["@earendil-works/pi-coding-agent"]
+            .as_str()
+            .unwrap();
+        let nm = self
+            .home()
+            .join(".local/share/clio/pi")
+            .join(version)
+            .join("node_modules");
+        let file = |rel: &str, body: &str, exec: bool| {
+            let p = nm.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            if exec {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        };
+        file(".bin/pi", "#!/bin/sh\nexit 1\n", true);
+        file(
+            "@earendil-works/pi-coding-agent/package.json",
+            &json!({ "version": version }).to_string(),
+            false,
+        );
+        file("pi-claude-agent-sdk/src/index.ts", "", false);
+        file(
+            "@anthropic-ai/claude-agent-sdk-linux-x64/claude",
+            &format!(
+                "#!/usr/bin/env python3\nimport json, os, sys\njson.dump({{'env': dict(os.environ), 'stdin': sys.stdin.read(), 'argv': sys.argv[1:]}}, open({:?}, 'w'))\nprint(json.dumps({{'type': 'result', 'is_error': False, 'result': 'ok', 'usage': {{'input_tokens': 5, 'output_tokens': 1}}}}))\n",
+                self.path("script/claude-seen.json")
+            ),
+            true,
+        );
+    }
+
+    /// What the fake Claude Code of `fake_bridge` was given, if it ran.
+    fn claude_seen(&self) -> Option<Value> {
+        std::fs::read_to_string(self.tmp.path().join("script/claude-seen.json"))
+            .ok()
+            .map(|t| serde_json::from_str(&t).unwrap())
+    }
+}
+
 #[test]
 fn connect_without_the_vault_changes_nothing() {
     let e = Env::new();
@@ -1445,6 +1516,7 @@ fn connect_without_the_vault_changes_nothing() {
 #[test]
 fn connect_claude_refuses_a_token_that_is_not_oauth() {
     let e = Env::new();
+    e.fake_bridge();
     let _v = e.vault();
     let before = e.config_bytes();
     let o = e.with_stdin(&["connect", "claude"], "sk-ant-api03-x-not-oauth\n", &[]);
@@ -1466,22 +1538,25 @@ fn connect_claude_refuses_a_token_that_is_not_oauth() {
 #[test]
 fn connect_claude_trims_stores_and_switches() {
     let e = Env::new();
+    e.fake_bridge();
     let _v = e.vault();
-    let fake = pi_support::FakeProvider::start(
-        e.tmp.path(),
-        r#"[{"text": "ok"}]"#,
-        Some("sk-ant-oat01-decoy-token"),
-    );
     let before: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
     let o = e.with_stdin(
         &["connect", "claude"],
         "  sk-ant-oat01-decoy-token  \n",
-        &[("LLM_BASE_URL", &fake.base_url)],
+        &[],
     );
     let out = all_text(&o);
     assert!(o.status.success(), "{out}");
     assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
-    assert!(out.contains("Anthropic puede suspender la cuenta"), "{out}");
+    assert!(
+        out.contains("Clio usa tu suscripción a través de Claude Code (oficial). El token sale de: claude setup-token"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("presentándose") && !out.contains("suspender"),
+        "{out}"
+    );
     assert!(
         out.contains("conectado: claude / claude-sonnet-5-5 respondió"),
         "{out}"
@@ -1504,10 +1579,77 @@ fn connect_claude_trims_stores_and_switches() {
     // and the probe did not use it (it would have left its `seen` file).
     assert!(out.contains("model.command es un programa tuyo"), "{out}");
     assert!(!e.tmp.path().join("script/seen").exists());
-    // The probe carried the trimmed token and the question.
+    // The probe went through Claude Code, with the trimmed token only in its environment.
+    let seen = e.claude_seen().expect("Claude Code was not run");
+    assert_eq!(
+        seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"],
+        "sk-ant-oat01-decoy-token"
+    );
+    assert!(
+        seen["stdin"]
+            .as_str()
+            .unwrap()
+            .contains("Responde solo: ok")
+    );
+    assert!(!seen["argv"].to_string().contains("sk-ant-oat01"));
+}
+
+#[test]
+fn connect_claude_without_the_bridge_saves_nothing() {
+    let e = Env::new();
+    let _v = e.vault();
+    let before = e.config_bytes();
+    let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy-token\n", &[]);
+    let out = all_text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(
+        out.contains("falta el puente de Claude (pi-claude-agent-sdk): clio pi install"),
+        "{out}"
+    );
+    assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
+    assert!(!e.vault_list().contains("claude"));
+    assert_eq!(e.config_bytes(), before);
+}
+
+#[test]
+fn connect_anthropic_api_stores_and_switches() {
+    let e = Env::new();
+    let _v = e.vault();
+    let key = "sk-ant-api03-decoy-key-0123456789";
+    let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, Some(key));
+    let env = [("LLM_BASE_URL", fake.base_url.as_str())];
+    let before = e.config_bytes();
+    // A subscription token is not an API key: refused, nothing stored.
+    let o = e.with_stdin(&["connect", "anthropic-api"], "sk-ant-oat01-decoy\n", &env);
+    assert!(!o.status.success(), "{}", all_text(&o));
+    assert!(all_text(&o).contains("sk-ant-api"), "{}", all_text(&o));
+    assert!(
+        !all_text(&o).contains("sk-ant-oat01-decoy"),
+        "{}",
+        all_text(&o)
+    );
+    assert_eq!(e.config_bytes(), before);
+
+    let o = e.with_stdin(&["connect", "anthropic-api"], &format!(" {key} \n"), &env);
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(!out.contains(key), "{out}");
+    assert!(
+        out.contains("conectado: anthropic-api / claude-sonnet-5-5 respondió"),
+        "{out}"
+    );
+    let list = e.vault_list();
+    assert!(
+        list.contains("anthropic-api") && list.contains("api.anthropic.com"),
+        "{list}"
+    );
+    let cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
+    assert_eq!(cfg["model"]["provider"], "anthropic");
+    assert_eq!(cfg["model"]["model"], "claude-sonnet-5-5");
     let seen = fake.requests();
     assert_eq!(seen.len(), 1, "{seen:?}");
-    assert_eq!(seen[0]["headers"]["authorization_matches"], json!(true));
+    assert_eq!(seen[0]["headers"]["x_api_key_matches"], json!(true));
+    assert_eq!(seen[0]["headers"]["authorization_present"], json!(false));
     assert_eq!(seen[0]["last_user"], "Responde solo: ok");
 }
 
@@ -1535,8 +1677,8 @@ fn connect_with_an_unknown_model_warns() {
     let _v = e.vault();
     let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, None);
     let o = e.with_stdin(
-        &["connect", "claude", "--model", "claude-nada"],
-        "sk-ant-oat01-decoy-token\n",
+        &["connect", "anthropic-api", "--model", "claude-nada"],
+        "sk-ant-api03-decoy-key\n",
         &[("LLM_BASE_URL", &fake.base_url)],
     );
     assert!(o.status.success(), "{}", all_text(&o));
@@ -1551,31 +1693,31 @@ fn connect_with_an_unknown_model_warns() {
 fn connect_reuses_a_key_already_in_the_vault_and_still_probes() {
     let e = Env::new();
     let _v = e.vault();
-    let tok = "sk-ant-oat01-decoy-token";
+    let tok = "sk-ant-api03-decoy-key";
     let fake = pi_support::FakeProvider::start(e.tmp.path(), r#"[{"text": "ok"}]"#, Some(tok));
     let env = [("LLM_BASE_URL", fake.base_url.as_str())];
     assert!(
-        e.with_stdin(&["connect", "claude"], &format!("{tok}\n"), &env)
+        e.with_stdin(&["connect", "anthropic-api"], &format!("{tok}\n"), &env)
             .status
             .success()
     );
     // Second time: nothing on stdin, so any prompt would fail; the stored key is used.
     let o = e.with_stdin(
-        &["connect", "claude", "--model", "claude-opus-5-5"],
+        &["connect", "anthropic-api", "--model", "claude-opus-5-5"],
         "",
         &env,
     );
     let out = all_text(&o);
     assert!(o.status.success(), "{out}");
-    assert!(!out.contains("Aviso") && !out.contains("guardada"), "{out}");
+    assert!(!out.contains("guardada"), "{out}");
     assert!(
-        out.contains("conectado: claude / claude-opus-5-5 respondió"),
+        out.contains("conectado: anthropic-api / claude-opus-5-5 respondió"),
         "{out}"
     );
     let seen = fake.requests();
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert_eq!(seen[1]["model"], "claude-opus-5-5");
-    assert_eq!(seen[1]["headers"]["authorization_matches"], json!(true));
+    assert_eq!(seen[1]["headers"]["x_api_key_matches"], json!(true));
 }
 
 #[test]
@@ -1584,17 +1726,20 @@ fn connect_keeps_the_key_when_the_probe_fails() {
     let _v = e.vault();
     // Nothing listens on port 1.
     let o = e.with_stdin(
-        &["connect", "claude"],
-        "sk-ant-oat01-decoy-token\n",
+        &["connect", "anthropic-api"],
+        "sk-ant-api03-decoy-key\n",
         &[("LLM_BASE_URL", "http://127.0.0.1:1")],
     );
     let out = all_text(&o);
     assert!(o.status.success(), "{out}");
-    assert!(out.contains("guardado, pero claude no respondió"), "{out}");
-    assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
+    assert!(
+        out.contains("guardado, pero anthropic-api no respondió"),
+        "{out}"
+    );
+    assert!(!out.contains("sk-ant-api03-decoy"), "{out}");
     assert!(e.vault_list().contains("api.anthropic.com"));
     let cfg: Value = serde_json::from_slice(&e.config_bytes()).unwrap();
-    assert_eq!(cfg["model"]["provider"], "claude");
+    assert_eq!(cfg["model"]["provider"], "anthropic");
 }
 
 // An upgrading person may have any provider id in config.json; `clio connect` is what the error
@@ -1610,7 +1755,7 @@ fn connect_repairs_a_provider_that_is_not_a_connector() {
     // Every other command still refuses it, and points at connect.
     let o = e.try_clio(&["run", "--workspace", &e.path("proj"), "hazlo"]);
     assert!(
-        !o.status.success() && all_text(&o).contains("clio connect opencode|claude"),
+        !o.status.success() && all_text(&o).contains("clio connect opencode|claude|anthropic-api"),
         "{}",
         all_text(&o)
     );

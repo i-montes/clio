@@ -66,7 +66,8 @@ pub const CONNECTORS: [Connector; 3] = [
         pi_key_env: "ANTHROPIC_OAUTH_TOKEN",
         key_prefix: "sk-ant-oat",
         pi_extension: Some("node_modules/pi-claude-agent-sdk/src/index.ts"),
-        adapter: "anthropic_oauth.py",
+        // Single calls run the official Claude Code too (`claude -p`), never the API directly.
+        adapter: "claude_code.py",
         secret: "claude",
         domain: "api.anthropic.com",
         default_model: "claude-sonnet-5-5",
@@ -82,8 +83,7 @@ pub const CONNECTORS: [Connector; 3] = [
         pi_key_env: "ANTHROPIC_API_KEY",
         key_prefix: "sk-ant-api",
         pi_extension: None,
-        // shortcut: the OAuth adapter until Task 2 brings anthropic_api.py (x-api-key).
-        adapter: "anthropic_oauth.py",
+        adapter: "anthropic_api.py",
         secret: "anthropic-api",
         domain: "api.anthropic.com",
         default_model: "claude-sonnet-5-5",

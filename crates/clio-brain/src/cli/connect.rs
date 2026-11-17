@@ -1,7 +1,7 @@
-//! `clio connect opencode|claude [--model M] [--new-key]`: makes a connector the active one. The
-//! key goes into the vault (`model:<domain>`) and `config.json` says which connector and model are
-//! used. Nothing is changed until every check that can fail has passed, and no message carries
-//! the key.
+//! `clio connect opencode|claude|anthropic-api [--model M] [--new-key]`: makes a connector the
+//! active one. The key goes into the vault (`model:<domain>`) and `config.json` says which
+//! connector and model are used. Nothing is changed until every check that can fail has passed,
+//! and no message carries the key.
 
 use std::io::{BufRead, Write};
 
@@ -10,10 +10,10 @@ use clio_brain::connector::{Connector, by_name};
 use clio_brain::pi::launch::Secret;
 use serde_json::Value;
 
-use super::home::{Config, Dirs, names_builtin_adapter};
+use super::home::{Config, Dirs, lacks_bridge, names_builtin_adapter};
 use super::{Args, Res, io_err, usage, vault, write_private};
 
-const CLAUDE_WARNING: &str = "Aviso: Clio usará tu suscripción presentándose como Claude Code; Anthropic puede suspender la cuenta por esto. El token sale de: claude setup-token";
+const CLAUDE_WARNING: &str = "Clio usa tu suscripción a través de Claude Code (oficial). El token sale de: claude setup-token";
 
 pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let mut args = Args::new(args);
@@ -21,10 +21,12 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let model_arg = args.value("--model")?;
     let rest = args.rest()?;
     let [name] = rest.as_slice() else {
-        return Err("uso: clio connect opencode|claude [--model M] [--new-key]".into());
+        return Err(
+            "uso: clio connect opencode|claude|anthropic-api [--model M] [--new-key]".into(),
+        );
     };
     let c = by_name(name).ok_or_else(|| {
-        format!("conector desconocido {name:?}: usa clio connect opencode|claude")
+        format!("conector desconocido {name:?}: usa clio connect opencode|claude|anthropic-api")
     })?;
     let model = model_arg.unwrap_or_else(|| c.default_model.to_owned());
 
@@ -32,6 +34,10 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     // Read now, so a broken config stops us before the vault changes; its provider is what we
     // are about to replace, so it may be anything.
     let cfg = Config::load_with_provider(dirs, c.provider)?;
+    // Without the bridge the subscription cannot be used at all: nothing is stored.
+    if lacks_bridge(dirs, c) {
+        return Err("falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into());
+    }
 
     let mut key = None;
     if new_key || !vault::has_model_key(dirs, c) {
@@ -94,11 +100,23 @@ fn ask_key(dirs: &Dirs, c: &Connector) -> Res<(String, Option<std::path::PathBuf
     if c.name == "claude" {
         println!("{CLAUDE_WARNING}");
         let v = vault::read_secret("token")?.trim().to_owned();
-        if !v.starts_with("sk-ant-oat") {
-            return Err(
-                "eso no es un token de suscripción (debe empezar por sk-ant-oat): nada se guardó. Sale de: claude setup-token"
-                    .into(),
-            );
+        if !v.starts_with(c.key_prefix) {
+            return Err(format!(
+                "eso no es un token de suscripción (debe empezar por {}): nada se guardó. Sale de: claude setup-token",
+                c.key_prefix
+            ));
+        }
+        return Ok((v, None));
+    }
+    if c.name == "anthropic-api" {
+        let v = vault::read_secret("llave de la API de Anthropic")?
+            .trim()
+            .to_owned();
+        if !v.starts_with(c.key_prefix) {
+            return Err(format!(
+                "eso no es una llave de la API de Anthropic (debe empezar por {}): nada se guardó",
+                c.key_prefix
+            ));
         }
         return Ok((v, None));
     }

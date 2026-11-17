@@ -13,7 +13,8 @@ use super::{Res, io_err, mkdir_private, write_private};
 /// The adapter that ships with the repository; `init` installs this copy when it cannot find the
 /// repository's own file.
 const ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/openai_compat.py");
-const CLAUDE_ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/anthropic_oauth.py");
+const CLAUDE_ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/claude_code.py");
+const API_ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/anthropic_api.py");
 /// The default system prompt, compiled in so the binary works without the repository.
 pub const DEFAULT_PROMPT_NAME: &str = "clio-agent@2";
 const DEFAULT_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@2.md");
@@ -161,7 +162,7 @@ impl ModelCfg {
         let at = file.display();
         if clio_brain::connector::by_provider(&self.provider).is_none() {
             return Err(format!(
-                "{at}: model.provider {:?} no es un conector: usa clio connect opencode|claude",
+                "{at}: model.provider {:?} no es un conector: usa clio connect opencode|claude|anthropic-api",
                 self.provider
             ));
         }
@@ -233,14 +234,28 @@ impl Config {
     }
 
     /// The model adapter's program and arguments as a run starts it: the adapter of the active
-    /// connector, inside this binary (`names_builtin_adapter`), as `python3 <its copy>`, any
-    /// other command as written.
+    /// connector, inside this binary (`names_builtin_adapter`), as `python3 <its copy>` (the
+    /// Claude one followed by `--claude <Claude Code of the installed Pi>`), any other command as
+    /// written.
     pub fn model_command(&self, dirs: &Dirs) -> Res<Vec<String>> {
-        if names_builtin_adapter(&self.model.command) {
-            let p = builtin_adapter(dirs, self.connector()?)?;
-            return Ok(vec!["python3".into(), p.display().to_string()]);
+        if !names_builtin_adapter(&self.model.command) {
+            return Ok(self.model.command.clone());
         }
-        Ok(self.model.command.clone())
+        let c = self.connector()?;
+        // Found first, so a missing Claude Code writes nothing.
+        let claude = if c.adapter == CLAUDE_ADAPTER_FILE {
+            Some(claude_code(dirs)?)
+        } else {
+            None
+        };
+        let mut cmd = vec![
+            "python3".to_owned(),
+            builtin_adapter(dirs, c)?.display().to_string(),
+        ];
+        if let Some(bin) = claude {
+            cmd.extend(["--claude".to_owned(), bin.display().to_string()]);
+        }
+        Ok(cmd)
     }
 
     /// The model key for `command` (as `model_command` returned it): only the adapter inside this
@@ -274,28 +289,53 @@ impl Config {
 
 /// The file name of the OpenCode adapter that travels inside this binary.
 const ADAPTER_FILE: &str = "openai_compat.py";
-/// The file name of the Claude adapter.
-const CLAUDE_ADAPTER_FILE: &str = "anthropic_oauth.py";
+/// The file name of the Claude adapter (it runs Claude Code).
+const CLAUDE_ADAPTER_FILE: &str = "claude_code.py";
+/// The file name of the Anthropic API adapter.
+const API_ADAPTER_FILE: &str = "anthropic_api.py";
 /// The file names of the adapters that travel inside this binary, one per connector.
-const ADAPTER_FILES: [&str; 2] = [ADAPTER_FILE, CLAUDE_ADAPTER_FILE];
+const ADAPTER_FILES: [&str; 3] = [ADAPTER_FILE, CLAUDE_ADAPTER_FILE, API_ADAPTER_FILE];
 
 /// Whether `command` names an adapter inside this binary: empty (what `init` writes), or
 /// `python3` and one of their files in an `adapters/` folder, which is what older versions of
-/// `init` wrote (a checkout's file, or the copy in the data folder). That path is not run: it can
-/// be gone (the checkout moved) or changed, and the adapter receives the model key on every call
-/// and runs outside the jail.
+/// `init` wrote (a checkout's file, or the copy in the data folder), or the Claude one with its
+/// `--claude <path>` (what `model_command` returns). That path is not run: it can be gone (the
+/// checkout moved) or changed, and the adapter receives the model key on every call and runs
+/// outside the jail.
 pub fn names_builtin_adapter(command: &[String]) -> bool {
+    let in_adapters = |script: &str, files: &[&str]| {
+        let p = Path::new(script);
+        p.file_name().is_some_and(|n| files.iter().any(|f| n == *f))
+            && p.ancestors()
+                .any(|a| a.file_name().is_some_and(|n| n == "adapters"))
+    };
     match command {
         [] => true,
-        [python, script] if python == "python3" => {
-            let p = Path::new(script);
-            p.file_name()
-                .is_some_and(|n| ADAPTER_FILES.iter().any(|f| n == *f))
-                && p.ancestors()
-                    .any(|a| a.file_name().is_some_and(|n| n == "adapters"))
+        [python, script] if python == "python3" => in_adapters(script, &ADAPTER_FILES),
+        [python, script, flag, _] if python == "python3" && flag == "--claude" => {
+            in_adapters(script, &[CLAUDE_ADAPTER_FILE])
         }
         _ => false,
     }
+}
+
+/// Whether connector `c` runs through the Claude bridge and the installed Pi lacks it (the
+/// extension, or the Claude Code its SDK brings).
+pub fn lacks_bridge(dirs: &Dirs, c: &Connector) -> bool {
+    let Some(x) = c.pi_extension else {
+        return false;
+    };
+    !clio_brain::pi::install::locate(&super::pi::paths(dirs)).is_ok_and(|i| {
+        i.dir.join(x).is_file() && clio_brain::pi::install::claude_code_bin(&i.dir).is_some()
+    })
+}
+
+/// The Claude Code binary inside the installed Pi (the Agent SDK brings it with the bridge).
+pub fn claude_code(dirs: &Dirs) -> Res<PathBuf> {
+    clio_brain::pi::install::locate(&super::pi::paths(dirs))
+        .ok()
+        .and_then(|i| clio_brain::pi::install::claude_code_bin(&i.dir))
+        .ok_or_else(|| "falta Claude Code (pi-claude-agent-sdk): clio pi install".to_owned())
 }
 
 /// Where the adapter file `file` inside this binary is written: `<data>/adapters/<file>`.
@@ -313,6 +353,7 @@ fn adapter_source(c: &Connector) -> Res<&'static str> {
     match c.adapter {
         ADAPTER_FILE => Ok(ADAPTER_SOURCE),
         CLAUDE_ADAPTER_FILE => Ok(CLAUDE_ADAPTER_SOURCE),
+        API_ADAPTER_FILE => Ok(API_ADAPTER_SOURCE),
         _ => Err(format!("el adaptador de {} todavía no está", c.name)),
     }
 }
@@ -428,7 +469,14 @@ mod tests {
         ])));
         assert!(names_builtin_adapter(&cmd(&[
             "python3",
-            "/home/ana/.local/share/clio/adapters/anthropic_oauth.py"
+            "/home/ana/.local/share/clio/adapters/anthropic_api.py"
+        ])));
+        // The Claude one as `model_command` resolves it: with the path of Claude Code.
+        assert!(names_builtin_adapter(&cmd(&[
+            "python3",
+            "/home/ana/.local/share/clio/adapters/claude_code.py",
+            "--claude",
+            "/home/ana/.local/share/clio/pi/1.4.0/node_modules/x/claude"
         ])));
         // Anything else is the person's own adapter, run as written.
         for other in [
@@ -439,6 +487,19 @@ mod tests {
                 "/home/ana/clio/adapters/models/openai_compat.py",
             ]),
             cmd(&["python3", "/x/adapters/models/openai_compat.py", "--debug"]),
+            cmd(&[
+                "python3",
+                "/x/adapters/openai_compat.py",
+                "--claude",
+                "/x/claude",
+            ]),
+            cmd(&[
+                "python3",
+                "/x/adapters/claude_code.py",
+                "--other",
+                "/x/claude",
+            ]),
+            cmd(&["python3", "/x/adapters/anthropic_oauth.py"]),
             cmd(&["./adapter"]),
         ] {
             assert!(!names_builtin_adapter(&other), "{other:?}");
@@ -474,18 +535,80 @@ mod tests {
         assert_eq!(c.model_command(&dirs).unwrap(), c.model.command);
         // Only the adapter inside this binary is handed the key.
         assert!(c.model_key(&dirs, &c.model.command).unwrap().is_none());
-        // The claude connector runs its own adapter, written beside the other.
+        // The anthropic-api connector runs its own adapter, written beside the other.
         c.model.command = Vec::new();
-        c.model.provider = "claude".into();
-        let claude = dirs.data.join("adapters/anthropic_oauth.py");
+        c.model.provider = "anthropic".into();
+        let api = dirs.data.join("adapters/anthropic_api.py");
         assert_eq!(
             c.model_command(&dirs).unwrap(),
-            cmd(&["python3", &claude.display().to_string()])
+            cmd(&["python3", &api.display().to_string()])
         );
+        assert_eq!(std::fs::read_to_string(&api).unwrap(), API_ADAPTER_SOURCE);
+        assert_eq!(mode(&api), Some(0o600));
+    }
+
+    #[test]
+    fn the_claude_adapter_gets_the_claude_code_of_the_installed_pi() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            config: t.path().join("config"),
+            data: t.path().join("data"),
+            runs: t.path().join("data/runs"),
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        let mut c = Config::default_with(Vec::new());
+        c.model.provider = "claude".into();
+        // No Pi: the message says how to get it.
         assert_eq!(
-            std::fs::read_to_string(&claude).unwrap(),
+            c.model_command(&dirs).unwrap_err(),
+            "falta Claude Code (pi-claude-agent-sdk): clio pi install"
+        );
+        // A Pi of the pinned version, with Claude Code for this machine.
+        let v = clio_brain::pi::install::pinned_version().unwrap();
+        let nm = super::super::pi::paths(&dirs)
+            .install_dir(&v)
+            .join("node_modules");
+        let put = |rel: &str, body: &str, m: u32| {
+            let p = nm.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+            p
+        };
+        put(".bin/pi", "", 0o700);
+        put(
+            "@earendil-works/pi-coding-agent/package.json",
+            &format!(r#"{{"version":"{v}"}}"#),
+            0o600,
+        );
+        assert!(c.model_command(&dirs).is_err(), "Pi without Claude Code");
+        // Not executable is not there; the musl one is taken when it is the one that runs.
+        put("@anthropic-ai/claude-agent-sdk-linux-x64/claude", "", 0o600);
+        let musl = put(
+            "@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude",
+            "",
+            0o700,
+        );
+        let copy = dirs.data.join("adapters/claude_code.py");
+        let want = |bin: &std::path::Path| {
+            cmd(&[
+                "python3",
+                &copy.display().to_string(),
+                "--claude",
+                &bin.display().to_string(),
+            ])
+        };
+        let got = c.model_command(&dirs).unwrap();
+        assert_eq!(got, want(&musl));
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
             CLAUDE_ADAPTER_SOURCE
         );
-        assert_eq!(mode(&claude), Some(0o600));
+        // The resolved command is still the built-in adapter: it gets the key.
+        assert!(names_builtin_adapter(&got));
+        let x64 = put("@anthropic-ai/claude-agent-sdk-linux-x64/claude", "", 0o700);
+        assert_eq!(c.model_command(&dirs).unwrap(), want(&x64));
     }
 }

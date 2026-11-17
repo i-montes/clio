@@ -19,8 +19,8 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
   clio runs [--all] [--json] | clio show <id> [--json]
-  clio connect opencode|claude [--model M] [--new-key]
-                                              elige el modelo (opencode o tu suscripción de Claude) y guarda su llave en el baúl
+  clio connect opencode|claude|anthropic-api [--model M] [--new-key]
+                                              elige el modelo (opencode, tu suscripción de Claude o la API de Anthropic) y guarda su llave en el baúl
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
                                               lo que Clio recuerda (clio memory --help)

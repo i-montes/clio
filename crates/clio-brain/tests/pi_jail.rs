@@ -346,3 +346,47 @@ fn the_self_test_does_not_refuse_a_good_jail_now_and_then() {
         results.first()
     );
 }
+
+// The claude connector starts as the product starts it: Pi inside the real jail, the bridge loaded
+// with `-e`, a decoy subscription token in its variable. `start` runs `verify_startup` (provider
+// `claude-bridge`, the model, no command beyond the guard's). No prompt is sent: no API call.
+#[test]
+fn pi_starts_with_the_claude_bridge_inside_the_jail() {
+    let test = "pi jail: claude bridge";
+    let Some(node) = pi_support::need(test, true) else {
+        return;
+    };
+    let bridge =
+        pi_support::repo().join("adapters/pi/node_modules/pi-claude-agent-sdk/src/index.ts");
+    if !bridge.is_file() {
+        assert!(
+            std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
+            "CLIO_REQUIRE_PI=1 and the bridge is not installed"
+        );
+        eprintln!("SKIPPED {test}: falta el puente (cd adapters/pi && npm ci --ignore-scripts)");
+        return;
+    }
+    if let jail::Status::Unavailable(why) = jail::status() {
+        assert!(std::env::var_os("CLIO_REQUIRE_JAIL").is_none(), "{why}");
+        eprintln!("SKIPPED {test} (the jail cannot run here, nothing was tested): {why}");
+        return;
+    }
+    let rig = Rig::new(node);
+    let decoy = "sk-ant-oat01-decoy-0123456789abcdef";
+    let mut l = rig.launch("http://127.0.0.1:1/v1", Some(decoy));
+    l.provider = clio_brain::connector::by_name("claude")
+        .unwrap()
+        .pi_launch_provider("claude-sonnet-5-5");
+    let p = match start(&l) {
+        Ok(p) => p,
+        Err(e) => panic!("Pi did not start with the bridge: {e}"),
+    };
+    assert!(p.jail.is_some(), "on Linux Pi runs in the jail");
+    assert_eq!(
+        (p.state.provider.as_str(), p.state.model.as_str()),
+        ("claude-bridge", "claude-sonnet-5-5")
+    );
+    assert!(!p.state.raw.to_string().contains(decoy));
+    // Starting asks nothing of the network: the jail's proxy refused nothing.
+    assert!(p.jail.as_ref().unwrap().egress_denied().is_empty());
+}
