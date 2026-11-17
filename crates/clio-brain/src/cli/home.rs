@@ -13,6 +13,7 @@ use super::{Res, io_err, mkdir_private, mode, write_private};
 /// The adapter that ships with the repository; `init` installs this copy when it cannot find the
 /// repository's own file.
 const ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/openai_compat.py");
+const CLAUDE_ADAPTER_SOURCE: &str = include_str!("../../../../adapters/models/anthropic_oauth.py");
 /// The default system prompt, compiled in so the binary works without the repository.
 pub const DEFAULT_PROMPT_NAME: &str = "clio-agent@2";
 const DEFAULT_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@2.md");
@@ -280,8 +281,10 @@ pub fn key_status(dirs: &Dirs) -> KeyStatus {
 
 /// The file name of the OpenCode adapter that travels inside this binary.
 const ADAPTER_FILE: &str = "openai_compat.py";
+/// The file name of the Claude adapter.
+const CLAUDE_ADAPTER_FILE: &str = "anthropic_oauth.py";
 /// The file names of the adapters that travel inside this binary, one per connector.
-const ADAPTER_FILES: [&str; 2] = [ADAPTER_FILE, "anthropic_oauth.py"];
+const ADAPTER_FILES: [&str; 2] = [ADAPTER_FILE, CLAUDE_ADAPTER_FILE];
 
 /// Whether `command` names an adapter inside this binary: empty (what `init` writes), or
 /// `python3` and one of their files in an `adapters/` folder, which is what older versions of
@@ -302,15 +305,22 @@ pub fn names_builtin_adapter(command: &[String]) -> bool {
     }
 }
 
-/// Where the adapter inside this binary is written: `<data>/adapters/openai_compat.py`.
+/// Where the adapter file `file` inside this binary is written: `<data>/adapters/<file>`.
+fn adapter_copy(dirs: &Dirs, file: &str) -> PathBuf {
+    dirs.data.join("adapters").join(file)
+}
+
+/// Where the OpenCode adapter is written (`doctor` checks that one until it follows the active
+/// connector).
 pub fn builtin_adapter_path(dirs: &Dirs) -> PathBuf {
-    dirs.data.join("adapters").join(ADAPTER_FILE)
+    adapter_copy(dirs, ADAPTER_FILE)
 }
 
 /// The source of the adapter of connector `c`, which travels inside this binary.
 fn adapter_source(c: &Connector) -> Res<&'static str> {
     match c.adapter {
         ADAPTER_FILE => Ok(ADAPTER_SOURCE),
+        CLAUDE_ADAPTER_FILE => Ok(CLAUDE_ADAPTER_SOURCE),
         _ => Err(format!("el adaptador de {} todavía no está", c.name)),
     }
 }
@@ -323,7 +333,7 @@ fn builtin_adapter(dirs: &Dirs, c: &Connector) -> Res<PathBuf> {
         return Ok(PathBuf::from(p));
     }
     let source = adapter_source(c)?;
-    let p = dirs.data.join("adapters").join(c.adapter);
+    let p = adapter_copy(dirs, c.adapter);
     if std::fs::read_to_string(&p).ok().as_deref() != Some(source) {
         mkdir_private(&dirs.data.join("adapters"))?;
         write_private(&p, source.as_bytes())?;
@@ -475,12 +485,18 @@ mod tests {
         assert_eq!(c.model_command(&dirs).unwrap(), c.model.command);
         // Only the adapter inside this binary is handed the key.
         assert!(c.model_key(&dirs, &c.model.command).unwrap().is_none());
-        // The claude adapter is not in this binary yet.
+        // The claude connector runs its own adapter, written beside the other.
         c.model.command = Vec::new();
         c.model.provider = "claude".into();
+        let claude = dirs.data.join("adapters/anthropic_oauth.py");
         assert_eq!(
-            c.model_command(&dirs).unwrap_err(),
-            "el adaptador de claude todavía no está"
+            c.model_command(&dirs).unwrap(),
+            cmd(&["python3", &claude.display().to_string()])
         );
+        assert_eq!(
+            std::fs::read_to_string(&claude).unwrap(),
+            CLAUDE_ADAPTER_SOURCE
+        );
+        assert_eq!(mode(&claude), Some(0o600));
     }
 }

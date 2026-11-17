@@ -66,6 +66,11 @@ pub struct FakeProvider {
 impl FakeProvider {
     /// `script` is the JSON list of replies (see testing/fake-provider/server.py).
     pub fn start(dir: &Path, script: &str, expect_key: Option<&str>) -> Self {
+        Self::start_with(dir, script, expect_key, &[])
+    }
+
+    /// Like `start`, with more server flags (`--log-body`).
+    pub fn start_with(dir: &Path, script: &str, expect_key: Option<&str>, flags: &[&str]) -> Self {
         let sp = dir.join("script.json");
         std::fs::write(&sp, script).unwrap();
         let log = dir.join("provider.jsonl");
@@ -74,7 +79,8 @@ impl FakeProvider {
             .arg("--script")
             .arg(&sp)
             .arg("--log")
-            .arg(&log);
+            .arg(&log)
+            .args(flags);
         if let Some(k) = expect_key {
             cmd.args(["--expect-key", k]);
         }
