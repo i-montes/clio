@@ -293,6 +293,8 @@ const ADAPTER_FILE: &str = "openai_compat.py";
 const CLAUDE_ADAPTER_FILE: &str = "claude_code.py";
 /// The file name of the Anthropic API adapter.
 const API_ADAPTER_FILE: &str = "anthropic_api.py";
+/// Built-in adapters older Clios wrote and this one no longer has; the only files cleaned up.
+const RETIRED_ADAPTERS: [&str; 1] = ["anthropic_oauth.py"];
 /// The file names of the adapters that travel inside this binary, one per connector.
 const ADAPTER_FILES: [&str; 3] = [ADAPTER_FILE, CLAUDE_ADAPTER_FILE, API_ADAPTER_FILE];
 
@@ -378,9 +380,7 @@ fn builtin_adapter(dirs: &Dirs, c: &Connector) -> Res<PathBuf> {
         .flatten()
     {
         let n = e.file_name();
-        if Path::new(&n).extension().is_some_and(|x| x == "py")
-            && !ADAPTER_FILES.iter().any(|f| n == *f)
-        {
+        if RETIRED_ADAPTERS.iter().any(|f| n == *f) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -484,10 +484,11 @@ mod tests {
         std::fs::create_dir_all(&a).unwrap();
         std::fs::write(a.join("anthropic_oauth.py"), "old").unwrap();
         std::fs::write(a.join("notas.txt"), "x").unwrap();
+        std::fs::write(a.join("mine.py"), "mine").unwrap();
         let c = clio_brain::connector::by_name("opencode").unwrap();
         let p = builtin_adapter(&dirs, c).unwrap();
         assert!(p.is_file() && !a.join("anthropic_oauth.py").exists());
-        assert!(a.join("notas.txt").exists());
+        assert!(a.join("notas.txt").exists() && a.join("mine.py").exists());
     }
 
     #[test]
