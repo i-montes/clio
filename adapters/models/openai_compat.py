@@ -36,7 +36,7 @@ def check_base() -> None:
     local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
     own = u.scheme == "https" and u.hostname == "opencode.ai"
     if not own and not local:
-        fail("LLM_BASE_URL must be https://opencode.ai/... (or http://127.0.0.1 or localhost)")
+        fail("LLM_BASE_URL debe ser https://opencode.ai/... (o http://127.0.0.1 o localhost)")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -55,11 +55,11 @@ else:
     key, request = os.environ.get("OPENCODE_API_KEY"), sent
 key = key.strip() if isinstance(key, str) else ""
 if not key:
-    fail("the API key is missing: Clio sends it in the envelope, or set OPENCODE_API_KEY")
+    fail("falta la llave: Clio la manda en el sobre, o define OPENCODE_API_KEY")
 # A key with a line break or a non-ASCII character makes `http.client` raise an error that quotes
 # the header, token included: refuse it here, without printing it.
 if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
-    fail("the key has a character that cannot go in an HTTP header (a line break, a space, non-ASCII)")
+    fail("la llave tiene un carácter que no puede ir en una cabecera HTTP (un salto de línea, un espacio, algo no ASCII)")
 
 body = {
     "model": request["model"],
@@ -97,7 +97,7 @@ except Exception as e:  # timeout, bad JSON: only the kind, a message could quot
 choice = (answer.get("choices") or [{}])[0]
 message = choice.get("message", {})
 if not message.get("content") and choice.get("finish_reason") == "length":
-    print("clio-model-adapter: empty answer: max_tokens ran out while the model was reasoning", file=sys.stderr)
+    print("clio-model-adapter: respuesta vacía: max_tokens se agotó mientras el modelo razonaba", file=sys.stderr)
 usage = answer.get("usage", {})
 json.dump(
     {

@@ -416,13 +416,11 @@ fn claude_key() -> Result<Secret, String> {
         })
 }
 
-/// The model of the real `config.json`, which must name the `claude` connector.
+/// The model of the real `config.json` (`$HOME/.config/clio/`, as `clio` reads it), which must
+/// name the `claude` connector.
 fn claude_model_from_config() -> Result<String, String> {
-    let dir = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))
-        .ok_or("no hay HOME ni XDG_CONFIG_HOME")?;
-    let p = dir.join("clio/config.json");
+    let home = std::env::var_os("HOME").ok_or("HOME no está definida")?;
+    let p = Path::new(&home).join(".config/clio/config.json");
     let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -450,6 +448,10 @@ fn claude_model_from_config() -> Result<String, String> {
 fn claude_subscription_answers() {
     use clio_brain::agent::{CommandModel, Model, Msg};
 
+    // Checked first, so a missing Node does not cost a paid call.
+    let node = need("claude_subscription_answers", true).expect(
+        "hacen falta Node y adapters/pi/node_modules (cd adapters/pi && npm ci --ignore-scripts)",
+    );
     let model = claude_model_from_config().unwrap_or_else(|e| panic!("{e}"));
     let key = claude_key().unwrap_or_else(|e| panic!("{e}"));
     // Never print the key, whatever an error says.
@@ -479,16 +481,16 @@ fn claude_subscription_answers() {
     assert!(r.output_tokens > 0);
 
     // 2. A Pi session (own temporary home, the real jail) with the same connector and key.
-    let node = need("claude_subscription_answers", true).expect(
-        "hacen falta Node y adapters/pi/node_modules (cd adapters/pi && npm ci --ignore-scripts)",
-    );
     let rig = Rig::new(node);
     let mut launch = rig.launch("", None);
     launch.provider = clio_brain::connector::by_name("claude")
         .unwrap()
         .pi_provider(&model);
     launch.api_key = Some(key.clone());
-    let p = start(&launch).unwrap_or_else(|e| panic!("Pi no arrancó: {}", hide(e.to_string())));
+    let mut p = start(&launch).unwrap_or_else(|e| panic!("Pi no arrancó: {}", hide(e.to_string())));
+    // A short answer: a stuck turn fails in two minutes instead of the default hour.
+    p.client.timeouts.run = std::time::Duration::from_secs(120);
+    p.client.timeouts.silence = std::time::Duration::from_secs(60);
     let (r, _) = run(&p, "Responde solo: ok");
     let r = r.unwrap_or_else(|e| panic!("el turno de Pi falló: {}", hide(e.to_string())));
     println!(

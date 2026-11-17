@@ -38,7 +38,7 @@ def check_base() -> None:
     local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
     own = u.scheme == "https" and u.hostname == "api.anthropic.com"
     if not own and not local:
-        fail("LLM_BASE_URL must be https://api.anthropic.com (or http://127.0.0.1 or localhost)")
+        fail("LLM_BASE_URL debe ser https://api.anthropic.com (o http://127.0.0.1 o localhost)")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -63,11 +63,11 @@ else:
     key, request = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), sent
 key = key.strip() if isinstance(key, str) else ""
 if not key:
-    fail("the token is missing: Clio sends it in the envelope, or set CLAUDE_CODE_OAUTH_TOKEN")
+    fail("falta el token: Clio lo manda en el sobre, o define CLAUDE_CODE_OAUTH_TOKEN")
 # A key with a line break or a non-ASCII character makes `http.client` raise an error that quotes
 # the header, token included: refuse it here, without printing it.
 if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
-    fail("the token has a character that cannot go in an HTTP header (a line break, a space, non-ASCII)")
+    fail("el token tiene un carácter que no puede ir en una cabecera HTTP (un salto de línea, un espacio, algo no ASCII)")
 
 # Clio's `system` messages go in the API's `system` (after the identity block); the API takes only
 # `role` and plain-text `content` in user/assistant messages and rejects empty ones, so that is all

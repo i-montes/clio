@@ -336,7 +336,7 @@ fn a_key_with_a_control_or_non_ascii_character_fails_without_printing_it() {
         let o = run_adapter(&[("LLM_BASE_URL", "http://127.0.0.1:9")], &stdin);
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(
-            !o.status.success() && err.contains("header"),
+            !o.status.success() && err.contains("cabecera"),
             "{bad}: {err}"
         );
         assert!(!err.contains("SECRET"), "{bad}: {err}");
