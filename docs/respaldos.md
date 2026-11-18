@@ -1,58 +1,58 @@
-# Respaldos con restic (S-40)
+# Backups with restic (S-40)
 
-La memoria de Clio, el vault y la configuración viven en tu disco. Estos scripts hacen copias cifradas y comprueban que se pueden leer de vuelta. Funcionan igual en Linux y macOS (los scripts compartidos se llaman `.unix.sh`; lo propio de cada sistema, `.linux.` o `.macos.`). Decidido el 2026-11-02: la herramienta es `restic`.
+Clio's memory, the vault and the configuration live on the host's disk. These scripts make encrypted copies and check that they can be read back. They work the same on Linux and macOS (shared scripts are named `.unix.sh`; what belongs to one system, `.linux.` or `.macos.`). Decided on 2026-11-02: the tool is `restic`.
 
-## Dónde van las copias
+## Where the copies go
 
-Sin indicar nada, `backup-init.unix.sh` crea el repositorio en un lugar que depende del sistema y queda **fuera de la carpeta de datos de Clio**, para que borrar los datos no borre las copias:
+With no argument, `backup-init.unix.sh` creates the repository in a place that depends on the system and sits **outside Clio's data folder**, so deleting the data does not delete the copies:
 
-| Sistema | Repositorio por defecto |
+| System | Default repository |
 |---|---|
 | Linux | `${XDG_DATA_HOME:-~/.local/share}/clio-backup/repo` |
 | macOS | `~/Library/Application Support/clio-backup/repo` |
 
-**Ese lugar está en el mismo disco que tus datos.** Protege de borrar o dañar archivos, no de perder el disco. Para sobrevivir a eso, pasa un destino distinto al crear el repositorio: una carpeta de un disco externo (`/run/media/$USER/DISCO/clio-backup`, `/Volumes/DISCO/clio-backup`), `sftp:usuario@host:/ruta`, `b2:bucket:ruta`. `check-host.sh` te lo recuerda con un aviso mientras el repositorio siga en el mismo disco.
+**That place is on the same disk as your data.** It protects against deleting or damaging files, not against losing the disk. To survive that, give a different destination when you create the repository: a folder on an external disk (`/run/media/$USER/DISK/clio-backup`, `/Volumes/DISK/clio-backup`), `sftp:user@host:/path`, `b2:bucket:path`. `check-host.sh` reminds you with a warning while the repository is on the same disk.
 
-## Cuántas copias
+## How many copies
 
-Solo las **2 últimas** (`restic forget --keep-last 2 --prune` después de cada copia). Se cambia con `CLIO_BACKUP_KEEP=N` (entero de 1 o más; nunca borra todo). Con una copia diaria eso son dos días de historia: si un problema pasa desapercibido más tiempo, no habrá una copia anterior buena. restic guarda solo lo que cambió, así que subir el número cuesta poco espacio.
+Only the **last 2** (`restic forget --keep-last 2 --prune` after each copy). Change it with `CLIO_BACKUP_KEEP=N` (an integer, 1 or more; it never deletes everything). With one copy a day that is two days of history: if a problem goes unnoticed longer, there is no earlier good copy. restic stores only what changed, so a higher number costs little space.
 
-## Qué se respalda
+## What is backed up
 
-- `~/.local/share/clio/memory.db` (copia en caliente con `clio-memory backup` o `sqlite3 .backup`, nunca el archivo en uso), si existe.
-- `~/.local/share/clio/vault.bin` (ya cifrado por el vault; restic lo cifra otra vez), si existe.
+- `~/.local/share/clio/memory.db` (a hot copy with `clio-memory backup` or `sqlite3 .backup`, never the file in use), if it exists.
+- `~/.local/share/clio/vault.bin` (already encrypted by the vault; restic encrypts it again), if it exists.
 - `~/.config/clio/config.json`.
-- `~/.local/share/clio/runs/` sin las copias de trabajo (`sandbox/` y `scratch/`): quedan los registros, diffs y logs de efectos.
+- `~/.local/share/clio/runs/` without the working copies (`sandbox/` and `scratch/`): the records, diffs, effect logs and, for host sessions, the tool host's files (file backups for `clio undo`, what the judge withheld, background job output) stay.
 
-La llave del modelo vive en el baúl (`vault.bin`, que ya va en la copia, cifrado); Clio ya no usa un archivo `opencode-api-key`. No se respaldan la frase de restic ni lo que se puede reinstalar (`pi/`).
+The model key lives in the vault (`vault.bin`, which is already in the copy, encrypted). Not backed up: the restic passphrase, what can be reinstalled (`pi/`), and the host-mode files outside `runs/` (`~/.local/share/clio/host/`: the action log, what is pending and the day's budget; `~/.config/clio/host.json`).
 
-## Puesta en marcha (una vez)
+## Setting it up (once)
 
 ```sh
-infra/local/backup-init.unix.sh [REPOSITORIO]  # crea el repositorio y la frase (0600)
-infra/local/backup.unix.sh                     # primera copia
-infra/local/backup-restore-test.unix.sh        # prueba que se puede restaurar
-infra/local/install-backup.linux.sh            # copia diaria: timer de systemd (Linux)
-infra/local/install-backup.macos.sh            # copia diaria: launchd (macOS, sin probar en un Mac)
+infra/local/backup-init.unix.sh [REPOSITORY]   # creates the repository and the passphrase (0600)
+infra/local/backup.unix.sh                     # first copy
+infra/local/backup-restore-test.unix.sh        # checks that it can be restored
+infra/local/install-backup.linux.sh            # daily copy: a systemd timer (Linux)
+infra/local/install-backup.macos.sh            # daily copy: launchd (macOS, not tested on a Mac)
 ```
 
-`infra/local/backup-selftest.unix.sh` prueba todo esto contra repositorios desechables en un HOME falso, sin tocar nada real. Córrelo en un Mac antes de fiarte del instalador de macOS.
+`infra/local/backup-selftest.unix.sh` tests all of this against throwaway repositories in a fake HOME, without touching anything real. Run it on a Mac before you trust the macOS installer.
 
-## La frase
+## The passphrase
 
-`backup-init` crea una frase aleatoria en `~/.config/clio/restic-password`. **Está en el mismo disco que los datos**, así que si el disco se pierde, las copias quedan ilegibles aunque estén en otro lado. Guarda una copia de esa frase fuera de este equipo (un gestor de contraseñas) justo después de crear el repositorio. El script nunca la imprime.
+`backup-init` creates a random passphrase in `~/.config/clio/restic-password`. **It is on the same disk as the data**, so if the disk is lost the copies cannot be read even if they are elsewhere. Keep a copy of that passphrase off this machine (a password manager) right after you create the repository. The script never prints it.
 
-## Restaurar
+## Restoring
 
 ```sh
 set -a; . ~/.config/clio/backup.env; set +a
-restic snapshots                              # elegir un snapshot
-restic restore latest --target /ruta/vacía    # los archivos salen bajo su ruta original
+restic snapshots                              # pick a snapshot
+restic restore latest --target /empty/path    # files come out under their original path
 ```
 
-Solo se copia a mano lo que haga falta de `/ruta/vacía` a su sitio; nada se pisa solo.
+Copy by hand only what you need from `/empty/path` to its place; nothing is overwritten by itself.
 
-## Cómo se comprueba
+## How it is checked
 
-- `infra/local/check-host.sh` (Linux) avisa si no hay repositorio configurado, si el último snapshot tiene más de 8 días o si el repositorio está en el mismo disco.
-- `backup-restore-test.unix.sh` restaura el último snapshot en una carpeta desechable y comprueba que la memoria pasa `integrity_check` y que el vault y la configuración no están vacíos. Conviene correrlo cada mes (S-40: «restauración probada cada mes»).
+- `infra/local/check-host.sh` (Linux) warns if no repository is configured, if the last snapshot is more than 8 days old, or if the repository is on the same disk.
+- `backup-restore-test.unix.sh` restores the last snapshot into a throwaway folder and checks that the memory passes `integrity_check` and that the vault and the configuration are not empty. Run it every month (S-40: "a restore tested every month").

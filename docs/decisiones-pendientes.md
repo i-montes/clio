@@ -1,53 +1,53 @@
-# Decisiones pendientes de la persona
+# Decisions pending for the person
 
-Escrito durante la fase 1, con la persona desconectada. Aquí está lo que se decidió por defecto (y se puede cambiar) y lo que solo ella puede decidir, con qué pasa si no se toca.
+Written during phase 1, with the person away, and kept up to date. Here is what was decided by default (and can be changed) and what only the person can decide, with what happens if nothing is touched.
 
-## Para decidir (bloquean trabajo)
+## To decide (they block work)
 
-### 1. Respaldos cifrados y Tailnet Lock en este PC · tareas 093, 094, 095
-Decidiste que no hay servidor por ahora, así que el PC es la base (ADR 0006) y `infra/local/check-host.sh` ya confirma lo esencial: disco LUKS, cortafuegos, SSH apagado, nada de Clio fuera de loopback, llave de Tailscale con vencimiento.
-- **Herramienta: restic (decidido el 2026-11-02),** instalado, con scripts en `infra/local/` (`docs/respaldos.md`). Lugar por defecto según el sistema (Linux y macOS, fuera de la carpeta de datos) y solo las 2 últimas copias (decidido el 2026-11-02). Ese lugar está en el mismo disco: **falta un destino fuera de este PC** (un disco externo o un almacenamiento en la nube cifrado), crear el repositorio y probar una restauración (093, 094). Mientras tanto, la memoria y el vault solo viven en este disco.
-- **Tailnet Lock** no está activado; es opcional y lo decides tú (095).
-- **Un VPS, si algún día quieres uno:** es opcional; el borrador está en `infra/vps/` y no bloquea nada.
+### 1. Encrypted backups and Tailnet Lock on the host · tasks 093, 094, 095
+The host is one machine (ADR 0006): the person's PC at first, the owner's VPS now. `infra/local/check-host.sh` checks the essentials: disk encryption, firewall, SSH off, nothing of Clio outside loopback, a Tailscale key with expiry.
+- **Tool: restic (decided on 2026-11-02),** installed, with scripts in `infra/local/` (`docs/respaldos.md`). A default place per system (Linux and macOS, outside the data folder) and only the last 2 copies (decided on 2026-11-02). That place is on the same disk: **a destination off the host is still missing** (an external disk or encrypted cloud storage), as are creating the repository and testing a restore (093, 094). Until then, the memory and the vault live only on that disk.
+- **Disk encryption on a VPS.** ADR 0011 (memory not encrypted by the engine) holds only where the host's disk is encrypted; on a host without it, that decision is reopened.
+- **Tailnet Lock** is not on; it is optional and yours to decide (095).
 
-### 2. Pi como arnés (decidido por ti el 2026-10-31, ADR 0007)
-Pi 1.4.0 (publicada el 2026-10-21, activa) es el arnés: bucle, proveedores, sesiones y compactación; Clio es el servicio, la guardia y la interfaz alrededor. Quedan por decidir cosas menores que tomé por defecto: el modelo diario (hoy `beam-free`, gratuito; tu Aria usa `mimo-v2.6-flash`, que sí consume la cuota de tu plan Go) (Pi ya corre dentro de `bwrap`, con red propia y el proveedor como único destino: ADR 0009, hecho el 2026-11-03).
+### 2. Pi as the harness (decided by you on 2026-10-31, ADR 0007)
+Pi 1.4.0 (published 2026-10-21, active) is the harness: loop, providers, sessions and compaction; Clio is the service, the guard and the interface around it. Smaller things were taken by default: the daily model (today `beam-free`, free; your Aria uses `mimo-v2.6-flash`, which does use your Go plan's quota). Pi already runs inside `bwrap`, with its own network and the provider as its only destination (ADR 0009, done on 2026-11-03).
 
-### 3. Topes de gasto en el panel de cada proveedor · tarea 281 (S-45)
-Se configura en la web del proveedor, no en código. Hoy se usa solo el modelo gratuito, así que el riesgo es nulo; hazlo antes de usar un modelo de pago.
+### 3. Spending caps in each provider's dashboard · task 281 (S-45)
+Set in the provider's web dashboard, not in code. Only the free model is used today, so the risk is nil; do it before using a paid model.
 
-### 4. Rotar la clave de OpenCode
-Se pegó en el chat de una sesión de la fase 1. **Decidido el 2026-11-02: no se rota por ahora.** Si se rota después: cambiar la llave del baúl con `clio connect opencode --new-key` y luego `gh secret set OPENCODE_API_KEY` (pega la llave nueva cuando la pida).
+### 4. Rotating the OpenCode key
+It was pasted in the chat of a phase 1 session. **Decided on 2026-11-02: not rotated for now.** If it is rotated later: change the key in the vault with `clio connect opencode --new-key`, then `gh secret set OPENCODE_API_KEY` (paste the new key when asked).
 
-## Decididas por defecto (cámbialas si no te sirven)
+## Decided by default (change them if they do not suit you)
 
-| Tarea | Decisión | Alternativa |
+| Task | Decision | Alternative |
 |---|---|---|
-| 136 | Formato del contrato: JSON | markdown con frontmatter |
-| 137 | Dónde vive el registro del contrato: el archivo que se le pase (hoy en el workspace de trabajo) | memoria episódica (fase 2), o ambos |
-| 161 | El anti-bucle cuenta solo repeticiones | contar también pasos «sin avance» |
-| 221 | Formato de reglas de la pasarela: JSON propio | unificar con las políticas (fase 5) |
-| 270 | Vault: implementación propia en Rust (XChaCha20-Poly1305 y Argon2id) | OpenBao o Infisical |
-| 303 | Memoria sin cifrar por el motor: la protegen el disco LUKS del equipo y restic en las copias ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); vale solo donde el disco está cifrado | SQLCipher, con la llave en el vault |
-| 304, 310, 314–316 | El daemon de la memoria (y su API remota) se aplaza a la fase 4: Clio usa la librería y los demás agentes, MCP por stdio | hacerlo en la fase 2 |
-| 271 | Desbloqueo del vault: frase por terminal | passkey (fase 4), o llave en otro equipo |
-| 205 | Aprobaciones por terminal | passkey con la PWA (fase 4) |
-| — | `/rápido` fuerza nivel 1 y gana sobre «posible irreversible» | que lo irreversible siempre suba a 2 |
-| — | El triaje «pregunta corta» = 12 palabras o menos; listas de verbos cortas y sin afinar con casos reales | afinar con el banco |
-| — | La pasarela nunca permite lo irreversible por política: siempre pide aprobación | permitirlo con una política que cubra todo (fase 5) |
-| — | Rutas protegidas del agente (sin escritura): `extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer` (una tarea que escriba en `.git` se niega) | ampliar o quitar `.git` |
-| — | real-02: el README ahora dice «redondeo hacia arriba en la mitad» (antes ambiguo; el agente falló 6 de 6 por eso) | dejarla ambigua como prueba de especificación |
-| — | Modelo gratuito para pruebas: `opencode-go/beam-free` (no `iceman-contributor-free`, que deja entrenar con tus prompts) | un modelo de pago |
+| 136 | Contract format: JSON | markdown with frontmatter |
+| 137 | Where the contract record lives: the file it is given (today in the working workspace) | episodic memory (phase 2), or both |
+| 161 | The anti-loop counts only repetitions | also count steps "without progress" |
+| 221 | Gateway rules format: Clio's own JSON | unify with the policies (phase 5) |
+| 270 | Vault: own implementation in Rust (XChaCha20-Poly1305 and Argon2id) | OpenBao or Infisical |
+| 303 | Memory not encrypted by the engine: the host's encrypted disk and restic for the copies protect it ([ADR 0011](decisions/0011-memory-encryption-at-rest.md)); valid only where the disk is encrypted | SQLCipher, with the key in the vault |
+| 304, 310, 314–316 | The memory daemon (and its remote API) moves to phase 4: Clio uses the library and the other agents MCP over stdio | do it in phase 2 |
+| 271 | Unlocking the vault: a passphrase at the terminal | passkey (phase 4), or a key on another device |
+| 205 | Approvals at the terminal (and in the chat) | passkey with the PWA (phase 4) |
+| — | `/rápido` forces level 1 and wins over "possibly irreversible" | that the irreversible always goes up to 2 |
+| — | Triage "short question" = 12 words or fewer; short verb lists, not tuned with real cases | tune with the bench |
+| — | The gateway never allows the irreversible by policy: it always asks for approval | allow it with a policy that covers everything (phase 5) |
+| — | Protected paths for the agent in copy mode (not writable): `extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer` (a task that writes in `.git` is refused) | widen it, or drop `.git` |
+| — | real-02: the README now says "round half up" (ambiguous before; the agent failed 6 of 6 because of it) | leave it ambiguous as a specification test |
+| — | Free model for tests: `opencode-go/beam-free` (not `iceman-contributor-free`, which lets them train on your prompts) | a paid model |
 
-## Cosas que quedan por hacer y no son decisiones
-Ver la lista maestra (`docs/lista-maestra.md`): tareas de la fase 1 aún abiertas, sobre todo mediciones con el agente completo, el proceso aparte y el socket del vault (233, 234), y el aislamiento de preproducción (055).
+## Things left to do that are not decisions
+See the master list (`docs/lista-maestra.md`): phase 1 tasks still open, above all measurements with the whole agent, the separate process and the vault socket (233, 234), and pre-production isolation (055).
 
-- **Argon2id del vault (hallazgo 11 de la auditoría):** hecho. El coste se guarda en el archivo del baúl y los baúles nuevos usan 64 MiB y 3 pasadas. Tu baúl actual sigue con el coste antiguo hasta que corras `clio vault upgrade-kdf` (con el baúl en marcha; pide tu frase y deja una copia `vault.pre-argon2` que puedes borrar cuando compruebes que abre). `clio doctor` te avisa mientras siga con el coste antiguo.
-- **Permiso `workflow` del token de GitHub:** se añadió para poder actualizar ramas con cambios en `.github/workflows`. Si ya no lo necesitas: `gh auth refresh -h github.com -r workflow`.
+- **The vault's Argon2id (finding 11 of the audit):** done. The cost is kept in the vault's file and new vaults use 64 MiB and 3 passes. An older vault keeps the old cost until you run `clio vault upgrade-kdf` (with the vault running; it asks for your passphrase and leaves a `vault.pre-argon2` copy you can delete once you check it opens). `clio doctor` warns while it keeps the old cost.
+- **The GitHub token's `workflow` scope:** added to update branches with changes in `.github/workflows`. If you no longer need it: `gh auth refresh -h github.com -r workflow`.
 
-## Pendiente de probar en un Mac
-El flujo interactivo de la TUI (lanzar un trabajo y cancelarlo desde la pantalla, pruebas `pty_*`) se atasca en el CI de macOS y no se pudo depurar sin un Mac, así que esas dos pruebas corren solo en Linux. En macOS sí pasan abrir, salir, la restauración tras un pánico y la ayuda por tubería. Tampoco corre en macOS la prueba de la secuencia de atajos (`Ctrl-D`, `c`, `U`, `?`, `Ctrl-L`, `q`): allí `q` no sale a tiempo, y hay que mirar con un Mac si es un fallo real de la TUI o del controlador de la prueba. Tu PC es Linux, así que no te afecta; solo importa si algún día usas Clio en un Mac.
+## To test on a Mac
+The TUI's interactive flow (starting a job and cancelling it from the screen, the `pty_*` tests) hangs in the macOS CI and could not be debugged without a Mac, so those two tests run only on Linux. On macOS, opening, quitting, restoring after a panic and help through a pipe do pass. The key-sequence test (`Ctrl-D`, `c`, `U`, `?`, `Ctrl-L`, `q`) does not run on macOS either: there `q` does not quit in time, and someone with a Mac has to see whether it is a real TUI bug or the test driver's. Your host is Linux, so it does not affect you; it only matters if you ever use Clio on a Mac.
 
-- **CI con Pi real:** los tests con Pi (`pi_real`, ataques 38–49) se saltan en CI porque el runner no trae Node ≥ 22.19. Para exigirlos hace falta `actions/setup-node` fijado por SHA (verificar el SHA antes de fijarlo) y `CLIO_REQUIRE_PI=1`. Localmente ya pasan todos.
-- **Presupuesto en el camino Pi (S-47):** cada prompt es una tarea con los topes de `config.json` (`limits`: pasos = llamadas a herramientas, segundos, costo) y el anti-bucle del `builtin` (la misma llamada más de 4 veces); el corte aborta Pi y, si no se detiene en 5 s, lo mata. Quedan dos huecos: (1) el aborto no es instantáneo, así que una llamada que Pi ya había empezado todavía corre (un contador dentro del toolhost lo cerraría); (2) el tope por día existe pero no tiene valor en la configuración y no se guarda entre ejecuciones, igual que en `builtin`. Prueba de extremo a extremo con un Pi y un modelo reales: pendiente.
-- **Cortacircuito de la guardia:** se abre a las 10 negadas seguidas y no se cierra solo; hoy solo sirve empezar otra sesión. ¿Quieres un diálogo para reanudarla?
+- **CI with the real Pi:** the tests with Pi (`pi_real`, attacks 38–49) are skipped in CI because the runner does not bring Node ≥ 22.19. Requiring them needs `actions/setup-node` pinned by SHA (check the SHA before pinning it) and `CLIO_REQUIRE_PI=1`. Locally they all pass.
+- **Budget on the Pi path (S-47):** each prompt is a task with the caps in `config.json` (`limits`: steps = tool calls, seconds, cost) and the builtin loop's anti-loop (the same call more than 4 times); the cut aborts Pi and, if it does not stop within 5 s, kills it. Two gaps are left: (1) the abort is not instant, so a call Pi had already started still runs (a counter inside the tool host would close it); (2) in copy mode the per-day cap exists but has no value in the configuration and is not kept between runs, as in `builtin`. Host mode has its own day budget across sessions (`limits.day_cost_micro_usd`, `limits.day_steps`; ADR 0012). End-to-end test with a real Pi and model: pending.
+- **The guard's circuit breaker:** it opens after 10 denials in a row and does not close by itself; today the only remedy is to start another session. Do you want a dialog to resume it?
