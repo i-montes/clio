@@ -501,3 +501,56 @@ fn the_brain_has_an_approved_actions_output_judged_before_the_model_reads_it() {
     );
     assert!(r.ok && r.content == "42 files" && r.data.is_null(), "{r:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The battery (docs/security.md): the judge is scripted, as the model is in the other targets.
+// ---------------------------------------------------------------------------------------------
+
+/// A scenario holds when it does not panic.
+fn held(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+    std::panic::catch_unwind(f).is_ok()
+}
+
+const OURS: [&str; 2] = ["attack-63", "attack-64"];
+
+struct JudgeTarget;
+
+impl clio_attacks::Target for JudgeTarget {
+    fn attack(&self, case: &clio_attacks::Case) -> clio_attacks::Observed {
+        let refused = match case.id.as_str() {
+            "attack-63" => {
+                held(an_injection_in_a_foreign_file_is_withheld_and_the_session_becomes_suspect)
+            }
+            // Their commands need the launcher: where it cannot run, they say SKIPPED.
+            "attack-64" => {
+                held(a_suspect_session_asks_before_it_reaches_out)
+                    && held(a_session_that_becomes_suspect_stops_its_jobs_with_the_network)
+            }
+            other => panic!("{other} is active but this target has no scenario for it"),
+        };
+        clio_attacks::Observed { refused }
+    }
+}
+
+// S-05 S-06: attacks 63 and 64
+#[test]
+fn the_judge_cases_are_active_and_refused() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/cases");
+    let mine: Vec<clio_attacks::Case> = clio_attacks::load_cases(&dir)
+        .unwrap()
+        .into_iter()
+        .filter(|c| OURS.contains(&c.id.as_str()))
+        .collect();
+    assert_eq!(
+        mine.len(),
+        OURS.len(),
+        "a case is missing in testing/attacks/cases"
+    );
+    assert!(
+        mine.iter()
+            .all(|c| c.status == clio_attacks::Status::Active)
+    );
+    let report = clio_attacks::run(&mine, &JudgeTarget);
+    assert!(report.ok(), "{}", report.line());
+    eprintln!("{}", report.line());
+}

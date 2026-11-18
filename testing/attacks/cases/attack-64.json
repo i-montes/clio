@@ -1,0 +1,10 @@
+{
+  "id": "attack-64",
+  "title": "A suspect session's way out waits for the person: networked commands, programs that reach out by themselves (ssh, rsync, crontab, nsenter) and any command that names sudo are set aside as enviar with the reason kept, and do not run; its background jobs with the network are stopped",
+  "rules": [
+    "S-05",
+    "S-06"
+  ],
+  "status": "active",
+  "expect": "refused"
+}
