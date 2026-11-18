@@ -174,12 +174,19 @@ pub struct SecretSpec {
 /// it is dropped.
 pub struct SecretValue(String);
 
-/// Zeroes the bytes of `s` and leaves it empty. Best effort: no `zeroize` dependency, so a copy the
-/// allocator made earlier (a `String` that grew) is not reached; `with_capacity` avoids growing.
+/// Zeroes the bytes of `s`, its spare capacity too (a byte removed earlier is still there), and
+/// leaves it empty. Best effort: no `zeroize` dependency, so a copy the allocator made earlier (a
+/// `String` that grew) is not reached; `with_capacity` avoids growing.
 pub fn wipe(s: &mut String) {
     let mut bytes = std::mem::take(s).into_bytes();
-    bytes.fill(0);
+    zero_all(&mut bytes);
     std::hint::black_box(&bytes);
+}
+
+/// Writes a zero over every byte `v` owns, within its capacity: it never reallocates.
+fn zero_all(v: &mut Vec<u8>) {
+    v.clear();
+    v.resize(v.capacity(), 0);
 }
 
 impl SecretValue {
@@ -207,8 +214,14 @@ impl SecretValue {
         fits
     }
 
+    /// Removes the last character, its bytes overwritten first (zeros pushed over them, within
+    /// the capacity, then cut off).
     pub fn pop(&mut self) {
-        self.0.pop();
+        if let Some(c) = self.0.pop() {
+            let len = self.0.len();
+            (0..c.len_utf8()).for_each(|_| self.0.push('\0'));
+            self.0.truncate(len);
+        }
     }
 
     /// How many characters: what a masked field shows.
@@ -1068,4 +1081,42 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
+}
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::*;
+
+    // What was once in the buffer past its length is reached too, in the same allocation. (Reading
+    // the spare bytes of a `String` would take `unsafe`: the zeroing is checked on a `Vec` here.)
+    #[test]
+    fn wiping_zeroes_the_whole_capacity_in_place() {
+        let mut v = Vec::with_capacity(64);
+        v.extend_from_slice(b"lin_api_Zq8vX2mN4pR7tY1wK9sB3dF6");
+        v.truncate(4);
+        let at = v.as_ptr();
+        zero_all(&mut v);
+        assert_eq!((v.len(), v.capacity(), v.as_ptr()), (64, 64, at));
+        assert!(v.iter().all(|b| *b == 0));
+        let mut s = String::with_capacity(32);
+        s.push_str("secret");
+        wipe(&mut s);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn pop_removes_a_character_in_place() {
+        let mut v = SecretValue::with_capacity(8);
+        assert!(v.push('a') && v.push('é'));
+        let at = v.expose().as_ptr();
+        v.pop();
+        assert_eq!(v.expose(), "a");
+        assert_eq!(v.expose().as_ptr(), at);
+        // The two bytes of `é` are free again: the buffer takes its eight bytes, in place.
+        assert!(v.push('é') && v.push('b') && v.push('c'));
+        assert!(v.push('d') && v.push('e') && v.push('f'));
+        assert_eq!(v.expose().as_ptr(), at);
+        (0..8).for_each(|_| v.pop());
+        assert!(v.is_empty());
+    }
 }
