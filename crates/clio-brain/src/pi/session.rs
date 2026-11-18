@@ -44,8 +44,8 @@ pub const GUARD_TOOLS: [&str; 19] = [
 pub const PROMPT_NAME: &str = "clio-agent@19";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@19.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
-pub const HOST_PROMPT_NAME: &str = "clio-host@1";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@1.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@2";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@2.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
