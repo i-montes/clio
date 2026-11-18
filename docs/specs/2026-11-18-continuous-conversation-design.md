@@ -106,16 +106,20 @@ This is the part Gentle Dot does not have, and it needs the owner's decision.
   for good. Decision: the same numbers count over a rolling hour instead of the whole session. Not
   "start again at each compaction": Pi reports compactions, and Pi is inside the jail, so a fooled
   Pi could reset its own budget; the tool host's clock cannot be moved from there.
-- **`tainted`** (the session read outside content). In one endless chat it will almost always be
-  set. Today it labels what the model saves as `externo`, lowers the save cap to 5 and refuses
-  `memory_block_edit` ("open a new session"). Proposal: keep it for the life of the conversation,
-  as today; changing identity or rules is done after `/new`, which is rare and deliberate.
-- **`suspect`** (the judge withheld an injection). Proposal: keep it until `/new`. The injected text
-  never reached the model, but lifting the mark automatically is a security decision that should not
-  ride on a summary.
-
-Alternative for both marks: lift them at a rotation when the judge reads the handoff summary and
-finds it clean. More comfortable, weaker; not proposed for the first version.
+- **`tainted`** (the session read outside content). In one endless chat it is almost always set:
+  the output of any command the agent runs sets it. Until now a tainted session's
+  `memory_block_edit` was refused ("open a new session"). The owner hit this on 2026-11-18: after a
+  disk clean-up he asked Clio to keep watching the disk, and the change to his `vigilancia` block
+  was refused because the session had read the output of `df` and `docker`. Decision: in a marked
+  session (`tainted` or `suspect`) a change to the person's blocks is **set aside for the person's
+  approval** instead of refused. The approval box shows the block, the action and the exact text;
+  approved, it is written with the person's origin, exactly as shown, once; rejected or expired,
+  nothing is written. A clean session writes as before, without asking. The protection is the
+  same one S-05 wanted: text from outside cannot become the person's words unless the person reads
+  those words and approves them.
+- **`suspect`** (the judge withheld an injection). Unchanged: it lasts until `/new`, and its
+  networked commands wait for approval. The approval box for a block change says so when set.
+- **Memory read budget** (20 calls / 24 KiB per session) counts over a rolling hour too.
 
 ## Stages
 
@@ -133,5 +137,6 @@ finds it clean. More comfortable, weaker; not proposed for the first version.
 ## Decisions
 
 1. The cap is 200,000 tokens by default (owner, 2026-11-18), changed with `/compact N`.
-2. The marks last until `/new`: taken as proposed, the owner did not object; revisit with stage 2.
+2. The marks last until `/new`, but they no longer refuse a change to the person's blocks: it waits
+   for the person's approval (owner's concern of 2026-11-18, section 5).
 3. Stage 2 (rotation) comes after stage 1 has been used for a while.
