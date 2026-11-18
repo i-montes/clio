@@ -32,7 +32,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
 
-pub(crate) const MEMORY_OPS: [&str; 11] = [
+pub(crate) const MEMORY_OPS: [&str; 13] = [
     "memory_search",
     "memory_get",
     "memory_timeline",
@@ -44,6 +44,8 @@ pub(crate) const MEMORY_OPS: [&str; 11] = [
     "memory_forget",
     "memory_revert",
     "memory_pin",
+    "memory_block",
+    "memory_block_edit",
 ];
 
 /// The old name of `memory_save`, still served for one version (a prompt or a client of before).
@@ -79,6 +81,12 @@ const CONTEXT_DESCRIPTION: &str =
 const FORGET_DESCRIPTION: &str = "Forget a memory: it leaves the memory for quarantine, its record kept (the person can restore it)";
 const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
 const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
+const BLOCK_DESCRIPTION: &str = "Read one of the person's blocks whole, in order, each entry with its id: identidad (who Clio is and how she speaks), reglas (how she works and her limits), preferencias (who the person is), vigilancia (what she watches) (read-only)";
+const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
+const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. Refused in a session that read outside content";
+/// What a session that read outside content hears when it tries to change a block: the person's
+/// own words only enter from a clean session (S-05).
+pub const BLOCK_TAINTED: &str = "esta sesión leyó contenido de fuera: la identidad y lo que se vigila solo se cambian en una sesión limpia. Abre una sesión nueva y pídelo ahí.";
 
 /// Changes a session may make through forget, pin, revert and consolidate (S-47, S-65).
 pub(crate) const MAX_CHANGES: u32 = 10;
@@ -253,6 +261,17 @@ pub struct Proposed {
     pub similar: Option<Near>,
 }
 
+/// A change to one of the person's blocks, as `memory_block_edit` asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockEdit {
+    /// A new last entry.
+    Add(String),
+    /// A new text for entry `id`, in its place.
+    Replace(i64, String),
+    /// Entry `id` leaves the block (and is forgotten, restorable).
+    Remove(i64),
+}
+
 /// What the tool host tells the port about the call: whether the session read anything hostile
 /// (what it saves is marked `externo`, and Jev is told).
 #[derive(Debug, Clone, Default)]
@@ -320,6 +339,19 @@ pub trait MemoryPort: Send + Sync {
     fn undo(&self, _change: i64, _judging: &Judging) -> Result<(), String> {
         Err(NO_CHANGES.into())
     }
+    /// Every entry of the person's block `name`, whole and in order.
+    fn block(&self, _name: &str) -> Result<Vec<MemoryItem>, String> {
+        Err("this memory has no blocks".into())
+    }
+    /// Changes the person's block `name` with the person's authority: only from a clean session.
+    fn block_edit(
+        &self,
+        _name: &str,
+        _edit: &BlockEdit,
+        _judging: &Judging,
+    ) -> Result<MemoryItem, String> {
+        Err(NO_CHANGES.into())
+    }
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
     /// it is must not leak.
@@ -372,6 +404,13 @@ pub(crate) fn arg_specs(tool: &str) -> Vec<ArgSpec> {
         ],
         "memory_context" => vec![],
         "memory_revert" => vec![a("change", ArgKind::Int, true)],
+        "memory_block" => vec![a("name", ArgKind::Text, true)],
+        "memory_block_edit" => vec![
+            a("name", ArgKind::Text, true),
+            a("action", ArgKind::Text, true),
+            a("id", ArgKind::Int, false),
+            a("text", ArgKind::Text, false),
+        ],
         _ => vec![a("id", ArgKind::Int, true)],
     }
 }
@@ -405,6 +444,8 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         ("memory_forget", FORGET_DESCRIPTION),
         ("memory_revert", REVERT_DESCRIPTION),
         ("memory_pin", PIN_DESCRIPTION),
+        ("memory_block", BLOCK_DESCRIPTION),
+        ("memory_block_edit", BLOCK_EDIT_DESCRIPTION),
     ]
     .into_iter()
     .map(|(name, description)| ToolDecl {
@@ -413,7 +454,7 @@ pub(crate) fn decls() -> Vec<ToolDecl> {
         // A write changes the memory file, and every change stays in its log (revertible).
         effect: if matches!(
             name,
-            "memory_search" | "memory_get" | "memory_timeline" | "memory_context"
+            "memory_search" | "memory_get" | "memory_timeline" | "memory_context" | "memory_block"
         ) {
             Effect::Read
         } else {
@@ -702,6 +743,9 @@ impl ToolHost {
         ) {
             return self.change_call(req, args, out);
         }
+        if req.tool == "memory_block_edit" {
+            return self.block_edit_call(req, args, out);
+        }
         let path = self.run_dir.join("memory-budget.json");
         let mut budget = match Budget::load(&path) {
             Ok(b) => b,
@@ -719,7 +763,14 @@ impl ToolHost {
         if let Err(why) = budget.save(&path) {
             return self.budget_denied(req, &format!("the memory budget cannot be kept: {why}"));
         }
-        let cap = usize::try_from(left).map_or(MAX_ANSWER_BYTES, |l| l.min(MAX_ANSWER_BYTES));
+        // A block is read whole (up to what is left of the session's budget): what Clio watches
+        // can be longer than one answer of the others.
+        let most = if req.tool == "memory_block" {
+            usize::MAX
+        } else {
+            MAX_ANSWER_BYTES
+        };
+        let cap = usize::try_from(left).map_or(MAX_ANSWER_BYTES, |l| l.min(most));
         let mut facts = Facts::default();
         let resp = self.memory_answer(req, args, out, cap, &mut facts);
         // Only what a memory said counts: an error or a refusal is not text of the memory.
@@ -883,35 +934,10 @@ impl ToolHost {
             merge,
             target,
         } = asked;
-        let typed = typed.as_str();
-        // The vault's cleaner sees the text before anything is proposed, as typed AND as it will be
-        // proposed (flattened to one line): a secret with spaces in it must not get through by
-        // swapping a space for a newline, a tab or a no-break space, which flattening puts back.
-        // A text that had a secret in it is not proposed at all: a memory with a hole where a
-        // secret was is useless, and the model had no business keeping it.
-        let flat = one_line(typed);
-        let (Some(from_typed), Some(from_flat)) = (self.try_clean(typed), self.try_clean(&flat))
-        else {
-            return self.memory_failed(req, out, "the vault could not filter the text");
+        let text = match self.text_to_keep(&typed) {
+            Ok(t) => t,
+            Err(why) => return self.memory_failed(req, out, why),
         };
-        if count_masks(&from_typed) > count_masks(typed)
-            || count_masks(&from_flat) > count_masks(&flat)
-        {
-            return self.memory_failed(
-                req,
-                out,
-                "the text had a secret in it: nothing was proposed",
-            );
-        }
-        let text = one_line(&from_typed);
-        let chars = text.chars().count();
-        if chars == 0 || chars > MAX_PROPOSAL_CHARS {
-            return self.memory_failed(
-                req,
-                out,
-                &format!("the text must have 1 to {MAX_PROPOSAL_CHARS} characters"),
-            );
-        }
         // The title is checked like the text: cleaned by the vault, refused if it had a secret.
         let title = match args.get("title").and_then(Value::as_str) {
             None => None,
@@ -1018,6 +1044,145 @@ impl ToolHost {
         }
     }
 
+    /// A text to write, cleaned by the vault as typed AND as it will be written (flattened to one
+    /// line): a secret with spaces in it must not get through by swapping a space for a newline, a
+    /// tab or a no-break space, which flattening puts back. A text that had a secret in it is not
+    /// written at all: a memory with a hole where a secret was is useless, and the model had no
+    /// business keeping it.
+    fn text_to_keep(&self, typed: &str) -> Result<String, &'static str> {
+        let flat = one_line(typed);
+        let (Some(from_typed), Some(from_flat)) = (self.try_clean(typed), self.try_clean(&flat))
+        else {
+            return Err("the vault could not filter the text");
+        };
+        if count_masks(&from_typed) > count_masks(typed)
+            || count_masks(&from_flat) > count_masks(&flat)
+        {
+            return Err("the text had a secret in it: nothing was proposed");
+        }
+        let text = one_line(&from_typed);
+        let chars = text.chars().count();
+        if chars == 0 || chars > MAX_PROPOSAL_CHARS {
+            return Err(TEXT_SIZE);
+        }
+        Ok(text)
+    }
+
+    /// `memory_block_edit`: the person's words, so only from a session that read nothing from
+    /// outside (checked before anything else, the port never hears of it). Its arguments are
+    /// checked before it is counted, and it counts as one of the session's saves.
+    fn block_edit_call(
+        &self,
+        req: &Request,
+        args: &Map<String, Value>,
+        out: DecisionOut,
+    ) -> Response {
+        if self.is_tainted(&req.session) {
+            return Response {
+                id: req.id.clone(),
+                ok: false,
+                content: BLOCK_TAINTED.into(),
+                data: Value::Null,
+                decision: DecisionOut {
+                    outcome: "deny".into(),
+                    rule: "S-05/block".into(),
+                    reason: BLOCK_TAINTED.into(),
+                },
+                tainted: true,
+                external: false,
+            };
+        }
+        let name = one_line(args.get("name").and_then(Value::as_str).unwrap_or_default());
+        let id = args.get("id").and_then(Value::as_i64).filter(|n| *n > 0);
+        let text = args.get("text").and_then(Value::as_str).map(str::to_owned);
+        // The model's own mistakes are refused before anything is counted.
+        let edit = match (args.get("action").and_then(Value::as_str), id, text) {
+            (Some("add"), _, Some(t)) => BlockEdit::Add(t),
+            (Some("replace"), Some(id), Some(t)) => BlockEdit::Replace(id, t),
+            (Some("remove"), Some(id), _) => BlockEdit::Remove(id),
+            (Some("add" | "replace" | "remove"), _, _) => {
+                return self.memory_failed(
+                    req,
+                    out,
+                    "add needs text, replace needs id and text, remove needs id",
+                );
+            }
+            _ => return self.memory_failed(req, out, "action must be add, replace or remove"),
+        };
+        if let BlockEdit::Add(t) | BlockEdit::Replace(_, t) = &edit
+            && one_line(t).chars().count() > MAX_PROPOSAL_CHARS
+        {
+            return self.memory_failed(req, out, TEXT_SIZE);
+        }
+        let path = self.run_dir.join("memory-proposals.json");
+        let mut budget = match Budget::load(&path) {
+            Ok(b) => b,
+            Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
+        };
+        if budget.calls >= MAX_PROPOSALS_CLEAN {
+            return self.budget_denied(
+                req,
+                &format!("this session made its memory saves ({MAX_PROPOSALS_CLEAN})"),
+            );
+        }
+        budget.calls += 1;
+        if let Err(why) = budget.save(&path) {
+            return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
+        }
+        let edit = match edit {
+            BlockEdit::Add(t) => self.text_to_keep(&t).map(BlockEdit::Add),
+            BlockEdit::Replace(id, t) => self.text_to_keep(&t).map(|t| BlockEdit::Replace(id, t)),
+            remove => Ok(remove),
+        };
+        let edit = match edit {
+            Ok(e) => e,
+            Err(why) => return self.memory_failed(req, out, why),
+        };
+        let remove = matches!(edit, BlockEdit::Remove(_));
+        let Some(port) = self.memory.clone() else {
+            return self.memory_failed(req, out, "there is no memory");
+        };
+        let judging = Judging {
+            tainted: false,
+            session: req.session.clone(),
+        };
+        let block = name.clone();
+        let done = self.ask_port_for(
+            &port,
+            move |p| p.block_edit(&block, &edit, &judging),
+            self.memory_timeout * 3,
+        );
+        let mut facts = Facts::default();
+        let resp = match done {
+            Ok(it) => {
+                facts.ids.push(it.id);
+                let content = if remove {
+                    format!(
+                        "removed from «{}»: m{} is in quarantine, the person can restore it",
+                        self.tidy(&name, 40),
+                        it.id
+                    )
+                } else {
+                    format!("saved in «{}» as m{}", self.tidy(&name, 40), it.id)
+                };
+                Response {
+                    id: req.id.clone(),
+                    ok: true,
+                    content,
+                    data: json!({ "done": true, "id": it.id }),
+                    decision: out,
+                    tainted: self.is_tainted(&req.session),
+                    external: false,
+                }
+            }
+            Err(why) => self.memory_failed(req, out, &why),
+        };
+        match self.log_facts(req, &facts, 0) {
+            Ok(()) => resp,
+            Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
+        }
+    }
+
     fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1077,6 +1242,14 @@ impl ToolHost {
                 usize::try_from(n.clamp(1, MAX_LIMIT as i64)).unwrap_or(MAX_LIMIT)
             });
             self.ask_port(&port, move |p| p.search(&query, limit))
+        } else if req.tool == "memory_block" {
+            let name = one_line(args.get("name").and_then(Value::as_str).unwrap_or_default());
+            self.ask_port(&port, move |p| p.block(&name))
+                .map(|items| Found {
+                    items,
+                    abstained: false,
+                    note: None,
+                })
         } else if req.tool == "memory_context" {
             self.ask_port(&port, |p| p.context()).map(|items| Found {
                 items,
@@ -1173,7 +1346,7 @@ impl ToolHost {
         let mut ids_after: Vec<(usize, String)> = Vec::new();
         let (mut lines, mut ids, mut masked, mut used) = (Vec::new(), Vec::new(), 0, 0);
         // A memory read on its own is shown whole (within the cap); a list shows previews.
-        let max_line = if req.tool == "memory_get" {
+        let max_line = if matches!(req.tool.as_str(), "memory_get" | "memory_block") {
             MAX_FULL_LINE_CHARS
         } else {
             MAX_LINE_CHARS

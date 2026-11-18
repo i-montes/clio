@@ -44,8 +44,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use memory::{
-    CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft, ProposalKind,
-    Proposed, Saved, memory_args,
+    BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Near, Origin,
+    ProposalDraft, ProposalKind, Proposed, Saved, memory_args,
 };
 pub use sanitize::sanitize;
 pub use server::Server;

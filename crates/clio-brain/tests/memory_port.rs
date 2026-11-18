@@ -2098,3 +2098,59 @@ fn vigilancia_is_created_on_the_first_write() {
     link.block_add("vigilancia", "el correo del banco").unwrap();
     assert_eq!(texts(&link, "vigilancia"), ["el correo del banco"]);
 }
+
+#[test]
+fn the_real_port_edits_and_reads_a_block() {
+    use clio_toolhost::BlockEdit;
+    let w = world();
+    drop(open(&w));
+    let p = port(&w);
+    let a = MemoryPort::block_edit(
+        &p,
+        "vigilancia",
+        &BlockEdit::Add("el correo del banco".into()),
+        &judging(false),
+    )
+    .unwrap();
+    MemoryPort::block_edit(
+        &p,
+        "vigilancia",
+        &BlockEdit::Add("el disco lleno".into()),
+        &judging(false),
+    )
+    .unwrap();
+    let b = MemoryPort::block_edit(
+        &p,
+        "vigilancia",
+        &BlockEdit::Replace(a.id, "el correo del banco y de la DIAN".into()),
+        &judging(false),
+    )
+    .unwrap();
+    let read = MemoryPort::block(&p, "vigilancia").unwrap();
+    assert_eq!(
+        read.iter()
+            .map(|i| (i.id, i.text.as_str(), i.origin))
+            .collect::<Vec<_>>(),
+        [
+            (b.id, "el correo del banco y de la DIAN", Origin::Person),
+            (read[1].id, "el disco lleno", Origin::Person),
+        ]
+    );
+    MemoryPort::block_edit(&p, "vigilancia", &BlockEdit::Remove(b.id), &judging(false)).unwrap();
+    assert_eq!(MemoryPort::block(&p, "vigilancia").unwrap().len(), 1);
+    // Refusals: a tainted session, a block that does not exist, an id from elsewhere.
+    let add = BlockEdit::Add("otra".into());
+    assert!(MemoryPort::block_edit(&p, "vigilancia", &add, &judging(true)).is_err());
+    assert!(MemoryPort::block_edit(&p, "nada", &add, &judging(false)).is_err());
+    assert!(MemoryPort::block(&p, "nada").is_err());
+    assert!(
+        MemoryPort::block_edit(
+            &p,
+            "identidad",
+            &BlockEdit::Remove(read[1].id),
+            &judging(false)
+        )
+        .is_err()
+    );
+    assert_eq!(MemoryPort::block(&p, "vigilancia").unwrap().len(), 1);
+}

@@ -14,8 +14,8 @@ use clio_memory::{
     Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, Relation, State,
 };
 use clio_toolhost::{
-    Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft, ProposalKind, Proposed,
-    Saved,
+    BLOCK_TAINTED, BlockEdit, Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft,
+    ProposalKind, Proposed, Saved,
 };
 
 use crate::memory_judge::{Guard, MemoryJudge};
@@ -383,6 +383,40 @@ impl MemoryPort for LinkPort {
             .revert_as_agent(OpId(change))
             .map(|_| ())
             .map_err(|_| NOT_READABLE.to_owned())
+    }
+
+    fn block(&self, name: &str) -> Result<Vec<MemoryItem>, String> {
+        self.with_link(|link| {
+            Ok(link
+                .block_rows(name)?
+                .iter()
+                .map(|r| item(link, r, 0))
+                .collect())
+        })
+    }
+
+    /// The person's own words, so with the person's authority: never from a session that read
+    /// outside content (the tool host already refuses it; this is the second lock).
+    fn block_edit(
+        &self,
+        name: &str,
+        edit: &BlockEdit,
+        judging: &Judging,
+    ) -> Result<MemoryItem, String> {
+        if judging.tainted {
+            return Err(BLOCK_TAINTED.into());
+        }
+        let link = self.writer()?;
+        let row = match edit {
+            BlockEdit::Add(text) => link.block_add(name, text)?,
+            BlockEdit::Replace(id, text) => link.block_replace(name, MemoryId(*id), text)?,
+            BlockEdit::Remove(id) => {
+                link.block_remove(name, MemoryId(*id))?;
+                link.get(MemoryId(*id))?
+            }
+        };
+        embed_now(&link);
+        Ok(item(&link, &row, 0))
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
