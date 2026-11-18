@@ -466,7 +466,7 @@ fn a_secret_is_scrubbed_or_refused_before_it_is_written() {
     let c = Canaries::fresh();
     let s = scrubber();
     s.add("github", c.value("github").unwrap());
-    // One the scrubber knows by value and one it only knows by its shape: both come out tachado.
+    // One the scrubber knows by value and one it only knows by its shape: both come out redacted.
     // A key the person TYPES is not scrubbed, so there the detector is what refuses it.
     let unknown = format!("sk-{}", "9f8e7d6c5b4a39281706".repeat(2));
     let r = run(

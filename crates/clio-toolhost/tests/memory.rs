@@ -419,7 +419,7 @@ fn limits_are_applied_after_cleaning() {
     let e = env_with(Some(&leaky), |c| c.scrubber = Some(scrubber));
     let r = search(&e, "s1", "q");
     assert!(!r.content.contains(value), "{r:?}");
-    assert!(r.content.contains("tachado"), "{r:?}");
+    assert!(r.content.contains("redacted"), "{r:?}");
     assert_eq!(r.data["masked"], 1);
 }
 
@@ -1915,7 +1915,7 @@ fn a_secret_across_the_preview_cut_is_crossed_out() {
     let e = env_with(Some(&port), |c| c.scrubber = Some(scrubber));
     let g = call(&e, "s", "memory_get", json!({ "id": 1 }));
     assert!(!g.content.contains("canario-del"), "{g:?}");
-    assert!(g.content.contains("[secreto"), "{g:?}");
+    assert!(g.content.contains("[secret:"), "{g:?}");
     assert_eq!(g.data["masked"], 1, "the crossed-out value is counted");
 }
 

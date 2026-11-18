@@ -325,7 +325,7 @@ fn raw_reads_keep_the_bytes_and_clean_ones_do_not_and_filter_cleans_and_wraps() 
         "{}",
         r.content
     );
-    assert!(r.content.matches("tachado").count() >= 3, "{}", r.content);
+    assert!(r.content.matches("redacted").count() >= 3, "{}", r.content);
     // `edit` needs the real bytes (it writes the file back); they are filtered at the end.
     let raw = call(&e, "s", "fs_read", json!({"path":"n.txt","raw":true}));
     assert_eq!(raw.content, body);

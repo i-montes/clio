@@ -32,7 +32,7 @@ pub struct Connector {
     pub default_model: &'static str,
 }
 
-/// The name the model's key is struck out under, everywhere (`[secreto:model-api-key tachado]`):
+/// The name the model's key is struck out under, everywhere (`[secret:model-api-key redacted]`):
 /// the session's tool host and an approval from the terminal must clean a command alike, or the
 /// approval sees a changed command and refuses it.
 pub const MODEL_KEY_NAME: &str = "model-api-key";

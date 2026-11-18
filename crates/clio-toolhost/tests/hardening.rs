@@ -244,7 +244,7 @@ fn a_token_inside_a_file_reaches_the_model_masked_with_a_guide() {
         "the rest of the file stays: {}",
         r.content
     );
-    for want in ["[secreto:patrón tachado", "vault", "person"] {
+    for want in ["[secret:pattern redacted", "vault", "person"] {
         assert!(
             r.content.contains(want),
             "the mark lacks {want:?}: {}",
@@ -287,7 +287,20 @@ fn a_write_that_carries_a_mask_is_refused_and_the_file_keeps_its_value() {
         "fs_write",
         json!({"path": "deploy.sh", "content": masked}),
     );
-    assert!(!w.ok && w.content.contains("tachado"), "{w:?}");
+    assert!(!w.ok && w.content.contains("redacted"), "{w:?}");
+    assert!(std::fs::read_to_string(&path).unwrap().contains(GH));
+    // The Spanish marks that older sessions and memories carry are refused the same way.
+    for old in [
+        "export GITHUB_TOKEN=[secreto:github tachado]\necho ok\n",
+        "export GITHUB_TOKEN=[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]\n",
+    ] {
+        let w = call(
+            &e.host,
+            "fs_write",
+            json!({"path": "deploy.sh", "content": old}),
+        );
+        assert!(!w.ok && w.content.contains("redacted"), "{w:?}");
+    }
     assert!(std::fs::read_to_string(&path).unwrap().contains(GH));
     // An ordinary write is not affected.
     let ok = call(

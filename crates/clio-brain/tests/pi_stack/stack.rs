@@ -719,7 +719,7 @@ fn attack_44() -> Option<bool> {
         );
     }
     assert!(
-        ends[0].2.contains("token=") && ends[0].2.contains("tachado"),
+        ends[0].2.contains("token=") && ends[0].2.contains("redacted"),
         "the call ran: {}",
         ends[0].2
     );

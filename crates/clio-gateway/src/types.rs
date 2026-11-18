@@ -97,7 +97,7 @@ pub struct ActionRequest {
     pub version: String,
     /// The description hash the caller saw (S-15).
     pub description_hash: String,
-    /// Secrets travel as `{{secreto:name}}` markers inside the arguments.
+    /// Secrets travel as `{{secret:name}}` markers inside the arguments.
     pub args: Map<String, Value>,
     pub node: String,
     pub session: SessionInfo,

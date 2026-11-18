@@ -133,7 +133,9 @@ fn request(tool: &str, hash: &str, url: &str) -> ActionRequest {
         tool: tool.into(),
         version: "1.0".into(),
         description_hash: hash.into(),
-        args: json!({"url": url, "body": "token={{secreto:notion}}"})
+        // Both spellings: the English one the model writes now and the Spanish one older
+        // sessions carry are filled alike.
+        args: json!({"url": url, "body": "token={{secret:notion}} old={{secreto:notion}}"})
             .as_object()
             .unwrap()
             .clone(),
@@ -217,7 +219,7 @@ fn run(w: &World, req: &ActionRequest) -> (clio_gateway::Decision, ExecResult) {
 }
 
 // S-19, S-20 (tasks 206, 207): the executor receives the real value, the model-facing result
-// does not: the output comes back with the secret tachado, in plain text and in base64.
+// does not: the output comes back with the secret redacted, in plain text and in base64.
 #[test]
 fn the_value_reaches_the_executor_and_never_the_model() {
     let w = world();
@@ -231,11 +233,11 @@ fn the_value_reaches_the_executor_and_never_the_model() {
     let seen = w.seen.lock().unwrap();
     assert_eq!(
         seen[0]["body"],
-        format!("token={value}"),
-        "executor got the value"
+        format!("token={value} old={value}"),
+        "executor got the value, for either spelling"
     );
     w.canaries.assert_clean("tool output", &out);
-    assert!(out.contains("[secreto:notion tachado]"), "{out}");
+    assert!(out.contains("[secret:notion redacted]"), "{out}");
     // What the model/loop holds: the request and the decision keep the marker only.
     w.canaries.assert_clean("request", &format!("{req:?}"));
     w.canaries
@@ -244,7 +246,7 @@ fn the_value_reaches_the_executor_and_never_the_model() {
         req.args["body"]
             .as_str()
             .unwrap()
-            .contains("{{secreto:notion}}")
+            .contains("{{secret:notion}} old={{secreto:notion}}")
     );
 }
 

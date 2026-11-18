@@ -659,7 +659,7 @@ impl ToolHost {
             return self.refuse(
                 &req.id,
                 "S-18/mask",
-                "the text carries a value that was crossed out (tachado): the file holds the real value, which you were not shown. Do not write the whole file back; change only the lines you need with `edit`".into(),
+                "the text carries a value that was redacted: the file holds the real value, which you were not shown. Do not write the whole file back; change only the lines you need with `edit`".into(),
                 tainted,
             );
         }

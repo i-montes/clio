@@ -144,16 +144,20 @@ pub fn domain_matches(host: &str, domain: &str) -> bool {
     host == d || host.ends_with(&format!(".{d}"))
 }
 
-/// Every `{{secreto:name}}` marker in the strings of `v`.
+/// Every `{{secret:name}}` marker in the strings of `v`, and every `{{secreto:name}}`: the
+/// Spanish spelling older sessions and prompts carry is filled the same way, so it is checked the
+/// same way. Neither opening is a prefix of the other; each is scanned on its own.
 pub(crate) fn markers(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::String(s) => {
-            let mut rest = s.as_str();
-            while let Some(i) = rest.find("{{secreto:") {
-                let after = &rest[i + "{{secreto:".len()..];
-                let end = after.find("}}").unwrap_or(after.len());
-                out.push(after[..end].to_string());
-                rest = &after[end..];
+            for open in ["{{secret:", "{{secreto:"] {
+                let mut rest = s.as_str();
+                while let Some(i) = rest.find(open) {
+                    let after = &rest[i + open.len()..];
+                    let end = after.find("}}").unwrap_or(after.len());
+                    out.push(after[..end].to_string());
+                    rest = &after[end..];
+                }
             }
         }
         Value::Array(a) => a.iter().for_each(|x| markers(x, out)),

@@ -38,18 +38,28 @@ fn credential_files_are_not_copied_for_the_agent() {
 // must never travel back into the person's project through `apply` and replace the real value.
 #[test]
 fn apply_refuses_a_file_that_carries_a_masked_value() {
-    let e = Env::new();
-    put(&e.proj(), "notes.md", "hello\n");
-    let id = e.run();
-    let masked = "[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]";
-    put(&e.sandbox(&id), "notes.md", &format!("key = {masked}\n"));
-    let o = e.try_clio(&["apply", "--yes", "--force", &id]);
-    let err = String::from_utf8_lossy(&o.stderr).into_owned();
-    assert!(!o.status.success() && err.contains("tachado"), "{err}");
-    assert_eq!(
-        std::fs::read_to_string(e.proj().join("notes.md")).unwrap(),
-        "hello\n"
-    );
+    // The English marks, and the Spanish ones that sandboxes from before the English pass carry.
+    for masked in [
+        "[secret:pattern redacted: it looks like a key and is not in the vault; do not write it back, ask the person for it]",
+        "[secret:github redacted]",
+        "[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]",
+        "[secreto:github tachado]",
+    ] {
+        let e = Env::new();
+        put(&e.proj(), "notes.md", "hello\n");
+        let id = e.run();
+        put(&e.sandbox(&id), "notes.md", &format!("key = {masked}\n"));
+        let o = e.try_clio(&["apply", "--yes", "--force", &id]);
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(
+            !o.status.success() && err.contains("tachado"),
+            "{masked}: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(e.proj().join("notes.md")).unwrap(),
+            "hello\n"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

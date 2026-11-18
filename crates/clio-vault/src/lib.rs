@@ -1,5 +1,5 @@
 //! The vault: keeps the secrets, hands a value only to the gateway for an allowed destination,
-//! and scrubs known values out of every output. The model only ever sees `{{secreto:name}}`.
+//! and scrubs known values out of every output. The model only ever sees `{{secret:name}}`.
 //!
 //! No `Debug` or `Display` in this crate prints a value (S-18). Values are encrypted at rest
 //! with XChaCha20-Poly1305; the master key comes from a passphrase (Argon2id) and is never
@@ -400,9 +400,15 @@ pub fn valid_name(n: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
 }
 
-/// The marker the model writes: `{{secreto:name}}`.
+/// The marker the model writes: `{{secret:name}}`.
 pub fn marker(name: &str) -> String {
-    format!("{{{{secreto:{name}}}}}")
+    format!("{{{{secret:{name}}}}}")
+}
+
+/// Every spelling of `name`'s marker that gets filled: `marker`, and `{{secreto:name}}`, the
+/// Spanish one that older sessions and prompts carry.
+pub fn markers(name: &str) -> [String; 2] {
+    [marker(name), format!("{{{{secreto:{name}}}}}")]
 }
 
 impl Vault {

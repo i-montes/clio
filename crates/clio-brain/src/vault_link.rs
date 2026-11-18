@@ -3,9 +3,10 @@
 //!
 //! - [`VaultPolicy`]: the gateway's `SecretPolicy`, answered by the vault's `check` (no value
 //!   moves; a refusal is audited and alerted by the vault).
-//! - [`SecretExecutor`]: the gateway's `Executor`. It resolves `{{secreto:name}}` last, inside
-//!   the executing process, only for the action's tool and destination domains, runs the tool
-//!   with the real values, and sends every output through the vault's filter before returning.
+//! - [`SecretExecutor`]: the gateway's `Executor`. It resolves `{{secret:name}}` (or the older
+//!   `{{secreto:name}}`) last, inside the executing process, only for the action's tool and
+//!   destination domains, runs the tool with the real values, and sends every output through
+//!   the vault's filter before returning.
 //!   The model, the decision and the gateway's log only ever see the markers.
 //!
 //! Limits: the resolved values live in this process's memory while the tool runs and are not
@@ -89,11 +90,13 @@ impl<R: ToolRunner> Executor for SecretExecutor<R> {
     }
 }
 
-/// Replaces each marker in the string values of `v` with its value.
+/// Replaces each marker, in either spelling, in the string values of `v` with its value.
 fn fill(v: &Value, values: &[(String, SecretValue)]) -> Value {
     match v {
         Value::String(s) => Value::String(values.iter().fold(s.clone(), |s, (name, val)| {
-            s.replace(&clio_vault::marker(name), val.expose())
+            clio_vault::markers(name)
+                .iter()
+                .fold(s, |s, m| s.replace(m, val.expose()))
         })),
         Value::Array(a) => Value::Array(a.iter().map(|x| fill(x, values)).collect()),
         Value::Object(m) => Value::Object(

@@ -478,7 +478,7 @@ fn attack_58() -> Option<bool> {
         );
     }
     assert!(
-        ends.iter().all(|e| e.2.contains("tachado")),
+        ends.iter().all(|e| e.2.contains("redacted")),
         "the memory was read and struck out: {ends:?}"
     );
     no_leak(&w, &model, &ev, "attack-58");

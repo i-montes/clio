@@ -231,7 +231,7 @@ fn scrub_removes_values_in_every_form() {
     let b = clio_canaries_b64(v);
     let out = s.gateway().scrub(&format!("x {v} y {b} z")).unwrap();
     c.assert_clean("scrubbed", &out);
-    assert!(out.contains("[secreto:github tachado]"));
+    assert!(out.contains("[secret:github redacted]"));
 }
 
 // Standard base64 of a decoy, the same way a tool that echoes it in base64 would.

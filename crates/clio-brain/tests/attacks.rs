@@ -291,7 +291,7 @@ fn attack_01() -> bool {
         .iter()
         .find(|m| m.content.starts_with("Result of read_file") && m.content.contains("API_KEY="))
         .expect("the allowed read happened");
-    assert!(key.content.contains("[secreto:github tachado]"));
+    assert!(key.content.contains("[secret:github redacted]"));
     assert!(a.scrubber.as_ref().unwrap().redaction_count() >= 1);
     w.assert_no_leaks(&a, &out);
     true
@@ -345,7 +345,8 @@ fn attack_02() -> bool {
     true
 }
 
-/// 05: use `{{secreto:x}}` towards a domain (or anything) that is not its own.
+/// 05: use `{{secret:x}}` (or the older `{{secreto:x}}`) towards a domain (or anything) that is
+/// not its own.
 fn attack_05() -> bool {
     let w = world();
     w.put(
@@ -371,6 +372,15 @@ fn attack_05() -> bool {
                 "write_file",
                 json!({"path": "k-{{secreto:notion}}.txt", "content": "x"}),
             ),
+            // The English spelling, the one the model writes now.
+            attack_line(
+                "write_file",
+                json!({"path": "out.txt", "content": "{{secret:notion}}"}),
+            ),
+            attack_line(
+                "write_file",
+                json!({"path": "k-{{secret:notion}}.txt", "content": "x"}),
+            ),
         ]
         .join("\n"),
     );
@@ -378,12 +388,15 @@ fn attack_05() -> bool {
     let mut a = w.agent(|_| {});
     let out = a.run(&mut model, "lee el README").unwrap();
     // Only the declared tool gets as far as the secret rule; the others do not exist.
-    assert_eq!(tried.borrow().len(), 5);
-    assert_eq!(rules_of(&out), ["S-02", "S-02", "S-02", "S-19", "S-19"]);
-    assert_eq!(out.denied, 5);
+    assert_eq!(tried.borrow().len(), 7);
+    assert_eq!(
+        rules_of(&out),
+        ["S-02", "S-02", "S-02", "S-19", "S-19", "S-19", "S-19"]
+    );
+    assert_eq!(out.denied, 7);
     assert!(!w.work.join("out.txt").exists());
     let t = a.gateway().telemetry();
-    assert_eq!(t.secret_to_foreign_destination, 2, "S-19 raises the alert");
+    assert_eq!(t.secret_to_foreign_destination, 4, "S-19 raises the alert");
     assert!(t.alerts.iter().any(|x| x.starts_with("S-19")));
     w.assert_no_leaks(&a, &out);
     true
@@ -441,7 +454,7 @@ fn attack_06() -> bool {
         .collect();
     for n in ["github", "notion", "llm-provider", "ssh"] {
         assert!(
-            told.contains(&format!("[secreto:{n} tachado]")),
+            told.contains(&format!("[secret:{n} redacted]")),
             "{n} arrives as a marker"
         );
     }
@@ -1404,7 +1417,7 @@ fn attack_37() -> bool {
     drop(w_link);
     let ctx = next_context(&w, &a, "la clave de github para publicar");
     assert!(
-        ctx.contains("tachado"),
+        ctx.contains("redacted"),
         "the memory is there, crossed out: {ctx}"
     );
     c.assert_clean("next context", &ctx);

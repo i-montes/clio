@@ -1,5 +1,5 @@
 //! The one output filter (S-20, S-44): known vault values (plain, base64 at any alignment, URL
-//! encoded) and provider key patterns become `[secreto:name tachado]`. Every redaction is logged,
+//! encoded) and provider key patterns become `[secret:name redacted]`. Every redaction is logged,
 //! because a redaction usually means somebody tried to leak.
 
 use clio_core::{Clock, SystemClock};
@@ -24,7 +24,7 @@ pub enum Form {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redaction {
     pub at_ms: i64,
-    /// The secret name, or `patrón` for a provider pattern.
+    /// The secret name, or `pattern` for a provider pattern.
     pub name: String,
     pub form: Form,
 }
@@ -217,7 +217,7 @@ impl Scrubber {
         hits.extend(masked_hits);
         let (out, patterns) = redact_patterns(&out);
         hits.extend(std::iter::repeat_n(
-            ("patrón".to_string(), Form::Pattern),
+            ("pattern".to_string(), Form::Pattern),
             patterns,
         ));
         (out, hits)
@@ -257,26 +257,35 @@ pub(crate) fn prints(value: &str) -> Vec<Print> {
         .collect()
 }
 
-/// The marks keep their Spanish words (`secreto`, `tachado`, `patrón`): like `{{secreto:name}}`
-/// they are the syntax the model, the prompts and saved files already use.
+/// The mark a value leaves. Text from before the English pass (sessions, files, memories) carries
+/// the Spanish spelling, `[secreto:name tachado]`: `MARKS` keeps both recognised.
 fn marker(name: &str) -> String {
-    format!("[secreto:{name} tachado]")
+    format!("[secret:{name} redacted]")
 }
+
+/// How a mark opens and the word inside it, for each spelling: the one written now, and the
+/// Spanish one older text carries. Neither opening is a prefix of the other.
+const MARKS: [(&str, &str); 2] = [("[secret:", " redacted"), ("[secreto:", " tachado")];
 
 /// What replaces a key the vault does not know (a provider shape found in a file or an output).
 /// It says what happened and what to do in the place where the value was, because the model
 /// reads it there: it cannot see the value, and it must not write the mark back over it.
-const PATTERN_MARK: &str = "[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]";
+const PATTERN_MARK: &str = "[secret:pattern redacted: it looks like a key and is not in the vault; do not write it back, ask the person for it]";
 
-/// How many marks this filter left in `text` (`[secreto:... tachado...]`, of either kind).
+/// How many marks this filter left in `text` (`[secret:... redacted...]`, of either kind, in
+/// either spelling).
 pub fn count_masks(text: &str) -> usize {
-    text.match_indices("[secreto:")
-        .filter(|(i, _)| {
-            let rest = &text[*i..];
-            rest.find(']')
-                .is_some_and(|j| rest[..j].contains(" tachado"))
+    MARKS
+        .iter()
+        .map(|(open, word)| {
+            text.match_indices(open)
+                .filter(|(i, _)| {
+                    let rest = &text[*i..];
+                    rest.find(']').is_some_and(|j| rest[..j].contains(word))
+                })
+                .count()
         })
-        .count()
+        .sum()
 }
 
 /// True when `text` carries a mark this filter left. Such a text is not the real content of what
