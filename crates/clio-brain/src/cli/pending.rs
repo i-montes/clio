@@ -33,10 +33,32 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
+    if let Some(b) = pending::block_of(p) {
+        let id = b.id.map_or_else(String::new, |n| format!(" m{n}"));
+        let text = b.text.map_or_else(String::new, |t| format!(": {t}"));
+        return format!("{}{id} in your block «{}»{text}", b.action, b.name);
+    }
     match pending::secret_of(p) {
         Some((name, dest, _)) => format!("{name}, it can only be sent to {dest}"),
         None => Scrubber::default().scrub(pending::shown(p)),
     }
+}
+
+/// A block change as the approval box shows it, row by row, cleaned: what `clio approve` prints.
+/// The session is `suspect` when its tool host left that mark in the run folder.
+fn block_text(dirs: &Dirs, p: &Pending) -> Option<String> {
+    let suspect = std::fs::read_to_string(dirs.runs.join(&p.run).join("toolhost/tainted.json"))
+        .is_ok_and(|t| t.contains("\"suspect\""));
+    let b = super::tui::ask::BlockAsk::new(p, suspect)?;
+    let rows: Vec<String> = b
+        .parts()
+        .into_iter()
+        .map(|(part, text)| match part {
+            super::tui::ask::Part::Text => format!("  {text}"),
+            _ => text,
+        })
+        .collect();
+    Some(rows.join("\n"))
 }
 
 /// The person's answer to secret request `id`: the value (`Some`) goes to the vault, `None`
@@ -178,8 +200,15 @@ pub fn outcome(p: &Pending) -> String {
 pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     // Before the toolhost is built (folders, the launcher's self-test): one that does not wait
     // stops here.
-    let run = pending::check(&state(dirs), id, now_ms())?.run;
-    let done = host_for(dirs, &run)?.approve(id, now_ms())?;
+    let p = pending::check(&state(dirs), id, now_ms())?;
+    let done = if pending::block_of(&p).is_some() {
+        // The same port a clean session's tool host writes the person's blocks with.
+        let models = clio_brain::memory_link::MemoryLink::model_dirs(&dirs.home);
+        let port = clio_brain::memory_port::LinkPort::new(&dirs.data, &models);
+        pending::approve_block(&state(dirs), id, now_ms(), &port)?
+    } else {
+        host_for(dirs, &p.run)?.approve(id, now_ms())?
+    };
     let _ = pending::answered_at_terminal(&state(dirs), id);
     Ok(done)
 }
@@ -208,6 +237,9 @@ pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
         println!("{}", answer_secret(dirs, id, Some(&value))?);
         return Ok(());
     }
+    if let Some(text) = block_text(dirs, &p) {
+        println!("{id}:\n{text}\n");
+    }
     let p = approve(dirs, id)?;
     println!("approved {}: {}", p.id, sanitize::multiline(&outcome(&p)));
     Ok(())
@@ -218,6 +250,14 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = reject(dirs, id)?;
     if let Some((name, ..)) = pending::secret_of(&p) {
         println!("declined {}: {name} is not stored", p.id);
+        return Ok(());
+    }
+    if let Some(b) = pending::block_of(&p) {
+        println!(
+            "rejected {}: nothing was written to your block «{}»",
+            p.id,
+            sanitize::line(b.name)
+        );
         return Ok(());
     }
     println!(
@@ -497,5 +537,97 @@ mod tests {
         assert!(secret_waiting(&dirs, &id).is_none());
         // An action set aside is not a secret request.
         assert!(answer_secret(&dirs, "nope", None).is_err());
+    }
+
+    // S-05, S-36, S-60: a marked chat session's change to a block waits; `clio approve` (and the
+    // chat's box, which calls the same `approve`) writes it through the port a clean session uses:
+    // the exact text, with the person's origin, once. What it prints is cleaned of what could
+    // redraw a terminal; a rejected one writes nothing.
+    #[test]
+    fn an_approved_block_change_is_written_as_the_persons_and_shown_clean() {
+        use clio_brain::memory_link::{EmbedModel, MemoryLink};
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(&t.path().canonicalize().unwrap());
+        let work = dirs.home.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let run = dirs.runs.join("r1");
+        let mut cfg = Config::new(&work, &run.join("scratch"), &run.join("toolhost"));
+        cfg.jail = JailMode::Off;
+        cfg.memory = Some(std::sync::Arc::new(clio_brain::memory_port::LinkPort::new(
+            &dirs.data,
+            &[],
+        )));
+        cfg.secrets = Some(SecretCfg {
+            state: state(&dirs),
+            run: "r1".into(),
+            person: dirs.home.join("no-vault.sock"),
+            per_day: 3,
+        });
+        let host = ToolHost::new(cfg).unwrap();
+        let ask = |text: &str| {
+            let line = json!({"id":"i","tool":"memory_block_edit","args":{"name":"vigilancia","action":"add","text":text},"session":"s1","call_id":"c","tainted":true}).to_string();
+            let r: Value = serde_json::from_str(&host.handle_line(&line)).unwrap();
+            let text = r["content"].as_str().unwrap().to_owned();
+            text.strip_prefix("set aside ")
+                .and_then(|t| t.split(':').next())
+                .unwrap_or_else(|| panic!("{text}"))
+                .to_owned()
+        };
+        let text = "the disk of / \u{1b}[2J\u{1b}[31mover 90 %";
+        let id = ask(text);
+        let p = pending::check(&state(&dirs), &id, now_ms()).unwrap();
+        assert_eq!(label(&p), "«memory»");
+        let shown = block_text(&dirs, &p).unwrap();
+        assert!(!shown.contains('\u{1b}'), "{shown}");
+        assert_eq!(
+            shown.lines().collect::<Vec<_>>(),
+            [
+                "This is written to your own block, as said by you.",
+                "block: vigilancia",
+                "action: add an entry",
+                "text:",
+                // The tool host already cleaned it before it was stored.
+                "  the disk of / over 90 %",
+            ]
+        );
+        // Suspect: the box's warning, last.
+        std::fs::create_dir_all(run.join("toolhost")).unwrap();
+        std::fs::write(
+            run.join("toolhost/tainted.json"),
+            r#"{"sources":["suspect"]}"#,
+        )
+        .unwrap();
+        assert!(
+            block_text(&dirs, &p)
+                .unwrap()
+                .ends_with(super::super::tui::ask::SUSPECT_LINE)
+        );
+        assert!(
+            MemoryLink::open_write(&dirs.data, &EmbedModel::none())
+                .unwrap()
+                .block_rows("vigilancia")
+                .unwrap()
+                .is_empty()
+        );
+
+        let done = approve(&dirs, &id).unwrap();
+        assert!(
+            outcome(&done).contains("saved in «vigilancia» as m"),
+            "{}",
+            outcome(&done)
+        );
+        let link = MemoryLink::open_write(&dirs.data, &EmbedModel::none()).unwrap();
+        let rows = link.block_rows("vigilancia").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content, p.args["text"].as_str().unwrap());
+        assert_eq!(rows[0].origin, clio_memory::Origin::User);
+        drop(link);
+        assert!(approve(&dirs, &id).is_err(), "once");
+
+        let other = ask("something else");
+        reject(&dirs, &other).unwrap();
+        assert!(approve(&dirs, &other).is_err());
+        let link = MemoryLink::open_write(&dirs.data, &EmbedModel::none()).unwrap();
+        assert_eq!(link.block_rows("vigilancia").unwrap().len(), 1);
     }
 }

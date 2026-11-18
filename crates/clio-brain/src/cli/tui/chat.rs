@@ -2474,7 +2474,11 @@ mod tests {
         a.chat.running = false;
         let (a, _) = update(
             a,
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![(
+                "a1".into(),
+                "«delete» rm -r x".into(),
+                None,
+            )])),
         );
         assert!(a.animating());
         let (a, _) = update(a, Input::Tick(61_000));

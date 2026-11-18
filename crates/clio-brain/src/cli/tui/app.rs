@@ -232,8 +232,9 @@ pub enum Bg {
         page: Result<clio_brain::pi::sessions::History, String>,
     },
     ChatEvent(clio_brain::pi::rpc::Event),
-    /// Host mode: what the turn set aside, one question each: (id, «class» and what).
-    ChatAsks(Vec<(String, String)>),
+    /// Host mode: what the turn set aside, one question each: (id, «class» and what, and the
+    /// change itself when it is one to the person's blocks).
+    ChatAsks(Vec<(String, String, Option<super::ask::BlockAsk>)>),
     /// What came of an answer to one of them.
     ChatAnswered(Result<String, String>),
     /// The secrets this turn asked the person for: (id, (name, destination, why)) each, and
@@ -342,6 +343,8 @@ pub struct Confirm {
     pub session: String,
     /// When it came on screen (its quiet second starts then, not when it was queued).
     pub shown_ms: u64,
+    /// A change to one of the person's blocks: drawn whole, scrolled with the arrows.
+    pub block: Option<super::ask::BlockAsk>,
 }
 
 /// A set-aside question takes an answer only after this long with no key at all, so the tail of
@@ -360,6 +363,7 @@ impl Confirm {
             armed: false,
             session: String::new(),
             shown_ms: 0,
+            block: None,
         }
     }
 }
@@ -796,15 +800,32 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     let yes = if c.action == Action::Approve {
         let no = k.code == KeyCode::Esc || (plain && matches!(k.code, KeyCode::Char('n' | 'N')));
         let enter = plain && k.code == KeyCode::Enter;
+        // A block change longer than the box: the arrows move it (and disarm it, as any key);
+        // `y` arms it only once its last row was on screen.
+        let seen = c.block.as_ref().is_none_or(|b| b.seen_end.get());
+        if let Some(b) = c.block.as_mut() {
+            let max = b.max.get();
+            match k.code {
+                KeyCode::Up => b.scroll = b.scroll.saturating_sub(1),
+                KeyCode::Down => b.scroll = (b.scroll + 1).min(max),
+                KeyCode::PageUp => b.scroll = b.scroll.saturating_sub(10),
+                KeyCode::PageDown => b.scroll = (b.scroll + 10).min(max),
+                _ => {}
+            }
+        }
         match (c.armed, quiet) {
             (true, _) if enter => true,
             (_, true) if no => false,
-            (false, true) if yes_key => {
+            (false, true) if yes_key && seen => {
                 c.armed = true;
                 app.confirm = Some(c);
                 return vec![];
             }
             _ => {
+                if yes_key && !seen {
+                    app.flash =
+                        Some("read the change to its end first (the arrows move it)".into());
+                }
                 c.armed = false;
                 app.confirm = Some(c);
                 return vec![];
@@ -1169,9 +1190,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         // They come before the turn settles, so from the session open now.
         Bg::ChatAsks(asks) => {
-            for (id, what) in asks {
+            for (id, what, block) in asks {
                 let mut c = Confirm::new(Action::Approve, id, 0, what);
                 c.session.clone_from(&app.chat.session_id);
+                c.block = block;
                 app.asks.push_back(c);
             }
             next_ask(app);
@@ -1702,7 +1724,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         super::commands::draw_modal(f, rest, app, m);
     }
     if let Some(c) = &app.confirm {
-        confirm_dialog(f, area, app, c);
+        match &c.block {
+            // Under the top bar and its rule, like the secret box: it can take the whole height.
+            Some(b) => block_dialog(f, rest, app, c, b),
+            None => confirm_dialog(f, area, app, c),
+        }
     } else if let Some(p) = &app.prompt {
         // Under the top bar and its rule, like the boxes of the commands.
         match p {
@@ -1801,6 +1827,98 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         " Confirm "
     };
     dialog(f, area, t, title, lines, hint, border);
+}
+
+/// The approval of a change to one of the person's blocks: every row of it, whole, wrapped; when
+/// it is longer than the box, a window of it that the arrows move, and a line saying where it is.
+/// Never cut with an ellipsis: the person approves what they can read (S-36).
+fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::ask::BlockAsk) {
+    use super::ask::Part;
+    let t = app.theme;
+    let w = dialog_inner(area);
+    let mut body: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(format!("Clio set aside {}.", c.id), t.bold())),
+        Line::from(""),
+    ];
+    for (part, text) in b.parts() {
+        let (style, indent) = match part {
+            Part::Head => (t.bold(), ""),
+            Part::Label => (t.dim(), ""),
+            Part::Text => (t.code(), "  "),
+            Part::Warn => (t.warn(), ""),
+        };
+        if part == Part::Warn {
+            body.push(Line::from(""));
+        }
+        for l in wrap_line(
+            Line::from(Span::styled(text, style)),
+            w.saturating_sub(indent.len()),
+        ) {
+            let mut spans = vec![Span::raw(indent)];
+            spans.extend(l.spans);
+            body.push(Line::from(spans));
+        }
+    }
+    let mut foot: Vec<Line<'static>> = Vec::new();
+    if !c.armed && !app.quiet() {
+        foot.push(Line::from(""));
+        foot.push(Line::from(Span::styled(
+            "wait a second without typing to answer…",
+            t.dim(),
+        )));
+    }
+    let d = format!("   {}   ", t.dot());
+    let hint = Line::from(vec![
+        Span::styled(if c.armed { "Enter" } else { "y then Enter" }, t.key()),
+        Span::styled(" yes, write it", t.dim()),
+        Span::styled(d, t.dim()),
+        Span::styled(if c.armed { "other key" } else { "n or Esc" }, t.key()),
+        Span::styled(
+            if c.armed {
+                " goes back"
+            } else {
+                " no, reject it"
+            },
+            t.dim(),
+        ),
+    ]);
+    foot.push(Line::from(""));
+    foot.extend(wrap_line(hint, w));
+    // The rows the box has for the change: the screen less its border, its air and the keys.
+    let air = if area.height >= 24 { 2 } else { 0 };
+    let room = usize::from(area.height)
+        .saturating_sub(2 + air + foot.len())
+        .max(1);
+    let total = body.len();
+    let rows = if total <= room {
+        b.max.set(0);
+        b.seen_end.set(true);
+        body
+    } else {
+        // One row says where the window is.
+        let shown = room.saturating_sub(1).max(1);
+        let max = total - shown;
+        b.max.set(max);
+        let from = b.scroll.min(max);
+        if from == max {
+            b.seen_end.set(true);
+        }
+        let mut rows: Vec<Line<'static>> = body.into_iter().skip(from).take(shown).collect();
+        rows.push(Line::from(Span::styled(
+            format!(
+                "{}{} rows {}-{} of {total}{}",
+                t.up(),
+                t.down(),
+                from + 1,
+                from + shown,
+                if from < max { ", more below" } else { "" }
+            ),
+            t.dim(),
+        )));
+        rows
+    };
+    let all: Vec<Line<'static>> = rows.into_iter().chain(foot).collect();
+    dialog_box(f, area, t, " Approval ", all, t.warn());
 }
 
 /// A centered box over the screen: a question or a message that needs a key. The text is wrapped

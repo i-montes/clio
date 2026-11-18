@@ -1511,8 +1511,8 @@ fn short_id_never_panics_on_a_non_ascii_name() {
 #[test]
 fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let asks = vec![
-        ("a1".to_owned(), "«delete» rm -r datos".to_owned()),
-        ("b2".to_owned(), "«send» git push".to_owned()),
+        ("a1".to_owned(), "«delete» rm -r datos".to_owned(), None),
+        ("b2".to_owned(), "«send» git push".to_owned(), None),
     ];
     let (a, cmds) = feed(app(), vec![Input::Bg(Bg::ChatAsks(asks))]);
     assert!(cmds.is_empty());
@@ -1633,6 +1633,7 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     inputs.push(Input::Bg(Bg::ChatAsks(vec![(
         "a1".into(),
         "«delete» rm -r x".into(),
+        None,
     )])));
     inputs.extend(typed_at(2_000, "sos"));
     inputs.extend([Input::Tick(2_150), key(KeyCode::Enter)]);
@@ -1702,7 +1703,13 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
 // from when it came on screen; a queued one, from when it is shown, not when it was queued.
 #[test]
 fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
-    let ask = |id: &str| Input::Bg(Bg::ChatAsks(vec![(id.into(), "«delete» rm -r x".into())]));
+    let ask = |id: &str| {
+        Input::Bg(Bg::ChatAsks(vec![(
+            id.into(),
+            "«delete» rm -r x".into(),
+            None,
+        )]))
+    };
     let mut inputs = typed_at(1_000, "x");
     inputs.extend([Input::Tick(3_500), ask("a1")]);
     inputs.extend([
@@ -1792,6 +1799,7 @@ fn a_delete_never_comes_over_a_set_aside_question_nor_while_the_chat_is_busy() {
         vec![Input::Bg(Bg::ChatAsks(vec![(
             "a1".into(),
             "«delete» rm -r x".into(),
+            None,
         )]))],
     );
     let (a, _) = feed(a, vec![plan()]);
@@ -1820,7 +1828,11 @@ fn a_question_queued_behind_another_dialog_shows_when_it_closes() {
                 "otra".into(),
                 "the conversation only".into(),
             )))),
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![(
+                "a1".into(),
+                "«delete» rm -r x".into(),
+                None,
+            )])),
         ],
     );
     assert_eq!(a.confirm.as_ref().unwrap().action, Action::DeleteSession);
@@ -1964,7 +1976,11 @@ fn y_and_the_old_s_both_arm_the_question_after_its_quiet_second() {
         let mut inputs = typed_at(1_000, "x");
         inputs.extend([
             Input::Tick(3_500),
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![(
+                "a1".into(),
+                "«delete» rm -r x".into(),
+                None,
+            )])),
             Input::Tick(3_501),
             ch(yes),
             Input::Tick(3_502),

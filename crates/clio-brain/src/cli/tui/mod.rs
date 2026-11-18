@@ -1114,13 +1114,14 @@ impl Ctx {
                         if !secrets.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, session.suspect())));
                         }
-                        let asks: Vec<(String, String)> = aside
+                        let asks: Vec<_> = aside
                             .into_iter()
                             .map(|p| {
                                 let what = super::pending::what(&p);
                                 (
                                     p.id.clone(),
                                     format!("{} {what}", super::pending::label(&p)),
+                                    ask::BlockAsk::new(&p, session.suspect()),
                                 )
                             })
                             .collect();

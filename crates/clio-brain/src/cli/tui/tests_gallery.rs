@@ -133,6 +133,44 @@ fn approve(a: &mut App, quiet: bool) {
     a.last_key_ms = Some(if quiet { 0 } else { 299_800 });
 }
 
+/// A change to one of the person's blocks a marked session set aside, as the box gets it.
+pub(super) fn block_ask(args: serde_json::Value, suspect: bool) -> super::ask::BlockAsk {
+    let p = clio_toolhost::pending::Pending {
+        id: "c3d4e5f6".into(),
+        class: clio_toolhost::ask::Class::Memory,
+        tool: "memory_block_edit".into(),
+        args,
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        ask: true,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: None,
+    };
+    super::ask::BlockAsk::new(&p, suspect).unwrap()
+}
+
+/// Its approval box on screen, after the quiet second.
+fn approve_block(a: &mut App, b: super::ask::BlockAsk) {
+    let mut c = Confirm::new(
+        Action::Approve,
+        "c3d4e5f6".into(),
+        0,
+        "«memory» add in your block «vigilancia»".into(),
+    );
+    c.session = "sid".into();
+    c.block = Some(b);
+    a.confirm = Some(c);
+    a.now_ms = 300_000;
+    a.last_key_ms = Some(0);
+}
+
+/// A text of the longest kind a block entry takes: 1200 characters.
+pub(super) const LONG_ENTRY: &str = "Watch the disk of / and of /var/lib/docker every hour; when either passes 90 % tell me at once, with the five folders that grew the most since the day before, how much each grew, and which service writes there. Do not delete anything to make room: propose what to delete and wait for my yes. Also watch the backups of the orders database: each night's copy must exist by 04:00, weigh within 20 % of the night before, and open with pg_restore --list; if any of those fails, tell me in the morning summary with the file name and the size. Watch the certificates of the three public domains: when one has fewer than 14 days left, tell me which one and whether certbot's timer ran in the last day. Watch the memory of the java process of the game server: above 3 GB for more than ten minutes, tell me with its uptime and the number of players. Watch failed logins over ssh: more than 30 from one address in an hour, tell me the address and whether fail2ban already banned it. Watch that the orders service answers on its health endpoint every five minutes; two failures in a row, tell me with the last lines of its log. Keep each warning to one short paragraph and never repeat one within six hours.";
+
 /// Clio asks (`ask_person`): within the quiet second or after it, and with `Other…` typed.
 fn question(a: &mut App, quiet: bool, typed: Option<&str>) {
     question_with(a, &super::tests_ask::OPTIONS, quiet, typed);
@@ -255,6 +293,32 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
             s.value.push('x');
         });
         a.prompt = Some(super::ask::Prompt::Secret(s));
+        out.push((name, a));
+    }
+    for (name, args, suspect) in [
+        (
+            "block change, add",
+            serde_json::json!({"name": "vigilancia", "action": "add", "text": "Watch the disk of /: tell me when it passes 90 %."}),
+            false,
+        ),
+        (
+            "block change, replace (the old entry shown)",
+            serde_json::json!({"name": "preferencias", "action": "replace", "id": 12, "text": "Call me Ivan, informally.", "old": "Address me formally, as Mr. Montes."}),
+            false,
+        ),
+        (
+            "block change, a long text",
+            serde_json::json!({"name": "vigilancia", "action": "add", "text": LONG_ENTRY}),
+            false,
+        ),
+        (
+            "block change, remove, suspect session",
+            serde_json::json!({"name": "vigilancia", "action": "remove", "id": 31, "old": "Watch the backups of the orders database."}),
+            true,
+        ),
+    ] {
+        let mut a = conversation(true);
+        approve_block(&mut a, block_ask(args, suspect));
         out.push((name, a));
     }
     let mut a = conversation(true);

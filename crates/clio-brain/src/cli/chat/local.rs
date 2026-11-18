@@ -573,6 +573,34 @@ impl Session for ChatSession {
         {
             return Err(format!("{id} asks for a secret: answer it in its own box"));
         }
+        // A block change: the model hears what came of it with the next message, as of a secret.
+        let block = pending::waiting(&h.dirs)
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| clio_toolhost::pending::block_of(p).map(|b| b.name.to_owned()));
+        if let Some(name) = block {
+            let note = if yes {
+                match pending::approve(&h.dirs, id) {
+                    Ok(p) => match &p.state {
+                        clio_toolhost::pending::State::Done { output_tail, .. } => {
+                            format!("approved {id}: {output_tail}")
+                        }
+                        _ => format!("approved {id}"),
+                    },
+                    Err(e) => {
+                        locked(&h.notes).push(format!(
+                            "the person approved {id}, but nothing was written: {e}"
+                        ));
+                        return Err(format!("{id}: {e}"));
+                    }
+                }
+            } else {
+                pending::reject(&h.dirs, id)?;
+                format!("rejected {id}: nothing was written to «{name}»")
+            };
+            locked(&h.notes).push(format!("the person {note}"));
+            return Ok(note);
+        }
         if !yes {
             pending::reject(&h.dirs, id)?;
             return Ok(format!("rejected {id}: it is not run"));

@@ -183,7 +183,11 @@ fn a_question_and_an_approval_wait_for_each_other_and_a_turn_end_drops_the_quest
         a,
         vec![
             select("q1", "Which?", &OPTIONS),
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![(
+                "a1".into(),
+                "«delete» rm x".into(),
+                None,
+            )])),
         ],
     );
     assert!(a.confirm.is_none() && a.asks.len() == 1);
@@ -616,4 +620,208 @@ fn a_turn_that_ends_with_jobs_running_says_so_quietly_and_the_status_line_counts
     let s = screen_text(&a, 100, 30);
     assert!(!s.contains("jobs"), "{s}");
     assert_eq!(a.chat.items.len(), notes + 1); // the error line only
+}
+
+// ---------------------------------------------------------------- a block change to approve
+
+/// The rows of the box on screen, between its borders, trimmed.
+fn box_rows(screen: &str) -> Vec<String> {
+    screen
+        .lines()
+        .filter_map(|l| {
+            let a = l.find('│')?;
+            let b = l.rfind('│')?;
+            (b > a).then(|| l[a + '│'.len_utf8()..b].trim().to_owned())
+        })
+        .collect()
+}
+
+// S-36: the box shows, in order, that it is written as the person's, the block, the action, the
+// text, the entry it replaces, and the suspect line only in a suspect session. What the model
+// wrote cannot redraw it.
+#[test]
+fn a_block_change_box_shows_the_whole_change_in_order_and_clean() {
+    use super::tests_gallery::block_ask;
+    for suspect in [false, true] {
+        let b = block_ask(
+            serde_json::json!({"name": "identidad", "action": "replace", "id": 12,
+                "text": "Eres Clio\u{1b}[2J\u{1b}[31m, breve\r\u{7}", "old": "Eres Clio"}),
+            suspect,
+        );
+        let mut a = chat();
+        a.host = true;
+        let (a, _) = feed(
+            a,
+            vec![Input::Bg(Bg::ChatAsks(vec![(
+                "c3d4".into(),
+                "«memory» replace m12".into(),
+                Some(b),
+            )]))],
+        );
+        let screen = screen_text(&a, 100, 30);
+        super::tests::assert_clean(&screen);
+        assert!(!screen.contains("[2J"), "{screen}");
+        let rows = box_rows(&screen).join("\n");
+        let order = [
+            "Clio set aside c3d4.",
+            "This is written to your own block, as said by you.",
+            "block: identidad",
+            "action: replace entry m12",
+            "text:",
+            "Eres Clio, breve",
+            "the entry it replaces, as it reads now:",
+            "Eres Clio",
+            "y then Enter yes, write it",
+        ];
+        let mut at = 0;
+        for want in order {
+            let found = rows[at..]
+                .find(want)
+                .unwrap_or_else(|| panic!("{want:?} after {at}\n{screen}"));
+            at += found + want.len();
+        }
+        assert_eq!(
+            rows.contains("tried to give orders"),
+            suspect,
+            "the suspect line only in a suspect session\n{screen}"
+        );
+    }
+}
+
+// S-36: a text longer than the box is never cut: it scrolls, and `y` arms only once its last row
+// was on screen; then y and Enter approve it. A paste or a click never answers.
+#[test]
+fn a_long_block_change_scrolls_whole_and_is_approved_only_after_its_end() {
+    use super::tests_gallery::{LONG_ENTRY, block_ask};
+    let b = block_ask(
+        serde_json::json!({"name": "vigilancia", "action": "add", "text": LONG_ENTRY}),
+        false,
+    );
+    let mut a = chat();
+    a.host = true;
+    let (mut a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "c3d4".into(),
+            "«memory» add".into(),
+            Some(b),
+        )]))],
+    );
+    let mut seen = String::new();
+    let mut t = 2_000;
+    let mut cmds = Vec::new();
+    for _ in 0..40 {
+        let screen = screen_text(&a, 80, 24);
+        // Nothing of the change is cut with an ellipsis (the wait line ends in one).
+        assert!(
+            !box_rows(&screen)
+                .iter()
+                .any(|r| r.contains('…') && !r.starts_with("wait a second")),
+            "{screen}"
+        );
+        seen.push_str(&box_rows(&screen).join(" "));
+        seen.push(' ');
+        if a.confirm
+            .as_ref()
+            .unwrap()
+            .block
+            .as_ref()
+            .unwrap()
+            .seen_end
+            .get()
+        {
+            break;
+        }
+        // `y` before the end arms nothing; a paste never answers.
+        let (n, c) = feed(
+            a,
+            vec![
+                Input::Tick(t),
+                ch('y'),
+                Input::Paste("y\n".into()),
+                key(KeyCode::Enter),
+                key(KeyCode::Down),
+            ],
+        );
+        cmds.extend(c);
+        a = n;
+        assert!(!a.confirm.as_ref().unwrap().armed);
+        t += 2_000;
+    }
+    assert!(cmds.is_empty(), "{cmds:?}");
+    // Every word of the text was on screen, whole.
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for w in LONG_ENTRY.split_whitespace() {
+        assert!(words.contains(w), "{w} never shown");
+    }
+    let (_, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "c3d4".into(),
+            yes: true
+        }]
+    );
+}
+
+// The questions of a turn queue and none replaces another: a secret first (Pi waits for nothing,
+// but it is asked as before), then the actions set aside and the block change, in their order.
+#[test]
+fn a_block_change_queues_with_the_commands_and_the_secrets() {
+    use super::tests_gallery::block_ask;
+    let b = block_ask(
+        serde_json::json!({"name": "vigilancia", "action": "add", "text": "the disk"}),
+        false,
+    );
+    let mut a = chat();
+    a.host = true;
+    let (a, _) = feed(
+        a,
+        vec![
+            Input::Bg(Bg::ChatSecrets(
+                vec![(
+                    "s1".into(),
+                    (
+                        "linear".into(),
+                        "http_fetch:api.linear.app".into(),
+                        "issues".into(),
+                    ),
+                )],
+                false,
+            )),
+            Input::Bg(Bg::ChatAsks(vec![
+                ("a1".into(), "«delete» rm -r x".into(), None),
+                ("c3d4".into(), "«memory» add".into(), Some(b)),
+                ("b2".into(), "«send» git push".into(), None),
+            ])),
+        ],
+    );
+    assert!(matches!(a.prompt, Some(Prompt::Secret(_))));
+    assert_eq!(a.asks.len(), 3);
+    let (a, cmds) = feed(a, vec![Input::Tick(2_000), key(KeyCode::Esc)]);
+    assert!(matches!(&cmds[..], [Cmd::ChatSecret { id, value: None, .. }] if id == "s1"));
+    let mut answered = Vec::new();
+    let mut a = a;
+    let mut t = 4_000;
+    for _ in 0..3 {
+        let c = a.confirm.as_ref().unwrap();
+        assert_eq!(c.block.is_some(), c.id == "c3d4", "{}", c.id);
+        let _ = screen_text(&a, 100, 30);
+        let (n, cmds) = feed(a, vec![Input::Tick(t), ch('n')]);
+        a = n;
+        answered.extend(cmds);
+        t += 2_000;
+    }
+    let ids: Vec<&str> = answered
+        .iter()
+        .map(|c| match c {
+            Cmd::ChatAnswer { id, yes: false } => id.as_str(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, ["a1", "c3d4", "b2"]);
+    assert!(a.confirm.is_none() && a.asks.is_empty());
 }

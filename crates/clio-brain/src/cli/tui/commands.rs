@@ -891,6 +891,13 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                 ));
                 return vec![];
             }
+            // A block change is shown whole by the box the turn's end opens, or by `clio approve`.
+            if what.starts_with("«memory»") {
+                app.flash = Some(format!(
+                    "{id} changes one of your blocks: answer it with `clio approve {id}` in a terminal"
+                ));
+                return vec![];
+            }
             let mut c = Confirm::new(Action::Approve, id, 0, what);
             c.session.clone_from(&app.chat.session_id);
             app.confirm = Some(c);

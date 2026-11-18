@@ -200,6 +200,98 @@ impl SecretAsk {
     }
 }
 
+/// The warning a box shows when the judge flagged the session (`suspect`).
+pub const SUSPECT_LINE: &str =
+    "this session read content that tried to give orders: be sure you want this";
+
+/// What a row of a block change is, for its style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Head,
+    Label,
+    Text,
+    Warn,
+}
+
+/// A change to one of the person's blocks set aside by a marked session, as the approval box and
+/// `clio approve` show it: everything from the stored item, cleaned, nothing cut (S-36).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockAsk {
+    pub name: String,
+    pub action: String,
+    pub id: Option<i64>,
+    pub text: Option<String>,
+    pub old: Option<String>,
+    /// The judge flagged the session: the box says so.
+    pub suspect: bool,
+    /// The first row shown, when the change is longer than the box.
+    pub scroll: usize,
+    /// How far the last draw let it scroll, and whether it has shown the last row: only then
+    /// can `y` arm it.
+    pub max: std::cell::Cell<usize>,
+    pub seen_end: std::cell::Cell<bool>,
+}
+
+impl BlockAsk {
+    pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
+        let b = clio_toolhost::pending::block_of(p)?;
+        let clean = |s: &str| sanitize::line(s).trim().to_owned();
+        Some(Self {
+            name: clean(b.name),
+            action: clean(b.action),
+            id: b.id,
+            text: b.text.map(clean),
+            old: b.old.map(clean),
+            suspect,
+            scroll: 0,
+            max: std::cell::Cell::new(0),
+            seen_end: std::cell::Cell::new(false),
+        })
+    }
+
+    /// Its rows, in order: that it is written as said by the person, the block, the action, the
+    /// text whole, the entry it replaces or removes, and the warning of a suspect session.
+    pub fn parts(&self) -> Vec<(Part, String)> {
+        let id = self.id.map_or_else(String::new, |n| format!(" m{n}"));
+        let mut out = vec![
+            (
+                Part::Head,
+                "This is written to your own block, as said by you.".to_owned(),
+            ),
+            (Part::Label, format!("block: {}", self.name)),
+            (
+                Part::Label,
+                match self.action.as_str() {
+                    "add" => "action: add an entry".to_owned(),
+                    a => format!("action: {a} entry{id}"),
+                },
+            ),
+        ];
+        if let Some(t) = &self.text {
+            out.push((Part::Label, "text:".into()));
+            out.push((Part::Text, t.clone()));
+        }
+        if let Some(o) = &self.old {
+            out.push((
+                Part::Label,
+                format!(
+                    "the entry it {}, as it reads now:",
+                    if self.action == "remove" {
+                        "removes"
+                    } else {
+                        "replaces"
+                    }
+                ),
+            ));
+            out.push((Part::Text, o.clone()));
+        }
+        if self.suspect {
+            out.push((Part::Warn, SUSPECT_LINE.into()));
+        }
+        out
+    }
+}
+
 /// The value on its way from the box to the vault: shared, never copied, printed as `[redacted]`.
 #[derive(Clone)]
 pub struct SecretBox(pub Arc<SecretValue>);
@@ -646,10 +738,7 @@ pub fn draw_secret(f: &mut Frame, area: Rect, app: &App, s: &SecretAsk) {
     ));
     if s.suspect {
         rows.extend(app::wrap_line(
-            Line::from(Span::styled(
-                "this session read content that tried to give orders: be sure you want this",
-                t.warn(),
-            )),
+            Line::from(Span::styled(SUSPECT_LINE, t.warn())),
             w,
         ));
     }
