@@ -115,6 +115,11 @@ pub enum Cmd {
         text: String,
     },
     ChatAbort,
+    /// The person's answer to an action the session set aside (host mode).
+    ChatAnswer {
+        id: String,
+        yes: bool,
+    },
     /// Leave the chat: stop its Pi and its toolhost.
     ChatClose,
     /// Debug was switched; the agent reads the switch at every call.
@@ -158,6 +163,10 @@ pub enum Bg {
         result: Result<Box<ChatInfo>, String>,
     },
     ChatEvent(clio_brain::pi::rpc::Event),
+    /// Host mode: what the turn set aside, one question each: (id, «class» and what).
+    ChatAsks(Vec<(String, String)>),
+    /// What came of an answer to one of them.
+    ChatAnswered(Result<String, String>),
     /// The run ended; `refresh` is Pi's own totals if it could still give them.
     ChatSettled {
         result: Result<clio_brain::pi::rpc::RunSummary, String>,
@@ -218,6 +227,9 @@ pub enum Action {
     Archive,
     /// A Pi session: `Confirm::id` is its file and `Confirm::workspace` what goes with it.
     DeleteSession,
+    /// Host mode: run an action the session set aside. `Confirm::id` is its id and
+    /// `Confirm::workspace` its class and what it does. Any other key rejects it.
+    Approve,
 }
 
 /// A question that needs a `y`.
@@ -269,6 +281,8 @@ pub struct App {
     pub chat: Chat,
     pub chat_seq: u64,
     pub confirm: Option<Confirm>,
+    /// Host mode: the questions waiting behind the one on screen.
+    pub asks: std::collections::VecDeque<Confirm>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
     /// An error or a longer message in a box, closed by any key.
@@ -301,6 +315,7 @@ impl App {
             chat: Chat::default(),
             chat_seq: 0,
             confirm: None,
+            asks: std::collections::VecDeque::new(),
             flash: None,
             notice: None,
             check_seq: 0,
@@ -504,7 +519,9 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     };
     // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
-    if !plain || !matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S')) {
+    let yes = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
+    // [s/N] on an action set aside: anything but yes is a no.
+    if !yes && c.action != Action::Approve {
         app.flash = Some("cancelado: no se cambió nada".into());
         return vec![];
     }
@@ -514,6 +531,10 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
         Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
+        Action::Approve => {
+            app.confirm = app.asks.pop_front();
+            vec![Cmd::ChatAnswer { id: c.id, yes }]
+        }
     }
 }
 
@@ -699,6 +720,23 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatEvent(e) => {
             app.chat.on_event(&e);
+            vec![]
+        }
+        Bg::ChatAsks(asks) => {
+            for (id, what) in asks {
+                app.asks
+                    .push_back(Confirm::new(Action::Approve, id, 0, what));
+            }
+            if app.confirm.is_none() {
+                app.confirm = app.asks.pop_front();
+            }
+            vec![]
+        }
+        Bg::ChatAnswered(r) => {
+            app.chat.items.push(match r {
+                Ok(m) => super::chat::Item::Note(m),
+                Err(e) => super::chat::Item::Error(e),
+            });
             vec![]
         }
         Bg::ChatSettled { result, refresh } => {
@@ -932,6 +970,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ),
             Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
             Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
+            Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto? [s/N]", c.id),
         };
         let mut lines = vec![
             Line::from(Span::styled(verb, t.bold())),
@@ -949,13 +988,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         if let Some(n) = &c.note {
             lines.push(Line::from(Span::styled(clean(n), t.warn())));
         }
+        let (yes, no) = if c.action == Action::Approve {
+            (("s", " sí, ejecutarlo      "), " no (se rechaza)")
+        } else {
+            (("y", " sí, continuar      "), " cancela")
+        };
         lines.extend([
             Line::from(""),
             Line::from(vec![
-                Span::styled("y", t.key()),
-                Span::raw(" sí, continuar      "),
+                Span::styled(yes.0, t.key()),
+                Span::raw(yes.1),
                 Span::styled("cualquier otra tecla", t.key()),
-                Span::raw(" cancela"),
+                Span::raw(no),
             ]),
         ]);
         dialog(f, area, t, " Confirmar ", lines, t.warn());

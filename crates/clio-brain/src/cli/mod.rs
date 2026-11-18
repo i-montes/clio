@@ -14,6 +14,7 @@ pub mod jail;
 pub mod jev;
 pub mod mcp;
 pub mod memory;
+pub mod pending;
 pub mod pi;
 pub mod runs;
 pub mod sessions;

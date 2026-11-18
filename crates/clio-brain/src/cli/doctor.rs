@@ -11,7 +11,7 @@ use clio_vault::proto::Request;
 use clio_vault::{Scrubber, VaultClient};
 use serde_json::json;
 
-use super::home::{Config, Dirs, builtin_adapter_path, lacks_bridge, names_builtin_adapter};
+use super::home::{Config, Dirs, Mode, builtin_adapter_path, lacks_bridge, names_builtin_adapter};
 use super::mode;
 use super::tui::app::plural;
 use super::tui::sanitize;
@@ -761,6 +761,48 @@ fn host_lines(o: &mut Report, script: &Path) {
     }
 }
 
+/// Host mode's console: which launcher runs the commands, and whether it passes its self-test
+/// (in a scratch folder). Only when host mode is configured: the self-test runs commands, with
+/// `sudo` where there is passwordless `sudo`.
+fn host_mode_lines(o: &mut Report, dirs: &Dirs) {
+    if !Config::load(dirs).is_ok_and(|c| c.mode == Mode::Host) {
+        return;
+    }
+    let scratch = std::env::temp_dir().join(format!("clio-doctor-host-{}", std::process::id()));
+    let found = clio_node::HostJail::detect().map(|j| (j.launcher(), j.self_test(&scratch)));
+    let _ = std::fs::remove_dir_all(&scratch);
+    host_report(o, found);
+}
+
+fn host_report(o: &mut Report, found: Result<(clio_node::Launcher, Result<(), String>), String>) {
+    use clio_node::Launcher;
+    let fix = Some("Hace falta bubblewrap (bwrap) o sudo sin contraseña con systemd-run; sin eso Clio trabaja sin consola en el modo anfitrión.".to_owned());
+    match &found {
+        Err(why) => o.say(
+            Level::Fail,
+            format!("modo anfitrión: no hay con qué correr la consola ({why}): no habrá consola"),
+            fix,
+        ),
+        Ok((l, Err(why))) => o.say(
+            Level::Fail,
+            format!("modo anfitrión: la consola ({l:?}) no pasa su autoprueba ({why}): no habrá consola"),
+            fix,
+        ),
+        Ok((l, Ok(()))) => o.say(
+            Level::Pass,
+            format!("modo anfitrión: la consola corre con {l:?} y pasa su autoprueba (lo de Clio tapado, red solo cuando se pide)"),
+            None,
+        ),
+    }
+    if matches!(found, Ok((Launcher::Bwrap, _))) {
+        o.say(
+            Level::Warn,
+            "la consola de Clio no tendrá sudo".into(),
+            Some("Con sudo sin contraseña (y systemd-run) la consola lo tendría.".into()),
+        );
+    }
+}
+
 /// Runs every check. The host script's own lines are included as checks.
 pub fn collect(dirs: &Dirs) -> Report {
     let mut o = Report::default();
@@ -882,6 +924,7 @@ pub fn collect(dirs: &Dirs) -> Report {
     }
     jail_lines(&mut o);
     pi_jail_line(&mut o, dirs);
+    host_mode_lines(&mut o, dirs);
     match find_host_check() {
         Some(script) => {
             o.host_script = Some(script.display().to_string());
@@ -961,6 +1004,34 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_section_says_the_launcher_and_warns_when_there_is_no_sudo() {
+        use clio_node::Launcher;
+        let said = |found| {
+            let mut o = Report::default();
+            host_report(&mut o, found);
+            o.checks
+                .iter()
+                .map(|c| (c.level, c.msg.clone()))
+                .collect::<Vec<_>>()
+        };
+        let sudo = said(Ok((Launcher::Systemd, Ok(()))));
+        assert_eq!(sudo.len(), 1);
+        assert!(
+            sudo[0].0 == Level::Pass && sudo[0].1.contains("Systemd"),
+            "{sudo:?}"
+        );
+        let bwrap = said(Ok((Launcher::Bwrap, Ok(()))));
+        assert_eq!(bwrap[0].0, Level::Pass);
+        assert_eq!(
+            bwrap[1],
+            (Level::Warn, "la consola de Clio no tendrá sudo".into())
+        );
+        let broken = said(Ok((Launcher::Bwrap, Err("x".into()))));
+        assert_eq!(broken[0].0, Level::Fail);
+        assert_eq!(said(Err("nada".into()))[0].0, Level::Fail);
+    }
 
     #[test]
     fn jev_is_off_by_default_and_an_old_config_without_it_still_loads() {

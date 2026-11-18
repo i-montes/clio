@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 
 use cli::chat;
 use cli::home::{Dirs, Mode};
-use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pi, runs, tui, vault};
+use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pending, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
@@ -19,7 +19,11 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instrucción\"
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
-  clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
+  clio undo <id> [--force]                    devuelve el original a como estaba antes de apply;
+                                              en una sesión anfitrión, deshace los archivos que cambió
+  clio pending [--json]                       lo que espera tu visto bueno (modo anfitrión)
+  clio approve <id> | clio reject <id>        lo ejecuta tal cual se apartó, o lo descarta
+  clio actions [--run <id>] [--json]          el registro de lo que Clio ejecutó y cambió en la máquina
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
                                               elige el modelo (opencode, tu suscripción de Claude o la API de Anthropic) y guarda su llave en el baúl
@@ -31,6 +35,14 @@ const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu pro
   clio pi doctor|install|sessions [--json]    Pi (el arnés del agente): estado, instalación, sesiones
 
 Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
+
+fn pending_arg(args: Args) -> Res<String> {
+    let mut rest = args.rest()?;
+    if rest.len() != 1 {
+        return Err("falta el id de lo apartado (mira `clio pending`)".into());
+    }
+    Ok(rest.remove(0))
+}
 
 fn id_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;
@@ -97,6 +109,10 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "undo"
             | "runs"
             | "show"
+            | "pending"
+            | "approve"
+            | "reject"
+            | "actions"
             | "vault"
             | "connect"
             | "doctor"
@@ -189,6 +205,18 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         "show" => {
             let json = args.flag("--json");
             runs::show(&dirs, &id_arg(args)?, json)?;
+        }
+        "pending" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            pending::show(&dirs, json)?;
+        }
+        "approve" => pending::approve_cmd(&dirs, &pending_arg(args)?)?,
+        "reject" => pending::reject_cmd(&dirs, &pending_arg(args)?)?,
+        "actions" => {
+            let (json, run) = (args.flag("--json"), args.value("--run")?);
+            args.rest()?;
+            pending::actions(&dirs, run.as_deref(), json)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
         "connect" => return connect::run(&dirs, args.into_raw()),

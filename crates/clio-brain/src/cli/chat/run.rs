@@ -11,10 +11,11 @@ use clio_brain::pi::rpc::{Cancel, Event};
 
 use super::local::LocalSource;
 use super::{SessionSource, Target};
-use crate::cli::Res;
 use crate::cli::home::{Dirs, Mode};
 use crate::cli::tui::sanitize;
 use crate::cli::usage;
+use crate::cli::{Res, pending};
+use clio_toolhost::pending::Pending;
 
 pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>) -> Res<i32> {
     let source = LocalSource::new(Arc::new(dirs)).one_shot().with_mode(mode);
@@ -58,6 +59,8 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
         println!();
     }
     let refresh = opened.session.refresh().ok();
+    // Nobody is here to answer: what was set aside is said at the end and waits.
+    let aside = opened.session.new_pending();
     opened.session.shutdown();
     let r = r.map_err(|e| e.to_string())?;
     if let Some(a) = &r.assessment {
@@ -80,8 +83,32 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
             }
         );
     }
-    println!("siguiente: clio diff {}", opened.id);
+    if opened.host {
+        print!("{}", aside_report(&aside, crate::cli::now_ms()));
+        println!(
+            "siguiente: clio actions --run {0} · deshacer: clio undo {0}",
+            opened.id
+        );
+    } else {
+        println!("siguiente: clio diff {}", opened.id);
+    }
     Ok(exit_code(&r))
+}
+
+/// What a host run set aside for the person; nothing when it set nothing aside.
+fn aside_report(aside: &[Pending], now: i64) -> String {
+    if aside.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "apartó {} acción(es) que esperan tu visto bueno:\n",
+        aside.len()
+    );
+    for p in aside {
+        out.push_str(&format!("  {}\n", pending::line(p, now)));
+    }
+    out.push_str("clio approve <id> lo ejecuta · clio reject <id> lo descarta\n");
+    out
 }
 
 /// 0 only for a run that ended by itself: aborted, with errors from the model, or cut by a budget

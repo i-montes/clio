@@ -1513,3 +1513,50 @@ fn short_id_never_panics_on_a_non_ascii_name() {
     // A real id is still shortened as before.
     assert_eq!(short_id("20261031-181646-5a67"), "1031-1816-5a67");
 }
+
+// Host mode: at the end of a turn, each action the session set aside is one question, `[s/N]`;
+// `s` runs it, anything else rejects it, and the next one comes.
+#[test]
+fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_runs_it() {
+    let asks = vec![
+        ("a1".to_owned(), "«borrar» rm -r datos".to_owned()),
+        ("b2".to_owned(), "«enviar» git push".to_owned()),
+    ];
+    let (a, cmds) = feed(app(), vec![Input::Bg(Bg::ChatAsks(asks))]);
+    assert!(cmds.is_empty());
+    let c = a.confirm.as_ref().unwrap();
+    assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
+    let screen = screen_text(&a, 90, 30);
+    assert!(
+        screen.contains("¿Lo ejecuto? [s/N]") && screen.contains("rm -r datos"),
+        "{screen}"
+    );
+    let (a, cmds) = feed(a, vec![ch('s')]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "a1".into(),
+            yes: true
+        }]
+    );
+    assert_eq!(a.confirm.as_ref().unwrap().id, "b2");
+    let (a, cmds) = feed(a, vec![ch('n')]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "b2".into(),
+            yes: false
+        }]
+    );
+    assert!(a.confirm.is_none());
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAnswered(Ok(
+            "aprobado a1: rm -r datos".into()
+        )))],
+    );
+    assert!(matches!(
+        a.chat.items.last(),
+        Some(super::chat::Item::Note(m)) if m.contains("aprobado a1")
+    ));
+}

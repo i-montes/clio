@@ -96,6 +96,8 @@ pub struct Refresh {
 
 pub struct Opened {
     pub session: Arc<dyn Session>,
+    /// A host-mode session: the tools act on the real machine.
+    pub host: bool,
     pub id: String,
     /// The folder the session works on (its copy).
     pub workspace: String,
@@ -122,6 +124,15 @@ pub trait Session: Send + Sync {
     /// Before closing a session the person worked in: asks the model, under a short cap, to save
     /// the session's summary. Nothing when it does not apply. Runs once.
     fn summarize(&self) {}
+    /// Host mode: what this session set aside for the person since the last call, each once.
+    fn new_pending(&self) -> Vec<clio_toolhost::pending::Pending> {
+        Vec::new()
+    }
+    /// The person's answer at the terminal to one of `new_pending`: yes runs it (its result goes
+    /// to the model with the next message), no rejects it. Says what happened.
+    fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
+        Err(format!("{id} no es de esta sesión"))
+    }
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
 }

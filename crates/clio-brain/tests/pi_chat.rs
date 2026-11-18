@@ -516,6 +516,39 @@ fn clio_run_in_host_mode_writes_in_the_home_and_keeps_a_copy_first() {
     w.assert_key_nowhere();
 }
 
+// Host mode: `clio run` asks nobody. What the list sets aside does not run, the run goes on, and
+// it ends saying what waits for the person, with exit code 0.
+#[test]
+fn clio_run_in_host_mode_ends_saying_what_it_set_aside() {
+    if can_run("run_host_aside", false).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"tool_calls":[{"name":"write","arguments":{"reason":"probar","path":"backup.sql","content":"nada\n"}}]},{"text":"listo","usage":[100,5]}]"#,
+    );
+    std::fs::write(w.home().join("backup.sql"), "datos\n").unwrap();
+    let o = w
+        .clio(&["run", "--harness", "pi", "--host", "vacía el respaldo"])
+        .env("CLIO_JAIL", "off")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        o.status.success(),
+        "{out}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(w.home().join("backup.sql")).unwrap(),
+        "datos\n"
+    );
+    assert!(
+        out.contains("apartó 1 acción(es)") && out.contains("«borrar»"),
+        "{out}"
+    );
+    assert!(out.contains("clio approve <id>"), "{out}");
+}
+
 // The key is never in a file: with no variable and no vault the run says what to do.
 #[test]
 fn a_chat_without_key_or_vault_says_what_to_do() {

@@ -1,0 +1,200 @@
+//! Host mode from the terminal: what waits for the person's approval (`clio pending`), saying yes
+//! or no to it (`clio approve`, `clio reject`), and the log of what was run (`clio actions`).
+//! What is set aside comes from the toolhost (`clio_toolhost::pending`); here it is only shown,
+//! and an approval runs in a host-mode `ToolHost` on that session's run folder.
+
+use std::path::PathBuf;
+
+use clio_brain::pi::launch::valid_id;
+use clio_toolhost::ask::HostRules;
+use clio_toolhost::pending::{self, Pending, State};
+use clio_toolhost::{Config, HostCfg, JailMode, ToolHost};
+use serde_json::Value;
+
+use super::home::Dirs;
+use super::tui::sanitize;
+use super::{Res, io_err, mkdir_private, now_ms, stamp};
+
+/// `Dirs.data/host`: the action log and what is set aside.
+pub fn state(dirs: &Dirs) -> PathBuf {
+    dirs.data.join("host")
+}
+
+/// What waits for the person, oldest first.
+pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
+    pending::list(&state(dirs))
+        .into_iter()
+        .filter(|p| p.state == State::Waiting)
+        .collect()
+}
+
+/// One line for the person: id, class, what, since when, until when, and whether it was asked.
+pub fn line(p: &Pending, now: i64) -> String {
+    format!(
+        "{}  «{}»  {}  · desde {} UTC · {} {} UTC{}",
+        p.id,
+        p.class,
+        sanitize::line(&p.what),
+        stamp(p.created_ms),
+        if now >= p.expires_ms {
+            "venció"
+        } else {
+            "vence"
+        },
+        stamp(p.expires_ms),
+        if p.ask {
+            ""
+        } else {
+            " · sin preguntar (va al resumen del día)"
+        }
+    )
+}
+
+pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
+    let list = waiting(dirs);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("no hay nada esperando tu visto bueno");
+        return Ok(());
+    }
+    let now = now_ms();
+    for p in &list {
+        println!("{}", line(p, now));
+    }
+    println!("\nclio approve <id> lo ejecuta · clio reject <id> lo descarta");
+    Ok(())
+}
+
+/// A host-mode `ToolHost` on the run folder of `run`, as its session had it (same folders, same
+/// rules), with nothing of the session's own: an approval does not mark the running session.
+fn host_for(dirs: &Dirs, run: &str) -> Res<ToolHost> {
+    if !valid_id(run) {
+        return Err(format!("la sesión {run:?} no es válida"));
+    }
+    let dir = dirs.runs.join(run);
+    let scratch = dir.join("scratch");
+    mkdir_private(&scratch)?;
+    let mut rules = HostRules::factory();
+    if let Some(f) = dirs.host_rules() {
+        let text = std::fs::read_to_string(&f).map_err(|e| io_err(&f, &e))?;
+        rules = rules.with_file(&text)?;
+    }
+    let mut cfg = Config::new(&dirs.home, &scratch, &dir.join("toolhost"));
+    // As `Toolhost::start`: `CLIO_JAIL=off` leaves out commands, and the launcher is not looked for.
+    if std::env::var("CLIO_JAIL").is_ok_and(|v| v == "off") {
+        cfg.jail = JailMode::Off;
+    }
+    cfg.scrubber = Some(super::debug::scrubber(dirs));
+    cfg.host = Some(HostCfg {
+        home: dirs.home.clone(),
+        state: state(dirs),
+        control: dirs.control(),
+        rules,
+        run: run.into(),
+        launcher: None,
+    });
+    ToolHost::new(cfg)
+}
+
+/// What an approved action did: what it was, its exit code, the tail of its output.
+pub fn outcome(p: &Pending) -> String {
+    match &p.state {
+        State::Done {
+            exit_code,
+            output_tail,
+        } => {
+            let code = exit_code.map_or_else(String::new, |c| format!(" (salida {c})"));
+            let tail = output_tail.trim();
+            if tail.is_empty() {
+                format!("{}{code}", p.what)
+            } else {
+                format!("{}{code}\n{tail}", p.what)
+            }
+        }
+        _ => p.what.clone(),
+    }
+}
+
+/// Runs `id` as it was set aside. The person answered: it does not count as one of the day's
+/// questions.
+pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
+    let run = pending::list(&state(dirs))
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(|p| p.run)
+        .ok_or_else(|| format!("no hay ningún pendiente {id}"))?;
+    let done = host_for(dirs, &run)?.approve(id, now_ms())?;
+    let _ = pending::answered_at_terminal(&state(dirs), id);
+    Ok(done)
+}
+
+pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
+    let p = pending::reject(&state(dirs), id)?;
+    let _ = pending::answered_at_terminal(&state(dirs), id);
+    Ok(p)
+}
+
+/// `clio approve ID`.
+pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
+    let p = approve(dirs, id)?;
+    println!("aprobado {}: {}", p.id, sanitize::multiline(&outcome(&p)));
+    Ok(())
+}
+
+/// `clio reject ID`.
+pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
+    let p = reject(dirs, id)?;
+    println!(
+        "rechazado {}: {} no se ejecuta",
+        p.id,
+        sanitize::line(&p.what)
+    );
+    Ok(())
+}
+
+/// `clio actions [--run ID] [--json]`: the action log, the newest last.
+pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
+    let file = state(dirs).join("actions.jsonl");
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(io_err(&file, &e)),
+    };
+    let lines: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| run.is_none_or(|r| v["run"] == r))
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&lines).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if lines.is_empty() {
+        println!("no hay acciones registradas");
+    }
+    let s = |v: &Value| sanitize::line(v.as_str().unwrap_or(""));
+    for v in &lines {
+        let code = v["exit_code"]
+            .as_i64()
+            .map_or_else(String::new, |c| format!(" (salida {c})"));
+        println!(
+            "{} UTC  {}  {:<8} {:<5} {}{code}{}",
+            stamp(v["at_ms"].as_i64().unwrap_or(0)),
+            s(&v["run"]),
+            s(&v["tool"]),
+            s(&v["outcome"]),
+            s(&v["what"]),
+            if v["network"] == true { " · red" } else { "" }
+        );
+    }
+    Ok(())
+}

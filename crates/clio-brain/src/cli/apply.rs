@@ -461,6 +461,18 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
 
 pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
     let st = Style::stdout();
+    // A host session changed the machine itself: its own journal says what to give back.
+    let run = runs::resolve(dirs, id)?;
+    if run.meta().is_ok_and(|m| m.host) {
+        let said = clio_toolhost::host::undo(&run.path.join("toolhost"))?;
+        if said.is_empty() {
+            println!("no queda nada que deshacer en {}", run.id);
+        }
+        for l in &said {
+            println!("  {}", sanitize::line(l));
+        }
+        return Ok(());
+    }
     let n = undo_run(dirs, id, force)?;
     let total: usize = n.values().sum();
     let word = |k: &str, w: &str| n.get(k).map(|c| format!("{c} {w}"));

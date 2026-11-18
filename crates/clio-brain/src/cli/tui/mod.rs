@@ -636,6 +636,15 @@ impl Ctx {
                         let result = session
                             .run_prompt(&text, &cancel, &mut forward)
                             .map_err(|e| e.to_string());
+                        // Host mode: what the turn set aside is asked now, one question each.
+                        let asks: Vec<(String, String)> = session
+                            .new_pending()
+                            .into_iter()
+                            .map(|p| (p.id, format!("«{}» {}", p.class, p.what)))
+                            .collect();
+                        if !asks.is_empty() {
+                            let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
+                        }
                         (result, session.refresh().ok())
                     },
                     |r| match r {
@@ -657,6 +666,16 @@ impl Ctx {
                         },
                     );
                 }
+            }
+            Cmd::ChatAnswer { id, yes } => {
+                let Some(session) = self.current_chat() else {
+                    self.send(Bg::ChatAnswered(Err("no hay una sesión abierta".into())));
+                    return;
+                };
+                self.spawn(
+                    move |_, _| session.answer(&id, yes),
+                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                );
             }
             Cmd::ChatAbort => {
                 if let Ok(c) = self.chat_cancel.lock() {

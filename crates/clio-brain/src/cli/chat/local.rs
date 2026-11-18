@@ -16,11 +16,13 @@
 //! Pi and the toolhost both exit when their stdin closes, so nothing is left behind even if this
 //! process is killed with `SIGKILL`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clio_core::SystemClock;
+use clio_toolhost::pending::Pending;
 
 use clio_brain::agent::AgentConfig;
 use clio_brain::connector;
@@ -30,7 +32,7 @@ use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
-use clio_brain::pi::level::{Assessor, run_assessed};
+use clio_brain::pi::level::{Assessor, run_assessed_with};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
@@ -43,6 +45,7 @@ use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
 use crate::cli::Res;
 use crate::cli::home::{Config, Dirs, Limits, Mode};
 use crate::cli::jev;
+use crate::cli::pending;
 use crate::cli::runs::{self, RunOpts};
 use crate::cli::usage;
 
@@ -314,10 +317,17 @@ impl SessionSource for LocalSource {
             taint_file,
             summarized: AtomicBool::new(false),
             busy: Mutex::new(()),
+            host: host.then(|| HostSide {
+                dirs: self.dirs.clone(),
+                run: id.clone(),
+                asked: Mutex::default(),
+                approved: Mutex::default(),
+            }),
         };
         let refresh = s.refresh().ok();
         let presentation = s.pre.presenting();
         Ok(Opened {
+            host,
             presentation,
             id: s.pi.session_id.clone(),
             workspace: work.display().to_string(),
@@ -400,6 +410,21 @@ struct ChatSession {
     summarized: AtomicBool,
     /// Held while a turn runs: the closing turn never runs beside one (both would read Pi's events).
     busy: Mutex<()>,
+    host: Option<HostSide>,
+}
+
+/// Host mode: what the session set aside and what the person answered at the terminal.
+struct HostSide {
+    dirs: Arc<Dirs>,
+    run: String,
+    /// The pending actions already put to the person: each is asked once.
+    asked: Mutex<HashSet<String>>,
+    /// What the actions the person approved did, for the model's next message.
+    approved: Mutex<Vec<String>>,
+}
+
+fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A session with fewer messages of the person than this closes without a summary.
@@ -426,15 +451,54 @@ impl Session for ChatSession {
             self.budget,
             self.day.clone(),
         );
-        run_assessed(
+        let approved = self
+            .host
+            .as_ref()
+            .map(|h| std::mem::take(&mut *locked(&h.approved)))
+            .unwrap_or_default();
+        if !approved.is_empty() {
+            // What an approved action printed is outside text, read by a service of its own:
+            // the session is marked here, as its own toolhost would.
+            jev::taint_session(&self.toolhost.socket, &self.pi.session_id);
+        }
+        let data = approved.join("\n\n");
+        run_assessed_with(
             &self.pi.client,
             &self.assessor,
             &self.pre,
             text,
+            (!data.is_empty()).then_some(data.as_str()),
             cancel,
             &mut guard,
             on_event,
         )
+    }
+
+    fn new_pending(&self) -> Vec<Pending> {
+        let Some(h) = &self.host else {
+            return Vec::new();
+        };
+        let mut asked = locked(&h.asked);
+        pending::waiting(&h.dirs)
+            .into_iter()
+            .filter(|p| p.run == h.run && p.session == self.pi.session_id)
+            .filter(|p| asked.insert(p.id.clone()))
+            .collect()
+    }
+
+    fn answer(&self, id: &str, yes: bool) -> Result<String, String> {
+        let h = self
+            .host
+            .as_ref()
+            .filter(|h| locked(&h.asked).contains(id))
+            .ok_or_else(|| format!("{id} no es de esta sesión"))?;
+        if !yes {
+            pending::reject(&h.dirs, id)?;
+            return Ok(format!("rechazado {id}: no se ejecuta"));
+        }
+        let what = pending::outcome(&pending::approve(&h.dirs, id)?);
+        locked(&h.approved).push(format!("la persona aprobó {id}: {what}"));
+        Ok(format!("aprobado {id}: {what}"))
     }
 
     fn steer(&self, text: &str) -> Result<(), PiError> {
