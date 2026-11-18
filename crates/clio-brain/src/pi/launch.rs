@@ -63,7 +63,12 @@ pub struct Provider {
     pub extension: Option<String>,
     /// Extra variables for Pi's environment (what the extension's child processes need).
     pub child_env: Vec<(String, String)>,
+    /// How hard the model thinks (`--thinking`): one of [`THINKING`].
+    pub thinking: String,
 }
+
+/// Pi's thinking levels, lowest first. A model shows only some of them (Pi says which).
+pub const THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 impl Provider {
     /// The `models.json` content. The key appears only as a reference to its variable.
@@ -237,10 +242,8 @@ pub fn hardened_args(l: &Launch, session_args: &[OsString]) -> Vec<OsString> {
         l.provider.id.clone().into(),
         "--model".into(),
         l.provider.model.clone().into(),
-        // A reasoning model thinks for thousands of tokens on a simple step at Pi's default
-        // ("medium"): measured 46 s against 7 s at "low" for the same answer.
         "--thinking".into(),
-        "low".into(),
+        l.provider.thinking.clone().into(),
     ]);
     a.extend(session_args.iter().cloned());
     if let Some(n) = &l.name {
@@ -574,6 +577,14 @@ mod tests {
         assert!(a.iter().position(|x| x == "--no-extensions").unwrap() < i);
         assert!(!hardened_args(&launch(None), &[]).iter().any(|x| x == "-e"));
         assert!(!a.join(" ").contains("decoy-key"));
+        // The thinking level is the provider's (the config's `model.thinking`), `low` by default.
+        let i = a.iter().position(|x| x == "--thinking").unwrap();
+        assert_eq!(a[i + 1], "low");
+        let mut l = launch(None);
+        l.provider.thinking = "high".into();
+        let b = hardened_args(&l, &[]);
+        let i = b.iter().position(|x| x == "--thinking").unwrap();
+        assert_eq!(b[i + 1], "high");
     }
 
     #[test]

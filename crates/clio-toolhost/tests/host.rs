@@ -191,6 +191,8 @@ fn clios_folders_are_refused_directly_through_a_link_and_with_dotdot() {
         p(&cfg_file),
         p(&e.config.join("new.json")),
         p(&e.config.join("deep/new.json")),
+        // The person's slash commands: a file there is sent as the person's own message.
+        p(&e.config.join("commands/hola.md")),
         p(&e.config),
         "dir_link/config.json".into(),
         "dir_link/new.json".into(),
@@ -224,6 +226,7 @@ fn clios_folders_are_refused_directly_through_a_link_and_with_dotdot() {
         "{\"mode\":\"host\"}"
     );
     assert!(!e.config.join("new.json").exists() && !e.config.join("deep").exists());
+    assert!(!e.config.join("commands").exists());
 }
 
 #[test]

@@ -53,7 +53,7 @@ impl Sessions {
 
 /// A new session in the chat. Nothing is created yet: the run and Pi start with its first
 /// message (`chat::send`), so opening Clio leaves nothing on disk.
-fn open_new(app: &mut App) -> Vec<Cmd> {
+pub(super) fn open_new(app: &mut App) -> Vec<Cmd> {
     if app.chat.is_draft() {
         app.screen = Screen::Chat;
         return vec![];
@@ -171,6 +171,16 @@ pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
     let at = Position::new(m.column, m.row);
     let side = app.screen == Screen::Sessions && app.sessions.area.get().contains(at);
     let last = app.sessions.len() - 1;
+    // A click on a row of the slash menu runs it; elsewhere it closes the menu.
+    if app.screen == Screen::Chat
+        && app.chat.menu.is_some()
+        && m.kind == MouseEventKind::Down(MouseButton::Left)
+    {
+        return super::commands::click(app, m.column, m.row).unwrap_or_else(|| {
+            app.chat.menu = None;
+            vec![]
+        });
+    }
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) if side => {
             let (y, first, shown, per) = app.sessions.list_at.get();

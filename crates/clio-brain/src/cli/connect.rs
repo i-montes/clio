@@ -158,8 +158,32 @@ fn ask(question: &str) -> Res<bool> {
     ))
 }
 
-/// Sets `model.provider` and `model.model` and keeps every other field, atomically and 0600.
+/// Sets `model.provider` and `model.model` (remembered as that connector's last model).
 fn switch_config(dirs: &Dirs, c: &Connector, model: &str) -> Res<()> {
+    edit_model(dirs, |m| set_model(m, c.provider, model))
+}
+
+/// The connector and its model in `model`; the model is also remembered as the one last chosen
+/// for that connector (`model.last`), for when the person comes back to it.
+pub(crate) fn set_model(m: &mut serde_json::Map<String, Value>, provider: &str, model: &str) {
+    m.insert("provider".into(), provider.into());
+    m.insert("model".into(), model.into());
+    let last = m
+        .entry("last")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !last.is_object() {
+        *last = Value::Object(serde_json::Map::new());
+    }
+    last[provider] = model.into();
+}
+
+/// Changes the `model` section of `config.json` with `f` and keeps every other field, atomically
+/// and 0600. The values put in must already be checked: what `clio connect` and the chat's
+/// commands use to save a choice.
+pub(crate) fn edit_model(
+    dirs: &Dirs,
+    f: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Res<()> {
     let path = dirs.config_file();
     let text = std::fs::read_to_string(&path).map_err(|e| io_err(&path, &e))?;
     let mut v: Value =
@@ -168,8 +192,7 @@ fn switch_config(dirs: &Dirs, c: &Connector, model: &str) -> Res<()> {
         .get_mut("model")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| format!("{}: falta \"model\"", path.display()))?;
-    m.insert("provider".into(), c.provider.into());
-    m.insert("model".into(), model.into());
+    f(m);
     let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
     write_private(&tmp, out.as_bytes())?;

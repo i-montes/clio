@@ -165,19 +165,46 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     Ok(())
 }
 
-/// `clio actions [--run ID] [--json]`: the action log, the newest last.
-pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
+/// The action log of `run` (all of it with `None`), the newest last.
+pub fn action_log(dirs: &Dirs, run: Option<&str>) -> Res<Vec<Value>> {
     let file = state(dirs).join("actions.jsonl");
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(io_err(&file, &e)),
     };
-    let lines: Vec<Value> = text
+    Ok(text
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|v| run.is_none_or(|r| v["run"] == r))
-        .collect();
+        .collect())
+}
+
+/// One entry of the action log for the person: when, run (with `with_run`), tool, outcome, what,
+/// exit code.
+pub fn action_line(v: &Value, with_run: bool) -> String {
+    let s = |v: &Value| sanitize::line(v.as_str().unwrap_or(""));
+    let code = v["exit_code"]
+        .as_i64()
+        .map_or_else(String::new, |c| format!(" (salida {c})"));
+    let run = if with_run {
+        format!("  {}", s(&v["run"]))
+    } else {
+        String::new()
+    };
+    format!(
+        "{} UTC{run}  {:<8} {:<5} {}{code}{}",
+        stamp(v["at_ms"].as_i64().unwrap_or(0)),
+        s(&v["tool"]),
+        s(&v["outcome"]),
+        s(&v["what"]),
+        if v["network"] == true { " · red" } else { "" }
+    )
+}
+
+/// `clio actions [--run ID] [--json]`: the action log, the newest last.
+pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
+    let lines = action_log(dirs, run)?;
     if json {
         println!(
             "{}",
@@ -188,20 +215,8 @@ pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
     if lines.is_empty() {
         println!("no hay acciones registradas");
     }
-    let s = |v: &Value| sanitize::line(v.as_str().unwrap_or(""));
     for v in &lines {
-        let code = v["exit_code"]
-            .as_i64()
-            .map_or_else(String::new, |c| format!(" (salida {c})"));
-        println!(
-            "{} UTC  {}  {:<8} {:<5} {}{code}{}",
-            stamp(v["at_ms"].as_i64().unwrap_or(0)),
-            s(&v["run"]),
-            s(&v["tool"]),
-            s(&v["outcome"]),
-            s(&v["what"]),
-            if v["network"] == true { " · red" } else { "" }
-        );
+        println!("{}", action_line(v, true));
     }
     Ok(())
 }

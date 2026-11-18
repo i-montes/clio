@@ -467,6 +467,27 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
             ],
         ));
     }
+    let cmds = super::commands::COMMANDS
+        .iter()
+        .map(|c| {
+            let alias: Vec<String> = c.aliases.iter().map(|a| format!("/{a}")).collect();
+            let what = if alias.is_empty() {
+                c.what.to_owned()
+            } else {
+                format!("{} · {}", c.what, alias.join(" "))
+            };
+            (format!("/{}", c.name), what)
+        })
+        .collect();
+    sections.push((
+        "los comandos",
+        cmds,
+        vec![
+            "/ al empezar el mensaje abre la lista: Tab completa, Enter ejecuta, Esc la cierra.",
+            "Los tuyos: un .md en ~/.config/clio/commands/; $ARGUMENTS es lo que escribes tras él.",
+            "/copiar usa OSC 52: solo copia en terminales que lo permiten.",
+        ],
+    ));
     sections.push((
         "el ratón",
         pairs(&[

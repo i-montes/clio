@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod chat;
+pub mod commands;
 pub mod composer;
 pub mod debug_view;
 pub mod detail;
@@ -27,6 +28,8 @@ pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_commands;
 #[cfg(test)]
 mod tests_gallery;
 #[cfg(test)]
@@ -443,21 +446,29 @@ fn expand(dir: &str, home: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Whether a connector's key is there, without pulling its value.
+fn has_key(dirs: &Dirs, c: &clio_brain::connector::Connector) -> bool {
+    std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty())
+        || super::vault::has_model_key(dirs, c)
+}
+
 fn header(dirs: &Dirs) -> Header {
-    let (provider, model, config_error, limits) = match Config::load(dirs) {
+    let (provider, model, thinking, config_error, limits) = match Config::load(dirs) {
         Ok(c) => {
             let l = RunLimits::of(&c);
-            (c.model.provider, c.model.model, None, l)
+            (c.model.provider, c.model.model, c.model.thinking, None, l)
         }
-        Err(e) => (String::new(), String::new(), Some(e), RunLimits::default()),
+        Err(e) => (
+            String::new(),
+            String::new(),
+            String::new(),
+            Some(e),
+            RunLimits::default(),
+        ),
     };
     let (window, window_known) = usage::window_for(dirs, &provider, &model);
     let active = clio_brain::connector::by_provider(&provider);
-    // Whether the key is there, without pulling its value.
-    let key = if active.is_some_and(|c| {
-        std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty())
-            || super::vault::has_model_key(dirs, c)
-    }) {
+    let key = if active.is_some_and(|c| has_key(dirs, c)) {
         KeyState::Present
     } else {
         KeyState::Missing
@@ -475,6 +486,7 @@ fn header(dirs: &Dirs) -> Header {
     };
     Header {
         model,
+        thinking,
         key,
         connector: active.map_or(String::new(), |c| c.name.to_owned()),
         vault: vault.into(),
@@ -483,6 +495,199 @@ fn header(dirs: &Dirs) -> Header {
         window,
         window_known,
     }
+}
+
+/// What `/modelo`, `/conector` and `/esfuerzo` pick from. With a session open, Pi says which
+/// models and levels it has; before the first message, the catalog and every level.
+fn choices(
+    d: &Dirs,
+    session: Option<&dyn Session>,
+    run: commands::Run,
+) -> Result<Vec<commands::Choice>, String> {
+    use clio_brain::connector::{self, CONNECTORS};
+    use commands::{Choice, Run};
+    let cfg = Config::load(d)?;
+    let active = connector::by_provider(&cfg.model.provider).ok_or("sin conector")?;
+    let choice = |value: &str, label: String, current: bool| Choice {
+        value: value.to_owned(),
+        label,
+        blocked: None,
+        current,
+    };
+    Ok(match run {
+        Run::Model => models(d, session, active)?
+            .iter()
+            .map(|m| choice(m, m.clone(), *m == cfg.model.model))
+            .collect(),
+        Run::Effort => levels(session)?
+            .iter()
+            .map(|l| {
+                let label = commands::level_name(l).map_or_else(|| l.clone(), str::to_owned);
+                choice(l, label, *l == cfg.model.thinking)
+            })
+            .collect(),
+        Run::Connector => CONNECTORS
+            .iter()
+            .map(|c| {
+                let model = cfg
+                    .model
+                    .last
+                    .get(c.provider)
+                    .map_or(c.default_model, String::as_str);
+                let mut ch = choice(
+                    c.name,
+                    format!("{} · {model}", c.name),
+                    c.provider == active.provider,
+                );
+                ch.blocked = if !has_key(d, c) {
+                    Some(format!("sin llave: clio connect {}", c.name))
+                } else if super::home::lacks_bridge(d, c) {
+                    Some("falta el puente de Claude: clio pi install".into())
+                } else {
+                    None
+                };
+                ch
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// The models of the active connector: Pi's own list when a session is open, else the catalog's
+/// (with the configured one, even when the catalog does not have it).
+fn models(
+    d: &Dirs,
+    session: Option<&dyn Session>,
+    c: &clio_brain::connector::Connector,
+) -> Result<Vec<String>, String> {
+    let mut v: Vec<String> = match session {
+        Some(s) => s.command("get_available_models", serde_json::json!({}))?["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["provider"] == c.pi_provider)
+            .filter_map(|m| m["id"].as_str().map(str::to_owned))
+            .collect(),
+        None => usage::catalog_models(d, c.provider),
+    };
+    if session.is_none()
+        && let Ok(cfg) = Config::load(d)
+        && !v.contains(&cfg.model.model)
+    {
+        v.insert(0, cfg.model.model);
+    }
+    Ok(v)
+}
+
+/// The thinking levels: those the session's model has, or all of Pi's before it starts.
+fn levels(session: Option<&dyn Session>) -> Result<Vec<String>, String> {
+    let all = || {
+        clio_brain::pi::launch::THINKING
+            .iter()
+            .map(|l| (*l).to_owned())
+            .collect()
+    };
+    let Some(s) = session else {
+        return Ok(all());
+    };
+    let v = s.command("get_available_thinking_levels", serde_json::json!({}))?;
+    Ok(v["levels"].as_array().map_or_else(all, |a| {
+        a.iter()
+            .filter_map(|l| l.as_str())
+            .filter(|l| clio_brain::pi::launch::THINKING.contains(l))
+            .map(str::to_owned)
+            .collect()
+    }))
+}
+
+/// `/modelo <nombre>`: one of the connector's models, for the session open now (Pi switches it)
+/// and as the default from now on.
+fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<String, String> {
+    let cfg = Config::load(d)?;
+    let c = clio_brain::connector::by_provider(&cfg.model.provider).ok_or("sin conector")?;
+    let known = models(d, session, c)?;
+    // Before the first message, a name the catalog does not list is taken as typed: Pi checks
+    // it when the session starts.
+    let plain = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/@-".contains(&b));
+    if !known.iter().any(|m| m == name) && (session.is_some() || !plain) {
+        return Err(format!(
+            "{} no tiene el modelo «{}»; tiene: {}",
+            c.name,
+            sanitize::line(name),
+            known.join(", ")
+        ));
+    }
+    if let Some(s) = session {
+        s.command(
+            "set_model",
+            serde_json::json!({ "provider": c.pi_provider, "modelId": name }),
+        )?;
+    }
+    super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, name))?;
+    Ok(format!("modelo: {name}"))
+}
+
+/// `/conector <nombre>`: saved for the next session (the one open keeps its connector: its
+/// pending questions and its copy belong to it). Back to the model last chosen for it.
+fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
+    let c = clio_brain::connector::by_name(name.trim()).ok_or_else(|| {
+        format!(
+            "no existe el conector «{}»: opencode, claude o anthropic-api",
+            sanitize::line(name)
+        )
+    })?;
+    if !has_key(d, c) {
+        return Err(format!(
+            "{} no tiene llave: clio connect {} en una terminal",
+            c.name, c.name
+        ));
+    }
+    if super::home::lacks_bridge(d, c) {
+        return Err("falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into());
+    }
+    let cfg = Config::load_with_provider(d, c.provider)?;
+    let model = cfg
+        .model
+        .last
+        .get(c.provider)
+        .cloned()
+        .unwrap_or_else(|| c.default_model.to_owned());
+    super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, &model))?;
+    Ok(format!(
+        "conector: {} · {model}. Vale desde la próxima sesión: /nueva la empieza",
+        c.name
+    ))
+}
+
+/// `/esfuerzo <nivel>`: for the session open now (if its model has that level) and as the
+/// default from now on.
+fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<String, String> {
+    if !clio_brain::pi::launch::THINKING.contains(&level) {
+        return Err(format!("«{}» no es un nivel de Pi", sanitize::line(level)));
+    }
+    let name = commands::level_name(level).unwrap_or(level);
+    if let Some(s) = session {
+        let have = levels(Some(s))?;
+        if !have.iter().any(|l| l == level) {
+            let names: Vec<&str> = have
+                .iter()
+                .map(|l| commands::level_name(l).unwrap_or(l))
+                .collect();
+            return Err(format!(
+                "este modelo no tiene el esfuerzo {name}; tiene: {}",
+                names.join(", ")
+            ));
+        }
+        s.command("set_thinking_level", serde_json::json!({ "level": level }))?;
+    }
+    super::connect::edit_model(d, |m| {
+        m.insert("thinking".into(), level.into());
+    })?;
+    Ok(format!("esfuerzo: {name}"))
 }
 
 fn check(dirs: &Dirs, dir: &str) -> Result<Preview, String> {
@@ -777,6 +982,113 @@ impl Ctx {
                 }
             }
             Cmd::ChatClose => self.stop_chat_later(0),
+            Cmd::LoadCommands => self.spawn(
+                |d, _| commands::load_custom(&d.config.join("commands")),
+                |r| match r {
+                    Ok((customs, left)) => Bg::Commands(customs, left),
+                    Err(e) => Bg::Done(Err(e)),
+                },
+            ),
+            Cmd::Choices(run) => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |d, _| choices(d, session.as_deref(), run),
+                    move |r| Bg::Choices(run, r.and_then(|x| x)),
+                );
+            }
+            Cmd::SetModel(name) => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |d, _| set_model(d, session.as_deref(), &name),
+                    |r| Bg::Done(r.and_then(|x| x)),
+                );
+            }
+            Cmd::SetConnector(name) => self.spawn(
+                move |d, _| set_connector(d, &name),
+                |r| Bg::Done(r.and_then(|x| x)),
+            ),
+            Cmd::SetEffort(level) => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |d, _| set_effort(d, session.as_deref(), &level),
+                    |r| Bg::Done(r.and_then(|x| x)),
+                );
+            }
+            Cmd::SessionName(name) => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |_, _| {
+                        let s = session.ok_or("no hay una sesión abierta")?;
+                        s.command("set_session_name", serde_json::json!({ "name": name }))?;
+                        Ok::<_, String>(name)
+                    },
+                    |r| Bg::Named(r.and_then(|x| x)),
+                );
+            }
+            Cmd::Compact(instructions) => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |_, _| {
+                        let Some(s) = session else {
+                            return (Err("no hay una sesión abierta".to_owned()), None);
+                        };
+                        let fields = if instructions.trim().is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::json!({ "customInstructions": instructions })
+                        };
+                        let done = s.command("compact", fields).map(|v| {
+                            let n = |k: &str| v[k].as_u64().map(usage::tokens);
+                            match (n("tokensBefore"), n("estimatedTokensAfter")) {
+                                (Some(a), Some(b)) => {
+                                    format!("contexto compactado: de {a} a unos {b} tokens")
+                                }
+                                _ => "contexto compactado".to_owned(),
+                            }
+                        });
+                        (done, s.refresh().ok())
+                    },
+                    |r| match r {
+                        Ok((done, refresh)) => Bg::Compacted(done, refresh),
+                        Err(e) => Bg::Compacted(Err(e), None),
+                    },
+                );
+            }
+            Cmd::LoadPending { session } => self.spawn(
+                move |d, _| {
+                    let now = crate::cli::now_ms();
+                    let all = super::pending::waiting(d);
+                    let others = all.iter().filter(|p| p.session != session).count();
+                    let mine = all
+                        .into_iter()
+                        .filter(|p| !session.is_empty() && p.session == session)
+                        .map(|p| {
+                            let what = format!("«{}» {}", p.class, super::pending::what(&p));
+                            (p.id.clone(), super::pending::line(&p, now), what)
+                        })
+                        .collect();
+                    (mine, others)
+                },
+                Bg::Pending,
+            ),
+            Cmd::LoadActions { run } => self.spawn(
+                move |d, _| {
+                    let log = super::pending::action_log(d, Some(&run))?;
+                    let mut lines: Vec<String> = log
+                        .iter()
+                        .map(|v| super::pending::action_line(v, false))
+                        .collect();
+                    if lines.is_empty() {
+                        lines.push("esta sesión no ejecutó ninguna acción en la máquina".into());
+                    }
+                    Ok::<_, String>(lines)
+                },
+                |r| Bg::Modal("Acciones".into(), r.and_then(|x| x)),
+            ),
+            Cmd::UndoSession { id } => self.spawn(
+                move |d, _| apply::undo_lines(d, &id, false).map(|(_, lines)| lines),
+                |r| Bg::Modal("Deshacer".into(), r.and_then(|x| x)),
+            ),
             Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
                 if let Ok(flag) = self.cancel.lock() {

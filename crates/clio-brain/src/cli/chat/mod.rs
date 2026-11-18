@@ -136,6 +136,11 @@ pub trait Session: Send + Sync {
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
         Err(format!("{id} no es de esta sesión"))
     }
+    /// One of Pi's commands (`set_model`, `compact`...) for the chat's slash commands, sent only
+    /// while no turn runs; Pi's `data`, or why not.
+    fn command(&self, kind: &str, _fields: Value) -> Result<Value, String> {
+        Err(format!("{kind}: no disponible en esta sesión"))
+    }
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
 }

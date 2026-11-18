@@ -141,11 +141,30 @@ pub fn percent(part: u64, whole: u64) -> u64 {
 /// has one, else from the catalog that ships with the repository; `(DEFAULT_WINDOW, false)` when
 /// the model is not in it.
 pub fn window_for(dirs: &Dirs, provider: &str, model: &str) -> (u64, bool) {
+    window_in(&catalog_text(dirs), provider, model)
+}
+
+fn catalog_text(dirs: &Dirs) -> String {
     let path = std::env::var_os("CLIO_CATALOG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| dirs.config.join("catalog.json"));
-    let text = std::fs::read_to_string(path).unwrap_or_else(|_| BUILTIN_CATALOG.to_owned());
-    window_in(&text, provider, model)
+    std::fs::read_to_string(path).unwrap_or_else(|_| BUILTIN_CATALOG.to_owned())
+}
+
+/// The models the catalog knows for a connector (its provider id), in its order.
+pub fn catalog_models(dirs: &Dirs, provider: &str) -> Vec<String> {
+    Catalog::from_json(&catalog_text(dirs)).map_or_else(
+        |_| Vec::new(),
+        |c| {
+            let mut v: Vec<String> = Vec::new();
+            for m in c.models.iter().filter(|m| m.provider == provider) {
+                if !v.contains(&m.id) {
+                    v.push(m.id.clone());
+                }
+            }
+            v
+        },
+    )
 }
 
 pub fn window_in(catalog: &str, provider: &str, model: &str) -> (u64, bool) {

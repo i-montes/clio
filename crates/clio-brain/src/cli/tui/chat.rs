@@ -173,6 +173,12 @@ pub struct Chat {
     pub input_w: Cell<u16>,
     /// The first message of a new session, sent once it opens.
     pub queued: Option<String>,
+    /// The slash commands' menu over the composer, while it is open.
+    pub menu: Option<super::commands::Menu>,
+    /// The person's own commands, as read when the menu last opened.
+    pub customs: Vec<super::commands::Custom>,
+    /// `/compactar` runs: nothing is sent until it ends.
+    pub compacting: bool,
     streamed: bool,
     /// The agent's answers as the last draw rendered them, by what went into them: a long
     /// conversation is drawn ten times a second and parsing all its markdown each time is slow.
@@ -214,6 +220,9 @@ impl Chat {
             view_w: Cell::new(0),
             input_w: Cell::new(0),
             queued: None,
+            menu: None,
+            customs: vec![],
+            compacting: false,
             streamed: false,
             rendered: RefCell::default(),
         }
@@ -580,6 +589,16 @@ pub fn summarize(name: &str, args: &Value) -> String {
 }
 
 pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
+    if let Some(cmds) = super::commands::key(app, k) {
+        return cmds;
+    }
+    let before = app.chat.input.clone();
+    let cmds = key_composer(app, k);
+    super::commands::sync(app, &before);
+    cmds
+}
+
+fn key_composer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let ctx = app.ctx();
     let Some(act) = lookup(ctx, k) else {
         return edit(app, k);
@@ -642,13 +661,27 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
 }
 
 fn send(app: &mut App) -> Vec<Cmd> {
-    let c = &mut app.chat;
-    let text = c.input.trim().to_owned();
+    // A command is only what the person typed with `/` first; ` /x` is a message.
+    if app.chat.input.starts_with('/') {
+        return super::commands::enter(app);
+    }
+    let text = app.chat.input.trim().to_owned();
     if text.is_empty() {
         return vec![];
     }
+    app.chat.set_input(String::new());
+    send_text(app, text)
+}
+
+/// Sends `text` as the person's message: it opens a new session, steers the turn running, or
+/// starts a turn. Never read as a command (a command of the person's ends up here already
+/// expanded).
+pub fn send_text(app: &mut App, text: String) -> Vec<Cmd> {
+    let c = &mut app.chat;
+    if text.trim().is_empty() {
+        return vec![];
+    }
     if c.is_draft() {
-        c.set_input(String::new());
         c.items.push(Item::User(text.clone()));
         c.queued = Some(text);
         c.opening = true;
@@ -661,11 +694,18 @@ fn send(app: &mut App) -> Vec<Cmd> {
             },
         }];
     }
-    if c.opening || c.failed.is_some() {
-        app.flash = Some("la sesión todavía no está lista".into());
+    if c.compacting || c.opening || c.failed.is_some() {
+        app.flash = Some(if c.compacting {
+            "Pi está compactando el contexto: espera a que termine".into()
+        } else {
+            "la sesión todavía no está lista".into()
+        });
+        // Nothing is lost: what was going out is back in the composer.
+        if c.input.is_empty() {
+            c.set_input(text);
+        }
         return vec![];
     }
-    c.set_input(String::new());
     c.scroll = 0;
     c.items.push(Item::User(text.clone()));
     if c.running {
@@ -687,15 +727,21 @@ fn edit(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     {
         let mut buf = [0u8; 4];
         let ch = &mut app.chat;
+        let was_empty = ch.input.is_empty();
         composer::insert(&mut ch.input, &mut ch.cursor, c.encode_utf8(&mut buf));
+        if was_empty && c == '/' {
+            return super::commands::open(app);
+        }
     }
     vec![]
 }
 
 /// Pasted text goes through the sanitizer: no escape sequences, and it never presses Enter.
 pub fn paste(app: &mut App, text: &str) {
+    let before = app.chat.input.clone();
     let ch = &mut app.chat;
     composer::insert(&mut ch.input, &mut ch.cursor, &sanitize::multiline(text));
+    super::commands::sync(app, &before);
 }
 
 /// What a tool does, as a title ("Leer archivo"), like Aria's steps.
@@ -1195,6 +1241,9 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
+    if focused && app.modal.is_none() {
+        super::commands::draw(f, input, conv.y, app);
+    }
     if focused {
         let x = inner.x + 3 + u16::try_from(cur_col).unwrap_or(0);
         let y = inner.y + u16::try_from(cur_row - top).unwrap_or(0);

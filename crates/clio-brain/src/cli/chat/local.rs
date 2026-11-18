@@ -351,6 +351,7 @@ fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
     if let Some(u) = &m.base_url {
         p.base_url.clone_from(u);
     }
+    p.thinking.clone_from(&m.thinking);
     p.context_window = usage::window_for(d, &m.provider, &m.model).0;
     // Micro-dollars per million tokens to dollars per million tokens.
     p.dollars_per_mtok = (
@@ -491,10 +492,16 @@ impl Session for ChatSession {
     }
 
     fn answer(&self, id: &str, yes: bool) -> Result<String, String> {
+        // One already put to the person, or one of this session still waiting (`/pendientes`).
         let h = self
             .host
             .as_ref()
-            .filter(|h| locked(&h.asked).contains(id))
+            .filter(|h| {
+                locked(&h.asked).contains(id)
+                    || pending::waiting(&h.dirs)
+                        .iter()
+                        .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
+            })
             .ok_or_else(|| format!("{id} no es de esta sesión"))?;
         if !yes {
             pending::reject(&h.dirs, id)?;
@@ -575,6 +582,25 @@ impl Session for ChatSession {
             .run_prompt_limited(&text, &Cancel::new(), &mut guard, &mut |_| {});
     }
 
+    fn command(&self, kind: &str, fields: Value) -> Result<Value, String> {
+        // Never beside a turn: both would read Pi's events, and a turn's model must not change
+        // under it.
+        let Ok(_idle) = self.busy.try_lock() else {
+            return Err("el agente está trabajando: espera a que termine el turno".into());
+        };
+        if self.down.lock().map_or(true, |d| *d) {
+            return Err("la sesión ya se cerró".into());
+        }
+        let r = if kind == "compact" {
+            self.pi
+                .client
+                .compact(fields["customInstructions"].as_str())
+        } else {
+            self.pi.client.request(kind, fields)
+        };
+        r.map_err(text)
+    }
+
     fn shutdown(&self) {
         if let Ok(mut g) = self.down.lock() {
             if std::mem::replace(&mut *g, true) {
@@ -627,6 +653,24 @@ mod tests {
             (b.max_steps, b.max_ms, b.max_cost_micro, b.max_repeats),
             (40, 600_000, 100_000, 4)
         );
+    }
+
+    // `/esfuerzo` saves `model.thinking`: a new session starts Pi with it (`low` when unset).
+    #[test]
+    fn the_thinking_level_of_the_config_reaches_pis_arguments() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, _) = local_source(t.path());
+        let mut cfg: Config = serde_json::from_value(json!({
+            "model": {"provider": "anthropic", "model": "claude-sonnet-5-5", "prompt": "x@1",
+                "price_in_micro_per_mtok": 0, "price_out_micro_per_mtok": 0},
+            "limits": {"max_steps": 1, "max_seconds": 1, "max_cost_micro_usd": 1},
+            "workspace": {"max_files": 1, "max_bytes": 1}
+        }))
+        .unwrap();
+        assert_eq!(provider_of(&src.dirs, &cfg).thinking, "low");
+        cfg.model.thinking = "high".into();
+        // `hardened_args` puts `provider.thinking` after `--thinking` (pinned in `pi::launch`).
+        assert_eq!(provider_of(&src.dirs, &cfg).thinking, "high");
     }
 
     // S-16, S-22 (second audit, finding 1): a session file is written by Pi, which is jailed but

@@ -24,6 +24,8 @@ pub enum KeyState {
 #[derive(Debug, Clone)]
 pub struct Header {
     pub model: String,
+    /// The model's thinking level for a Pi session (`model.thinking`).
+    pub thinking: String,
     pub key: KeyState,
     /// The active connector's name (`clio connect <name>`), empty when the config has none.
     pub connector: String,

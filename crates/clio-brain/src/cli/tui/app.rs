@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::chat::Chat;
+use super::commands::{Choice, Custom, Modal, Run};
 use super::detail::Detail;
 use super::doctor::DoctorView;
 use super::home::{Header, Home};
@@ -124,11 +125,37 @@ pub enum Cmd {
     },
     /// Leave the chat: stop its Pi and its toolhost.
     ChatClose,
+    /// The chat's slash commands (`commands.rs`): read the person's own commands again.
+    LoadCommands,
+    /// What a command picks from (models, connectors, levels).
+    Choices(Run),
+    SetModel(String),
+    SetConnector(String),
+    SetEffort(String),
+    SessionName(String),
+    /// Pi's compaction, with the person's instructions (may be empty).
+    Compact(String),
+    /// What this session set aside and still waits.
+    LoadPending {
+        session: String,
+    },
+    /// The action log of one run (a host session).
+    LoadActions {
+        run: String,
+    },
+    /// Undo what a chat's session changed (asked first).
+    UndoSession {
+        id: String,
+    },
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),
     /// Clear the terminal and draw everything again.
     Redraw,
 }
+
+/// This session's actions waiting, (id, line, «class» and what) each, and how many of other
+/// sessions wait.
+pub type Waiting = (Vec<(String, String, String)>, usize);
 
 /// What a worker thread reports back.
 pub enum Bg {
@@ -169,6 +196,18 @@ pub enum Bg {
     ChatAsks(Vec<(String, String)>),
     /// What came of an answer to one of them.
     ChatAnswered(Result<String, String>),
+    /// The person's commands (`<config>/commands/*.md`) and the files left out.
+    Commands(Vec<Custom>, Vec<String>),
+    Choices(Run, Result<Vec<Choice>, String>),
+    /// The session's new title.
+    Named(Result<String, String>),
+    /// What a compaction did, and Pi's totals after it.
+    Compacted(Result<String, String>, Option<Refresh>),
+    /// This session's actions waiting: (id, line, «class» and what), and how many of other
+    /// sessions wait too.
+    Pending(Result<Waiting, String>),
+    /// Lines to show in a box with that title.
+    Modal(String, Result<Vec<String>, String>),
     /// The run ended; `refresh` is Pi's own totals if it could still give them.
     ChatSettled {
         result: Result<clio_brain::pi::rpc::RunSummary, String>,
@@ -236,6 +275,8 @@ pub enum Action {
     /// Host mode: run an action the session set aside. `Confirm::id` is its id and
     /// `Confirm::workspace` its class and what it does. Any other key rejects it.
     Approve,
+    /// `/deshacer`: what the chat's session changed goes back. `Confirm::id` is the session.
+    UndoSession,
 }
 
 /// A question that needs a `y`.
@@ -299,6 +340,8 @@ pub struct App {
     pub chat: Chat,
     pub chat_seq: u64,
     pub confirm: Option<Confirm>,
+    /// A box of lines over the chat (`/uso`, `/pendientes`...), under any question.
+    pub modal: Option<Modal>,
     /// Host mode: the questions waiting behind the one on screen.
     pub asks: std::collections::VecDeque<Confirm>,
     /// Host mode: answers to set-aside actions still running (an approved one can take a while).
@@ -338,6 +381,7 @@ impl App {
             chat: Chat::default(),
             chat_seq: 0,
             confirm: None,
+            modal: None,
             asks: std::collections::VecDeque::new(),
             answering: 0,
             last_key_ms: None,
@@ -483,6 +527,8 @@ impl App {
             "Clio todavía ejecuta lo que aprobaste: espera a que termine; luego cambia de sesión"
         } else if self.chat.opening {
             "la sesión se está abriendo: espera a que arranque; luego cambia de sesión"
+        } else if self.chat.compacting {
+            "Pi está compactando el contexto: espera a que termine"
         } else {
             return false;
         };
@@ -511,7 +557,7 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         Input::Resize => vec![],
         Input::Paste(text) => {
             app.last_key_ms = Some(app.now_ms);
-            if app.confirm.is_some() || app.notice.is_some() {
+            if app.confirm.is_some() || app.notice.is_some() || app.modal.is_some() {
                 vec![]
             } else if app.screen == Screen::NewRun {
                 super::new_run::paste(app, &text)
@@ -530,6 +576,7 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             if !matches!(m.kind, M::Down(_) | M::ScrollUp | M::ScrollDown)
                 || app.confirm.is_some()
                 || app.notice.is_some()
+                || app.modal.is_some()
                 || !matches!(app.screen, Screen::Sessions | Screen::Chat)
             {
                 return vec![];
@@ -565,6 +612,9 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 let cmds = answer(app, &k, quiet);
                 next_ask(app);
                 return cmds;
+            }
+            if app.modal.is_some() {
+                return super::commands::modal_key(app, &k);
             }
             match app.screen {
                 Screen::Home => super::home::key(app, &k),
@@ -622,6 +672,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::Promote => vec![Cmd::MemoryPromote { id: c.id }],
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
         Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
+        Action::UndoSession => vec![Cmd::UndoSession { id: c.id }],
         Action::Approve => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -889,6 +940,87 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             });
             vec![]
         }
+        Bg::Commands(customs, left) => {
+            app.chat.customs = customs;
+            if !left.is_empty() && app.chat.menu.is_some() {
+                app.flash = Some(format!(
+                    "comandos sin usar: {} (el nombre va en a-z, 0-9 y -, sin chocar con uno de Clio, y el archivo pesa hasta 32 kB)",
+                    clean(&left.join(", "))
+                ));
+            }
+            vec![]
+        }
+        Bg::Choices(run, r) => {
+            let Some(m) = app
+                .chat
+                .menu
+                .as_mut()
+                .filter(|m| m.pick == Some((run, None)))
+            else {
+                return vec![];
+            };
+            match r {
+                Ok(items) => {
+                    m.sel = items.iter().position(|c| c.current).unwrap_or(0);
+                    m.pick = Some((run, Some(items)));
+                }
+                Err(e) => {
+                    m.pick = None;
+                    app.flash = Some(e);
+                }
+            }
+            vec![]
+        }
+        Bg::Named(r) => match r {
+            Ok(title) => {
+                app.flash = Some(format!("título: {}", clean(&title)));
+                app.chat.title = title;
+                vec![Cmd::LoadSessions]
+            }
+            Err(e) => {
+                app.notice = Some(e);
+                vec![]
+            }
+        },
+        Bg::Compacted(r, refresh) => {
+            app.chat.compacting = false;
+            app.chat.items.push(match r {
+                Ok(m) => super::chat::Item::Note(m),
+                Err(e) => super::chat::Item::Error(format!("no se pudo compactar: {e}")),
+            });
+            if let Some(r) = refresh {
+                app.chat.refresh(&r);
+            }
+            vec![]
+        }
+        Bg::Pending(r) => {
+            match r {
+                Ok((rows, others)) => {
+                    let mut lines: Vec<String> = rows.iter().map(|(_, l, _)| l.clone()).collect();
+                    let picks = rows.into_iter().map(|(id, _, what)| (id, what)).collect();
+                    if lines.is_empty() {
+                        lines.push("nada de esta sesión espera tu visto bueno".into());
+                    }
+                    let mut m = Modal::text("Pendientes", lines);
+                    m.picks = picks;
+                    if others > 0 {
+                        m.foot = Some(format!(
+                            "y {others} de otras sesiones: clio pending en una terminal"
+                        ));
+                    }
+                    app.modal = Some(m);
+                }
+                Err(e) => app.notice = Some(e),
+            }
+            vec![]
+        }
+        Bg::Modal(title, r) => {
+            match r {
+                Ok(lines) => app.modal = Some(Modal::text(&title, lines)),
+                Err(e) => app.notice = Some(e),
+            }
+            vec![]
+        }
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
             app.chat.aborting = false;
@@ -1033,12 +1165,18 @@ fn draw_top(f: &mut Frame, area: Rect, app: &App) {
     };
     let sep = format!(" {} ", t.dot());
     let warns = warnings(app).join(&sep);
+    // With Pi, how hard the model thinks too: `claude-sonnet-5-5 · bajo`.
     let model = app
         .home
         .header
         .as_ref()
         .filter(|h| h.config_error.is_none())
-        .map_or_else(String::new, |h| clean(&h.model));
+        .map_or_else(String::new, |h| {
+            match super::commands::level_name(&h.thinking) {
+                Some(level) if app.pi => format!("{} {} {level}", clean(&h.model), t.dot()),
+                _ => clean(&h.model),
+            }
+        });
     let lead = 1 + 4 + text::width(&sep);
     // The model gives way to what is wrong, and that is cut before it pushes "clio" out.
     let both = text::width(&warns) + 3 + text::width(&model);
@@ -1233,6 +1371,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         };
         footer(f, foot, app, 6, right);
     }
+    if let Some(m) = &app.modal {
+        // Under the top bar and its rule, which always stay.
+        super::commands::draw_modal(f, rest, app, m);
+    }
     if let Some(c) = &app.confirm {
         confirm_dialog(f, area, app, c);
     } else if let Some(n) = &app.notice {
@@ -1257,6 +1399,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
         Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
         Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
+        Action::UndoSession => "Deshacer los cambios de archivos de esta sesión en".to_owned(),
     };
     let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
     // A set-aside action (`«borrar» …`): its class in the warning color, the command under it.

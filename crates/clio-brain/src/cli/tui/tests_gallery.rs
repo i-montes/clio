@@ -24,6 +24,7 @@ pub(super) fn pi(host: bool) -> App {
     a.host = host;
     a.home.header = Some(Header {
         model: "claude-sonnet-5-5".into(),
+        thinking: "low".into(),
         key: KeyState::Present,
         connector: "anthropic".into(),
         vault: "activa".into(),
@@ -211,6 +212,83 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     a.home.doctor = Some((30, 2, 2));
     a.debug = true;
     out.push(("algo anda mal: llave, doctor, debug", a));
+    out.extend(command_states());
+    out
+}
+
+/// The slash commands: the menu, a command's choices, the boxes.
+fn command_states() -> Vec<(&'static str, App)> {
+    use super::commands::{self, Choice, Custom, Menu, Modal, Run, Target};
+    let menu = |input: &str| {
+        let mut a = conversation(true);
+        a.chat.set_input(input.into());
+        a.chat.menu = Some(Menu::default());
+        a.chat.customs = vec![Custom {
+            name: "revisa".into(),
+            what: "Revisa un archivo con cuidado".into(),
+            body: "Revisa $ARGUMENTS".into(),
+        }];
+        a
+    };
+    let mut out = vec![
+        ("menú de comandos", menu("/")),
+        ("menú filtrado", menu("/co")),
+    ];
+    let choice = |value: &str, label: &str, current: bool, blocked: Option<&str>| Choice {
+        value: value.into(),
+        label: label.into(),
+        blocked: blocked.map(str::to_owned),
+        current,
+    };
+    let mut a = menu("/esfuerzo");
+    let levels = ["off", "minimal", "low", "medium", "high"]
+        .iter()
+        .map(|l| choice(l, commands::level_name(l).unwrap(), *l == "low", None))
+        .collect();
+    a.chat.menu.as_mut().unwrap().pick = Some((Run::Effort, Some(levels)));
+    a.chat.menu.as_mut().unwrap().sel = 2;
+    out.push(("elegir el esfuerzo", a));
+    let mut a = menu("/conector");
+    a.chat.menu.as_mut().unwrap().pick = Some((
+        Run::Connector,
+        Some(vec![
+            choice("opencode", "opencode · beam-free", false, None),
+            choice(
+                "claude",
+                "claude · claude-sonnet-5-5",
+                false,
+                Some("sin llave: clio connect claude"),
+            ),
+            choice(
+                "anthropic-api",
+                "anthropic-api · claude-sonnet-5-5",
+                true,
+                None,
+            ),
+        ]),
+    ));
+    out.push(("elegir el conector", a));
+    let mut a = conversation(true);
+    commands::start(&mut a, Target::Builtin(Run::Usage), "");
+    out.push(("/uso", a));
+    let mut a = conversation(true);
+    let mut m = Modal::text(
+        "Pendientes",
+        vec![
+            "a1b2  «borrar»  sudo rm -r /var/lib/docker/volumes/viejo  · desde 2026-11-18 10:02 UTC · vence 2026-11-19 10:02 UTC".into(),
+            "c3d4  «servicio»  systemctl restart nginx  · desde 2026-11-18 10:05 UTC · vence 2026-11-19 10:05 UTC".into(),
+        ],
+    );
+    m.picks = vec![
+        (
+            "a1b2".into(),
+            "«borrar» sudo rm -r /var/lib/docker/volumes/viejo".into(),
+        ),
+        ("c3d4".into(), "«servicio» systemctl restart nginx".into()),
+    ];
+    m.foot = Some("y 1 de otras sesiones: clio pending en una terminal".into());
+    a.modal = Some(m);
+    out.push(("/pendientes", a));
     out
 }
 
@@ -255,6 +333,8 @@ fn tui_gallery() {
         println!("==== {name} (100x30)");
         println!("{}", screen_text(&a, 100, 30));
     }
+    println!("==== ayuda del chat, entera (100x90)");
+    println!("{}", screen_text(&a, 100, 90));
 }
 
 // Every state of the chat, at the sizes of the gallery and the minimum: the exact shape of the

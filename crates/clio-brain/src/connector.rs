@@ -153,6 +153,9 @@ impl Connector {
             } else {
                 vec![]
             },
+            // A reasoning model thinks for thousands of tokens on a simple step at Pi's default
+            // ("medium"): measured 46 s against 7 s at "low" for the same answer.
+            thinking: "low".into(),
         }
     }
 }

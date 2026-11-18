@@ -98,6 +98,7 @@ pub(super) fn with_runs() -> App {
     let mut a = app();
     a.home.header = Some(Header {
         model: "beam-free".into(),
+        thinking: "low".into(),
         key: KeyState::Present,
         connector: "opencode".into(),
         vault: "sin crear (opcional)".into(),

@@ -98,6 +98,19 @@ pub struct ModelCfg {
     /// only be a loopback address (checked when the config is loaded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// How hard the model thinks in a Pi session (`/esfuerzo` changes it): one of Pi's levels.
+    /// `low` by default: at Pi's own default ("medium") a reasoning model thinks for thousands
+    /// of tokens on a simple step (measured 46 s against 7 s for the same answer).
+    #[serde(default = "thinking_low")]
+    pub thinking: String,
+    /// The model last chosen for each connector (by its provider id), so `/conector` comes back
+    /// to it instead of the connector's default.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub last: std::collections::BTreeMap<String, String>,
+}
+
+fn thinking_low() -> String {
+    "low".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +236,13 @@ impl ModelCfg {
                 self.provider
             ));
         }
+        if !clio_brain::pi::launch::THINKING.contains(&self.thinking.as_str()) {
+            return Err(format!(
+                "{at}: model.thinking {:?} no es un nivel de Pi ({})",
+                self.thinking,
+                clio_brain::pi::launch::THINKING.join(", ")
+            ));
+        }
         if let Some(u) = &self.base_url
             && !clio_brain::connector::is_loopback(u)
         {
@@ -246,6 +266,8 @@ impl Config {
                 price_in_micro_per_mtok: 0,
                 price_out_micro_per_mtok: 0,
                 base_url: None,
+                thinking: thinking_low(),
+                last: std::collections::BTreeMap::new(),
             },
             limits: Limits {
                 max_steps: 40,

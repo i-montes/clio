@@ -461,17 +461,37 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
 
 pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
     let st = Style::stdout();
+    let (ok, said) = undo_lines(dirs, id, force)?;
+    for l in &said {
+        if ok {
+            println!("{} {l}", st.green(if st.unicode { "✓" } else { "ok:" }));
+        } else {
+            println!("{l}");
+        }
+    }
+    Ok(())
+}
+
+/// Undoes what run `id` changed and says what, one line each (already clean to show): a host
+/// session from its own journal, a copy from what was applied. `true` with one summary line
+/// when files of a copy came back.
+pub fn undo_lines(dirs: &Dirs, id: &str, force: bool) -> Res<(bool, Vec<String>)> {
     // A host session changed the machine itself: its own journal says what to give back.
     let run = runs::resolve(dirs, id)?;
     if run.meta().is_ok_and(|m| m.host) {
         let said = clio_toolhost::host::undo(&run.path.join("toolhost"))?;
         if said.is_empty() {
-            println!("no queda nada que deshacer en {}", run.id);
+            return Ok((
+                false,
+                vec![format!("no queda nada que deshacer en {}", run.id)],
+            ));
         }
-        for l in &said {
-            println!("  {}", sanitize::line(l));
-        }
-        return Ok(());
+        return Ok((
+            false,
+            said.iter()
+                .map(|l| format!("  {}", sanitize::line(l)))
+                .collect(),
+        ));
     }
     let n = undo_run(dirs, id, force)?;
     let total: usize = n.values().sum();
@@ -484,12 +504,13 @@ pub fn undo(dirs: &Dirs, id: &str, force: bool) -> Res<()> {
     .into_iter()
     .flatten()
     .collect();
-    println!(
-        "{} deshecho: {total} archivo(s) ({})",
-        st.green(if st.unicode { "✓" } else { "ok:" }),
-        parts.join(", ")
-    );
-    Ok(())
+    Ok((
+        true,
+        vec![format!(
+            "deshecho: {total} archivo(s) ({})",
+            parts.join(", ")
+        )],
+    ))
 }
 
 #[cfg(test)]
