@@ -29,6 +29,8 @@ pub(crate) const MAX_RUNNING: usize = 4;
 const FILE_CAP: u64 = 4 << 20;
 /// What one `job_output` hands over at most.
 const READ_CAP: u64 = 64 << 10;
+/// The log's rule for a job stopped because its session became suspect.
+const SUSPECT_RULE: &str = "judge/suspect";
 
 /// What a job's file holds: bytes `dropped..written` of everything it wrote.
 struct Out {
@@ -83,6 +85,8 @@ struct End {
     exit_code: Option<i32>,
     stopped: bool,
     timed_out: bool,
+    /// Stopped because its session became suspect while it had the network.
+    suspect: bool,
 }
 
 struct Job {
@@ -90,7 +94,11 @@ struct Job {
     what: String,
     /// It reached out or read a foreign folder: what it wrote is judged when it is read.
     judge: bool,
+    /// It has the network (asked for, or a program that reaches out by itself).
+    web: bool,
     stop: Arc<AtomicBool>,
+    /// Set before `stop` when the session became suspect.
+    suspect: Arc<AtomicBool>,
     out: Arc<Mutex<Out>>,
     end: Arc<Mutex<Option<End>>>,
     /// How far the model has read, in bytes of everything it wrote.
@@ -207,12 +215,14 @@ impl ToolHost {
             dropped: 0,
         }));
         let (stop, end) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(None)));
+        let suspect = Arc::new(AtomicBool::new(false));
         let sink: Sink = {
             let out = out.clone();
             Arc::new(move |b: &[u8]| lock(&out).append(b))
         };
         {
-            let (stop, end, out) = (stop.clone(), end.clone(), out.clone());
+            let (stop, end, out, suspect) =
+                (stop.clone(), end.clone(), out.clone(), suspect.clone());
             let (session, what, rule) = (req.session.clone(), what.clone(), decision.rule.clone());
             std::thread::spawn(move || {
                 let r = jail.run_streaming(&job, &|| stop.load(Ordering::SeqCst), sink);
@@ -221,6 +231,7 @@ impl ToolHost {
                         exit_code: o.exit_code,
                         stopped: o.stopped,
                         timed_out: o.timed_out,
+                        suspect: o.stopped && suspect.load(Ordering::SeqCst),
                     },
                     Err(e) => {
                         lock(&out).append(format!("\n[it could not start: {e}]\n").as_bytes());
@@ -228,13 +239,15 @@ impl ToolHost {
                             exit_code: None,
                             stopped: false,
                             timed_out: false,
+                            suspect: false,
                         }
                     }
                 };
                 let outcome = if e.stopped { "stopped" } else { "done" };
                 let code = e.exit_code.map(i64::from);
+                let rule = if e.suspect { SUSPECT_RULE } else { &rule };
                 if let Err(x) = log_line(
-                    &state, &run, &session, "exec", &what, network, outcome, &rule, code,
+                    &state, &run, &session, "exec", &what, network, outcome, rule, code,
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {x}");
                 }
@@ -247,7 +260,9 @@ impl ToolHost {
                 session: req.session.clone(),
                 what,
                 judge: web || foreign,
+                web,
                 stop,
+                suspect,
                 out,
                 end,
                 read: 0,
@@ -385,6 +400,17 @@ impl ToolHost {
         )
     }
 
+    /// The session just became suspect: its jobs with the network stop now (no wait), each with
+    /// its line in the log under `judge/suspect`; what stays on the machine goes on.
+    pub(crate) fn stop_web_jobs(&self, session: &str) {
+        for j in lock(&self.jobs.map).values() {
+            if j.session == session && j.web && j.ended().is_none() {
+                j.suspect.store(true, Ordering::SeqCst);
+                j.stop.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     /// Every background command is stopped (the service stops); waits up to `grace` for them.
     pub(crate) fn stop_jobs(&self, grace: Duration) {
         let ends: Vec<_> = lock(&self.jobs.map)
@@ -402,7 +428,9 @@ impl ToolHost {
 }
 
 fn ending(e: &End) -> String {
-    if e.stopped {
+    if e.suspect {
+        ": it was stopped because the session became suspect (it read text Clio's judge flagged) while this command had the network".into()
+    } else if e.stopped {
         ": it was stopped".into()
     } else if e.timed_out {
         ": its time limit ran out".into()

@@ -417,3 +417,53 @@ fn an_injection_in_a_log_is_withheld_and_what_it_asked_for_waits_for_the_person(
     assert!(!go.ok && go.decision.outcome == "ask", "{go:?}");
     assert_eq!(pending(&e).len(), 1);
 }
+
+// A job started with the network before the session became suspect does not keep it: it stops
+// when the judge flags something, says why, and the log has its line. One without the network
+// goes on.
+#[test]
+fn a_session_that_becomes_suspect_stops_its_jobs_with_the_network() {
+    let e = env_full(TextVerdict::Injection, true, Duration::ZERO, true);
+    if !exec_ok(&e) {
+        return;
+    }
+    let start = |c: &str, args: Value| {
+        let r = call(&e, "s", c, "exec", args);
+        assert!(r.ok, "{r:?}");
+        r.data["job"].as_str().unwrap().to_owned()
+    };
+    let web = start(
+        "c1",
+        json!({"command": "sleep 300", "network": true, "background": true}),
+    );
+    let local = start("c2", json!({"command": "sleep 300", "background": true}));
+    let log = e.r.join("inbox/app.log");
+    std::fs::write(&log, LETTER).unwrap();
+    call(&e, "s", "c3", "fs_read", json!({"path": p(&log)}));
+    let f = filter(&e, "s", "c3", LETTER);
+    assert!(f.data.get("withheld").is_some(), "{f:?}");
+    let until = Instant::now() + Duration::from_secs(10);
+    let out = loop {
+        let r = call(&e, "s", "c4", "job_output", json!({ "id": web }));
+        if r.data["running"] == false || Instant::now() > until {
+            break r;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        out.content.contains("because the session became suspect"),
+        "{out:?}"
+    );
+    let still = call(&e, "s", "c5", "job_output", json!({ "id": local }));
+    assert_eq!(still.data["running"], true, "{still:?}");
+    let actions = std::fs::read_to_string(e.r.join("clio/data/host/actions.jsonl")).unwrap();
+    let stopped: Vec<Value> = actions
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|l| l["outcome"] == "stopped")
+        .collect();
+    assert_eq!(stopped.len(), 1, "{actions}");
+    assert_eq!(stopped[0]["rule"], "judge/suspect");
+    assert_eq!(stopped[0]["network"], true);
+    e.host.stop(Duration::from_secs(5));
+}

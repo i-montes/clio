@@ -501,6 +501,10 @@ impl ToolHost {
         self.gateway.mark_tainted(session);
         if new {
             self.record_taint(&all);
+            // What it read may be what wants out: its jobs with the network stop.
+            if source == "suspect" {
+                self.stop_web_jobs(session);
+            }
         }
         true
     }
