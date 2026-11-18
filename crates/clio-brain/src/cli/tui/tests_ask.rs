@@ -421,3 +421,55 @@ fn esc_declines_a_secret_and_a_suspect_session_says_so() {
     };
     assert!(q.typing.is_none() && !q.ready);
 }
+
+// ---------------------------------------------------------------- the checklist
+
+pub(super) fn widget(key: &str, lines: Option<&[&str]>) -> Input {
+    Input::Bg(Bg::ChatEvent(Event::ExtensionUiRequest {
+        id: "w".into(),
+        method: "setWidget".into(),
+        title: String::new(),
+        options: vec![],
+        timeout_ms: None,
+        widget_key: key.into(),
+        widget_lines: lines.map(|l| l.iter().map(|s| (*s).to_owned()).collect()),
+    }))
+}
+
+#[test]
+fn the_checklist_is_pinned_above_the_status_line_and_only_its_widget_is_read() {
+    let lines = [
+        "[x] read the config",
+        "[>] fix the parser",
+        "[ ] run the tests",
+        "[ ] four",
+        "[ ] five",
+        "[ ] six",
+        "[ ] seven",
+        "[ ] eight",
+    ];
+    let (a, cmds) = feed(
+        chat(),
+        vec![
+            widget("other-ext", Some(&["[ ] not ours"])),
+            widget(super::todo::KEY, Some(&lines)),
+        ],
+    );
+    assert!(cmds.is_empty());
+    assert_eq!(a.chat.todo.len(), 8);
+    let screen = screen_text(&a, 90, 30);
+    assert!(!screen.contains("not ours"), "{screen}");
+    let rows: Vec<&str> = screen.lines().collect();
+    let first = rows
+        .iter()
+        .position(|l| l.contains("read the config"))
+        .unwrap();
+    assert!(rows[first].contains('✓') && rows[first + 1].contains("fix the parser"));
+    assert!(rows[first + 5].contains("+3 more"), "{screen}");
+    // The status line comes right under it, then the composer.
+    assert!(rows[first + 7].contains('╭'), "{screen}");
+    // Cleared: the rows go.
+    let (a, _) = feed(a, vec![widget(super::todo::KEY, None)]);
+    assert!(a.chat.todo.is_empty());
+    assert!(!screen_text(&a, 90, 30).contains("read the config"));
+}

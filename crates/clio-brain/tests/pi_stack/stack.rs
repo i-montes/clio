@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 /// The tools the guard registers: Pi's own, the thirteen memory ones and Clio's own. `grep` is not
 /// here: see the extension.
-const TOOLS: [&str; 21] = [
+const TOOLS: [&str; 22] = [
     "read",
     "write",
     "edit",
@@ -49,6 +49,7 @@ const TOOLS: [&str; 21] = [
     "memory_block_edit",
     "ask_person",
     "request_secret",
+    "todo_write",
 ];
 
 pub(crate) fn calls(list: &[(&str, Value)]) -> Turn {
@@ -1017,6 +1018,49 @@ fn ask_person_asks_through_pi_and_brings_back_only_the_persons_words() {
     assert_eq!(
         tool_ends(&ev)[0].2,
         "the person is not here: decide yourself and say what you assumed"
+    );
+}
+
+// todo_write: each call replaces the list, which goes to the client as Pi's widget `clio-todo`
+// (one marked line per item); the model reads a one-line count, its own words.
+#[test]
+fn todo_write_shows_the_whole_list_as_the_guards_widget() {
+    let Some(node) = pi_available() else {
+        return;
+    };
+    let w = world();
+    let model = FakeModel::scripted(vec![
+        call(
+            "todo_write",
+            json!({"items": [
+                {"text": "read the config", "status": "done"},
+                {"text": "fix the\nparser", "status": "in_progress"},
+                {"text": "run the tests", "status": "pending"}
+            ]}),
+        ),
+        call("todo_write", json!({"items": []})),
+        Turn::Text("done".into()),
+    ]);
+    let mut s = stack(&node, &w, &model, false, &Opts::default());
+    let ev = s.pi.prompt("plan it");
+    let widgets: Vec<&Value> = ev
+        .iter()
+        .filter(|e| e["type"] == "extension_ui_request" && e["method"] == "setWidget")
+        .collect();
+    assert_eq!(widgets.len(), 2, "{ev:#?}");
+    assert_eq!(widgets[0]["widgetKey"], "clio-todo");
+    assert_eq!(
+        widgets[0]["widgetLines"],
+        json!([
+            "[x] read the config",
+            "[>] fix the parser",
+            "[ ] run the tests"
+        ])
+    );
+    assert!(widgets[1]["widgetLines"].is_null(), "{:?}", widgets[1]);
+    assert_eq!(
+        tool_ends(&ev)[0].2,
+        "checklist saved: 1 done, 1 in progress, 1 pending"
     );
 }
 

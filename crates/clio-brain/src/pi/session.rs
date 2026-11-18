@@ -20,7 +20,7 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 21] = [
+pub const GUARD_TOOLS: [&str; 22] = [
     "read",
     "write",
     "edit",
@@ -42,6 +42,7 @@ pub const GUARD_TOOLS: [&str; 21] = [
     "memory_block_edit",
     "ask_person",
     "request_secret",
+    "todo_write",
 ];
 pub const PROMPT_NAME: &str = "clio-agent@20";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@20.md");

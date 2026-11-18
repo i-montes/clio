@@ -50,7 +50,7 @@ const WITHHELD = "clio-guard.withheld";
 // The judge is on and did not answer: the chat says it once.
 const JUDGE = "clio-guard.judge";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
-export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret"] as const;
+export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
 /**
  * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
@@ -79,6 +79,7 @@ export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
 	memory_block_edit: "cambiar, porque la persona lo pide aquí, quién es Clio, cómo trabaja, lo que sabe de la persona o lo que vigila",
 	ask_person: "ask the person one question with a few answers to pick from, when the doubt is real",
 	request_secret: "ask the person to put a token or key the task needs into the vault, bound to where it may be sent",
+	todo_write: "keep a short checklist of the steps of a longer job, shown to the person",
 };
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
@@ -104,7 +105,10 @@ const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
 // Tools whose result is Clio's own words or the person's, not outside content.
-const OWN_TOOLS = new Set(["ask_person", "request_secret"]);
+const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write"]);
+// `todo_write`: the widget the chat draws (the only one it reads) and the marks of its lines.
+const TODO_KEY = "clio-todo";
+const TODO_MARK: Record<string, string> = { done: "[x] ", in_progress: "[>] ", pending: "[ ] " };
 // A person answers the dialogs (the chat). Without one (`clio run`) nobody can be asked.
 const PERSON = process.env.CLIO_GUARD_PERSON === "1";
 // `ask_person`: how long the question waits, the row the person types into, and what the option
@@ -578,6 +582,56 @@ export default function clioGuard(pi: ExtensionAPI) {
 			content: [{ type: "text" as const, text: (await host("request_secret", params, id, signal)).content }],
 			details: {},
 		}),
+	});
+
+	// The model's checklist: each call replaces it whole. It lives here, for this session only,
+	// and is shown as Pi's widget `clio-todo` (the chat pins it, `clio run` prints it).
+	let todos: { text: string; status: string }[] = [];
+	register({
+		name: "todo_write",
+		label: "todo_write",
+		description:
+			"Write your checklist for a job of 3 or more steps; the person sees it. Each call replaces the whole list. Keep exactly one item in_progress and mark items done as you finish them.",
+		promptSnippet: "Keep a checklist of a longer job's steps (each call replaces the whole list).",
+		promptGuidelines: [
+			"todo_write: for jobs of 3 or more steps; exactly one item in_progress at a time; mark each item done as soon as it is, not all at the end.",
+		],
+		parameters: {
+			type: "object",
+			properties: {
+				items: {
+					type: "array",
+					maxItems: 30,
+					description: "The whole list, in order.",
+					items: {
+						type: "object",
+						properties: {
+							text: { type: "string", minLength: 1, maxLength: 200, description: "The step, a few words." },
+							status: { type: "string", enum: ["pending", "in_progress", "done"] },
+						},
+						required: ["text", "status"],
+						additionalProperties: false,
+					},
+				},
+			},
+			required: ["items"],
+			additionalProperties: false,
+		},
+		// biome-ignore lint/suspicious/noExplicitAny: Pi's tool context
+		execute: async (_id: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: any) => {
+			const items = (Array.isArray(params?.items) ? params.items : [])
+				.slice(0, 30)
+				.map((i: { text?: unknown; status?: unknown }) => ({
+					text: oneLine(i?.text, 200),
+					status: typeof i?.status === "string" && i.status in TODO_MARK ? i.status : "pending",
+				}))
+				.filter((i: { text: string }) => i.text);
+			todos = items;
+			if (ctx?.hasUI) ctx.ui.setWidget(TODO_KEY, todos.length ? todos.map((i) => TODO_MARK[i.status] + i.text) : undefined);
+			const n = (s: string) => todos.filter((i) => i.status === s).length;
+			const text = `checklist saved: ${n("done")} done, ${n("in_progress")} in progress, ${n("pending")} pending`;
+			return { content: [{ type: "text" as const, text }], details: {} };
+		},
 	});
 
 	// A project can not decide what Pi loads (S-16): always "no".

@@ -207,6 +207,21 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         question(&mut a, quiet, typed);
         out.push((name, a));
     }
+    let mut a = conversation(false);
+    a.chat.start_turn(188_000);
+    a.chat.todo = super::todo::parse(
+        &[
+            "[x] read the orders service config",
+            "[x] find where the connection pool is built",
+            "[>] move the pool size to the config file",
+            "[ ] update the tests that build a pool",
+            "[ ] run the whole test suite",
+            "[ ] write down what changed",
+            "[ ] tell the person what to restart",
+        ]
+        .map(String::from),
+    );
+    out.push(("lista de pasos", a));
     for (name, typed, suspect) in [
         ("Clio pide un secreto, vacío", 0, false),
         ("Clio pide un secreto, con caracteres", 23, true),

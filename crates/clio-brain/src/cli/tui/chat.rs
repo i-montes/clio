@@ -185,6 +185,8 @@ pub struct Chat {
     pub customs: Vec<super::commands::Custom>,
     /// `/compact` runs: nothing is sent until it ends.
     pub compacting: bool,
+    /// The model's checklist (`todo_write`), pinned above the status line.
+    pub todo: Vec<super::todo::Item>,
     streamed: bool,
     /// The text items as the last draw rendered them, by their place in the whole conversation
     /// (`dropped` + index), with the fingerprint of what went into them: parsing a long
@@ -236,6 +238,7 @@ impl Chat {
             menu: None,
             customs: vec![],
             compacting: false,
+            todo: vec![],
             streamed: false,
             rendered: RefCell::default(),
             dropped: 0,
@@ -536,6 +539,15 @@ impl Chat {
                 "aviso de la extensión: {}",
                 note(error)
             ))),
+            // Only the checklist's widget: any other key is not drawn.
+            Event::ExtensionUiRequest {
+                method,
+                widget_key,
+                widget_lines,
+                ..
+            } if method == "setWidget" && widget_key == super::todo::KEY => {
+                self.todo = super::todo::parse(widget_lines.as_deref().unwrap_or_default());
+            }
             _ => {}
         }
         // What this event added is paid from the budget; the oldest items go past the cap.
@@ -1287,9 +1299,10 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     } else {
         0
     };
-    let [conv, dbg, status, input, foot] = Layout::vertical([
+    let [conv, dbg, todo, status, input, foot] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(dbg_h),
+        Constraint::Length(super::todo::height(&c.todo)),
         Constraint::Length(1),
         Constraint::Length(u16::try_from(shown).unwrap_or(1) + 2),
         Constraint::Length(1),
@@ -1358,6 +1371,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(lines), dbg);
     }
 
+    super::todo::draw(f, todo, t, &c.todo);
     f.render_widget(
         Paragraph::new(status_line(app, usize::from(status.width))),
         status,

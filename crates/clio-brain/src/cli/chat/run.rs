@@ -12,7 +12,7 @@ use clio_brain::pi::rpc::{Cancel, Event};
 use super::local::LocalSource;
 use super::{SessionSource, Target};
 use crate::cli::home::{Dirs, Mode};
-use crate::cli::tui::sanitize;
+use crate::cli::tui::{sanitize, todo};
 use crate::cli::usage;
 use crate::cli::{Res, pending};
 use clio_toolhost::pending::Pending;
@@ -52,6 +52,23 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
                     if *is_error { "falló" } else { "ok" },
                     duration_ms.map_or_else(String::new, |m| format!(" ({})", usage::ms_label(m)))
                 );
+            }
+            // The checklist, whenever the model changes it.
+            Event::ExtensionUiRequest {
+                method,
+                widget_key,
+                widget_lines,
+                ..
+            } if method == "setWidget" && widget_key == todo::KEY => {
+                if mid_line {
+                    println!();
+                    mid_line = false;
+                }
+                let items = todo::parse(widget_lines.as_deref().unwrap_or_default());
+                println!("  checklist:");
+                for l in todo::plain(&items) {
+                    println!("  {l}");
+                }
             }
             _ => {}
         });

@@ -26,6 +26,7 @@ pub mod sessions;
 pub mod status;
 pub mod text;
 pub mod theme;
+pub mod todo;
 
 #[cfg(test)]
 mod tests;
