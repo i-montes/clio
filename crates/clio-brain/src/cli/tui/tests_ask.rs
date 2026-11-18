@@ -266,7 +266,7 @@ fn a_click_selects_only_the_row_drawn_there_and_never_answers() {
     let (b, _) = feed(chat(), vec![select("q9", "Other", &["A", "B"])]);
     let mut fresh = b.prompt.unwrap();
     if let (Prompt::Question(n), Some(Prompt::Question(old))) = (&mut fresh, &a.prompt) {
-        n.rows_at.set(old.rows_at.get());
+        n.rows_at.replace(old.rows_at.borrow().clone());
     }
     a.prompt = Some(fresh);
     let (a, _) = feed(a, vec![click(x, y - 1)]);
@@ -274,6 +274,67 @@ fn a_click_selects_only_the_row_drawn_there_and_never_answers() {
         panic!()
     };
     assert_eq!(q.sel, 0);
+}
+
+pub(super) const LONG: [&str; 3] = [
+    "Postgres — what the orders, billing and search services already use, with backups every night and a replica in the other zone",
+    "SQLite — one file, nothing to run",
+    "Keep both",
+];
+
+// A long description wraps onto dim rows under its label (three rows at most, then cut), and a
+// click on any row of an answer selects that answer.
+#[test]
+fn a_long_description_wraps_under_its_answer_and_a_click_on_it_picks_that_answer() {
+    let (a, _) = feed(chat(), vec![select("q1", "Which database?", &LONG)]);
+    let screen = screen_text(&a, 60, 30);
+    let rows: Vec<&str> = screen.lines().collect();
+    let top = rows.iter().position(|l| l.contains("1  Postgres")).unwrap();
+    assert!(
+        rows[top + 1].contains("services") || rows[top + 1].contains("billing"),
+        "{screen}"
+    );
+    assert!(rows[top + 2].contains('…'), "{screen}");
+    assert!(rows[top + 3].contains("2  SQLite"), "{screen}");
+    let click = |y: usize| {
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: u16::try_from(y).unwrap(),
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let pick = |a: App, y: usize| {
+        let (a, cmds) = feed(a, vec![click(y)]);
+        assert!(cmds.is_empty());
+        let Some(Prompt::Question(q)) = &a.prompt else {
+            panic!()
+        };
+        let sel = q.sel;
+        (a, sel)
+    };
+    let (a, sel) = pick(a, top + 3);
+    assert_eq!(sel, 1);
+    let (a, sel) = pick(a, top + 2);
+    assert_eq!(sel, 0);
+    let (_, sel) = pick(a, top + 4);
+    assert_eq!(sel, 2);
+}
+
+#[test]
+fn the_other_field_says_never_to_type_a_secret_there() {
+    let (a, _) = feed(
+        chat(),
+        vec![
+            select("q1", "Which database?", &OPTIONS),
+            Input::Tick(2_000),
+            ch('4'),
+        ],
+    );
+    let screen = screen_text(&a, 90, 30);
+    assert!(screen.contains(super::ask::NO_SECRETS), "{screen}");
+    let (b, _) = feed(chat(), vec![select("q1", "Which database?", &OPTIONS)]);
+    assert!(!screen_text(&b, 90, 30).contains("Never type a secret"));
 }
 
 #[test]

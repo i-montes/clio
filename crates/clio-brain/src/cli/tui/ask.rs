@@ -11,7 +11,7 @@
 //! the end of the turn: its name, where it may be sent, why, and a masked field. The value lives
 //! only here, in a `SecretValue` (zeroed when dropped), and goes from here to the vault.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -64,9 +64,10 @@ pub struct Question {
     pub shown_ms: u64,
     /// Pi gives up on the dialog then (it answers the model by itself): the box goes too.
     pub deadline_ms: u64,
-    /// Where the last draw put the option rows, how many, and what they said: a click picks
-    /// a row only if the row drawn there is still that row.
-    pub rows_at: Cell<(Rect, usize, u64)>,
+    /// Where the last draw put the option rows, the option each row belongs to (a long one
+    /// takes more than one), and what they said: a click picks a row only if the row drawn there
+    /// is still that row.
+    pub rows_at: RefCell<(Rect, Vec<usize>, u64)>,
 }
 
 /// Model text for the box: one line, cleaned, at most `max` characters.
@@ -114,7 +115,7 @@ impl Question {
             decided: None,
             shown_ms: now_ms,
             deadline_ms: now_ms.saturating_add(timeout_ms.unwrap_or(DEFAULT_WAIT_MS)),
-            rows_at: Cell::new((Rect::default(), 0, 0)),
+            rows_at: RefCell::new((Rect::default(), vec![], 0)),
         })
     }
 
@@ -140,7 +141,7 @@ impl Question {
             decided: None,
             shown_ms: now_ms,
             deadline_ms: now_ms.saturating_add(timeout_ms.unwrap_or(DEFAULT_WAIT_MS)),
-            rows_at: Cell::new((Rect::default(), 0, 0)),
+            rows_at: RefCell::new((Rect::default(), vec![], 0)),
         }
     }
 
@@ -155,6 +156,11 @@ impl Question {
         h.finish()
     }
 }
+
+/// Rows an answer takes at most: its label and description wrap onto dim rows under it.
+const OPTION_ROWS: usize = 3;
+/// Under the `Other…` field, always: a question is the model's, and could be after a secret.
+pub const NO_SECRETS: &str = "Never type a secret here; Clio asks for secrets in their own box.";
 
 /// The longest value the secret field takes, in bytes: its buffer never grows.
 pub const MAX_SECRET: usize = 8192;
@@ -406,12 +412,14 @@ pub fn click(app: &mut App, m: &MouseEvent) {
     if m.kind != MouseEventKind::Down(MouseButton::Left) || q.typing.is_some() {
         return;
     }
-    let (area, count, drawn) = q.rows_at.get();
-    if !area.contains(Position::new(m.column, m.row)) || drawn != q.rows_id() {
-        return;
-    }
-    let i = usize::from(m.row - area.y);
-    if i < count {
+    let picked = {
+        let (area, owner, drawn) = &*q.rows_at.borrow();
+        if !area.contains(Position::new(m.column, m.row)) || *drawn != q.rows_id() {
+            return;
+        }
+        owner.get(usize::from(m.row - area.y)).copied()
+    };
+    if let Some(i) = picked {
         q.sel = i;
     }
 }
@@ -428,6 +436,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, q: &Question) {
     ));
     rows.push(Line::from(""));
     let first = rows.len();
+    // The option of each row, for a click.
+    let mut owner = Vec::new();
     for (i, (label, desc)) in q.options.iter().enumerate() {
         let mut head = format!("{}  {label}", i + 1);
         if i == 0 {
@@ -438,7 +448,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, q: &Question) {
         } else {
             format!("{head}  {} {desc}", t.dot())
         };
-        rows.push(row(t, &line, i == q.sel && q.typing.is_none(), w));
+        let selected = i == q.sel && q.typing.is_none();
+        let option = option_rows(t, &line, selected, w);
+        owner.extend(std::iter::repeat_n(i, option.len()));
+        rows.extend(option);
     }
     if q.other {
         let i = q.options.len();
@@ -448,6 +461,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, q: &Question) {
             i == q.sel && q.typing.is_none(),
             w,
         ));
+        owner.push(i);
     }
     if let Some(typed) = &q.typing {
         if !q.options.is_empty() {
@@ -462,6 +476,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, q: &Question) {
             Span::styled(format!("  {} ", t.prompt()), t.accent_line()),
             Span::raw(shown),
         ]));
+        rows.extend(app::wrap_line(
+            Line::from(Span::styled(NO_SECRETS, t.dim())),
+            w,
+        ));
     }
     let waiting = !q.ready && !app.quiet();
     if waiting {
@@ -493,14 +511,38 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, q: &Question) {
     };
     rows.extend(app::wrap_line(hint, w));
     let at = app::dialog_box(f, area, t, " Clio asks ", rows, t.accent_line());
-    if q.rows() > 0 {
+    if !owner.is_empty() {
         let y =
             at.y.saturating_add(u16::try_from(first).unwrap_or(u16::MAX));
-        let h = u16::try_from(q.rows()).unwrap_or(0);
+        let h = u16::try_from(owner.len()).unwrap_or(0);
         // Only what the box really shows can be clicked.
         let area = Rect::new(at.x, y, at.width, h).intersection(at);
-        q.rows_at.set((area, usize::from(area.height), q.rows_id()));
+        owner.truncate(usize::from(area.height));
+        q.rows_at.replace((area, owner, q.rows_id()));
     }
+}
+
+/// One answer: on one row when it fits; else wrapped, the rest on dim rows under its label, at
+/// most `OPTION_ROWS` (the last cut with an ellipsis).
+fn option_rows(t: super::theme::Theme, s: &str, selected: bool, w: usize) -> Vec<Line<'static>> {
+    // The mark and its space, and the digit and its two spaces: where the label starts.
+    let indent = 5;
+    if text::width(s) + 2 <= w {
+        return vec![row(t, s, selected, w)];
+    }
+    let room = w.saturating_sub(indent).max(1);
+    let parts = text::wrap_ranges(s, room);
+    let mut out = vec![row(t, &s[parts[0].0..parts[0].1], selected, w)];
+    for (k, &(a, b)) in parts.iter().enumerate().skip(1).take(OPTION_ROWS - 1) {
+        let last = k == OPTION_ROWS - 1 && parts.len() > OPTION_ROWS;
+        // The last row takes the rest, cut: it ends in the ellipsis.
+        let part = text::fit(if last { &s[a..] } else { &s[a..b] }, room, t.ellipsis());
+        out.push(Line::from(Span::styled(
+            format!("{}{part}", " ".repeat(indent)),
+            t.dim(),
+        )));
+    }
+    out
 }
 
 /// One answer, on one row: the selected one across the width.

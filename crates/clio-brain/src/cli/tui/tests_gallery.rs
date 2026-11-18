@@ -139,10 +139,11 @@ fn approve(a: &mut App, quiet: bool) {
 
 /// Clio asks (`ask_person`): within the quiet second or after it, and with `Other…` typed.
 fn question(a: &mut App, quiet: bool, typed: Option<&str>) {
-    let mut options: Vec<String> = super::tests_ask::OPTIONS
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
+    question_with(a, &super::tests_ask::OPTIONS, quiet, typed);
+}
+
+fn question_with(a: &mut App, answers: &[&str], quiet: bool, typed: Option<&str>) {
+    let mut options: Vec<String> = answers.iter().map(|s| (*s).to_owned()).collect();
     options.push(super::ask::OTHER.into());
     let mut q = super::ask::Question::from_select(
         "q1",
@@ -207,6 +208,9 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         question(&mut a, quiet, typed);
         out.push((name, a));
     }
+    let mut a = conversation(false);
+    question_with(&mut a, &super::tests_ask::LONG, true, None);
+    out.push(("Clio pregunta, una descripción larga", a));
     let mut a = conversation(false);
     a.chat.start_turn(188_000);
     a.chat.todo = super::todo::parse(
