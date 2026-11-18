@@ -422,6 +422,36 @@ fn esc_declines_a_secret_and_a_suspect_session_says_so() {
     assert!(q.typing.is_none() && !q.ready);
 }
 
+// A store the vault refused: the worker offers the box again (the request still waits) and the
+// error goes to the chat; the box is empty, ready for the value again.
+#[test]
+fn a_secret_the_vault_refused_comes_back_with_the_error_in_the_chat() {
+    let (a, _) = feed(chat(), vec![secrets(false), Input::Tick(2_000)]);
+    let mut inputs: Vec<Input> = VALUE.chars().map(ch).collect();
+    inputs.push(key(KeyCode::Enter));
+    let (a, cmds) = feed(a, inputs);
+    assert!(a.prompt.is_none() && cmds.len() == 1);
+    let (a, _) = feed(
+        a,
+        vec![
+            secrets(false),
+            Input::Bg(Bg::ChatAnswered(Err("linear: the vault is locked".into()))),
+        ],
+    );
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!("the box did not come back")
+    };
+    assert!(s.value.is_empty() && a.answering == 0);
+    let screen = screen_text(&a, 90, 30);
+    assert!(screen.contains("Clio asks for a secret"), "{screen}");
+    assert!(
+        a.chat
+            .items
+            .iter()
+            .any(|i| matches!(i, super::chat::Item::Error(e) if e.contains("vault is locked")))
+    );
+}
+
 // ---------------------------------------------------------------- the checklist
 
 pub(super) fn widget(key: &str, lines: Option<&[&str]>) -> Input {

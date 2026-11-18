@@ -63,6 +63,14 @@ pub fn answer_secret(dirs: &Dirs, id: &str, value: Option<&SecretValue>) -> Res<
     Ok(note)
 }
 
+/// Secret request `id` while it still waits for the person: (name, destination, why). After a
+/// store the vault refused, the box is offered again from this.
+pub fn secret_waiting(dirs: &Dirs, id: &str) -> Option<(String, String, String)> {
+    let p = pending::check(&state(dirs), id, now_ms()).ok()?;
+    let (n, d, w) = pending::secret_of(&p)?;
+    Some((n.into(), d.into(), w.into()))
+}
+
 /// Its class in «», and why it waits when the class alone does not say it.
 pub fn label(p: &Pending) -> String {
     match &p.reason {
@@ -470,8 +478,15 @@ mod tests {
             .unwrap();
         let err = answer_secret(&dirs, &id, Some(&v)).unwrap_err();
         assert!(err.contains("already exists"), "{err}");
-        // It still waits: the person can answer it again.
+        // It still waits: the box is offered again, and the person can answer it again.
         assert!(pending::check(&state(&dirs), &id, now_ms()).is_ok());
+        let again = secret_waiting(&dirs, &id).unwrap();
+        assert_eq!(again.0, "other");
+        assert_eq!(
+            answer_secret(&dirs, &id, None).unwrap(),
+            "the person declined other"
+        );
+        assert!(secret_waiting(&dirs, &id).is_none());
         // An action set aside is not a secret request.
         assert!(answer_secret(&dirs, "nope", None).is_err());
     }

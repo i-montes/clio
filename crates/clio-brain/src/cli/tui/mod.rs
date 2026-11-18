@@ -1128,8 +1128,18 @@ impl Ctx {
                 };
                 // The value is dropped (and zeroed) when the worker is done with it.
                 self.spawn(
-                    move |_, _| {
+                    move |d, tx| {
                         let r = session.answer_secret(&id, value.as_ref().map(|b| &*b.0));
+                        // The vault refused it (locked, the name taken meanwhile): the request
+                        // still waits, so its box comes back, empty, with the error under it.
+                        if r.is_err()
+                            && let Some(again) = super::pending::secret_waiting(d, &id)
+                        {
+                            let _ = tx.send(Input::Bg(Bg::ChatSecrets(
+                                vec![(id.clone(), again)],
+                                session.suspect(),
+                            )));
+                        }
                         r.map_err(|e| format!("{name}: {e}"))
                     },
                     |r| Bg::ChatAnswered(r.and_then(|x| x)),
