@@ -254,7 +254,7 @@ impl SessionSource for LocalSource {
         let launch = Launch {
             guard: Some(ensure_guard(&install)?),
             guard_tools: GUARD_TOOLS.map(String::from).to_vec(),
-            extra_env: guard_env(&paths, &toolhost, host)?,
+            extra_env: guard_env(&paths, &toolhost, host, self.presentation)?,
             provider: provider_of(d, &cfg),
             api_key: Some(key),
             cwd: work.clone(),
@@ -266,6 +266,8 @@ impl SessionSource for LocalSource {
             helper: exe,
         };
         let pi = start(&launch).map_err(text)?;
+        // A conversation: the person answers the guard's questions (`ask_person`).
+        pi.client.set_interactive(self.presentation);
         let history = pi.client.get_messages().map_err(text)?;
         // Clio's identity ships with her: written once, on a memory that has none. A memory that
         // cannot be opened for writing now is left as it is (the next session tries again).
@@ -523,6 +525,11 @@ impl Session for ChatSession {
 
     fn steer(&self, text: &str) -> Result<(), PiError> {
         self.pi.client.steer(text)
+    }
+
+    fn ui_respond(&self, id: &str, value: Option<&str>) {
+        // Best effort: a Pi that is gone has nobody waiting for the answer.
+        let _ = self.pi.client.ui_respond(id, value);
     }
 
     fn refresh(&self) -> Result<Refresh, PiError> {

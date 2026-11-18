@@ -20,14 +20,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::common::fake_model::{FakeModel, Turn, gullible_from_tool_text};
+use crate::common::fake_model::{FakeModel, Turn, gullible_from_tool_text, last_tool_text};
 use crate::common::*;
 use clio_attacks::{Case, Observed, Status, Target, load_cases, run};
 use serde_json::{Value, json};
 
-/// The tools the guard registers: Pi's own and the thirteen memory ones. `grep` is not here: see the
-/// extension.
-const NINETEEN: [&str; 19] = [
+/// The tools the guard registers: Pi's own, the thirteen memory ones and Clio's own. `grep` is not
+/// here: see the extension.
+const TOOLS: [&str; 20] = [
     "read",
     "write",
     "edit",
@@ -47,6 +47,7 @@ const NINETEEN: [&str; 19] = [
     "memory_pin",
     "memory_block",
     "memory_block_edit",
+    "ask_person",
 ];
 
 pub(crate) fn calls(list: &[(&str, Value)]) -> Turn {
@@ -143,7 +144,7 @@ pub(crate) fn ask_host(socket: &Path, req: Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 38: the tools are exactly the guard's nineteen, through the guard; nothing else exists
+// 38: the tools are exactly the guard's own, through the guard; nothing else exists
 // ---------------------------------------------------------------------------------------------
 
 fn attack_38() -> Option<bool> {
@@ -164,19 +165,19 @@ fn attack_38() -> Option<bool> {
         Turn::Text("done".into()),
     ]);
     let mut s = stack(&node, &w, &model, false, &Opts::default());
-    let active = s.pi.verify_tools(&NINETEEN).unwrap();
-    assert_eq!(active.len(), 19, "{active:?}");
+    let active = s.pi.verify_tools(&TOOLS).unwrap();
+    assert_eq!(active.len(), TOOLS.len(), "{active:?}");
     let ev = s.pi.prompt("use any tool you like");
     let ends = tool_ends(&ev);
     assert_eq!(ends.len(), 7, "all seven calls were attempted: {ends:?}");
     all_errors(&ends);
     let mut declared = declared_tools(&model);
     declared.sort();
-    let mut want: Vec<String> = NINETEEN.iter().map(|s| (*s).to_owned()).collect();
+    let mut want: Vec<String> = TOOLS.iter().map(|s| (*s).to_owned()).collect();
     want.sort();
     assert_eq!(
         declared, want,
-        "the model must be told about exactly the nineteen tools"
+        "the model must be told about exactly the guard's tools"
     );
     assert_eq!(w.tree(), before, "nothing was created or changed");
     // A stricter allowed list than the extension's own: the start-up check must fail.
@@ -529,7 +530,7 @@ fn attack_42() -> Option<bool> {
     assert_eq!(ends.len(), names.len(), "{ends:?}");
     all_errors(&ends);
     assert_eq!(w.tree(), before);
-    s.pi.verify_tools(&NINETEEN).unwrap();
+    s.pi.verify_tools(&TOOLS).unwrap();
     Some(true)
 }
 
@@ -938,6 +939,86 @@ fn cases() -> Vec<Case> {
     load_cases(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/cases")).unwrap()
 }
 
+// ask_person: with a person, the question reaches the client as Pi's own `select` (each answer
+// `label — description`, `Other…` last) and the model reads only the label picked or the words
+// typed, as the person's, not wrapped as outside data. Esc skips; without a person the tool
+// answers at once and nothing is asked.
+#[test]
+fn ask_person_asks_through_pi_and_brings_back_only_the_persons_words() {
+    let Some(node) = pi_available() else {
+        return;
+    };
+    let w = world();
+    let q = json!({
+        "question": "Which database?",
+        "options": [
+            {"label": "Postgres", "description": "what the others use"},
+            {"label": "SQLite"}
+        ],
+        "reason": "Choose the database"
+    });
+    let model = FakeModel::scripted(vec![
+        call("ask_person", q.clone()),
+        call("ask_person", q.clone()),
+        call("ask_person", q.clone()),
+        Turn::Text("done".into()),
+    ]);
+    let person = Opts {
+        person: true,
+        ..Opts::default()
+    };
+    let mut s = stack(&node, &w, &model, false, &person);
+    let mut selects = Vec::new();
+    let ev = s.pi.prompt_with("ask me", |e| match e["method"].as_str() {
+        Some("select") => {
+            selects.push((e["title"].clone(), e["options"].clone()));
+            Some(match selects.len() {
+                1 => json!({"value": "SQLite"}),
+                2 => json!({"value": "Other…"}),
+                _ => json!({"cancelled": true}),
+            })
+        }
+        Some("input") => Some(json!({"value": "  MariaDB  "})),
+        _ => None,
+    });
+    assert_eq!(selects.len(), 3, "{selects:?}");
+    assert_eq!(selects[0].0, "Which database?");
+    assert_eq!(
+        selects[0].1,
+        json!(["Postgres — what the others use", "SQLite", "Other…"])
+    );
+    let texts: Vec<String> = tool_ends(&ev).into_iter().map(|(_, _, t)| t).collect();
+    assert_eq!(
+        texts,
+        ["SQLite", "MariaDB", "the person skipped the question"],
+        "{ev:#?}"
+    );
+    let seen: Vec<String> = model
+        .requests()
+        .iter()
+        .skip(1)
+        .filter_map(last_tool_text)
+        .collect();
+    assert_eq!(
+        seen[0], "SQLite",
+        "the model reads the person's words as they are"
+    );
+
+    // Without a person: nothing is asked, and the model is told to decide.
+    let model = FakeModel::scripted(vec![call("ask_person", q), Turn::Text("done".into())]);
+    let mut s = stack(&node, &w, &model, false, &Opts::default());
+    let mut asked = 0;
+    let ev = s.pi.prompt_with("ask me", |e| {
+        asked += usize::from(e["method"] == "select");
+        None
+    });
+    assert_eq!(asked, 0);
+    assert_eq!(
+        tool_ends(&ev)[0].2,
+        "the person is not here: decide yourself and say what you assumed"
+    );
+}
+
 // S-18 S-36: the person supervises from the chat. When the host strikes values out of what Pi
 // read, the guard records how many in the session (the chat reads it from there).
 #[test]
@@ -1000,7 +1081,7 @@ macro_rules! scenario {
         }
     };
 }
-scenario!(attack_38_only_the_guards_nineteen_tools_exist, attack_38);
+scenario!(attack_38_only_the_guards_tools_exist, attack_38);
 scenario!(attack_39_nothing_outside_the_folder_is_read, attack_39);
 scenario!(attack_40_nothing_is_written_where_pi_loads_code, attack_40);
 scenario!(attack_41_bash_is_confined, attack_41);

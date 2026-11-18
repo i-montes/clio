@@ -261,6 +261,8 @@ pub struct Opts {
     pub extension: bool,
     pub session: Option<PathBuf>,
     pub prompt_file: Option<PathBuf>,
+    /// A person is there to answer the guard's questions (the chat), as `CLIO_GUARD_PERSON`.
+    pub person: bool,
 }
 
 impl Default for Opts {
@@ -269,6 +271,7 @@ impl Default for Opts {
             extension: true,
             session: None,
             prompt_file: None,
+            person: false,
         }
     }
 }
@@ -309,6 +312,12 @@ fn launch_of(
     ];
     if let Some(s) = socket {
         extra_env.push(("CLIO_TOOLHOST_SOCKET".to_owned(), s.display().to_string()));
+    }
+    if o.person {
+        extra_env.push((
+            clio_brain::pi::session::PERSON_ENV.to_owned(),
+            "1".to_owned(),
+        ));
     }
     Ok(Launch {
         install: install.clone(),
@@ -443,6 +452,16 @@ impl Pi {
 
     /// Sends a prompt and returns every event until Pi settles.
     pub fn prompt(&mut self, text: &str) -> Vec<Value> {
+        self.prompt_with(text, |_| None)
+    }
+
+    /// `prompt`, with a person: `ui` sees every `extension_ui_request` and may answer it (the
+    /// fields of the `extension_ui_response`, `{"value": …}` or `{"cancelled": true}`).
+    pub fn prompt_with(
+        &mut self,
+        text: &str,
+        mut ui: impl FnMut(&Value) -> Option<Value>,
+    ) -> Vec<Value> {
         let id = self.send(json!({"type":"prompt","message":text}));
         let end = Instant::now() + Duration::from_secs(120);
         let mut events = Vec::new();
@@ -452,6 +471,15 @@ impl Pi {
                 .recv_timeout(end.saturating_duration_since(Instant::now()))
             {
                 Ok(e) => {
+                    if e["type"] == "extension_ui_request"
+                        && let Some(mut answer) = ui(&e)
+                    {
+                        answer["type"] = json!("extension_ui_response");
+                        answer["id"] = e["id"].clone();
+                        let stdin = self.stdin.as_mut().expect("stdin open");
+                        writeln!(stdin, "{answer}").unwrap();
+                        stdin.flush().unwrap();
+                    }
                     let done = e["type"] == "agent_settled";
                     let refused = e["type"] == "response" && e["id"] == id && e["success"] == false;
                     events.push(e);

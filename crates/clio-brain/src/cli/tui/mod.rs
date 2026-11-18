@@ -7,6 +7,7 @@
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod ask;
 pub mod chat;
 pub mod commands;
 pub mod composer;
@@ -28,6 +29,8 @@ pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_ask;
 #[cfg(test)]
 mod tests_commands;
 #[cfg(test)]
@@ -1101,6 +1104,12 @@ impl Ctx {
                     move |_, _| session.answer(&id, yes),
                     |r| Bg::ChatAnswered(r.and_then(|x| x)),
                 );
+            }
+            // One line to Pi's stdin: no worker needed.
+            Cmd::ChatUi { id, value } => {
+                if let Some(session) = self.current_chat() {
+                    session.ui_respond(&id, value.as_deref());
+                }
             }
             Cmd::ChatAbort => {
                 if let Ok(c) = self.chat_cancel.lock() {

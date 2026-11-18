@@ -20,7 +20,7 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 19] = [
+pub const GUARD_TOOLS: [&str; 20] = [
     "read",
     "write",
     "edit",
@@ -40,17 +40,18 @@ pub const GUARD_TOOLS: [&str; 19] = [
     "memory_pin",
     "memory_block",
     "memory_block_edit",
+    "ask_person",
 ];
-pub const PROMPT_NAME: &str = "clio-agent@19";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@19.md");
+pub const PROMPT_NAME: &str = "clio-agent@20";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@20.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@3";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@3.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@4";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@4.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -126,10 +127,13 @@ fn write_named_prompt(paths: &PiPaths, name: &str, body: &str) -> Result<PathBuf
 
 /// The guard's own variables (prompt file and version, toolhost socket) for `Launch::extra_env`.
 /// `host`: the host-mode prompt and `CLIO_GUARD_HOST=1`, which the guard and Pi's jail read.
+/// `person`: someone answers the guard's questions (the chat), `CLIO_GUARD_PERSON=1`; without it
+/// (`clio run`) `ask_person` answers at once that nobody is there.
 pub fn guard_env(
     paths: &PiPaths,
     toolhost: &Toolhost,
     host: bool,
+    person: bool,
 ) -> Result<Vec<(String, String)>, String> {
     let (name, body) = if host {
         (HOST_PROMPT_NAME, HOST_PROMPT)
@@ -150,11 +154,16 @@ pub fn guard_env(
     if host {
         env.push((HOST_ENV.into(), "1".into()));
     }
+    if person {
+        env.push((PERSON_ENV.into(), "1".into()));
+    }
     Ok(env)
 }
 
 /// Set in Pi's environment for a host-mode session.
 pub const HOST_ENV: &str = "CLIO_GUARD_HOST";
+/// Set in Pi's environment when a person answers the guard's dialogs.
+pub const PERSON_ENV: &str = "CLIO_GUARD_PERSON";
 
 /// What a tool host may be given besides its folders.
 #[derive(Default, Clone, Copy)]
@@ -360,7 +369,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guard_tools_are_the_nineteen_the_extension_registers() {
+    fn the_guard_tools_are_the_ones_the_extension_registers() {
         // Same list as TOOL_NAMES in adapters/pi/extensions/clio-guard/index.ts.
         let (_, index) = GUARD_FILES[0];
         let line = index
@@ -377,6 +386,6 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took «Jev» (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 19\n"));
+        assert!(PROMPT.starts_with("version: 20\n"));
     }
 }

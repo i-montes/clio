@@ -4,8 +4,9 @@
 //! group, and stderr captured, capped and sanitized.
 //!
 //! A reader thread owns stdout. It routes responses to whoever waits for that `id`, answers
-//! every extension dialog with "cancelled" (the person sees no extension dialogs in this version)
-//! and queues everything else as events. [`RpcClient`] is `Sync`: another thread may `steer` or
+//! every extension dialog with "cancelled" (unless the client is interactive: then `select` and
+//! `input` wait for [`RpcClient::ui_respond`], the person's answer) and queues everything else as
+//! events. [`RpcClient`] is `Sync`: another thread may `steer` or
 //! `abort` while one waits in [`RpcClient::run_prompt`].
 
 use std::collections::HashMap;
@@ -29,6 +30,8 @@ const MAX_ERRORS: usize = 50;
 const STDERR_KEEP: usize = 32 * 1024;
 /// How much of stderr is shown in an error.
 const STDERR_SHOWN: usize = 800;
+/// Options of a dialog, lines of a widget: more than this are dropped.
+pub const MAX_UI_ITEMS: usize = 32;
 
 /// Token counts and cost. `cost` is in US dollars.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -152,10 +155,20 @@ pub enum Event {
         event: String,
         error: String,
     },
-    /// A dialog or notification from an extension (already answered "cancelled" if it was a dialog).
+    /// A dialog or notification from an extension (already answered "cancelled" if it was a
+    /// dialog the client does not take). Text fields are as Pi sent them, capped in number.
     ExtensionUiRequest {
         id: String,
         method: String,
+        /// `select`, `input`: the question.
+        title: String,
+        /// `select`: the choices (at most `MAX_UI_ITEMS`).
+        options: Vec<String>,
+        /// A dialog Pi resolves by itself after this long.
+        timeout_ms: Option<u64>,
+        /// `setWidget`: its key, and its lines (`None` clears it; at most `MAX_UI_ITEMS`).
+        widget_key: String,
+        widget_lines: Option<Vec<String>>,
     },
     /// A response nobody was waiting for (for example the answer to unparsable input).
     Response(Response),
@@ -295,10 +308,25 @@ impl Event {
                 event: s(v, "event"),
                 error: s(v, "error"),
             },
-            "extension_ui_request" => Self::ExtensionUiRequest {
-                id: s(v, "id"),
-                method: s(v, "method"),
-            },
+            "extension_ui_request" => {
+                let list = |k: &str| {
+                    v[k].as_array().map(|a| {
+                        a.iter()
+                            .take(MAX_UI_ITEMS)
+                            .map(|x| x.as_str().unwrap_or("").to_owned())
+                            .collect()
+                    })
+                };
+                Self::ExtensionUiRequest {
+                    id: s(v, "id"),
+                    method: s(v, "method"),
+                    title: s(v, "title"),
+                    options: list("options").unwrap_or_default(),
+                    timeout_ms: v["timeout"].as_u64(),
+                    widget_key: s(v, "widgetKey"),
+                    widget_lines: list("widgetLines"),
+                }
+            }
             "response" => Self::Response(Response::from_value(v)),
             _ => Self::Unknown {
                 kind: kind.to_owned(),
@@ -551,6 +579,8 @@ pub struct RpcClient {
     /// When set: every tool a system message declares or an execution starts must be in this list;
     /// otherwise the process is killed and the call fails.
     allowed_tools: Mutex<Option<(Vec<String>, bool)>>,
+    /// A person answers `select` and `input` dialogs (`ui_respond`); otherwise they are cancelled.
+    interactive: Arc<AtomicBool>,
 }
 
 /// Kills a whole process group (Pi and anything it started). Only called while the leader has
@@ -588,9 +618,10 @@ impl RpcClient {
         let stdin = start_writer(stdin);
         let pending: Pending = Arc::default();
         let (tx, rx) = mpsc::channel();
+        let interactive = Arc::new(AtomicBool::new(false));
         {
-            let (stdin, pending) = (stdin.clone(), pending.clone());
-            std::thread::spawn(move || reader(stdout, &stdin, &pending, &tx));
+            let (stdin, pending, ui) = (stdin.clone(), pending.clone(), interactive.clone());
+            std::thread::spawn(move || reader(stdout, &stdin, &pending, &ui, &tx));
         }
         let errbuf: Arc<Mutex<Vec<u8>>> = Arc::default();
         {
@@ -623,6 +654,21 @@ impl RpcClient {
             next_id: AtomicU64::new(1),
             timeouts: Timeouts::default(),
             allowed_tools: Mutex::new(None),
+            interactive,
+        })
+    }
+
+    /// A person is there to answer the extension's `select` and `input` dialogs.
+    pub fn set_interactive(&self, on: bool) {
+        self.interactive.store(on, Ordering::SeqCst);
+    }
+
+    /// The person's answer to a dialog: its value, or `None` (dismissed). An id Pi no longer
+    /// waits for (it timed out) is ignored by Pi.
+    pub fn ui_respond(&self, id: &str, value: Option<&str>) -> Result<(), PiError> {
+        self.send(&match value {
+            Some(v) => json!({"type": "extension_ui_response", "id": id, "value": v}),
+            None => json!({"type": "extension_ui_response", "id": id, "cancelled": true}),
         })
     }
 
@@ -1041,11 +1087,13 @@ impl Drop for RpcClient {
     }
 }
 
-/// The stdout thread: LF-split records, routing, extension dialogs answered "cancelled".
+/// The stdout thread: LF-split records, routing, extension dialogs answered "cancelled" (but for
+/// `select` and `input` when a person answers them).
 fn reader(
     stdout: std::process::ChildStdout,
     stdin: &Outbox,
     pending: &Pending,
+    interactive: &AtomicBool,
     events: &Sender<Event>,
 ) {
     let mut r = std::io::BufReader::new(stdout);
@@ -1092,11 +1140,14 @@ fn reader(
             continue;
         }
         if v["type"] == "extension_ui_request" {
-            let dialog = matches!(
-                v["method"].as_str(),
-                Some("select" | "confirm" | "input" | "editor")
-            );
-            if dialog && let Some(id) = v["id"].as_str() {
+            let method = v["method"].as_str();
+            let dialog = matches!(method, Some("select" | "confirm" | "input" | "editor"));
+            let answered =
+                interactive.load(Ordering::SeqCst) && matches!(method, Some("select" | "input"));
+            if dialog
+                && !answered
+                && let Some(id) = v["id"].as_str()
+            {
                 let reply = json!({"type": "extension_ui_response", "id": id, "cancelled": true});
                 // Queued like any other line: the reader must never wait on a Pi that is not reading.
                 let mut line = reply.to_string().into_bytes();

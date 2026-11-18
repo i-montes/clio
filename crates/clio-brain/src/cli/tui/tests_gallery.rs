@@ -137,6 +137,35 @@ fn approve(a: &mut App, quiet: bool) {
     a.last_key_ms = Some(if quiet { 0 } else { 299_800 });
 }
 
+/// Clio asks (`ask_person`): within the quiet second or after it, and with `Other…` typed.
+fn question(a: &mut App, quiet: bool, typed: Option<&str>) {
+    let mut options: Vec<String> = super::tests_ask::OPTIONS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    options.push(super::ask::OTHER.into());
+    let mut q = super::ask::Question::from_select(
+        "q1",
+        "sid",
+        "The orders service needs a database. Which one should I set up?",
+        &options,
+        Some(600_000),
+        299_900,
+    )
+    .unwrap();
+    a.now_ms = 300_000;
+    a.last_key_ms = Some(if quiet { 0 } else { 299_800 });
+    if quiet {
+        q.shown_ms = 0;
+        q.sel = 1;
+    }
+    if let Some(t) = typed {
+        q.ready = true;
+        q.typing = Some(t.into());
+    }
+    a.prompt = Some(super::ask::Prompt::Question(q));
+}
+
 /// Every state, by name.
 pub(super) fn states() -> Vec<(&'static str, App)> {
     let mut out = vec![
@@ -165,6 +194,19 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     approve(&mut a, true);
     a.confirm.as_mut().unwrap().armed = true;
     out.push(("pregunta apartada, después del segundo, con s", a));
+    for (name, quiet, typed) in [
+        ("Clio pregunta, dentro del segundo", false, None),
+        ("Clio pregunta, segunda opción elegida", true, None),
+        (
+            "Clio pregunta, Other… escrito",
+            true,
+            Some("MariaDB, the one ops already runs"),
+        ),
+    ] {
+        let mut a = conversation(false);
+        question(&mut a, quiet, typed);
+        out.push((name, a));
+    }
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;

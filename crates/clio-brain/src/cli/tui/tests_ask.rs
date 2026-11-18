@@ -1,0 +1,302 @@
+//! What Clio asks the person: the `ask_person` question (Pi's `select`, then `input` after
+//! `Other…`), its quiet second, its clicks, and its turn with the approvals.
+
+#![allow(clippy::unwrap_used)]
+
+use clio_brain::pi::rpc::Event;
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+use super::app::{Action, App, Bg, Cmd, Input};
+use super::ask::{OTHER, Prompt};
+use super::tests::{ch, feed, key, screen_text};
+
+pub(super) fn chat() -> App {
+    let mut a = super::tests_gallery::pi(false);
+    a.chat = super::chat::Chat::opening(1, 0);
+    a.chat.opened("sid".into(), String::new(), &[], None, 0);
+    a.chat.running = true;
+    a
+}
+
+pub(super) fn select(id: &str, question: &str, options: &[&str]) -> Input {
+    let mut o: Vec<String> = options.iter().map(|s| (*s).to_owned()).collect();
+    o.push(OTHER.into());
+    Input::Bg(Bg::ChatEvent(Event::ExtensionUiRequest {
+        id: id.into(),
+        method: "select".into(),
+        title: question.into(),
+        options: o,
+        timeout_ms: Some(600_000),
+        widget_key: String::new(),
+        widget_lines: None,
+    }))
+}
+
+fn input(id: &str) -> Input {
+    Input::Bg(Bg::ChatEvent(Event::ExtensionUiRequest {
+        id: id.into(),
+        method: "input".into(),
+        title: "Which database?".into(),
+        options: vec![],
+        timeout_ms: Some(500_000),
+        widget_key: String::new(),
+        widget_lines: None,
+    }))
+}
+
+fn ui(id: &str, value: Option<&str>) -> Cmd {
+    Cmd::ChatUi {
+        id: id.into(),
+        value: value.map(str::to_owned),
+    }
+}
+
+pub(super) const OPTIONS: [&str; 3] = [
+    "Postgres — what the other services use",
+    "SQLite — one file, nothing to run",
+    "Keep both",
+];
+
+#[test]
+fn a_question_takes_keys_only_after_the_quiet_second_and_answers_with_the_option_string() {
+    let (a, cmds) = feed(
+        chat(),
+        vec![Input::Tick(100), select("q1", "Which database?", &OPTIONS)],
+    );
+    assert!(cmds.is_empty());
+    let screen = screen_text(&a, 90, 30);
+    assert!(
+        screen.contains("Clio asks")
+            && !screen.contains("Visto bueno")
+            && screen.contains("Which database?")
+            && screen.contains("1  Postgres (recommended)")
+            && screen.contains("what the other services use")
+            && screen.contains("4  Other…")
+            && screen.contains("Esc skip the question"),
+        "{screen}"
+    );
+    // Typing on, still in the chat's rhythm: nothing is answered, nothing moves.
+    let (a, cmds) = feed(
+        a,
+        vec![
+            Input::Tick(300),
+            ch('2'),
+            Input::Tick(600),
+            key(KeyCode::Enter),
+            Input::Tick(900),
+            key(KeyCode::Esc),
+        ],
+    );
+    assert!(cmds.is_empty(), "{cmds:?}");
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!("the question went")
+    };
+    assert_eq!((q.sel, q.ready), (0, false));
+    // A second later: ↓ and Enter pick the second answer; Pi gets the string it sent.
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Tick(2_000), key(KeyCode::Down), key(KeyCode::Enter)],
+    );
+    assert_eq!(cmds, vec![ui("q1", Some(OPTIONS[1]))]);
+    assert!(a.prompt.is_none());
+    // The digit answers at once; Esc skips (Pi hears it as cancelled), and the turn goes on.
+    let (a, cmds) = feed(
+        a,
+        vec![
+            select("q2", "Which database?", &OPTIONS),
+            Input::Tick(4_000),
+            ch('3'),
+        ],
+    );
+    assert_eq!(cmds, vec![ui("q2", Some(OPTIONS[2]))]);
+    let (a, cmds) = feed(
+        a,
+        vec![
+            select("q3", "Which database?", &OPTIONS),
+            Input::Tick(6_000),
+            key(KeyCode::Esc),
+        ],
+    );
+    assert_eq!(cmds, vec![ui("q3", None)]);
+    assert!(a.chat.running && a.prompt.is_none());
+}
+
+#[test]
+fn other_sends_the_choice_then_the_typed_line_to_the_input_that_follows() {
+    let (a, cmds) = feed(
+        chat(),
+        vec![
+            select("q1", "Which database?", &OPTIONS),
+            Input::Tick(2_000),
+            ch('4'),
+        ],
+    );
+    assert_eq!(cmds, vec![ui("q1", Some(OTHER))]);
+    // The person types before Pi's `input` comes: the answer waits for it.
+    let typed: Vec<Input> = "MariaDB"
+        .chars()
+        .map(ch)
+        .chain([
+            Input::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL,
+            )),
+            Input::Paste("pasted".into()),
+        ])
+        .collect();
+    let (a, cmds) = feed(a, typed);
+    assert!(cmds.is_empty());
+    let screen = screen_text(&a, 90, 30);
+    assert!(
+        screen.contains("MariaDB") && !screen.contains("pasted"),
+        "{screen}"
+    );
+    let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+    assert!(
+        cmds.is_empty(),
+        "nothing goes before Pi asks for it: {cmds:?}"
+    );
+    let (a, cmds) = feed(a, vec![input("q1b")]);
+    assert_eq!(cmds, vec![ui("q1b", Some("MariaDB"))]);
+    assert!(a.prompt.is_none());
+    // Once the field is there, Enter sends; an empty line sends nothing; Esc skips.
+    let (a, _) = feed(
+        a,
+        vec![
+            select("q2", "Which?", &OPTIONS),
+            Input::Tick(4_000),
+            ch('4'),
+            input("q2b"),
+            key(KeyCode::Enter),
+        ],
+    );
+    assert!(a.prompt.is_some());
+    let (_, cmds) = feed(a, vec![key(KeyCode::Esc)]);
+    assert_eq!(cmds, vec![ui("q2b", None)]);
+}
+
+#[test]
+fn a_question_and_an_approval_wait_for_each_other_and_a_turn_end_drops_the_question() {
+    let mut a = chat();
+    a.host = true;
+    let (a, _) = feed(
+        a,
+        vec![
+            select("q1", "Which?", &OPTIONS),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm x".into())])),
+        ],
+    );
+    assert!(a.confirm.is_none() && a.asks.len() == 1);
+    let (a, cmds) = feed(a, vec![Input::Tick(2_000), ch('1')]);
+    assert_eq!(cmds, vec![ui("q1", Some(OPTIONS[0]))]);
+    assert_eq!(a.confirm.as_ref().unwrap().action, Action::Approve);
+    // And the reverse: a question behind the approval on screen.
+    let (a, _) = feed(a, vec![select("q2", "Which?", &OPTIONS)]);
+    assert!(a.prompt.is_none() && a.prompts.len() == 1);
+    let (a, _) = feed(a, vec![Input::Tick(4_000), key(KeyCode::Esc)]);
+    assert!(a.confirm.is_none() && a.prompt.is_some());
+    // The digit of a question never approves: the approval's keys mean nothing here.
+    let (a, cmds) = feed(a, vec![Input::Tick(6_000), ch('s'), key(KeyCode::Enter)]);
+    assert_eq!(cmds, vec![ui("q2", Some(OPTIONS[0]))]);
+    // A question still open when the turn settles is gone: Pi already answered it.
+    let (a, _) = feed(a, vec![select("q3", "Which?", &OPTIONS)]);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatSettled {
+            result: Err("x".into()),
+            refresh: None,
+        })],
+    );
+    assert!(a.prompt.is_none() && a.prompts.is_empty());
+}
+
+#[test]
+fn a_question_past_its_time_closes_and_one_of_another_session_is_never_shown() {
+    let (a, _) = feed(
+        chat(),
+        vec![Input::Tick(1_000), select("q1", "Which?", &OPTIONS)],
+    );
+    let (a, cmds) = feed(a, vec![Input::Tick(601_000)]);
+    assert!(cmds.is_empty() && a.prompt.is_none());
+    assert!(
+        a.flash.as_deref().unwrap().contains("no answer"),
+        "{:?}",
+        a.flash
+    );
+    let mut a = a;
+    a.chat.session_id = "otra".into();
+    let mut b = chat();
+    b.chat.session_id = "otra".into();
+    let (mut b, _) = feed(b, vec![select("q2", "Which?", &OPTIONS)]);
+    // Stamped with another session, then this one is shown: it is dropped.
+    if let Some(Prompt::Question(x)) = &mut b.prompt {
+        x.session = "sid".into();
+    }
+    a.prompts.push_back(b.prompt.unwrap());
+    let (a, _) = feed(a, vec![Input::Bg(Bg::ChatAsks(vec![]))]);
+    assert!(a.prompt.is_none() && a.prompts.is_empty());
+}
+
+#[test]
+fn a_click_selects_only_the_row_drawn_there_and_never_answers() {
+    let (a, _) = feed(chat(), vec![select("q1", "Which database?", &OPTIONS)]);
+    let screen = screen_text(&a, 90, 30);
+    let (y, line) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.contains("3  Keep both"))
+        .unwrap();
+    let x = line.chars().position(|c| c == 'K').unwrap();
+    let click = |x: usize, y: usize| {
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: u16::try_from(x).unwrap(),
+            row: u16::try_from(y).unwrap(),
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let (a, cmds) = feed(a, vec![click(x, y)]);
+    assert!(cmds.is_empty());
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(q.sel, 2);
+    // Another question now, never drawn: the old rows say nothing about it.
+    let mut a = a;
+    let (b, _) = feed(chat(), vec![select("q9", "Other", &["A", "B"])]);
+    let mut fresh = b.prompt.unwrap();
+    if let (Prompt::Question(n), Some(Prompt::Question(old))) = (&mut fresh, &a.prompt) {
+        n.rows_at.set(old.rows_at.get());
+    }
+    a.prompt = Some(fresh);
+    let (a, _) = feed(a, vec![click(x, y - 1)]);
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(q.sel, 0);
+}
+
+#[test]
+fn hostile_question_text_is_one_clean_line_and_capped() {
+    let long = "x".repeat(5_000);
+    let evil = format!("Pick\u{1b}[2J\u{202e}one\n# not a heading {long}");
+    let (a, _) = feed(
+        chat(),
+        vec![select(
+            "q1",
+            &evil,
+            &["**bold** — \u{1b}]52;c;aGk=\u{7}desc", "/quit", "B"],
+        )],
+    );
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert!(q.text.chars().count() <= super::ask::MAX_QUESTION);
+    assert!(!q.text.contains('\u{1b}') && !q.text.contains('\n'));
+    let screen = screen_text(&a, 90, 30);
+    super::tests::assert_clean(&screen);
+    assert!(
+        screen.contains("**bold**") && screen.contains("/quit"),
+        "{screen}"
+    );
+}

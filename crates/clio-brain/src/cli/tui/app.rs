@@ -123,6 +123,11 @@ pub enum Cmd {
         id: String,
         yes: bool,
     },
+    /// The person's answer to one of Pi's dialogs (a question of `ask_person`); `None` skips it.
+    ChatUi {
+        id: String,
+        value: Option<String>,
+    },
     /// Leave the chat: stop its Pi and its toolhost.
     ChatClose,
     /// The chat's slash commands (`commands.rs`): read the person's own commands again.
@@ -348,6 +353,10 @@ pub struct App {
     pub modal: Option<Modal>,
     /// Host mode: the questions waiting behind the one on screen.
     pub asks: std::collections::VecDeque<Confirm>,
+    /// What Clio asks the person (`ask.rs`): never at the same time as an approval; each waits
+    /// for the other to close.
+    pub prompt: Option<super::ask::Prompt>,
+    pub prompts: std::collections::VecDeque<super::ask::Prompt>,
     /// Host mode: answers to set-aside actions still running (an approved one can take a while).
     pub answering: usize,
     /// When the last key (or paste) came, for the quiet rule of a set-aside question.
@@ -387,6 +396,8 @@ impl App {
             confirm: None,
             modal: None,
             asks: std::collections::VecDeque::new(),
+            prompt: None,
+            prompts: std::collections::VecDeque::new(),
             answering: 0,
             last_key_ms: None,
             flash: None,
@@ -523,6 +534,13 @@ impl App {
         let since = |t: u64| self.now_ms.saturating_sub(t) >= QUIET_MS;
         self.last_key_ms.is_none_or(since)
             && self.confirm.as_ref().is_none_or(|c| since(c.shown_ms))
+            && self.prompt.as_ref().is_none_or(|p| since(p.shown_ms()))
+    }
+
+    /// Something Clio asks: on screen if nothing else is, else in line.
+    pub fn offer(&mut self, p: super::ask::Prompt) {
+        self.prompts.push_back(p);
+        next_ask(self);
     }
 
     /// Something on screen moves or counts by itself (a spinner, the seconds of a turn or a run,
@@ -532,7 +550,8 @@ impl App {
             .confirm
             .as_ref()
             .is_some_and(|c| c.action == Action::Approve && !c.armed)
-            && !self.quiet();
+            || self.prompt.as_ref().is_some_and(|p| !p.ready());
+        let waiting = waiting && !self.quiet();
         let chat = matches!(self.screen, Screen::Chat | Screen::Sessions)
             && (self.chat.opening || self.chat.running);
         let live = (self.screen == Screen::Live
@@ -581,12 +600,22 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
     match input {
         Input::Tick(ms) => {
             app.now_ms = ms;
+            // Pi gave up on the question (it answered the model by itself): the box goes.
+            if app.prompt.as_ref().is_some_and(|p| p.expired(ms)) {
+                app.prompt = None;
+                app.flash = Some("no answer in time: Clio goes on with her best judgment".into());
+                next_ask(app);
+            }
             vec![]
         }
         Input::Resize => vec![],
         Input::Paste(text) => {
             app.last_key_ms = Some(app.now_ms);
-            if app.confirm.is_some() || app.notice.is_some() || app.modal.is_some() {
+            if app.confirm.is_some()
+                || app.prompt.is_some()
+                || app.notice.is_some()
+                || app.modal.is_some()
+            {
                 vec![]
             } else if app.screen == Screen::NewRun {
                 super::new_run::paste(app, &text)
@@ -602,6 +631,10 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         Input::Mouse(m) => {
             use crossterm::event::MouseEventKind as M;
             // Moves and releases are not acts of the person (the terminal reports every move).
+            if app.prompt.is_some() && app.confirm.is_none() && app.notice.is_none() {
+                super::ask::click(app, &m);
+                return vec![];
+            }
             if !matches!(m.kind, M::Down(_) | M::ScrollUp | M::ScrollDown)
                 || app.confirm.is_some()
                 || app.notice.is_some()
@@ -640,6 +673,11 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             }
             if app.confirm.is_some() {
                 let cmds = answer(app, &k, quiet);
+                next_ask(app);
+                return cmds;
+            }
+            if app.prompt.is_some() {
+                let cmds = super::ask::key(app, &k, quiet);
                 next_ask(app);
                 return cmds;
             }
@@ -713,8 +751,20 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
 
 /// Once no question is on screen, the next set-aside one; one of a session no longer open cannot
 /// be answered here and waits in `clio pending`.
-fn next_ask(app: &mut App) {
+pub(super) fn next_ask(app: &mut App) {
+    // What Clio asks goes first: Pi waits for it, and only for so long.
     while app.confirm.is_none()
+        && app.prompt.is_none()
+        && let Some(mut p) = app.prompts.pop_front()
+    {
+        // Pi already gave up on it, or its session is no longer open: nobody waits for it.
+        if p.session() == app.chat.session_id && !p.expired(app.now_ms) {
+            p.show(app.now_ms);
+            app.prompt = Some(p);
+        }
+    }
+    while app.confirm.is_none()
+        && app.prompt.is_none()
         && let Some(mut c) = app.asks.pop_front()
     {
         if c.session == app.chat.session_id {
@@ -731,7 +781,7 @@ fn next_ask(app: &mut App) {
 
 /// A question that comes back late never takes the place of the one on screen.
 fn dropped(app: &mut App, what: &str) -> bool {
-    if app.confirm.is_none() {
+    if app.confirm.is_none() && app.prompt.is_none() {
         return false;
     }
     app.flash = Some(format!(
@@ -953,6 +1003,17 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 app.chat.turn_ms = app.now_ms;
             }
             app.chat.on_event(&e);
+            if let clio_brain::pi::rpc::Event::ExtensionUiRequest {
+                id,
+                method,
+                title,
+                options,
+                timeout_ms,
+                ..
+            } = &e
+            {
+                return super::ask::on_request(app, id, method, title, options, *timeout_ms);
+            }
             vec![]
         }
         // They come before the turn settles, so from the session open now.
@@ -1057,6 +1118,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
+            // A question lives inside its turn: Pi answered it by itself if the turn ended.
+            app.prompt = None;
+            app.prompts.clear();
+            next_ask(app);
             app.chat.aborting = false;
             app.chat.stop_tools();
             match result {
@@ -1412,6 +1477,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if let Some(c) = &app.confirm {
         confirm_dialog(f, area, app, c);
+    } else if let Some(super::ask::Prompt::Question(q)) = &app.prompt {
+        // Under the top bar and its rule, like the boxes of the commands.
+        super::ask::draw(f, rest, app, q);
     } else if let Some(n) = &app.notice {
         let lines: Vec<Line> = sanitize::multiline(n)
             .lines()
@@ -1515,29 +1583,44 @@ fn dialog(
     hint: Line<'static>,
     border: ratatui::style::Style,
 ) {
-    let w = area.width.saturating_sub(6).min(72);
-    let inner = usize::from(w.saturating_sub(6)).max(1);
-    // A row of air above and below, when the terminal has the rows for it.
-    let air = area.height >= 24;
+    let inner = dialog_inner(area);
     let mut rows: Vec<Line> = Vec::new();
-    if air {
-        rows.push(Line::from(""));
-    }
     for l in lines.into_iter().chain([Line::from(""), hint]) {
-        let segs: Vec<(String, ratatui::style::Style)> = l
-            .spans
-            .into_iter()
-            .map(|s| (s.content.into_owned(), s.style))
-            .collect();
-        let none = (Vec::new(), 0);
-        rows.extend(super::markdown::wrap_spans(
-            &segs,
-            inner,
-            none.clone(),
-            none,
-        ));
+        rows.extend(wrap_line(l, inner));
     }
+    dialog_box(f, area, t, title, rows, border);
+}
+
+/// The columns of text inside a dialog on `area`.
+pub(super) fn dialog_inner(area: Rect) -> usize {
+    usize::from(area.width.saturating_sub(6).min(72).saturating_sub(6)).max(1)
+}
+
+/// One line wrapped to `w` columns, its styles kept.
+pub(super) fn wrap_line(l: Line<'static>, w: usize) -> Vec<Line<'static>> {
+    let segs: Vec<(String, ratatui::style::Style)> = l
+        .spans
+        .into_iter()
+        .map(|s| (s.content.into_owned(), s.style))
+        .collect();
+    let none = (Vec::new(), 0);
+    super::markdown::wrap_spans(&segs, w, none.clone(), none)
+}
+
+/// Draws rows already wrapped to `dialog_inner` in a centered box, a row of air above and below
+/// when the terminal has the rows for it. Returns where the first row went (x, y, width).
+pub(super) fn dialog_box(
+    f: &mut Frame,
+    area: Rect,
+    t: Theme,
+    title: &str,
+    mut rows: Vec<Line<'static>>,
+    border: ratatui::style::Style,
+) -> Rect {
+    let w = area.width.saturating_sub(6).min(72);
+    let air = area.height >= 24;
     if air {
+        rows.insert(0, Line::from(""));
         rows.push(Line::from(""));
     }
     let h = (u16::try_from(rows.len())
@@ -1558,6 +1641,12 @@ fn dialog(
         .padding(Padding::horizontal(2))
         .title(Span::styled(title.to_owned(), t.bold()));
     f.render_widget(Paragraph::new(rows).block(block), r);
+    Rect::new(
+        r.x + 3,
+        r.y + 1 + u16::from(air),
+        r.width.saturating_sub(6),
+        r.height.saturating_sub(2 + 2 * u16::from(air)),
+    )
 }
 
 /// Counts by label, for the home header and the live panel.

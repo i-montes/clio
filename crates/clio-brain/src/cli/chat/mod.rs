@@ -139,6 +139,9 @@ pub trait Session: Send + Sync {
     ) -> Result<RunSummary, PiError>;
     /// Adds a message to the run in progress.
     fn steer(&self, text: &str) -> Result<(), PiError>;
+    /// The person's answer to one of the guard's dialogs (`ask_person`): the value, or `None`
+    /// when they skipped it.
+    fn ui_respond(&self, _id: &str, _value: Option<&str>) {}
     fn refresh(&self) -> Result<Refresh, PiError>;
     /// Before closing a session the person worked in: asks the model, under a short cap, to save
     /// the session's summary. Nothing when it does not apply. Runs once.

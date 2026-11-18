@@ -12,7 +12,7 @@
 // (jailed) or `find`.
 //
 // This file is defence in depth and bookkeeping, not the boundary: it blocks anything that is
-// not one of its nineteen tools, refuses writes the host would refuse, keeps the session's taint,
+// not one of its tools, refuses writes the host would refuse, keeps the session's taint,
 // marks every tool result as data, adds the versioned Clio prompt, and refuses project trust.
 // It runs inside the Pi process, as the person.
 //
@@ -50,7 +50,7 @@ const WITHHELD = "clio-guard.withheld";
 // The judge is on and did not answer: the chat says it once.
 const JUDGE = "clio-guard.judge";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
-export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit"] as const;
+export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
 /**
  * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
@@ -77,6 +77,7 @@ export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
 	memory_pin: "fijar un recuerdo para tenerlo siempre presente",
 	memory_block: "leer entero lo que la persona fijó: quién es Clio, cómo trabaja, quién es la persona o lo que vigila",
 	memory_block_edit: "cambiar, porque la persona lo pide aquí, quién es Clio, cómo trabaja, lo que sabe de la persona o lo que vigila",
+	ask_person: "ask the person one question with a few answers to pick from, when the doubt is real",
 };
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
@@ -101,6 +102,19 @@ const DATA_RULE =
 const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
+// A person answers the dialogs (the chat). Without one (`clio run`) nobody can be asked.
+const PERSON = process.env.CLIO_GUARD_PERSON === "1";
+// `ask_person`: how long the question waits, the row the person types into, and what the option
+// strings look like (`label — description`, the only shape the chat parses).
+const ASK_TIMEOUT_MS = 10 * 60 * 1000;
+const OTHER = "Other…";
+const SEP = " — ";
+const NOBODY = "the person is not here: decide yourself and say what you assumed";
+const NO_ANSWER = "no answer: go on with your best judgment and say what you assumed";
+const SKIPPED = "the person skipped the question";
+/** Model text for a dialog: one line, no control characters, at most `max` characters. */
+const oneLine = (s: unknown, max: number) =>
+	(typeof s === "string" ? s : "").replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 const HOST_BASH_RULE =
 	"bash runs on the person's machine, in the home folder, with the time limit you give in `timeout` (none if you give none); it has no network unless you set `network: true`, which marks the session. Clio's own folders are not visible.";
 const NETWORK = { type: "boolean", description: "la orden necesita red; marca la sesión" };
@@ -469,6 +483,73 @@ export default function clioGuard(pi: ExtensionAPI) {
 		["name", "action"],
 	);
 
+	// One question to the person, through Pi's own dialogs (`select`, then `input` for "Other…"):
+	// in the chat it is a box the person answers; anywhere else nobody is there and it says so at
+	// once. The answer is the chosen label or the typed text, nothing else.
+	register({
+		name: "ask_person",
+		label: "ask_person",
+		description:
+			"Ask the person one question with 2 to 4 short answers to pick from (put the one you recommend first); they can always type something else instead. Only when the doubt is real and the answer changes what you do next. Never to ask for a secret.",
+		promptSnippet: "Ask the person one question with 2 to 4 answers to pick from (the first is the one you recommend).",
+		promptGuidelines: [
+			"ask_person: only when the doubt is real and the answer changes what you do next; one question at a time; never for a secret (a key, a token, a password). The answer is the person's own words. If nobody answers, decide yourself and say what you assumed.",
+		],
+		parameters: {
+			type: "object",
+			properties: {
+				question: { type: "string", minLength: 1, maxLength: 300, description: "The question, one or two short sentences." },
+				options: {
+					type: "array",
+					minItems: 2,
+					maxItems: 4,
+					description: "2 to 4 answers; the first is the one you recommend. Do not add an 'Other' option: the person can always type their own.",
+					items: {
+						type: "object",
+						properties: {
+							label: { type: "string", minLength: 1, maxLength: 60, description: "The answer, a few words." },
+							description: { type: "string", maxLength: 120, description: "What it means or implies, one line (optional)." },
+						},
+						required: ["label"],
+						additionalProperties: false,
+					},
+				},
+			},
+			required: ["question", "options"],
+			additionalProperties: false,
+		},
+		// biome-ignore lint/suspicious/noExplicitAny: Pi's tool context
+		execute: async (_id: string, params: any, signal: AbortSignal | undefined, _onUpdate: any, ctx: any) => {
+			const say = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+			if (!PERSON || !ctx?.hasUI) return say(NOBODY);
+			const question = oneLine(params?.question, 300);
+			const options = (Array.isArray(params?.options) ? params.options : []).slice(0, 4).map((o: { label?: unknown; description?: unknown }) => ({
+				// The separator is ours: a label never carries it.
+				label: oneLine(o?.label, 60).replaceAll("—", "-"),
+				description: oneLine(o?.description, 120),
+			}));
+			const labels = options.map((o: { label: string }) => o.label.toLowerCase());
+			if (!question || options.length < 2 || labels.some((l: string) => !l || l.startsWith("other")) || new Set(labels).size !== labels.length) {
+				throw new Error("ask_person needs a question and 2 to 4 different answers, none of them 'Other' (the person can always type their own)");
+			}
+			const shown: string[] = options.map((o: { label: string; description: string }) => (o.description ? `${o.label}${SEP}${o.description}` : o.label));
+			const started = Date.now();
+			const left = () => ASK_TIMEOUT_MS - (Date.now() - started);
+			// Pi resolves a dialog with nothing both when the person dismisses it and when it times out.
+			const silent = () => say(left() <= 1000 ? NO_ANSWER : SKIPPED);
+			const picked = await ctx.ui.select(question, [...shown, OTHER], { timeout: ASK_TIMEOUT_MS, signal });
+			if (picked === undefined) return silent();
+			if (picked === OTHER) {
+				const typed = await ctx.ui.input(question, "Type your answer", { timeout: Math.max(left(), 1), signal });
+				const t = typeof typed === "string" ? typed.trim().slice(0, 2000) : "";
+				return t ? say(t) : silent();
+			}
+			const i = shown.indexOf(picked);
+			if (i < 0) throw new Error("the answer is not one of the options");
+			return say(options[i].label);
+		},
+	});
+
 	// A project can not decide what Pi loads (S-16): always "no".
 	pi.on("project_trust", () => ({ trusted: "no" as const }));
 
@@ -513,7 +594,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		if (!ALLOWED.has(event.toolName)) mark(`tool:${event.toolName}`);
 		// Memory results come wrapped already; wrapping again would nest them and lose the source.
-		const source = MEMORY_TOOLS.has(event.toolName) ? undefined : event.toolName === "bash" ? "tool-result" : "file";
+		// `ask_person` answers with the person's own words: cleaned, never wrapped as outside data.
+		const source = MEMORY_TOOLS.has(event.toolName) || event.toolName === "ask_person" ? undefined : event.toolName === "bash" ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
 			if (v && typeof v === "object") {
@@ -570,6 +652,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 	// words (the host already wraps it; this is the guarantee that nothing slips through).
 	pi.on("context", (event) => ({
 		messages: event.messages.map((m) => {
+			// The person's answer to `ask_person` is theirs, not outside data (it was cleaned in `tool_result`).
+			if (m.role === "toolResult" && m.toolName === "ask_person") return m;
 			if (m.role === "toolResult") return { ...m, content: wrapBlocks(m.content, "tool-result") };
 			if ((m.role === "compactionSummary" || m.role === "branchSummary") && !isWrapped(m.summary)) {
 				return { ...m, summary: wrapUntrusted("summary", m.summary) };

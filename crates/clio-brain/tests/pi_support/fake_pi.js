@@ -28,6 +28,7 @@ const resp = (id, command, data, success = true, error) =>
 let hanging = false;
 let ticker = null;
 let deaf = false;
+let asked = null;
 const usage = (i, o) => ({ input: i, output: o, cacheRead: 0, cacheWrite: 0, totalTokens: i + o, cost: { total: 0.01 } });
 const settle = (aborted) => { out({ type: "agent_end", messages: [], willRetry: false }); out({ type: "agent_settled", aborted }); };
 
@@ -96,6 +97,16 @@ function prompt(id, raw) {
     }, 1500);
     return;
   }
+  if (msg === "ask") {
+    // A question of an extension (`ask_person`): the run waits for the client's answer.
+    out({ type: "extension_ui_request", id: "ui-c", method: "confirm", title: "sure?" });
+    out({ type: "extension_ui_request", id: "ui-ask", method: "select", title: "Which?", options: ["A — first", "B", "Other…"], timeout: 600000 });
+    asked = (v) => {
+      out({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `picked:${v}` }], usage: usage(1, 1), stopReason: "stop" } });
+      settle(false);
+    };
+    return;
+  }
   if (msg === "flood") process.stderr.write("x".repeat(200000));
   if (msg === "evil") out({ type: "tool_execution_start", toolCallId: "c9", toolName: "bash", args: { command: "id" } });
   out({ type: "message_start", message: { role: "assistant", content: [] } });
@@ -137,7 +148,10 @@ function handle(line) {
     case "new_session": case "switch_session": return resp(id, type, { cancelled: false });
     case "fork": return resp(id, type, { text: "orig", cancelled: false });
     case "never_answered": return;
-    case "extension_ui_response": process.stderr.write(`ui-cancelled:${c.id}:${c.cancelled}\n`); return;
+    case "extension_ui_response":
+      process.stderr.write(`ui-cancelled:${c.id}:${c.cancelled}\n`);
+      if (c.id === "ui-ask" && asked) { const f = asked; asked = null; f(c.cancelled ? "none" : c.value); }
+      return;
     default: return resp(id, type, undefined, false, "unknown command " + type);
   }
 }

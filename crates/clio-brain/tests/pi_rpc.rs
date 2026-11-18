@@ -81,6 +81,47 @@ fn a_run_streams_events_and_survives_unknown_ones_and_u2028() {
     assert_eq!(m.context.unwrap().window, 1000);
 }
 
+// A chat with a person: a `select` or `input` waits for the person's answer, and only that
+// answer goes back; any other dialog is still cancelled at once. Without a person, every dialog is.
+#[test]
+fn an_interactive_client_lets_the_person_answer_a_select() {
+    if need("an_interactive_client", false).is_none() {
+        return;
+    }
+    let c = fake(None);
+    c.set_interactive(true);
+    let mut seen = Vec::new();
+    let r = c.run_prompt("ask", &Cancel::new(), &mut |e| {
+        if let Event::ExtensionUiRequest {
+            id,
+            method,
+            options,
+            timeout_ms,
+            ..
+        } = e
+        {
+            seen.push((method.clone(), options.clone(), *timeout_ms));
+            if method == "select" {
+                c.ui_respond(id, Some("B")).unwrap();
+            }
+        }
+    });
+    assert_eq!(r.unwrap().text, "picked:B");
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(
+        seen[1],
+        (
+            "select".to_owned(),
+            vec!["A — first".to_owned(), "B".to_owned(), "Other…".to_owned()],
+            Some(600_000)
+        )
+    );
+    assert!(c.stderr_text().contains("ui-cancelled:ui-c:true"));
+    // Without a person: the select is cancelled by the client, never left waiting.
+    let c = fake(None);
+    assert_eq!(run(&c, "ask").0.unwrap().text, "picked:none");
+}
+
 #[test]
 fn split_responses_and_concurrent_ids_correlate() {
     if need("split_responses", false).is_none() {
