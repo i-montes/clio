@@ -925,16 +925,10 @@ pub fn collect(dirs: &Dirs) -> Report {
     jail_lines(&mut o);
     pi_jail_line(&mut o, dirs);
     host_mode_lines(&mut o, dirs);
-    match find_host_check() {
-        Some(script) => {
-            o.host_script = Some(script.display().to_string());
-            host_lines(&mut o, &script);
-        }
-        None => o.say(
-            Level::Warn,
-            "no se encontró infra/local/check-host.sh".into(),
-            Some("Define CLIO_HOST_CHECK con la ruta del script.".into()),
-        ),
+    // Outside the repository the script is not there, and that is no problem: nothing is said.
+    if let Some(script) = find_host_check() {
+        o.host_script = Some(script.display().to_string());
+        host_lines(&mut o, &script);
     }
     o
 }
