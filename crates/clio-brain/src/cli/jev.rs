@@ -375,6 +375,47 @@ mod tests {
         assert_eq!(fixed[0].text, "Eres Clio");
     }
 
+    // The person can list an agent-saved memory in a block: it goes with the outside memories.
+    #[test]
+    fn a_block_row_the_person_did_not_write_is_not_sent_with_authority() {
+        use clio_brain::memory_link::{Draft, Place};
+        use clio_memory::MemoryType;
+        let tmp = tempfile::tempdir().unwrap();
+        let link = MemoryLink::open_write(tmp.path(), &EmbedModel::none()).unwrap();
+        let hers = link.block_add("reglas", "responde en español").unwrap();
+        let agent = link
+            .save_as_agent(
+                &Draft::plain("el agente cree que usa vim", MemoryType::Semantic),
+                "s1",
+                Place::Personal,
+                false,
+            )
+            .unwrap()
+            .memory;
+        let block = link
+            .engine()
+            .blocks(link.scope())
+            .unwrap()
+            .into_iter()
+            .find(|b| b.name == "reglas")
+            .unwrap()
+            .id;
+        link.engine()
+            .block_set(block, &[hers.id, agent], link.actors().persona)
+            .unwrap();
+        drop(link);
+        let fixed = MemoryRecall::new(tmp.path(), &[], None).fixed();
+        assert_eq!(fixed.len(), 2, "{fixed:?}");
+        assert!(
+            fixed[0].person && fixed[0].block == Some("reglas"),
+            "{fixed:?}"
+        );
+        assert!(
+            !fixed[1].person && fixed[1].block.is_none() && fixed[1].id == agent.0,
+            "{fixed:?}"
+        );
+    }
+
     #[test]
     fn temis_gets_its_own_key_and_everything_else_jevs() {
         let temis = ("temis", "api.imontes.dev");
