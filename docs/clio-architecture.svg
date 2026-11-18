@@ -303,7 +303,7 @@
 <text class="s11" x="64" y="1400">Temis reads what a tool brought in from outside before the model does. An injection is withheld, the session becomes suspect, and its networked commands wait.</text>
 <g transform="translate(46,1432)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">4</text></g>
 <text class="h2" x="64" y="1436">Four classes of action wait for the owner</text>
-<text class="s11" x="64" y="1452">Delete (borrar), spend (gastar), send (enviar) and control are set aside, not run. The person approves each one, and it runs once, exactly as saved.</text>
+<text class="s11" x="64" y="1452">Delete, spend, send and control are set aside, not run. The person approves each one, and it runs once, exactly as saved.</text>
 <g transform="translate(46,1484)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">5</text></g>
 <text class="h2" x="64" y="1488">Secrets live in the vault</text>
 <text class="s11" x="64" y="1504">The model sees names, never values. A secret the task needs is typed by the person into the vault, and never passes through Pi, the guard or the model.</text>

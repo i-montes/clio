@@ -126,7 +126,7 @@ impl Env {
             "run",
             "--workspace",
             &self.path("proj"),
-            "arregla total en app.py",
+            "fix total in app.py",
         ]);
         out.lines()
             .find_map(|l| l.strip_prefix("run:").map(|s| s.trim().to_owned()))
@@ -187,12 +187,7 @@ fn full_cycle_run_diff_apply_undo() {
     let e = Env::new();
     let out_run = {
         e.script_fix();
-        e.clio(&[
-            "run",
-            "--workspace",
-            &e.path("proj"),
-            "arregla total en app.py",
-        ])
+        e.clio(&["run", "--workspace", &e.path("proj"), "fix total in app.py"])
     };
     // run did NOT touch the original, and said what it left out.
     assert_eq!(e.read("app.py"), OLD_APP);
@@ -785,12 +780,7 @@ fn no_arguments_without_a_terminal_prints_help_and_exits_0() {
 fn run_prints_a_line_per_step_and_a_plain_panel_without_escape_codes() {
     let e = Env::new();
     e.script_fix();
-    let o = e.clio(&[
-        "run",
-        "--workspace",
-        &e.path("proj"),
-        "arregla total en app.py",
-    ]);
+    let o = e.clio(&["run", "--workspace", &e.path("proj"), "fix total in app.py"]);
     assert!(!o.contains('\u{1b}'), "a pipe gets no color codes: {o:?}");
     assert!(o.contains("[1/40] read_file app.py"), "{o}");
     assert!(o.contains("allowed"), "{o}");
@@ -860,7 +850,7 @@ fn the_default_harness_says_when_it_falls_back_to_the_builtin_loop() {
     let e = Env::new();
     e.script_fix();
     let proj = e.path("proj");
-    let o = e.try_clio(&["run", "--workspace", &proj, "arregla total en app.py"]);
+    let o = e.try_clio(&["run", "--workspace", &proj, "fix total in app.py"]);
     assert!(o.status.success());
     assert!(
         text(&o.stderr).contains("Pi is not available"),
@@ -874,7 +864,7 @@ fn the_default_harness_says_when_it_falls_back_to_the_builtin_loop() {
         "builtin",
         "--workspace",
         &proj,
-        "arregla total en app.py",
+        "fix total in app.py",
     ]);
     assert!(o.status.success());
     assert!(!text(&o.stderr).contains("Pi is not available"));
@@ -1055,15 +1045,10 @@ fn print_plain_outputs() {
         json!({"tool": "read_file", "args": {"path": "app.py"}}),
         json!({"tool": "write_file", "args": {"path": "app.py", "content": NEW_APP}}),
         json!({"tool": "write_file", "args": {"path": ".git/x", "content": "no"}}),
-        json!({"final": "Corregí total() en app.py: ya no suma 1 de más. No pude correr las pruebas; ejecútalas antes de aplicar."}),
+        json!({"final": "Fixed total() in app.py: it no longer adds 1 too many. I could not run the tests; run them before applying."}),
     ]);
     println!("--- init\n{}", e.clio(&["init"]));
-    let o = e.try_clio(&[
-        "run",
-        "--workspace",
-        &e.path("proj"),
-        "arregla total en app.py",
-    ]);
+    let o = e.try_clio(&["run", "--workspace", &e.path("proj"), "fix total in app.py"]);
     println!("--- run\n{}", text(&o.stdout));
     println!("--- runs\n{}", e.clio(&["runs"]));
     println!("--- doctor\n{}", text(&e.try_clio(&["doctor"]).stdout));

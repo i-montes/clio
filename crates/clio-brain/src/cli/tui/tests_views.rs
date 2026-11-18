@@ -900,7 +900,7 @@ fn print_screens() {
     let show = |name: &str, a: &App| println!("===== {name} =====\n{}", screen_text(a, 80, 24));
     show("home", &with_runs());
     let (mut a, _) = feed(with_runs(), vec![ch('n')]);
-    a.new_run.instruction = "fix parse_date en dates.py".into();
+    a.new_run.instruction = "fix parse_date in dates.py".into();
     a.new_run.check = Some(Ok(super::new_run::Preview {
         workspace: "/home/ivan/project".into(),
         files: 12,
@@ -933,12 +933,12 @@ fn print_screens() {
                 id: ID1.into(),
                 files: 2,
                 workspace: "/home/ivan/project".into(),
-                names: vec!["M dates.py".into(), "+ notas.md".into()],
+                names: vec!["M dates.py".into(), "+ notes.md".into()],
                 tainted: Some(false),
             }))),
         ],
     );
-    show("confirmar", &a);
+    show("confirm", &a);
     let mut a = with_runs();
     a.screen = Screen::Doctor;
     a.doctor.set(report());
@@ -949,7 +949,7 @@ fn print_screens() {
     show("help (live)", &a);
     let mut f = live_app();
     f.live.finish(Ok(summary(ID1, "Final", &["dates.py"])));
-    show("live terminado", &f);
+    show("live finished", &f);
     println!(
         "===== live 120x30 =====\n{}",
         screen_text(&live_app(), 120, 30)

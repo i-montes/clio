@@ -1,5 +1,5 @@
 //! `clio`: use Clio for real on this machine. The agent works on a COPY of your project; you
-//! decide what goes back to the original. See `docs/uso-local.md`.
+//! decide what goes back to the original. See `docs/usage.md`.
 
 mod cli;
 
@@ -36,7 +36,7 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio --version                              the version
   clio pi doctor|install|sessions [--json]    Pi (the agent's harness): status, installation, sessions
 
-No color: NO_COLOR=1 or TERM=dumb. Debug: --debug, CLIO_DEBUG=1 or Ctrl-D in the interface. More: docs/uso-local.md";
+No color: NO_COLOR=1 or TERM=dumb. Debug: --debug, CLIO_DEBUG=1 or Ctrl-D in the interface. More: docs/usage.md";
 
 fn pending_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;

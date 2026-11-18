@@ -1,6 +1,6 @@
 # 0011: The memory file is not encrypted by the engine; the host's disk and the backups are
 
-Status: accepted by default (2026-11-09), with the person away; it can be changed (`docs/decisiones-pendientes.md`). Closes task 303.
+Status: accepted by default (2026-11-09), with the person away; it can be changed (`docs/open-decisions.md`). Closes task 303.
 
 ## Context
 
@@ -10,7 +10,7 @@ What already holds:
 
 - The file is created 0600 in a 0700 folder, and the engine refuses to open it otherwise (`clio-memory/tests/writer_lock.rs`, S-23). Vectors live in the same file with the same permissions (`clio-memory/tests/embed.rs`, S-24).
 - On the person's PC, the base of ADR 0006, the home disk is LUKS; `infra/local/check-host.sh` checks it (S-40).
-- Backups go through restic (`docs/respaldos.md`), which encrypts them. The memory is copied hot (`clio-memory backup`), never the file in use.
+- Backups go through restic (`docs/backups.md`), which encrypts them. The memory is copied hot (`clio-memory backup`), never the file in use.
 - The same file is shared by every agent that uses clio-memory over MCP (Claude Code, OpenCode, Codex…), and by the nightly sleep. Each opens it as the person's user.
 
 ## Decision

@@ -113,7 +113,7 @@ pub(super) fn with_runs() -> App {
         info(
             ID1,
             Status::Pending,
-            "fix parse_date en dates.py",
+            "fix parse_date in dates.py",
             &["dates.py"],
         ),
         info(
@@ -943,7 +943,7 @@ fn home_draws_state_and_runs_without_overflow() {
                 "{t}"
             );
             assert!(t.contains("applied") && t.contains("failed"), "{t}");
-            assert!(t.contains("fix parse_date en dates.py"), "{t}");
+            assert!(t.contains("fix parse_date in dates.py"), "{t}");
             assert!(t.contains("q quit") && t.contains("? help"), "{t}");
             if w >= 120 {
                 assert!(t.contains("/ filter") && t.contains("n new"), "{t}");

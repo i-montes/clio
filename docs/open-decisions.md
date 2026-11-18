@@ -6,7 +6,7 @@ Written during phase 1, with the person away, and kept up to date. Here is what 
 
 ### 1. Encrypted backups and Tailnet Lock on the host · tasks 093, 094, 095
 The host is one machine (ADR 0006): the person's PC at first, the owner's VPS now. `infra/local/check-host.sh` checks the essentials: disk encryption, firewall, SSH off, nothing of Clio outside loopback, a Tailscale key with expiry.
-- **Tool: restic (decided on 2026-11-02),** installed, with scripts in `infra/local/` (`docs/respaldos.md`). A default place per system (Linux and macOS, outside the data folder) and only the last 2 copies (decided on 2026-11-02). That place is on the same disk: **a destination off the host is still missing** (an external disk or encrypted cloud storage), as are creating the repository and testing a restore (093, 094). Until then, the memory and the vault live only on that disk.
+- **Tool: restic (decided on 2026-11-02),** installed, with scripts in `infra/local/` (`docs/backups.md`). A default place per system (Linux and macOS, outside the data folder) and only the last 2 copies (decided on 2026-11-02). That place is on the same disk: **a destination off the host is still missing** (an external disk or encrypted cloud storage), as are creating the repository and testing a restore (093, 094). Until then, the memory and the vault live only on that disk.
 - **Disk encryption on a VPS.** ADR 0011 (memory not encrypted by the engine) holds only where the host's disk is encrypted; on a host without it, that decision is reopened.
 - **Tailnet Lock** is not on; it is optional and yours to decide (095).
 

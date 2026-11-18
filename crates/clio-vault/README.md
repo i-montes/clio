@@ -1,6 +1,6 @@
 # clio-vault
 
-Secret vault (S-18 to S-22, S-44). The model only sees `{{secret:name}}` markers.
+Secret vault (S-18 to S-22, S-44). The model only sees `{{secret:name}}` markers; a value struck out of a text reads `[secret:name redacted]`. The old spellings (`{{secreto:name}}`, `[secreto:… tachado]`) are still read.
 
 - Values are encrypted at rest (XChaCha20-Poly1305). The master key comes from a passphrase
   (Argon2id) and is never stored: a fresh or restarted vault is locked until `unlock`.

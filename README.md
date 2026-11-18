@@ -39,7 +39,7 @@ By default Clio works in host mode ([ADR 0012](docs/decisions/0012-host-mode.md)
 
 Clio ships with who she is. Her primordial memories (the blocks `identidad`, `reglas`, `preferencias` and `vigilancia`) go to the model with authority in every session. In the first chat she introduces herself and asks who you are. You change them by talking to her in a clean session (one that read nothing from outside). `clio memory identity` shows them and `clio memory remember "text" --block B` writes one by hand.
 
-Guide: [`docs/uso-local.md`](docs/uso-local.md).
+Guide: [`docs/usage.md`](docs/usage.md).
 
 ## Layout
 
