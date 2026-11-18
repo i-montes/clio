@@ -187,7 +187,9 @@ pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = pending::check(&state(dirs), id, now_ms())?;
     if let Some((name, dest, why)) = pending::secret_of(&p) {
         println!(
-            "{id} asks for the secret {name}; it can only be sent to {dest}\nwhy: {}",
+            "{id} asks for the secret {}; it can only be sent to {}\nwhy: {}",
+            sanitize::line(name),
+            sanitize::line(dest),
             sanitize::line(why)
         );
         let typed = super::vault::read_secret("value (not shown)")?;

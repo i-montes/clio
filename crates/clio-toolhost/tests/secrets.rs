@@ -128,10 +128,43 @@ fn bad_names_destinations_and_reasons_are_refused_before_the_vault_is_asked() {
             json!({"name":"ok","destination":":b","why":"w"}),
             "`destination`",
         ),
-        (json!({"name":"ok","destination":"a:b","why":" "}), "`why`"),
+        (
+            json!({"name":"ok","destination":"http_fetch:api.example.com","why":" "}),
+            "`why`",
+        ),
+        (
+            json!({"name":"ok\u{1b}[2J","destination":"http_fetch:a.example","why":"w"}),
+            "`name`",
+        ),
     ] {
         let r = ask(&e, "s1", args);
         assert!(!r.ok && r.content.contains(why), "{}", r.content);
+    }
+    // A secret is bound to the host and everything under it: never a bare suffix, never a
+    // host that is not a plain name.
+    for dest in [
+        "http_fetch:com",
+        "http_fetch:.com",
+        "http_fetch:example.com.",
+        "http_fetch:.example.com",
+        "http_fetch:a..example.com",
+        "http_fetch:api example.com",
+        "http_fetch:api.example.com\u{1b}[1A",
+        "http_fetch:api.example.com/path",
+        "http_fetch:api.example.com:443",
+        "http_fetch:*.example.com",
+        "Http_Fetch:api.example.com",
+        "http-fetch:api.example.com",
+        "http fetch:api.example.com",
+        ":api.example.com",
+        "http_fetch:",
+    ] {
+        let r = ask(&e, "s1", json!({"name":"ok","destination":dest,"why":"w"}));
+        assert!(
+            !r.ok && r.content.contains("`destination`"),
+            "{dest:?}: {}",
+            r.content
+        );
     }
 }
 

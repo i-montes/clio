@@ -322,6 +322,24 @@ pub(crate) fn set_aside(state: &Path, mut p: Pending, per_day: u32) -> Result<Pe
     Ok(p)
 }
 
+/// A secret's destination, strict: the vault binds the value to the host and every name under it,
+/// so `http_fetch:com` would hand it to every `.com`. The tool is `[a-z_]+`; the host is
+/// `[a-z0-9.-]+` with at least two labels, none empty (no leading, trailing or double dot).
+// shortcut: no public suffix list, so `co.uk` passes; add one if hosts like that get asked for.
+fn destination(s: &str) -> Option<clio_vault::Dest> {
+    let (tool, host) = s.split_once(':')?;
+    // A host name has no case: `API.example.com` is `api.example.com`.
+    let host = host.to_ascii_lowercase();
+    let tool_ok = !tool.is_empty() && tool.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    let host_ok = host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+        && host.split('.').count() >= 2
+        && host.split('.').all(|l| !l.is_empty());
+    (tool_ok && host_ok).then(|| clio_vault::Dest::new(tool, &host))
+}
+
 fn tail(s: &str) -> String {
     let mut i = s.len().saturating_sub(TAIL_BYTES);
     while !s.is_char_boundary(i) {
@@ -478,9 +496,9 @@ impl ToolHost {
                 "`name` must be 1 to 64 lowercase letters, digits, '-', '_' or '.'".into(),
             );
         }
-        let Some(dest) = clio_vault::Dest::parse(arg("destination")) else {
+        let Some(dest) = destination(arg("destination")) else {
             return refuse(
-                "`destination` must be TOOL:DOMAIN, as in http_fetch:api.github.com".into(),
+                "`destination` must be TOOL:HOST, as in http_fetch:api.github.com: the tool in a-z and '_', the host a full name with a dot inside (a-z, 0-9, '-' and '.'), never a bare suffix such as com".into(),
             );
         };
         let why: String = self
