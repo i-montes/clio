@@ -1197,6 +1197,8 @@ fn a_background_command_is_logged_cleaned_capped_per_session_and_stopped_with_th
         .filter(|l| l["outcome"] == "stopped")
         .count();
     assert_eq!(stopped, 6);
+    // Their raw output does not outlive the session.
+    assert!(!e.run.join("jobs").exists() && !file.exists());
 }
 
 #[test]

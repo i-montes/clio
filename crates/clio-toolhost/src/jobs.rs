@@ -5,7 +5,8 @@
 //!
 //! What a job writes goes to `<run>/jobs/<id>.log` (0600), capped: past `FILE_CAP` the oldest half
 //! is dropped and the next read says so. At most `MAX_RUNNING` run per session. Every job stops
-//! when the service stops (the session ends, the person quits, a signal): `ToolHost::stop`.
+//! when the service stops (the session ends, the person quits, a signal): `ToolHost::stop`, and
+//! the files go then.
 
 use std::collections::HashMap;
 use std::fs;
@@ -423,6 +424,13 @@ impl ToolHost {
         let until = Instant::now() + grace;
         while ends.iter().any(|e| lock(e).is_none()) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
+        }
+        // What they wrote is raw (cleaned only when read): it does not outlive the session. A job
+        // still ending cannot make its file again (it only appends to one that exists).
+        if let Err(e) = fs::remove_dir_all(self.run_dir.join("jobs"))
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("clio-toolhost: the background commands' output could not be removed: {e}");
         }
     }
 }
