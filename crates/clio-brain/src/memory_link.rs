@@ -66,6 +66,10 @@ fn block_cap(name: &str) -> usize {
 
 pub type Res<T> = Result<T, String>;
 
+/// What the engine's guard of the fixed blocks says (`Error::HeldByBlock`).
+pub const HELD_BY_BLOCK: &str =
+    "ese recuerdo está en un bloque fijo de la persona: solo ella lo cambia";
+
 /// A refusal in the words of a person.
 pub fn explain(e: &Error) -> String {
     match e {
@@ -81,6 +85,7 @@ pub fn explain(e: &Error) -> String {
         Error::NotAllowed => "no permitido para este actor".into(),
         Error::InvalidState => "el recuerdo no está en un estado que lo permita".into(),
         Error::NotFound => "no existe ese recuerdo".into(),
+        Error::HeldByBlock => HELD_BY_BLOCK.into(),
         other => other.to_string(),
     }
 }

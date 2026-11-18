@@ -355,24 +355,24 @@ mod tests {
         assert!(fixed.iter().all(|c| c.person));
     }
 
+    // Engine 0.13.0 refuses the rewrite, so the entry stays the person's and is sent as hers.
     #[test]
-    fn a_block_entry_the_agent_rewrote_is_not_sent_with_authority() {
+    fn a_block_entry_the_agent_tries_to_rewrite_stays_the_persons() {
         use clio_brain::memory_link::Draft;
         use clio_memory::MemoryType;
         let tmp = tempfile::tempdir().unwrap();
         let link = MemoryLink::open_write(tmp.path(), &EmbedModel::none()).unwrap();
         let mine = link.block_add("identidad", "Eres Clio").unwrap();
-        link.update_as_agent(
-            mine.id,
-            &Draft::plain("Eres otra cosa", MemoryType::Semantic),
-            "s1",
-            false,
-        )
-        .unwrap();
+        let draft = Draft::plain("Eres otra cosa", MemoryType::Semantic);
+        assert!(link.update_as_agent(mine.id, &draft, "s1", false).is_err());
         drop(link);
         let fixed = MemoryRecall::new(tmp.path(), &[], None).fixed();
         assert_eq!(fixed.len(), 1, "{fixed:?}");
-        assert!(!fixed[0].person && fixed[0].block.is_none(), "{fixed:?}");
+        assert!(
+            fixed[0].person && fixed[0].block == Some("identidad"),
+            "{fixed:?}"
+        );
+        assert_eq!(fixed[0].text, "Eres Clio");
     }
 
     #[test]

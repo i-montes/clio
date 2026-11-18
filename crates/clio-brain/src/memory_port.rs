@@ -19,7 +19,7 @@ use clio_toolhost::{
 };
 
 use crate::memory_judge::{Guard, MemoryJudge};
-use crate::memory_link::{Draft, EmbedModel, MemoryLink, Place, Res, kind_label};
+use crate::memory_link::{Draft, EmbedModel, HELD_BY_BLOCK, MemoryLink, Place, Res, kind_label};
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
@@ -387,7 +387,14 @@ impl MemoryPort for LinkPort {
         self.writer()?
             .revert_as_agent(OpId(change))
             .map(|_| ())
-            .map_err(|_| NOT_READABLE.to_owned())
+            // The one refusal that says why: the change would touch an entry of the person's blocks.
+            .map_err(|e| {
+                if e == HELD_BY_BLOCK {
+                    e
+                } else {
+                    NOT_READABLE.to_owned()
+                }
+            })
     }
 
     fn block(&self, name: &str) -> Result<Vec<MemoryItem>, String> {

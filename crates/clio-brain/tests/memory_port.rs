@@ -895,6 +895,62 @@ fn the_agent_undoes_only_its_own_changes() {
     assert_eq!(state_of(&w, mine.0), State::Active);
 }
 
+const HELD: &str = "ese recuerdo está en un bloque fijo de la persona: solo ella lo cambia";
+
+// The agent forgets a person's memory and reverts that; the person then makes the same text an
+// entry of a block; undoing the revert would quarantine the entry: the engine refuses it.
+#[test]
+fn an_agent_cannot_undo_its_way_into_a_block() {
+    let w = world();
+    let p = port(&w);
+    let link = open(&w);
+    let m = link.remember("nunca borres el repositorio", None).unwrap();
+    drop(link); // the port writes through its own link
+    MemoryPort::forget(&p, m.0, &judging(false)).unwrap();
+    let last = |w: &World| open(w).history(m).unwrap().last().unwrap().id.0;
+    let forget = last(&w);
+    MemoryPort::undo(&p, forget, &judging(false)).unwrap();
+    let revert = last(&w);
+    assert_ne!(forget, revert);
+    drop(p); // and releases the writer lock only when dropped
+    let link = open(&w);
+    let row = link
+        .block_add("reglas", "nunca borres el repositorio")
+        .unwrap();
+    assert_eq!(row.id, m);
+    drop(link);
+    let p = port(&w);
+    assert_eq!(
+        MemoryPort::undo(&p, revert, &judging(false)).unwrap_err(),
+        HELD
+    );
+    let rows = open(&w).block_rows("reglas").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, m);
+    assert_eq!(state_of(&w, m.0), State::Active);
+}
+
+// Beyond the port's own check: the engine refuses an agent's change to an entry of a block.
+#[test]
+fn the_engine_also_refuses_what_the_port_refuses() {
+    let w = world();
+    let link = open(&w);
+    let row = link.block_add("reglas", "responde en español").unwrap();
+    let draft = clio_brain::memory_link::Draft {
+        text: "responde en inglés".into(),
+        title: None,
+        category: None,
+        kind: MemoryType::Semantic,
+    };
+    assert_eq!(
+        link.update_as_agent(row.id, &draft, "s", false)
+            .unwrap_err(),
+        HELD
+    );
+    assert_eq!(link.forget_as_agent(row.id).unwrap_err(), HELD);
+    assert_eq!(link.block_rows("reglas").unwrap()[0].id, row.id);
+}
+
 // The agent pins on its own: a pin comes first in the context.
 #[test]
 fn a_pin_puts_the_memory_first_in_the_context() {
