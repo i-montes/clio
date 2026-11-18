@@ -177,7 +177,7 @@ pub struct MemoryItem {
     pub text: String,
     pub title: Option<String>,
     pub category: Option<String>,
-    /// Where it lives: `proyecto`, `personal`, `lección de X`; empty when it does not say.
+    /// Where it lives: `personal`, `project X`, `lesson from X`; empty when it does not say.
     pub place: String,
     /// How it stands to other memories, as Jev judged it or as it replaced one: `contradice a m12`.
     pub notes: Vec<String>,

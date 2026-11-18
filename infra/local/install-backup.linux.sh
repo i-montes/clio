@@ -4,7 +4,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-[ -r "${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}" ] || { echo "falta la configuración: corre backup-init.unix.sh primero" >&2; exit 2; }
+[ -r "${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}" ] || { echo "the backup is not set up: run backup-init.unix.sh first" >&2; exit 2; }
 dest="$HOME/.config/systemd/user"
 mkdir -p "$dest"
 sed "s|@REPO@|$repo|g" "$here/clio-backup.linux.service" > "$dest/clio-backup.service"

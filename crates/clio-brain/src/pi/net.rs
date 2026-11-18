@@ -341,7 +341,7 @@ pub fn forward_main(args: Vec<String>) -> Result<i32, String> {
         }
     }
     let (Some(listen), Some(upstream)) = (listen, upstream) else {
-        return Err("pi-net: faltan --listen y --upstream".into());
+        return Err("pi-net: --listen and --upstream are required".into());
     };
     let Some((program, rest)) = cmd.split_first() else {
         return Err("pi-net: the command after -- is missing".into());

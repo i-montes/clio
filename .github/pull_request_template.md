@@ -1,7 +1,7 @@
-## Qué cambia
+## What changes
 
-## Reglas
-<!-- S-xx de docs/security.md que toca este PR y la prueba que cada una tiene. Si no toca ninguna: «ninguna». -->
+## Rules
+<!-- The S-xx of docs/security.md this PR touches and the test each one has. If it touches none: "none". -->
 
-## ¿Toca pasarela, vault, firmas de nodos o PWA?
-<!-- Si sí, lo revisa una persona (CODEOWNERS), no un agente. -->
+## Does it touch the gateway, the vault, node signatures or the PWA?
+<!-- If so, a person reviews it (CODEOWNERS), not an agent. -->

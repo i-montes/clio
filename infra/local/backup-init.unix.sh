@@ -10,17 +10,17 @@
 # Makes ~/.config/clio/restic-password (a random passphrase) and ~/.config/clio/backup.env, both
 # 0600. It never prints the passphrase and never overwrites an existing setup.
 set -euo pipefail
-command -v restic >/dev/null || { echo "restic no está instalado" >&2; exit 2; }
+command -v restic >/dev/null || { echo "restic is not installed" >&2; exit 2; }
 case "${CLIO_OS_OVERRIDE:-$(uname -s)}" in   # CLIO_OS_OVERRIDE: only for the self-test
   Darwin) default_repo="$HOME/Library/Application Support/clio-backup/repo" ;;
   Linux)  default_repo="${XDG_DATA_HOME:-$HOME/.local/share}/clio-backup/repo" ;;
-  *) echo "sistema no soportado (solo Linux y macOS)" >&2; exit 2 ;;
+  *) echo "unsupported system (Linux and macOS only)" >&2; exit 2 ;;
 esac
 repo="${1:-$default_repo}"
 CONF="${CLIO_CONFIG:-$HOME/.config/clio}"
 ENV_FILE="${CLIO_BACKUP_ENV:-$CONF/backup.env}"
 PASS_FILE="${CLIO_BACKUP_PASSWORD_FILE:-$CONF/restic-password}"
-[ ! -e "$ENV_FILE" ] && [ ! -e "$PASS_FILE" ] || { echo "ya hay una configuración ($ENV_FILE o $PASS_FILE); no la piso" >&2; exit 3; }
+[ ! -e "$ENV_FILE" ] && [ ! -e "$PASS_FILE" ] || { echo "there is already a setup ($ENV_FILE or $PASS_FILE); not overwriting it" >&2; exit 3; }
 umask 077
 mkdir -p "$CONF"
 case "$repo" in /*) mkdir -p "$(dirname "$repo")" ;; esac   # a local repository: its parent, private (umask)
@@ -29,23 +29,23 @@ printf 'RESTIC_REPOSITORY=%q\nRESTIC_PASSWORD_FILE=%q\n' "$repo" "$PASS_FILE" > 
 chmod 600 "$PASS_FILE" "$ENV_FILE"
 if ! RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD_FILE="$PASS_FILE" restic init; then
   rm -f "$ENV_FILE" "$PASS_FILE"
-  echo "no se pudo crear el repositorio; deshice la configuración" >&2
+  echo "could not create the repository; the setup was undone" >&2
   exit 4
 fi
 cat <<MSG
 
 Repositorio creado en $repo.
 
-IMPORTANTE: la frase que cifra las copias está solo en $PASS_FILE, en este mismo disco.
-Si este disco se pierde, las copias quedan ilegibles. Guarda ahora una copia de esa frase
-FUERA de este equipo (un gestor de contraseñas):   cat $PASS_FILE
+IMPORTANT: the passphrase that encrypts the copies is only in $PASS_FILE, on this same disk.
+If this disk is lost, the copies become unreadable. Keep a copy of that passphrase now
+OUTSIDE this machine (a password manager):   cat $PASS_FILE
 MSG
 # Same disk? (only for a local repository; df -P is the same on both systems)
 case "$repo" in /*)
   if [ "$(df -P "$(dirname "$repo")" | awk 'NR==2{print $1}')" = "$(df -P "$HOME" | awk 'NR==2{print $1}')" ]; then
     echo
-    echo "AVISO: este repositorio está en el mismo disco que tus datos. Protege de borrados y de archivos"
-    echo "dañados, pero no de perder el disco. Para eso, crea el repositorio en un disco externo o en la"
-    echo "nube (vuelve a correr este script con otro REPOSITORIO)."
+    echo "WARNING: this repository is on the same disk as your data. It protects against deletions and damaged files,"
+    echo "but not against losing the disk. For that, create the repository on an external disk or in the"
+    echo "cloud (run this script again with another REPOSITORY)."
   fi ;;
 esac

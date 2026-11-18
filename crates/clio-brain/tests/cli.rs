@@ -1348,17 +1348,18 @@ fn doctor_shows_each_check_once_with_the_real_host_script() {
     assert_eq!(count("(S-23)"), 0, "{msgs:#?}");
     // Ports: one line, Clio's own.
     assert_eq!(count("listens outside loopback"), 1, "{msgs:#?}");
-    assert_eq!(count("ningún proceso de Clio escucha"), 0, "{msgs:#?}");
-    // The host script's own lines are still in Spanish (infra/local/check-host.sh).
-    for english in ["firewall active", "backup tool"] {
-        assert_eq!(count(english), 0, "{english}: {msgs:#?}");
-    }
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("cortafuegos") || m.contains("OpenSSH") || m.contains("bwrap")),
+    assert_eq!(
+        count("no Clio process listens on a public interface"),
+        0,
         "{msgs:#?}"
     );
-    // The script on its own still does every check, in Spanish, and keeps its exit code.
+    // The host script's own lines (infra/local/check-host.sh) come through.
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("firewall") || m.contains("OpenSSH") || m.contains("bwrap")),
+        "{msgs:#?}"
+    );
+    // The script on its own still does every check and keeps its exit code.
     let alone = Command::new("bash")
         .arg(&script)
         .env("HOME", e.home())
@@ -1367,16 +1368,16 @@ fn doctor_shows_each_check_once_with_the_real_host_script() {
         .unwrap();
     let alone_out = text(&alone.stdout);
     assert!(
-        alone_out.contains("es privada (700)") && alone_out.contains("S-38"),
+        alone_out.contains("is private (700)") && alone_out.contains("S-38"),
         "{alone_out}"
     );
     assert!(
-        alone_out.contains("equipo: sin FAIL") || alone_out.contains("equipo: hay FAIL"),
+        alone_out.contains("host: no FAIL") || alone_out.contains("host: there is a FAIL"),
         "{alone_out}"
     );
     assert_eq!(
         alone.status.code() == Some(1),
-        alone_out.contains("equipo: hay FAIL")
+        alone_out.contains("host: there is a FAIL")
     );
 }
 

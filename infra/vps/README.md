@@ -11,7 +11,7 @@ Nothing in this folder has run on a real server. It is a provider-neutral start 
 
 ## What is missing and needs the person
 
-- A provider, a region and a size; and an account (see `docs/decisiones-pendientes.md`).
+- A provider, a region and a size; and an account (see `docs/open-decisions.md`).
 - A Tailscale account: a one-use auth key for the first boot, key expiry and Tailnet Lock (095).
 - **Disk encryption (092)** cannot be done from cloud-init: it depends on the provider (encrypted volumes) or on installing with LUKS.
 - **Off-site encrypted backups (093) and the first restore on a clean machine (094):** need storage somewhere else and a key kept apart.

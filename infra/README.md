@@ -1,7 +1,7 @@
 # infra
 
-- `local/`: lo que hace falta en este PC, que es la base (ADR 0006): `check-host.sh` (disco cifrado, cortafuegos, SSH, nada de Clio fuera de loopback) y los scripts de respaldos con restic (`docs/respaldos.md`).
-- `models/`: instaladores del modelo de embeddings (`just setup-model-linux`, `just setup-model-macos`).
-- `vps/`: borrador de un servidor opcional; no bloquea nada.
+- `local/`: what this PC needs, which is the base (ADR 0006): `check-host.sh` (encrypted disk, firewall, SSH, nothing of Clio outside loopback) and the backup scripts with restic (`docs/backups.md`).
+- `models/`: installers of the embedding model (`just setup-model-linux`, `just setup-model-macos`).
+- `vps/`: a draft of an optional server; it blocks nothing.
 
-Ver [`docs/specs/`](../docs/specs/) y [`docs/security.md`](../docs/security.md).
+See [`docs/specs/`](../docs/specs/) and [`docs/security.md`](../docs/security.md).

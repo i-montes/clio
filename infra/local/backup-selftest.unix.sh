@@ -4,7 +4,7 @@
 # Same on Linux and macOS (ADR 0002: shared Unix code is named .unix.sh). Needs restic.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-command -v restic >/dev/null || { echo "SKIP: restic no está instalado"; exit 0; }
+command -v restic >/dev/null || { echo "SKIP: restic is not installed"; exit 0; }
 root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
 fails=0
 ok()   { echo "PASS  $1"; }
@@ -29,31 +29,31 @@ snapshots() { env HOME="$1" bash -c 'set -a; . "$HOME/.config/clio/backup.env"; 
 new_home linux; OS=Linux run linux backup-init.unix.sh >/dev/null 2>&1
 check "Linux: repositorio por defecto en ~/.local/share/clio-backup/repo" '[ -f "$root/linux/.local/share/clio-backup/repo/config" ]'
 new_home linuxxdg; mkdir -p "$root/xdg"; OS=Linux XDGV="$root/xdg" run linuxxdg backup-init.unix.sh >/dev/null 2>&1
-check "Linux con XDG_DATA_HOME: se respeta" '[ -f "$root/xdg/clio-backup/repo/config" ]'
+check "Linux with XDG_DATA_HOME: it is respected" '[ -f "$root/xdg/clio-backup/repo/config" ]'
 new_home mac; OS=Darwin run mac backup-init.unix.sh >/dev/null 2>&1
 check "macOS: repositorio por defecto en ~/Library/Application Support/clio-backup/repo" '[ -f "$root/mac/Library/Application Support/clio-backup/repo/config" ]'
-check "la frase y la configuración quedan 0600" '[ "$(stat -c %a "$root/linux/.config/clio/restic-password" 2>/dev/null || stat -f %Lp "$root/linux/.config/clio/restic-password")" = 600 ]'
+check "the passphrase and the setup end up 0600" '[ "$(stat -c %a "$root/linux/.config/clio/restic-password" 2>/dev/null || stat -f %Lp "$root/linux/.config/clio/restic-password")" = 600 ]'
 OS=Linux run linux backup-init.unix.sh >/dev/null 2>&1; rc=$?
-check "init no pisa una configuración existente" '[ $rc -ne 0 ]'
+check "init does not overwrite an existing setup" '[ $rc -ne 0 ]'
 new_home warn; out="$(OS=Linux run warn backup-init.unix.sh 2>&1)"
-check "init avisa que un repositorio en el mismo disco no protege de perderlo" 'grep -q "mismo disco" <<<"$out"'
-check "init no imprime la frase" '! grep -qF "$(cat "$root/warn/.config/clio/restic-password")" <<<"$out"'
+check "init warns that a repository on the same disk does not protect against losing it" 'grep -q "same disk" <<<"$out"'
+check "init does not print the passphrase" '! grep -qF "$(cat "$root/warn/.config/clio/restic-password")" <<<"$out"'
 
 # 2. Only the last two copies are kept by default; the number can be raised.
 for i in 1 2 3; do echo "$i" > "$root/linux/.config/clio/config.json"; OS=Linux run linux backup.unix.sh >/dev/null 2>&1; done
-check "tras 3 copias quedan solo las 2 últimas" '[ "$(snapshots "$root/linux")" = 2 ]'
+check "after 3 copies only the last 2 remain" '[ "$(snapshots "$root/linux")" = 2 ]'
 for i in 4 5; do echo "$i" > "$root/linux/.config/clio/config.json"; OS=Linux KEEP=3 run linux backup.unix.sh >/dev/null 2>&1; done
-check "con CLIO_BACKUP_KEEP=3 quedan 3" '[ "$(snapshots "$root/linux")" = 3 ]'
+check "with CLIO_BACKUP_KEEP=3, 3 remain" '[ "$(snapshots "$root/linux")" = 3 ]'
 OS=Linux KEEP=0 run linux backup.unix.sh >/dev/null 2>&1; rc=$?
-check "CLIO_BACKUP_KEEP=0 se rechaza (no borra todo)" '[ $rc -ne 0 ] && [ "$(snapshots "$root/linux")" = 3 ]'
+check "CLIO_BACKUP_KEEP=0 is refused (it never deletes everything)" '[ $rc -ne 0 ] && [ "$(snapshots "$root/linux")" = 3 ]'
 
 # 3. What was backed up can be restored, and the work copy was left out.
 OS=Linux run linux backup-restore-test.unix.sh >/dev/null 2>&1; rc=$?
-check "la restauración se comprueba" '[ $rc -eq 0 ]'
-check "la copia de trabajo (sandbox) no se respalda" '! env HOME="$root/linux" bash -c "set -a; . \"\$HOME/.config/clio/backup.env\"; set +a; restic ls latest" 2>/dev/null | grep -q sandbox'
+check "the restore is checked" '[ $rc -eq 0 ]'
+check "the working copy (sandbox) is not backed up" '! env HOME="$root/linux" bash -c "set -a; . \"\$HOME/.config/clio/backup.env\"; set +a; restic ls latest" 2>/dev/null | grep -q sandbox'
 : > "$root/linux/.local/share/clio/vault.bin"; OS=Linux run linux backup.unix.sh >/dev/null 2>&1
 OS=Linux run linux backup-restore-test.unix.sh >/dev/null 2>&1; rc=$?
 # shellcheck disable=SC2034
-check "una bóveda vacía hace fallar la prueba de restauración" '[ $rc -ne 0 ]'
+check "an empty vault makes the restore test fail" '[ $rc -ne 0 ]'
 
 [ "$fails" -eq 0 ] && echo "selftest: todo bien" || { echo "selftest: $fails fallo(s)"; exit 1; }

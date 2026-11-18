@@ -5,7 +5,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-[ -r "${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}" ] || { echo "falta la configuración: corre backup-init.unix.sh primero" >&2; exit 2; }
+[ -r "${CLIO_BACKUP_ENV:-$HOME/.config/clio/backup.env}" ] || { echo "the backup is not set up: run backup-init.unix.sh first" >&2; exit 2; }
 dest="$HOME/Library/LaunchAgents/com.clio.backup.plist"
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 sed -e "s|@REPO@|$repo|g" -e "s|@HOME@|$HOME|g" "$here/com.clio.backup.macos.plist" > "$dest"
