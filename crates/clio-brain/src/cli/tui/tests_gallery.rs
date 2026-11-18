@@ -32,6 +32,7 @@ pub(super) fn pi(host: bool) -> App {
         limits: RunLimits::default(),
         window: 200_000,
         window_known: true,
+        context_cap: 200_000,
     });
     a.home.doctor = Some((36, 1, 0));
     a.sessions.set(rows());
@@ -320,6 +321,22 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         Some(40),
     );
     out.push(("reopened conversation, earlier messages and a summary", a));
+    // The turn ended over the cap: Clio compacts by itself.
+    let over = || {
+        let mut a = conversation(true);
+        a.chat.running = true;
+        super::app::update(a, super::tests_continuous::settled(Some(246_000))).0
+    };
+    out.push(("automatic compaction over the cap", over()));
+    let (a, _) = super::app::update(
+        over(),
+        super::app::Input::Bg(super::app::Bg::Compacted(
+            Ok("context compacted: from 246k to about 212k tokens".into()),
+            Some(212_000),
+            None,
+        )),
+    );
+    out.push(("automatic compaction, still over the cap", a));
     let mut a = pi(false);
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
     a.home.doctor = Some((30, 2, 2));
@@ -381,6 +398,9 @@ fn command_states() -> Vec<(&'static str, App)> {
     let mut a = conversation(true);
     commands::start(&mut a, Target::Builtin(Run::Usage), "");
     out.push(("/usage", a));
+    let mut a = conversation(true);
+    commands::start(&mut a, Target::Builtin(Run::Context), "");
+    out.push(("/context with the cap", a));
     let mut a = conversation(true);
     let mut m = Modal::text(
         "Pending",

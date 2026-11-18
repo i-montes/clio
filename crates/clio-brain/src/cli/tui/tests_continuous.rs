@@ -344,3 +344,128 @@ fn a_drawer_session_that_fails_to_open_gives_the_message_back() {
     assert!(a.chat.failed.is_some() && !a.chat.is_draft());
     assert!(!a.chat.items.contains(&Item::User("hola".into())));
 }
+
+/// A Pi session open on `sid`, a turn running.
+fn turn_running() -> App {
+    let mut a = pi(true);
+    a.chat = super::chat::Chat::opening(1, 0);
+    a.chat.opened("sid".into(), "/w".into(), &[], None, 0);
+    a.chat.running = true;
+    a
+}
+
+/// The turn ends, Pi's context then holding `tokens` (none right after Pi compacted).
+pub(super) fn settled(tokens: Option<u64>) -> Input {
+    use clio_brain::pi::rpc::{ContextUsage, SessionStats};
+    Input::Bg(Bg::ChatSettled {
+        result: Ok(clio_brain::pi::rpc::RunSummary::default()),
+        refresh: Some(crate::cli::chat::Refresh {
+            stats: SessionStats {
+                context: Some(ContextUsage {
+                    tokens,
+                    window: 1_000_000,
+                    percent: None,
+                }),
+                ..SessionStats::default()
+            },
+            tainted: false,
+            egress_denied: vec![],
+            masked: 0,
+            withheld: vec![],
+            judge_silent: false,
+            jobs: 0,
+        }),
+    })
+}
+
+fn last_note(a: &App) -> String {
+    match a.chat.items.last() {
+        Some(Item::Note(n)) => n.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+// Past the cap, the turn that ends is followed by the compaction `/compact` sends, with a quiet
+// note; what the person types meanwhile stays in the composer. One that leaves it still over the
+// cap says so once, and nothing tries again before another turn ends.
+#[test]
+fn a_context_over_the_cap_is_compacted_when_the_turn_ends() {
+    let (a, cmds) = feed(turn_running(), vec![settled(Some(150_000))]);
+    assert_eq!(cmds, vec![Cmd::LoadSessions]);
+    assert!(!a.chat.compacting);
+    let mut a = a;
+    a.chat.running = true;
+    let (a, cmds) = feed(a, vec![settled(Some(240_000))]);
+    assert_eq!(cmds, vec![Cmd::LoadSessions, Cmd::Compact(String::new())]);
+    assert!(a.chat.compacting && a.chat.auto_compact);
+    let n = last_note(&a);
+    assert!(
+        n.contains("240k") && n.contains("200k") && n.contains("automatically"),
+        "{n}"
+    );
+    // Keys still go to the composer, at once.
+    let (a, cmds) = feed(a, typed("sigo"));
+    assert!(cmds.is_empty());
+    assert_eq!(a.chat.input, "sigo");
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::Compacted(
+            Ok("context compacted: from 240k to about 210k tokens".into()),
+            Some(210_000),
+            None,
+        ))],
+    );
+    assert!(cmds.is_empty() && !a.chat.compacting && !a.chat.auto_compact);
+    let n = last_note(&a);
+    assert!(
+        n.contains("still over the cap") && n.contains("/compact N"),
+        "{n}"
+    );
+    assert_eq!(a.chat.input, "sigo");
+    // The person's own `/compact`, over the cap or not, says only what it did.
+    let mut a = a;
+    a.chat.compacting = true;
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Compacted(
+            Ok("context compacted".into()),
+            Some(210_000),
+            None,
+        ))],
+    );
+    assert_eq!(last_note(&a), "context compacted");
+}
+
+// Never while something waits: a question or approval on screen, an approved action still
+// running, a message held. Nor without Pi's number (right after it compacted by itself).
+#[test]
+fn nothing_is_compacted_by_itself_while_something_waits() {
+    use super::app::{Action, Confirm};
+    type Set = fn(&mut App);
+    let cases: [(&str, Set); 4] = [
+        ("approval", |a| {
+            a.confirm = Some(Confirm::new(
+                Action::UndoSession,
+                "sid".into(),
+                0,
+                String::new(),
+            ));
+        }),
+        ("answering", |a| a.answering = 1),
+        ("asks", |a| {
+            let mut c = Confirm::new(Action::UndoSession, "x".into(), 0, String::new());
+            c.session = "sid".into();
+            a.asks.push_back(c);
+        }),
+        ("held", |a| a.chat.queued = Some("hola".into())),
+    ];
+    for (what, set) in cases {
+        let mut a = turn_running();
+        set(&mut a);
+        let (a, cmds) = feed(a, vec![settled(Some(900_000))]);
+        assert_eq!(cmds, vec![Cmd::LoadSessions], "{what}");
+        assert!(!a.chat.compacting, "{what}");
+    }
+    let (_, cmds) = feed(turn_running(), vec![settled(None)]);
+    assert_eq!(cmds, vec![Cmd::LoadSessions]);
+}

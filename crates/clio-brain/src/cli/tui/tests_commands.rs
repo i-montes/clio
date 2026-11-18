@@ -162,6 +162,10 @@ fn each_command_asks_for_its_own_work() {
             vec![Cmd::Compact("solo el código".into())],
         ),
         ("/compact", vec![Cmd::Compact(String::new())]),
+        ("/compress", vec![Cmd::Compact(String::new())]),
+        ("/compact 300", vec![Cmd::SetCap(300_000)]),
+        ("/compress 1000", vec![Cmd::SetCap(1_000_000)]),
+        ("/compact 300 words", vec![Cmd::Compact("300 words".into())]),
         ("/resume", vec![]),
         ("/context", vec![]),
         ("/usage", vec![]),
@@ -186,11 +190,21 @@ fn each_command_asks_for_its_own_work() {
         let word = typed.split(' ').next().unwrap();
         match word {
             "/sessions" | "/resume" => assert_eq!(a.screen, Screen::Sessions),
-            "/context" => assert_eq!(a.modal.as_ref().unwrap().title, "Context"),
+            "/context" => {
+                let m = a.modal.as_ref().unwrap();
+                assert_eq!(m.title, "Context");
+                assert!(
+                    m.lines
+                        .iter()
+                        .any(|l| l.starts_with("cap") && l.contains("200k"))
+                );
+            }
             "/usage" | "/cost" => assert_eq!(a.modal.as_ref().unwrap().title, "Usage"),
             "/help" => assert_eq!(a.screen, Screen::Help),
             "/quit" | "/exit" => assert!(a.quit),
-            "/compact" => assert!(a.chat.compacting),
+            "/compact" | "/compress" if !typed.ends_with(char::is_numeric) => {
+                assert!(a.chat.compacting);
+            }
             "/new" | "/clear" => assert!(a.chat.is_draft()),
             "/undo" => {
                 assert_eq!(a.confirm.as_ref().unwrap().action, Action::UndoSession);
@@ -425,12 +439,32 @@ fn a_command_that_changes_the_session_waits_and_one_that_reads_does_not() {
     a.chat.running = true;
     let (a, _) = run(a, "/usage");
     assert_eq!(a.modal.as_ref().unwrap().title, "Usage");
-    // While compacting, a message waits too, and is not lost.
+    // While compacting, a message waits too, and goes out when it ends.
     let mut a = open();
     a.chat.compacting = true;
     let (a, cmds) = run(a, "hola");
     assert!(cmds.is_empty());
-    assert_eq!(a.chat.input, "hola");
+    assert_eq!(a.chat.queued.as_deref(), Some("hola"));
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::Compacted(
+            Ok("context compacted".into()),
+            None,
+            None,
+        ))],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatSend {
+            text: "hola".into()
+        }]
+    );
+    assert!(a.chat.running && !a.chat.compacting);
+    assert_eq!(
+        a.chat.items.last(),
+        Some(&Item::User("hola".into())),
+        "after what the compaction said"
+    );
 }
 
 #[test]
@@ -816,6 +850,52 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
     let v: Value =
         serde_json::from_str(&std::fs::read_to_string(d.config_file()).unwrap()).unwrap();
     assert_eq!(v["extra"], "se queda");
+}
+
+// `/compact N` saves the cap as `/effort` saves the level: in `config.json`, every other field
+// kept, the "session" section made if there is none; the chat uses it at once.
+#[test]
+fn the_context_cap_is_saved_and_used_at_once() {
+    let (_t, d) = dirs_with_config();
+    assert_eq!(super::set_cap(&d, 300_000), Ok(300_000));
+    let cfg = Config::load(&d).unwrap();
+    assert_eq!(cfg.session.context_cap_tokens, 300_000);
+    assert!(cfg.session.continuous);
+    let v: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.config_file()).unwrap()).unwrap();
+    assert_eq!(v["extra"], "se queda");
+    let with_header = || {
+        let mut a = open();
+        a.home.header = super::tests_gallery::pi(true).home.header;
+        a
+    };
+    let (a, cmds) = feed(with_header(), vec![Input::Bg(Bg::CapSet(Ok(300_000)))]);
+    assert!(cmds.is_empty());
+    assert_eq!(a.context_cap(), 300_000);
+    let Some(Item::Note(n)) = a.chat.items.last() else {
+        panic!("{:?}", a.chat.items)
+    };
+    assert!(n.contains("300k"), "{n}");
+    // Out of range: a note with the range, and nothing changes.
+    for typed in [
+        "/compact 20",
+        "/compact 1001",
+        "/compress 99999999999999999999999",
+    ] {
+        let (b, cmds) = run(with_header(), typed);
+        assert!(cmds.is_empty(), "{typed}: {cmds:?}");
+        let Some(Item::Note(n)) = b.chat.items.last() else {
+            panic!("{typed}")
+        };
+        assert!(n.contains("50 to 1000") && n.contains("200k"), "{n}");
+        assert!(b.chat.input.is_empty() && !b.chat.compacting);
+        assert_eq!(b.context_cap(), 200_000);
+    }
+    // The cap waits for nothing: it is set while a turn runs.
+    let mut b = with_header();
+    b.chat.running = true;
+    let (_, cmds) = run(b, "/compact 120");
+    assert_eq!(cmds, vec![Cmd::SetCap(120_000)]);
 }
 
 #[test]

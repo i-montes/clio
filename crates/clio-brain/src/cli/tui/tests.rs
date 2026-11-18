@@ -106,6 +106,7 @@ pub(super) fn with_runs() -> App {
         limits: LIMITS,
         window: 128_000,
         window_known: true,
+        context_cap: 200_000,
     });
     a.home.doctor = Some((12, 3, 0));
     a.home.last_usage = super::tests_views::usage_with_context();

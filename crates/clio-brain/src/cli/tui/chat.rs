@@ -177,7 +177,7 @@ pub struct Chat {
     pub view_w: Cell<u16>,
     /// The columns of the composer's text, at the last draw (for ↑ and ↓ in it).
     pub input_w: Cell<u16>,
-    /// The first message of a new session, sent once it opens.
+    /// The message sent while the session opens or compacts, sent once it can be.
     pub queued: Option<String>,
     /// The slash commands' menu over the composer, while it is open.
     pub menu: Option<super::commands::Menu>,
@@ -185,6 +185,8 @@ pub struct Chat {
     pub customs: Vec<super::commands::Custom>,
     /// `/compact` runs: nothing is sent until it ends.
     pub compacting: bool,
+    /// The compaction running is Clio's own, the context being over the cap.
+    pub auto_compact: bool,
     /// The model's checklist (`todo_write`), pinned above the status line.
     pub todo: Vec<super::todo::Item>,
     /// Host mode: commands running in the background, as of the last turn's end.
@@ -251,6 +253,7 @@ impl Chat {
             menu: None,
             customs: vec![],
             compacting: false,
+            auto_compact: false,
             todo: vec![],
             jobs: 0,
             streamed: false,
@@ -881,8 +884,8 @@ pub fn send_text(app: &mut App, text: String) -> Vec<Cmd> {
             },
         }];
     }
-    // The session is starting: the message goes out once it is up (one at a time).
-    if c.opening && c.queued.is_none() && c.failed.is_none() {
+    // The session is starting or compacting: the message goes out once it can (one at a time).
+    if (c.opening || c.compacting) && c.queued.is_none() && c.failed.is_none() {
         c.scroll = 0;
         c.items.push(Item::User(text.clone()));
         c.queued = Some(text);

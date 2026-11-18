@@ -106,9 +106,9 @@ pub const COMMANDS: &[Command] = &[
     c("name", &[], "<title>", "title the session", true, Run::Name),
     c(
         "compact",
-        &[],
-        "[instructions]",
-        "summarise the conversation to free context",
+        &["compress"],
+        "[instructions | N]",
+        "summarise the conversation now; N: compact past N thousand tokens",
         true,
         Run::Compact,
     ),
@@ -474,6 +474,13 @@ fn command(run: Run) -> &'static Command {
 /// Runs a command with what was typed after it. One that changes the session waits for the
 /// chat to be idle (`App::busy` says why); the text then stays where it was.
 pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
+    // `/compact N` only saves the cap: it waits for nothing.
+    if target == Target::Builtin(Run::Compact)
+        && !args.is_empty()
+        && args.bytes().all(|b| b.is_ascii_digit())
+    {
+        return set_cap(app, args);
+    }
     let custom = match target {
         Target::Custom(i) => Some(app.chat.customs[i].clone()),
         Target::Builtin(run) => {
@@ -603,6 +610,22 @@ fn last_answer(app: &App) -> Option<String> {
 
 /// The session's numbers, from Pi's own totals: what `/context` and `/usage` show (the context
 /// and usage screens belong to the builtin loop's runs).
+/// `/compact N`: past N thousand tokens Clio compacts between turns, from now on.
+fn set_cap(app: &mut App, args: &str) -> Vec<Cmd> {
+    app.chat.menu = None;
+    app.chat.set_input(String::new());
+    match args.parse::<u64>() {
+        Ok(n) if (50..=1000).contains(&n) => vec![Cmd::SetCap(n * 1000)],
+        _ => {
+            app.chat.items.push(super::chat::Item::Note(format!(
+                "the cap goes from 50 to 1000 thousand tokens (/compact 300 is 300k): it stays at {}",
+                crate::cli::usage::tokens(app.context_cap())
+            )));
+            vec![]
+        }
+    }
+}
+
 fn numbers(app: &App, context: bool) -> Modal {
     use crate::cli::usage::{self, tokens};
     let c = &app.chat;
@@ -619,8 +642,12 @@ fn numbers(app: &App, context: bool) -> Modal {
                 tokens(s.window)
             ),
             format!("compacted     {} time(s)", c.meter.compactions),
+            format!(
+                "cap           {} tokens: past it Clio compacts between turns",
+                tokens(app.context_cap())
+            ),
             String::new(),
-            "/compact summarises the conversation and frees context.".to_owned(),
+            "/compact summarises the conversation and frees context; /compact N sets the cap to N thousand tokens.".to_owned(),
         ]
     } else {
         vec![

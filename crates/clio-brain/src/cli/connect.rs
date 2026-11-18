@@ -182,14 +182,28 @@ pub(crate) fn edit_model(
     dirs: &Dirs,
     f: impl FnOnce(&mut serde_json::Map<String, Value>),
 ) -> Res<()> {
+    edit_section(dirs, "model", false, f)
+}
+
+/// [`edit_model`] for any section of `config.json`; `create`: one that is missing starts empty.
+pub(crate) fn edit_section(
+    dirs: &Dirs,
+    key: &str,
+    create: bool,
+    f: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Res<()> {
     let path = dirs.config_file();
     let text = std::fs::read_to_string(&path).map_err(|e| io_err(&path, &e))?;
     let mut v: Value =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    if create && let Some(o) = v.as_object_mut() {
+        o.entry(key)
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
     let m = v
-        .get_mut("model")
+        .get_mut(key)
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| format!("{}: \"model\" is missing", path.display()))?;
+        .ok_or_else(|| format!("{}: \"{key}\" is missing", path.display()))?;
     f(m);
     let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");

@@ -33,7 +33,7 @@ use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
-use clio_brain::pi::level::{Assessor, run_assessed_with};
+use clio_brain::pi::level::{self, Assessor, run_assessed_with};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
@@ -701,9 +701,11 @@ impl Session for ChatSession {
             return Err("the session is already closed".into());
         }
         let r = if kind == "compact" {
-            self.pi
-                .client
-                .compact(fields["customInstructions"].as_str())
+            level::compact(
+                &self.pi.client,
+                &self.pre,
+                fields["customInstructions"].as_str(),
+            )
         } else {
             self.pi.client.request(kind, fields)
         };

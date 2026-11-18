@@ -480,9 +480,11 @@ fn has_key(dirs: &Dirs, c: &clio_brain::connector::Connector) -> bool {
 }
 
 fn header(dirs: &Dirs) -> Header {
+    let mut context_cap = crate::cli::home::CONTEXT_CAP;
     let (provider, model, thinking, config_error, limits) = match Config::load(dirs) {
         Ok(c) => {
             let l = RunLimits::of(&c);
+            context_cap = c.session.context_cap_tokens;
             (c.model.provider, c.model.model, c.model.thinking, None, l)
         }
         Err(e) => (
@@ -521,6 +523,7 @@ fn header(dirs: &Dirs) -> Header {
         limits,
         window,
         window_known,
+        context_cap,
     }
 }
 
@@ -801,6 +804,14 @@ fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<St
         m.insert("thinking".into(), level.into());
     })?;
     Ok(format!("effort: {level}"))
+}
+
+/// `/compact N`: `session.context_cap_tokens` in `config.json`, every other field kept.
+fn set_cap(d: &Dirs, cap: u64) -> Result<u64, String> {
+    super::connect::edit_section(d, "session", true, |m| {
+        m.insert("context_cap_tokens".into(), cap.into());
+    })?;
+    Ok(cap)
 }
 
 /// `/actions`: one row per action, the local time, the tool and the outcome in columns, and
@@ -1233,14 +1244,16 @@ impl Ctx {
                 self.spawn(
                     move |_, _| {
                         let Some(s) = session else {
-                            return (Err("no session is open".to_owned()), None);
+                            return (Err("no session is open".to_owned()), None, None);
                         };
                         let fields = if instructions.trim().is_empty() {
                             serde_json::json!({})
                         } else {
                             serde_json::json!({ "customInstructions": instructions })
                         };
+                        let mut after = None;
                         let done = s.command("compact", fields).map(|v| {
+                            after = v["estimatedTokensAfter"].as_u64();
                             let n = |k: &str| v[k].as_u64().map(usage::tokens);
                             match (n("tokensBefore"), n("estimatedTokensAfter")) {
                                 (Some(a), Some(b)) => {
@@ -1249,14 +1262,18 @@ impl Ctx {
                                 _ => "context compacted".to_owned(),
                             }
                         });
-                        (done, s.refresh().ok())
+                        (done, after, s.refresh().ok())
                     },
                     |r| match r {
-                        Ok((done, refresh)) => Bg::Compacted(done, refresh),
-                        Err(e) => Bg::Compacted(Err(e), None),
+                        Ok((done, after, refresh)) => Bg::Compacted(done, after, refresh),
+                        Err(e) => Bg::Compacted(Err(e), None, None),
                     },
                 );
             }
+            Cmd::SetCap(cap) => self.spawn(
+                move |d, _| set_cap(d, cap),
+                |r| Bg::CapSet(r.and_then(|x| x)),
+            ),
             Cmd::LoadPending { session } => self.spawn(
                 move |d, _| {
                     let now = crate::cli::now_ms();

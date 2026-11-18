@@ -503,3 +503,26 @@ fn a_compaction_during_a_run_asks_for_the_summary_in_the_next_message() {
         assert_eq!(next.contains(COMPACTED_ASK), asks, "{msg}: {next}");
     }
 }
+
+// A compaction asked for between turns (`/compact`, or Clio's own over the cap) is followed by
+// what follows one seen in a run: the next message says who Clio is and asks for the summary.
+#[test]
+fn a_compaction_between_turns_asks_for_the_summary_in_the_next_message() {
+    if need("a_compaction_between_turns", false).is_none() {
+        return;
+    }
+    use clio_brain::pi::level::compact;
+    use clio_brain::pi::preprompt::{COMPACTED_ASK, PrePrompt};
+    let c = fake(None);
+    let pre = PrePrompt::time_only();
+    pre.set_summaries(true);
+    let _ = pre.prepare("hola", "2026-11-04 00:00 -05:00");
+    assert!(
+        !pre.prepare("y", "2026-11-04 00:05 -05:00")
+            .text
+            .contains(COMPACTED_ASK)
+    );
+    assert_eq!(compact(&c, &pre, None).unwrap()["summary"], "s");
+    let next = pre.prepare("sigue", "2026-11-04 00:10 -05:00").text;
+    assert!(next.contains(COMPACTED_ASK), "{next}");
+}

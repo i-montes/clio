@@ -36,6 +36,8 @@ pub struct Header {
     pub limits: RunLimits,
     pub window: u64,
     pub window_known: bool,
+    /// `session.context_cap_tokens`.
+    pub context_cap: u64,
 }
 
 #[derive(Default)]

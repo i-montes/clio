@@ -132,6 +132,18 @@ pub fn run_assessed_with(
     Ok(summary)
 }
 
+/// A compaction asked for between turns (`/compact`, or Clio's own over the cap). Its events are
+/// drained by the next run, unseen: what follows one seen in a run follows it too.
+pub fn compact(
+    client: &RpcClient,
+    pre: &super::preprompt::PrePrompt,
+    instructions: Option<&str>,
+) -> Result<serde_json::Value, PiError> {
+    let v = client.compact(instructions)?;
+    pre.compacted();
+    Ok(v)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

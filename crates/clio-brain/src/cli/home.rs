@@ -216,11 +216,23 @@ pub struct SessionCfg {
     /// `clio` reopens the last conversation instead of a new session (`clio --new` does not).
     #[serde(default = "yes")]
     pub continuous: bool,
+    /// Between turns, a context over this many tokens is compacted (`/compact N` sets it).
+    #[serde(default = "context_cap")]
+    pub context_cap_tokens: u64,
+}
+
+pub const CONTEXT_CAP: u64 = 200_000;
+
+fn context_cap() -> u64 {
+    CONTEXT_CAP
 }
 
 impl Default for SessionCfg {
     fn default() -> Self {
-        Self { continuous: true }
+        Self {
+            continuous: true,
+            context_cap_tokens: CONTEXT_CAP,
+        }
     }
 }
 

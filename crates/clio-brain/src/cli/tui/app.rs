@@ -30,7 +30,7 @@ use super::{sanitize, text};
 use crate::cli::chat::{Opened, Refresh, Row};
 use crate::cli::doctor::Report;
 use crate::cli::runs::{RunInfo, RunSummary};
-use crate::cli::usage::{DEFAULT_WINDOW, RunLimits, RunUsage, Snapshot};
+use crate::cli::usage::{self, DEFAULT_WINDOW, RunLimits, RunUsage, Snapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -159,6 +159,8 @@ pub enum Cmd {
     SessionName(String),
     /// Pi's compaction, with the person's instructions (may be empty).
     Compact(String),
+    /// `/compact N`: the context cap, in tokens, saved in `config.json`.
+    SetCap(u64),
     /// What this session set aside and still waits.
     LoadPending {
         session: String,
@@ -243,8 +245,10 @@ pub enum Bg {
     Choices(Run, Result<(Vec<Choice>, Option<String>), String>),
     /// The session's new title.
     Named(Result<String, String>),
-    /// What a compaction did, and Pi's totals after it.
-    Compacted(Result<String, String>, Option<Refresh>),
+    /// What a compaction did, about how many tokens it left, and Pi's totals after it.
+    Compacted(Result<String, String>, Option<u64>, Option<Refresh>),
+    /// The context cap `/compact N` saved.
+    CapSet(Result<u64, String>),
     /// This session's actions waiting: (id, line, «class» and what), and how many of other
     /// sessions wait too.
     Pending(Result<Waiting, String>),
@@ -498,6 +502,14 @@ impl App {
 
     /// The window, the limits and the name of the model Clio is set up with, for what a run did
     /// not record.
+    /// Past this many tokens of context, Clio compacts between turns (`session.context_cap_tokens`).
+    pub fn context_cap(&self) -> u64 {
+        self.home
+            .header
+            .as_ref()
+            .map_or(crate::cli::home::CONTEXT_CAP, |h| h.context_cap)
+    }
+
     pub(super) fn fallback(&self) -> (u64, bool, RunLimits) {
         self.home
             .header
@@ -852,6 +864,37 @@ pub(super) fn next_ask(app: &mut App) {
 /// `clio` could not reopen the last conversation: a draft, as when there is none, with what was
 /// typed meanwhile kept. With none, a message sent meanwhile starts the new one; a failure says why
 /// in a note and gives the message back to the composer.
+/// A turn ended: a context over the cap is compacted now, as `/compact` does, if nothing waits
+/// (a question, an approval, a message, an action still running). Once per turn that ends.
+fn over_cap(app: &mut App) -> Vec<Cmd> {
+    let cap = app.context_cap();
+    let c = &mut app.chat;
+    let Some(tokens) = c.meter.context.and_then(|x| x.tokens) else {
+        return vec![];
+    };
+    let waits = c.running
+        || c.compacting
+        || c.opening
+        || c.queued.is_some()
+        || c.session_id.is_empty()
+        || app.answering > 0
+        || app.confirm.is_some()
+        || !app.asks.is_empty()
+        || app.prompt.is_some()
+        || !app.prompts.is_empty();
+    if tokens <= cap || waits {
+        return vec![];
+    }
+    c.compacting = true;
+    c.auto_compact = true;
+    c.items.push(super::chat::Item::Note(format!(
+        "the context holds {} tokens, over the cap of {}: compacting it automatically…",
+        usage::tokens(tokens),
+        usage::tokens(cap)
+    )));
+    vec![Cmd::Compact(String::new())]
+}
+
 fn reopen_failed(app: &mut App, e: String, queued: Option<String>) -> Vec<Cmd> {
     let typed = std::mem::take(&mut app.chat.input);
     app.chat = Chat::draft(app.now_ms);
@@ -1194,14 +1237,52 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 vec![]
             }
         },
-        Bg::Compacted(r, refresh) => {
-            app.chat.compacting = false;
-            app.chat.items.push(match r {
+        Bg::Compacted(r, after, refresh) => {
+            let c = &mut app.chat;
+            c.compacting = false;
+            let auto = std::mem::take(&mut c.auto_compact);
+            let ok = r.is_ok();
+            c.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(format!("could not compact: {e}")),
             });
             if let Some(r) = refresh {
-                app.chat.refresh(&r);
+                c.refresh(&r);
+            }
+            // Not tried again before another turn ends.
+            let cap = app.context_cap();
+            if auto && ok && after.is_some_and(|n| n > cap) {
+                app.chat.items.push(super::chat::Item::Note(format!(
+                    "the context is still over the cap of {} tokens after compacting: /compact N raises it to N thousand",
+                    usage::tokens(cap)
+                )));
+            }
+            // A message sent meanwhile goes out now, after what the compaction said.
+            let c = &mut app.chat;
+            let Some(text) = c.queued.take() else {
+                return vec![];
+            };
+            let mine = super::chat::Item::User(text.clone());
+            if let Some(i) = c.items.iter().rposition(|i| *i == mine) {
+                c.items.remove(i);
+                c.items.push(mine);
+                c.rendered.take();
+            }
+            c.start_turn(app.now_ms);
+            vec![Cmd::ChatSend { text }]
+        }
+        Bg::CapSet(r) => {
+            match r {
+                Ok(cap) => {
+                    if let Some(h) = &mut app.home.header {
+                        h.context_cap = cap;
+                    }
+                    app.chat.items.push(super::chat::Item::Note(format!(
+                        "context cap: {} tokens; past it Clio compacts between turns (saved in config.json)",
+                        usage::tokens(cap)
+                    )));
+                }
+                Err(e) => app.notice = Some(e),
             }
             vec![]
         }
@@ -1271,6 +1352,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     }
                 }
             }
+            let refreshed = refresh.is_some();
             if let Some(r) = refresh {
                 app.chat.refresh(&r);
                 if r.jobs > 0 {
@@ -1283,7 +1365,11 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             // The list beside the chat: a new session shows up, a title changes.
             if app.pi {
-                return vec![Cmd::LoadSessions];
+                let mut cmds = vec![Cmd::LoadSessions];
+                if refreshed {
+                    cmds.extend(over_cap(app));
+                }
+                return cmds;
             }
             vec![]
         }
