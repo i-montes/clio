@@ -810,8 +810,6 @@ enum Kind {
     Notes,
 }
 
-/// The widest the chat's column gets.
-pub const COLUMN_MAX: u16 = 96;
 /// The widest a group's titles get before they are cut.
 const LABEL_MAX: usize = 30;
 /// The most rows of text the composer shows; past them it scrolls.
@@ -1201,7 +1199,7 @@ pub(super) fn meter(app: &App) -> Vec<Vec<Span<'static>>> {
 }
 
 /// The Pi harness's screen under the top bar: the drawer of sessions when it is open, and the
-/// chat in one centered column: the conversation, a status line, the composer and the footer.
+/// chat across the width left: the conversation, a status line, the composer and the footer.
 pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let c = &app.chat;
@@ -1225,8 +1223,9 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     if rest.width < 16 {
         return;
     }
-    let cw = rest.width.saturating_sub(4).min(COLUMN_MAX);
-    let col = Rect::new(rest.x + (rest.width - cw) / 2, rest.y, cw, rest.height);
+    // The whole width left, with one column of margin on each side.
+    let cw = rest.width - 2;
+    let col = Rect::new(rest.x + 1, rest.y, cw, rest.height);
 
     // The composer: its rows of text, and the one the cursor is on kept in sight.
     let text_w = usize::from(cw.saturating_sub(6)).max(2);

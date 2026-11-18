@@ -375,3 +375,32 @@ fn every_chat_state_fits_is_clean_and_has_an_ascii_form() {
         assert!(odd.is_empty(), "{name}: {odd:?}\n{t}");
     }
 }
+
+// The chat uses the whole width: one column of margin on each side, and with the drawer open it
+// starts right after the drawer.
+#[test]
+fn the_chat_spans_the_width_minus_the_margins() {
+    let corners = |t: &str| -> (usize, usize) {
+        let l = t.lines().rev().find(|l| l.contains('╭')).unwrap();
+        let left = l.chars().position(|c| c == '╭').unwrap();
+        let right = l.chars().position(|c| c == '╮').unwrap();
+        (left, right)
+    };
+    let mut a = conversation(true);
+    a.chat.items.push(Item::User("palabra ".repeat(60)));
+    let t = screen_text(&a, 160, 40);
+    // The person's message wraps at the full width (the old column stopped at 96), not at it.
+    let widest = t
+        .lines()
+        .filter(|l| l.contains("palabra"))
+        .map(|l| super::text::width(l.trim_end()))
+        .max()
+        .unwrap();
+    assert!((140..=158).contains(&widest), "{widest}\n{t}");
+    assert_eq!(corners(&t), (1, 158), "{t}");
+
+    a.screen = Screen::Sessions;
+    let t = screen_text(&a, 160, 40);
+    let d = usize::from(super::sessions::DRAWER_W);
+    assert_eq!(corners(&t), (d + 1, 158), "{t}");
+}
