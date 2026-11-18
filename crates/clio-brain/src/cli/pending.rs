@@ -36,12 +36,20 @@ pub fn what(p: &Pending) -> String {
     Scrubber::default().scrub(pending::shown(p))
 }
 
+/// Its class in «», and why it waits when the class alone does not say it.
+pub fn label(p: &Pending) -> String {
+    match &p.reason {
+        Some(r) => format!("«{} · {}»", p.class, sanitize::line(r)),
+        None => format!("«{}»", p.class),
+    }
+}
+
 /// One line for the person: id, class, what, since when, until when, and whether it was asked.
 pub fn line(p: &Pending, now: i64) -> String {
     format!(
-        "{}  «{}»  {}  · desde {} UTC · {} {} UTC{}",
+        "{}  {}  {}  · desde {} UTC · {} {} UTC{}",
         p.id,
-        p.class,
+        label(p),
         sanitize::line(&what(p)),
         stamp(p.created_ms),
         if now >= p.expires_ms {

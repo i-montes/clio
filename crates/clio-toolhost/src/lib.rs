@@ -744,7 +744,16 @@ impl ToolHost {
                 _ => None,
             };
             if let Some(class) = class {
-                return self.aside(h, &req, class);
+                return self.aside(h, &req, class, None);
+            }
+            // A session that read text the judge flagged asks before it reaches out, whatever
+            // the command: what it read may be what wants out.
+            if req.tool == "exec" && self.is_suspect(&req.session) {
+                let command = map.get("command").and_then(Value::as_str).unwrap_or("");
+                let network = map.get("network").and_then(Value::as_bool) == Some(true);
+                if network || h.cfg.rules.reaches_out(command) {
+                    return self.aside(h, &req, ask::Class::Enviar, Some(SUSPECT_REASON));
+                }
             }
             let (ok, content, data, external) = self
                 .host_run(h, &req, action_id, &out.rule, real.as_deref())

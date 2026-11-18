@@ -43,6 +43,9 @@ pub struct Pending {
     /// False: past today's questions, it goes to the day's summary.
     pub ask: bool,
     pub state: State,
+    /// Why it waits when its class alone would not say it (a suspect session reaching out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -67,8 +70,12 @@ struct Questions {
 
 /// The exact answer to the model.
 pub(crate) fn aside_text(p: &Pending) -> String {
+    let why = p
+        .reason
+        .as_deref()
+        .map_or_else(String::new, |r| format!(" (reason: {r})"));
     format!(
-        "apartado {}: «{}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.",
+        "apartado {}: «{}» necesita el visto bueno de la persona{why}. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.",
         p.id, p.class
     )
 }
@@ -274,7 +281,13 @@ fn tail(s: &str) -> String {
 
 impl ToolHost {
     /// Sets the action aside instead of running it, logs it, and gives the model the exact answer.
-    pub(crate) fn aside(&self, h: &Host, req: &Request, class: Class) -> Response {
+    pub(crate) fn aside(
+        &self,
+        h: &Host,
+        req: &Request,
+        class: Class,
+        reason: Option<&str>,
+    ) -> Response {
         let now = now_ms();
         let mut draft = Pending {
             id: String::new(),
@@ -289,6 +302,7 @@ impl ToolHost {
             expires_ms: now + DAY_MS,
             ask: false,
             state: State::Waiting,
+            reason: reason.map(str::to_owned),
         };
         draft.what = self.clean(shown(&draft));
         let network = req.args["network"].as_bool() == Some(true);

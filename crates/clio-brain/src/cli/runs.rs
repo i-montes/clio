@@ -1377,6 +1377,7 @@ mod tests {
             expires_ms: i64::MAX,
             ask: true,
             state: State::Waiting,
+            reason: None,
         };
         std::fs::create_dir_all(data.join("host/pending")).unwrap();
         write_json(&data.join("host/pending/abcd1234.json"), &p).unwrap();

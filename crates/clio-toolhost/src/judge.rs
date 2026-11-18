@@ -121,6 +121,12 @@ impl ToolHost {
         );
     }
 
+    pub(crate) fn is_suspect(&self, session: &str) -> bool {
+        lock(&self.sessions)
+            .get(session)
+            .is_some_and(|t| t.sources.contains(&"suspect"))
+    }
+
     /// For `filter`: when this result is one a call left to judge, asks the judge about the texts
     /// that go to the model (`wrapped`, indexes into `out`, already cleaned). On an injection they
     /// are replaced by the notice and the text is kept for the person; returns what the guard

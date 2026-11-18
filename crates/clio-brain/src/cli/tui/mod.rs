@@ -958,7 +958,10 @@ impl Ctx {
                             .into_iter()
                             .map(|p| {
                                 let what = super::pending::what(&p);
-                                (p.id, format!("«{}» {what}", p.class))
+                                (
+                                    p.id.clone(),
+                                    format!("{} {what}", super::pending::label(&p)),
+                                )
                             })
                             .collect();
                         if !asks.is_empty() {
@@ -1084,7 +1087,11 @@ impl Ctx {
                         .into_iter()
                         .filter(|p| !session.is_empty() && p.session == session)
                         .map(|p| {
-                            let what = format!("«{}» {}", p.class, super::pending::what(&p));
+                            let what = format!(
+                                "{} {}",
+                                super::pending::label(&p),
+                                super::pending::what(&p)
+                            );
                             (p.id.clone(), super::pending::line(&p, now), what)
                         })
                         .collect();
