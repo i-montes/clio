@@ -3,6 +3,7 @@
 
 mod effects;
 mod exec;
+pub mod host;
 pub mod jail;
 mod lease;
 mod run_tests;
@@ -12,6 +13,7 @@ mod tools;
 
 pub use effects::EffectLog;
 pub use exec::{Action, Approval, Executor, Outcome};
+pub use host::{HostJail, HostJob, Launcher};
 pub use jail::{Jail, JailOutput, Limits};
 pub use lease::{Lease, LeaseTable};
 pub use run_tests::{READ_ONLY, register_run_tests, run_tests_tool, valid_target};

@@ -126,6 +126,25 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
 }
 
+/// The version of `bwrap`, refused when older than `MIN_BWRAP`.
+pub(crate) fn bwrap_version(bwrap: &Path) -> Result<(u32, u32, u32), String> {
+    let out = Command::new(bwrap)
+        .arg("--version")
+        .env_clear()
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", bwrap.display()))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let version = parse_version(&text)
+        .ok_or_else(|| format!("could not read the bwrap version from {text:?}"))?;
+    if version < MIN_BWRAP {
+        return Err(format!(
+            "bwrap {}.{}.{} is too old, 0.8.0 or newer is needed (--disable-userns)",
+            version.0, version.1, version.2
+        ));
+    }
+    Ok(version)
+}
+
 /// Keeps the last `cap` bytes of a stream and counts all of them.
 struct Tail {
     buf: Mutex<Vec<u8>>,
@@ -158,6 +177,8 @@ fn drain(mut r: impl Read, tail: &Tail, cap: usize, over: &AtomicBool, flood_at:
 struct Reaper<'a> {
     child: Child,
     kill: Option<&'a Path>,
+    /// A command that stops what the child started elsewhere (a systemd unit), run after the kill.
+    stop: Option<&'a [String]>,
 }
 
 impl Reaper<'_> {
@@ -172,6 +193,15 @@ impl Reaper<'_> {
                 .status();
         }
         let _ = self.child.kill();
+        if let Some([prog, args @ ..]) = self.stop {
+            let _ = Command::new(prog)
+                .args(args)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
@@ -195,20 +225,7 @@ impl Jail {
             .ok_or("bwrap (bubblewrap) is not installed in /usr/bin, /bin or /usr/local/bin")?;
         let prlimit = find_in_trusted("prlimit")
             .ok_or("prlimit (util-linux) is not installed: there would be no resource limits")?;
-        let out = Command::new(&bwrap)
-            .arg("--version")
-            .env_clear()
-            .output()
-            .map_err(|e| format!("could not run {}: {e}", bwrap.display()))?;
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        let version = parse_version(&text)
-            .ok_or_else(|| format!("could not read the bwrap version from {text:?}"))?;
-        if version < MIN_BWRAP {
-            return Err(format!(
-                "bwrap {}.{}.{} is too old, 0.8.0 or newer is needed (--disable-userns)",
-                version.0, version.1, version.2
-            ));
-        }
+        let version = bwrap_version(&bwrap)?;
         if !Path::new("/usr").is_dir() {
             return Err("there is no /usr to mount read-only".into());
         }
@@ -380,101 +397,115 @@ impl Jail {
     /// Runs the job and waits for it. `Err` means the jail itself could not be built or started
     /// as a process; a command that fails or is killed is an `Ok` with its outcome.
     pub fn run(&self, job: &Job) -> Result<JailOutput, String> {
-        let lim = job.limits.as_ref().unwrap_or(&self.limits).clone();
+        let lim = job.limits.as_ref().unwrap_or(&self.limits);
         let args = self.bwrap_args(job)?;
         let mut cmd = Command::new(&self.bwrap);
-        cmd.args(&args)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
-        // The launcher gets an EMPTY environment too: `bwrap`'s own environment stays readable
-        // inside the jail as /proc/1/environ, so nothing of the caller's may be in it.
-        let started = Instant::now();
-        let mut reaper = Reaper {
-            child: cmd
-                .spawn()
-                .map_err(|e| format!("could not start {}: {e}", self.bwrap.display()))?,
-            kill: self.kill.as_deref(),
-        };
-        let flood_at = lim.max_output.saturating_mul(8).max(1 << 20);
-        let over = Arc::new(AtomicBool::new(false));
-        let mk = || {
-            Arc::new(Tail {
-                buf: Mutex::new(Vec::new()),
-                total: AtomicUsize::new(0),
-                done: AtomicBool::new(false),
-            })
-        };
-        let (so, se) = (mk(), mk());
-        for (pipe, tail) in [
-            (
-                reaper
-                    .child
-                    .stdout
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                so.clone(),
-            ),
-            (
-                reaper
-                    .child
-                    .stderr
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                se.clone(),
-            ),
-        ] {
-            let (over, cap) = (over.clone(), lim.max_output);
-            match pipe {
-                Some(p) => {
-                    std::thread::spawn(move || drain(p, &tail, cap, &over, flood_at));
-                }
-                None => tail.done.store(true, Ordering::SeqCst),
-            }
-        }
-        let (mut timed_out, mut flooded) = (false, false);
-        let status = loop {
-            if let Some(s) = reaper.child.try_wait().map_err(|e| e.to_string())? {
-                break s;
-            }
-            if started.elapsed() >= lim.timeout {
-                timed_out = true;
-            } else if over.load(Ordering::SeqCst) {
-                flooded = true;
-            }
-            if timed_out || flooded {
-                reaper.kill_all();
-                break reaper.child.wait().map_err(|e| e.to_string())?;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        // The pipes close with the jail; give the readers a moment, never wait on them forever.
-        let until = Instant::now() + Duration::from_secs(2);
-        while !(so.done.load(Ordering::SeqCst) && se.done.load(Ordering::SeqCst))
-            && Instant::now() < until
-        {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let text = |t: &Tail| {
-            let b = t.buf.lock().map(|b| b.clone()).unwrap_or_default();
-            let keep = &b[b.len().saturating_sub(lim.max_output)..];
-            String::from_utf8_lossy(keep).into_owned()
-        };
-        let truncated = so.total.load(Ordering::SeqCst) > lim.max_output
-            || se.total.load(Ordering::SeqCst) > lim.max_output;
-        Ok(JailOutput {
-            exit_code: status.code(),
-            signal: status.signal(),
-            timed_out,
-            flooded,
-            stdout: text(&so),
-            stderr: text(&se),
-            truncated,
-            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        })
+        cmd.args(&args);
+        run_command(cmd, lim.timeout, lim.max_output, self.kill.as_deref(), None)
     }
+}
+
+/// Runs `cmd` (its program and arguments already set) and waits for it, keeping the tails of
+/// its output. `Err` means it could not start; a command that fails or is killed is an `Ok`.
+pub(crate) fn run_command(
+    mut cmd: Command,
+    timeout: Duration,
+    max_output: usize,
+    kill: Option<&Path>,
+    stop: Option<&[String]>,
+) -> Result<JailOutput, String> {
+    let program = PathBuf::from(cmd.get_program());
+    cmd.env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    // The launcher gets an EMPTY environment too: `bwrap`'s own environment stays readable
+    // inside the jail as /proc/1/environ, so nothing of the caller's may be in it.
+    let started = Instant::now();
+    let mut reaper = Reaper {
+        child: cmd
+            .spawn()
+            .map_err(|e| format!("could not start {}: {e}", program.display()))?,
+        kill,
+        stop,
+    };
+    let flood_at = max_output.saturating_mul(8).max(1 << 20);
+    let over = Arc::new(AtomicBool::new(false));
+    let mk = || {
+        Arc::new(Tail {
+            buf: Mutex::new(Vec::new()),
+            total: AtomicUsize::new(0),
+            done: AtomicBool::new(false),
+        })
+    };
+    let (so, se) = (mk(), mk());
+    for (pipe, tail) in [
+        (
+            reaper
+                .child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+            so.clone(),
+        ),
+        (
+            reaper
+                .child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+            se.clone(),
+        ),
+    ] {
+        let (over, cap) = (over.clone(), max_output);
+        match pipe {
+            Some(p) => {
+                std::thread::spawn(move || drain(p, &tail, cap, &over, flood_at));
+            }
+            None => tail.done.store(true, Ordering::SeqCst),
+        }
+    }
+    let (mut timed_out, mut flooded) = (false, false);
+    let status = loop {
+        if let Some(s) = reaper.child.try_wait().map_err(|e| e.to_string())? {
+            break s;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+        } else if over.load(Ordering::SeqCst) {
+            flooded = true;
+        }
+        if timed_out || flooded {
+            reaper.kill_all();
+            break reaper.child.wait().map_err(|e| e.to_string())?;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // The pipes close with the jail; give the readers a moment, never wait on them forever.
+    let until = Instant::now() + Duration::from_secs(2);
+    while !(so.done.load(Ordering::SeqCst) && se.done.load(Ordering::SeqCst))
+        && Instant::now() < until
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let text = |t: &Tail| {
+        let b = t.buf.lock().map(|b| b.clone()).unwrap_or_default();
+        let keep = &b[b.len().saturating_sub(max_output)..];
+        String::from_utf8_lossy(keep).into_owned()
+    };
+    let truncated = so.total.load(Ordering::SeqCst) > max_output
+        || se.total.load(Ordering::SeqCst) > max_output;
+    Ok(JailOutput {
+        exit_code: status.code(),
+        signal: status.signal(),
+        timed_out,
+        flooded,
+        stdout: text(&so),
+        stderr: text(&se),
+        truncated,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
 }
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
