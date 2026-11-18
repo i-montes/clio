@@ -248,7 +248,13 @@ pub struct Confirm {
     pub note: Option<String>,
     /// An action set aside: `s` was typed, and Enter now runs it.
     pub armed: bool,
+    /// An action set aside: the session it belongs to (only that session can answer it).
+    pub session: String,
 }
+
+/// A set-aside question takes an answer only after this long with no key at all, so the tail of
+/// what the person was typing when it opened never answers it.
+pub const QUIET_MS: u64 = 1000;
 
 impl Confirm {
     pub fn new(action: Action, id: String, files: usize, workspace: String) -> Self {
@@ -260,6 +266,7 @@ impl Confirm {
             names: vec![],
             note: None,
             armed: false,
+            session: String::new(),
         }
     }
 }
@@ -291,6 +298,10 @@ pub struct App {
     pub confirm: Option<Confirm>,
     /// Host mode: the questions waiting behind the one on screen.
     pub asks: std::collections::VecDeque<Confirm>,
+    /// Host mode: answers to set-aside actions still running (an approved one can take a while).
+    pub answering: usize,
+    /// When the last key (or paste) came, for the quiet rule of a set-aside question.
+    pub last_key_ms: Option<u64>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
     /// An error or a longer message in a box, closed by any key.
@@ -325,6 +336,8 @@ impl App {
             chat_seq: 0,
             confirm: None,
             asks: std::collections::VecDeque::new(),
+            answering: 0,
+            last_key_ms: None,
             flash: None,
             notice: None,
             check_seq: 0,
@@ -452,6 +465,28 @@ impl App {
         self.view_scroll = 0;
     }
 
+    /// No key for `QUIET_MS`: a set-aside question may take an answer.
+    pub fn quiet(&self) -> bool {
+        self.last_key_ms
+            .is_none_or(|t| self.now_ms.saturating_sub(t) >= QUIET_MS)
+    }
+
+    /// Whether the chat cannot be left now (quit, another session, a new one, a delete); when
+    /// it cannot, the flash says why.
+    pub fn busy(&mut self) -> bool {
+        let why = if self.chat.running {
+            "el agente está trabajando: Esc en el chat aborta el turno; luego cambia de sesión"
+        } else if self.answering > 0 {
+            "Clio todavía ejecuta lo que aprobaste: espera a que termine; luego cambia de sesión"
+        } else if self.chat.opening {
+            "la sesión se está abriendo: espera a que arranque; luego cambia de sesión"
+        } else {
+            return false;
+        };
+        self.flash = Some(why.into());
+        true
+    }
+
     pub fn open_help(&mut self) {
         self.before_help = self.screen;
         self.screen = Screen::Help;
@@ -471,6 +506,7 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             vec![]
         }
         Input::Paste(text) => {
+            app.last_key_ms = Some(app.now_ms);
             if app.confirm.is_some() || app.notice.is_some() {
                 vec![]
             } else if app.screen == Screen::NewRun {
@@ -500,6 +536,9 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
             app.flash = None;
+            // Every key counts for the quiet rule, even one pressed before the question opened.
+            let quiet = app.quiet();
+            app.last_key_ms = Some(app.now_ms);
             // The keys that work everywhere, even over a message.
             match keys::lookup(app.ctx(), &k) {
                 Some(Act::Debug) => {
@@ -519,7 +558,9 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 return vec![];
             }
             if app.confirm.is_some() {
-                return answer(app, &k);
+                let cmds = answer(app, &k, quiet);
+                next_ask(app);
+                return cmds;
             }
             match app.screen {
                 Screen::Home => super::home::key(app, &k),
@@ -538,11 +579,17 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
 
 /// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead. An action set aside, which
 /// is asked when a turn ends while the person may be typing, takes `s` and then Enter; `n` or Esc
-/// rejects it, and any other key only undoes a typed `s`.
-fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
+/// rejects it, and any other key only undoes a typed `s`. It hears none of them unless `quiet`
+/// (no key for `QUIET_MS`): a key sooner is ignored and undoes a typed `s`.
+fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     let Some(mut c) = app.confirm.take() else {
         return vec![];
     };
+    if c.action == Action::Approve && !quiet {
+        c.armed = false;
+        app.confirm = Some(c);
+        return vec![];
+    }
     // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
     let yes_key = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
@@ -569,10 +616,38 @@ fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
         Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
         Action::Approve => {
-            app.confirm = app.asks.pop_front();
+            app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
         }
     }
+}
+
+/// Once no question is on screen, the next set-aside one; one of a session no longer open cannot
+/// be answered here and waits in `clio pending`.
+fn next_ask(app: &mut App) {
+    while app.confirm.is_none()
+        && let Some(c) = app.asks.pop_front()
+    {
+        if c.session == app.chat.session_id {
+            app.confirm = Some(c);
+        } else {
+            app.flash = Some(format!(
+                "{} es de otra sesión: espera en `clio pending`",
+                c.id
+            ));
+        }
+    }
+}
+
+/// A question that comes back late never takes the place of the one on screen.
+fn dropped(app: &mut App, what: &str) -> bool {
+    if app.confirm.is_none() {
+        return false;
+    }
+    app.flash = Some(format!(
+        "{what} llegó con otra pregunta abierta: pídelo otra vez"
+    ));
+    true
 }
 
 /// The run on screen: the selected one on the list, or the one open in the detail.
@@ -643,6 +718,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
         },
         Bg::Planned(Ok(p)) => {
+            if dropped(app, &format!("el plan de {}", p.id)) {
+                return vec![];
+            }
             // The plan takes a while. If the person is no longer looking at that run, a dialog
             // popping up now would turn the next key they type into an answer.
             if !looking_at(app, &p.id) {
@@ -705,6 +783,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::SessionPlan(r) => {
             match r {
+                // A turn, an open or an approval that started meanwhile: no delete now.
+                Ok(_) if dropped(app, "lo que se borraría") || app.busy() => {}
                 Ok((file, title, what)) if app.screen == Screen::Sessions => {
                     app.confirm = Some(Confirm::new(
                         Action::DeleteSession,
@@ -759,12 +839,17 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     use super::chat::Item;
                     app.chat.opening = false;
                     match queued {
-                        // Still a new session: what the person wrote is back in the field, and
-                        // Enter tries again.
+                        // Still a new session: what the person wrote is back in the field, in
+                        // front of anything typed meanwhile, and Enter tries again.
                         Some(text) => {
                             app.chat.items.retain(|i| *i != Item::User(text.clone()));
                             app.chat.items.push(Item::Error(e));
-                            app.chat.input = text;
+                            let typed = std::mem::take(&mut app.chat.input);
+                            app.chat.input = if typed.is_empty() {
+                                text
+                            } else {
+                                format!("{text}\n{typed}")
+                            };
                         }
                         None => app.chat.failed = Some(e),
                     }
@@ -776,17 +861,18 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.chat.on_event(&e);
             vec![]
         }
+        // They come before the turn settles, so from the session open now.
         Bg::ChatAsks(asks) => {
             for (id, what) in asks {
-                app.asks
-                    .push_back(Confirm::new(Action::Approve, id, 0, what));
+                let mut c = Confirm::new(Action::Approve, id, 0, what);
+                c.session.clone_from(&app.chat.session_id);
+                app.asks.push_back(c);
             }
-            if app.confirm.is_none() {
-                app.confirm = app.asks.pop_front();
-            }
+            next_ask(app);
             vec![]
         }
         Bg::ChatAnswered(r) => {
+            app.answering = app.answering.saturating_sub(1);
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),
@@ -1044,6 +1130,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         if let Some(n) = &c.note {
             lines.push(Line::from(Span::styled(clean(n), t.warn())));
+        }
+        if c.action == Action::Approve && !app.quiet() {
+            lines.push(Line::from(Span::styled(
+                "espera un segundo sin teclear para responder…",
+                t.dim(),
+            )));
         }
         let answers = if c.action == Action::Approve {
             vec![

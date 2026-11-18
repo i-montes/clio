@@ -536,7 +536,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let page = usize::from(app.chat.view_h.get().max(2) - 1);
     let max = usize::MAX / 2;
     match act {
-        Act::Quit => app.quit = true,
+        Act::Quit if !app.busy() => app.quit = true,
         // The keys go to the list; the session stays open beside it.
         Act::Back => app.screen = Screen::Sessions,
         Act::Cancel if !app.chat.aborting => {

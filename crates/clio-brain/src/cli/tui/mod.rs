@@ -181,6 +181,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         debug: DebugCtl::new(debug, false),
         closing: Arc::default(),
+        answered: AtomicBool::new(false),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -207,26 +208,31 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
     // Only for the pseudo-terminal tests (debug builds): the text of every frame, to a file.
     let dump = std::env::var_os("CLIO_TUI_SCREEN_DUMP").filter(|_| cfg!(debug_assertions));
+    // Drawn when something came in, and at least every 100 ms for the clock and the spinners.
+    let (mut dirty, mut drawn) = (true, Instant::now());
     while !app.quit && ended.load(Ordering::SeqCst) == 0 {
-        let frame = term
-            .draw(|f| draw(f, &app))
-            .map_err(|e| format!("terminal: {e}"))?;
-        if let Some(path) = &dump {
-            dump_screen(frame.buffer, std::path::Path::new(path));
-        }
-        let mut inputs: Vec<Input> = Vec::new();
-        if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-            match event::read().map_err(|e| e.to_string())? {
-                Term::Key(k) if k.kind != KeyEventKind::Release => inputs.push(Input::Key(k)),
-                Term::Paste(s) => inputs.push(Input::Paste(s)),
-                Term::Mouse(m) => inputs.push(Input::Mouse(m)),
-                _ => {}
+        if dirty || drawn.elapsed() >= Duration::from_millis(100) {
+            let frame = term
+                .draw(|f| draw(f, &app))
+                .map_err(|e| format!("terminal: {e}"))?;
+            if let Some(path) = &dump {
+                dump_screen(frame.buffer, std::path::Path::new(path));
             }
+            (dirty, drawn) = (false, Instant::now());
         }
-        inputs.push(Input::Tick(to_ms(Instant::now())));
+        let ev = if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
+            Some(event::read().map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
+        // The clock first: a key is timed when it comes (the quiet rule of a question).
+        let mut inputs: Vec<Input> = vec![Input::Tick(to_ms(Instant::now()))];
+        dirty |= matches!(ev, Some(Term::Resize(..)));
+        inputs.extend(ev.and_then(input_of));
         while let Ok(i) = rx.try_recv() {
             inputs.push(i);
         }
+        dirty |= inputs.len() > 1;
         for i in inputs {
             let (next, cmds) = update(app, i);
             app = next;
@@ -272,11 +278,31 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     }
     // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
     ctx.stop_chat_now();
+    // An approval runs in this process, with its own host launcher: its units carry this pid and
+    // outlive it (a signal can come while one runs).
+    if ctx.answered.load(Ordering::SeqCst) {
+        clio_node::host::stop_units_of(std::process::id());
+    }
     // The shell convention for a process ended by a signal.
     Ok(match ended.load(Ordering::SeqCst) {
         0 => 0,
         sig => 128 + sig as i32,
     })
+}
+
+/// What a terminal event is to `update`, if anything. The terminal reports every move of the
+/// pointer (crossterm turns on any-motion tracking): a move, a drag or a release changes nothing,
+/// so it is dropped here and costs no frame.
+fn input_of(ev: Term) -> Option<Input> {
+    use crossterm::event::MouseEventKind as M;
+    match ev {
+        Term::Key(k) if k.kind != KeyEventKind::Release => Some(Input::Key(k)),
+        Term::Paste(s) => Some(Input::Paste(s)),
+        Term::Mouse(m) if !matches!(m.kind, M::Moved | M::Drag(_) | M::Up(_)) => {
+            Some(Input::Mouse(m))
+        }
+        _ => None,
+    }
 }
 
 /// The screen as plain text, replaced atomically.
@@ -315,6 +341,8 @@ struct Ctx {
     /// Sessions being closed on their own thread (each may first save its summary): waited for
     /// when the person leaves, so leaving right after closing a chat does not cut it short.
     closing: Closing,
+    /// An answer to a set-aside action ran here (see the end of `run`).
+    answered: AtomicBool,
 }
 
 /// The threads closing a session (and saving its summary).
@@ -686,6 +714,7 @@ impl Ctx {
                     self.send(Bg::ChatAnswered(Err("no hay una sesión abierta".into())));
                     return;
                 };
+                self.answered.store(true, Ordering::SeqCst);
                 self.spawn(
                     move |_, _| session.answer(&id, yes),
                     |r| Bg::ChatAnswered(r.and_then(|x| x)),

@@ -51,17 +51,6 @@ impl Sessions {
     }
 }
 
-/// As leaving the chat always was: a turn that runs is aborted (Esc in the chat) first.
-fn running(app: &mut App) -> bool {
-    if app.chat.running {
-        app.flash = Some(
-            "el agente está trabajando: Esc en el chat aborta el turno; luego cambia de sesión"
-                .into(),
-        );
-    }
-    app.chat.running
-}
-
 /// A new session in the chat. Nothing is created yet: the run and Pi start with its first
 /// message (`chat::send`), so opening Clio leaves nothing on disk.
 fn open_new(app: &mut App) -> Vec<Cmd> {
@@ -69,7 +58,7 @@ fn open_new(app: &mut App) -> Vec<Cmd> {
         app.screen = Screen::Chat;
         return vec![];
     }
-    if running(app) {
+    if app.busy() {
         return vec![];
     }
     app.chat = Chat::draft(app.now_ms);
@@ -107,7 +96,7 @@ fn open_selected(app: &mut App) -> Vec<Cmd> {
         app.screen = Screen::Chat;
         return vec![];
     }
-    if running(app) {
+    if app.busy() {
         return vec![];
     }
     let row = &app.sessions.rows[app.sessions.sel - 1];
@@ -128,7 +117,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         return vec![];
     };
     match act {
-        Act::Quit if !running(app) => app.quit = true,
+        Act::Quit if !app.busy() => app.quit = true,
         Act::Back => app.screen = Screen::Chat,
         Act::Down => app.sessions.sel = (app.sessions.sel + 1).min(last),
         Act::Up => app.sessions.sel = app.sessions.sel.saturating_sub(1),
@@ -146,8 +135,10 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             return vec![Cmd::RunDoctor];
         }
         Act::Memory => return super::memory::opened(app),
+        // Its question would come over the chat's own (a set-aside action) while it works.
+        Act::Delete if app.busy() => {}
         Act::Delete => match app.sessions.selected() {
-            Some(_) if app.chat.opening || open_pos(app) == Some(app.sessions.sel) => {
+            Some(_) if open_pos(app) == Some(app.sessions.sel) => {
                 app.flash = Some("esa sesión está abierta: abre otra antes de borrarla".into());
             }
             Some(row) => {

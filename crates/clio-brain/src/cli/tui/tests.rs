@@ -1516,7 +1516,8 @@ fn short_id_never_panics_on_a_non_ascii_name() {
 
 // Host mode: at the end of a turn, each action the session set aside is one question; `s` and then
 // Enter runs it, `n` or Esc rejects it, and the next one comes. The question opens while the
-// person may be typing: a lone `s`, Enter or any other key decides nothing.
+// person may be typing: a lone `s`, Enter or any other key decides nothing, and it hears no key
+// until a second passed without one.
 #[test]
 fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let asks = vec![
@@ -1536,21 +1537,34 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         "{screen}"
     );
     // Typing on: nothing is answered, and an `s` followed by another key is undone.
+    let mut typing = Vec::new();
+    for (i, k) in [
+        ch('h'),
+        key(KeyCode::Enter),
+        ch('s'),
+        ch('o'),
+        key(KeyCode::Enter),
+        ch('s'),
+        ch('s'),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        typing.extend([Input::Tick(100 * (i as u64 + 1)), k]);
+    }
+    let (a, cmds) = feed(a, typing);
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(a.confirm.as_ref().unwrap().id, "a1");
+    assert!(!a.confirm.as_ref().unwrap().armed);
     let (a, cmds) = feed(
         a,
         vec![
-            ch('h'),
+            Input::Tick(2_000),
+            ch('s'),
+            Input::Tick(3_000),
             key(KeyCode::Enter),
-            ch('s'),
-            ch('o'),
-            key(KeyCode::Enter),
-            ch('s'),
-            ch('s'),
         ],
     );
-    assert!(cmds.is_empty(), "{cmds:?}");
-    assert_eq!(a.confirm.as_ref().unwrap().id, "a1");
-    let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
         vec![Cmd::ChatAnswer {
@@ -1559,7 +1573,7 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         }]
     );
     assert_eq!(a.confirm.as_ref().unwrap().id, "b2");
-    let (a, cmds) = feed(a, vec![ch('s'), key(KeyCode::Esc)]);
+    let (a, cmds) = feed(a, vec![Input::Tick(4_000), key(KeyCode::Esc)]);
     assert_eq!(
         cmds,
         vec![Cmd::ChatAnswer {
@@ -1568,6 +1582,7 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         }]
     );
     assert!(a.confirm.is_none());
+    assert_eq!(a.answering, 2);
     let (a, _) = feed(
         a,
         vec![Input::Bg(Bg::ChatAnswered(Ok(
@@ -1578,4 +1593,283 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         a.chat.items.last(),
         Some(super::chat::Item::Note(m)) if m.contains("aprobado a1")
     ));
+    assert_eq!(a.answering, 1);
+}
+
+/// The Pi screen in host mode with a session open (`sid`) and two more listed.
+fn host_chat() -> App {
+    use crate::cli::chat::{Row, RowKind};
+    let mut a = app();
+    a.use_pi();
+    a.host = true;
+    a.chat = super::chat::Chat::opening(1, 0);
+    a.chat.opened("sid".into(), String::new(), &[], None, 0);
+    let row = |title: &str, reference: &str| Row {
+        kind: RowKind::Session,
+        title: title.into(),
+        detail: String::new(),
+        messages: 2,
+        last_ms: None,
+        reference: reference.into(),
+        unavailable: None,
+    };
+    a.sessions.set(vec![
+        row("abierta", "/s/1_sid.jsonl"),
+        row("otra", "/s/2_otra.jsonl"),
+    ]);
+    a
+}
+
+fn typed_at(t0: u64, text: &str) -> Vec<Input> {
+    text.chars()
+        .enumerate()
+        .flat_map(|(i, c)| [Input::Tick(t0 + 50 * i as u64), ch(c)])
+        .collect()
+}
+
+// Review of the sessions bar: the question opened while the person typed «muéstrame los
+// permisos⏎», and the tail `s` then Enter ran the action. Now the question hears nothing until a
+// second passed with no key, counting the keys typed before it opened, and says so.
+#[test]
+fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
+    let mut inputs = typed_at(1_000, "muéstrame los permi");
+    inputs.push(Input::Bg(Bg::ChatAsks(vec![(
+        "a1".into(),
+        "«borrar» rm -r x".into(),
+    )])));
+    inputs.extend(typed_at(2_000, "sos"));
+    inputs.extend([Input::Tick(2_150), key(KeyCode::Enter)]);
+    let (a, cmds) = feed(host_chat(), inputs);
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(a.chat.input, "muéstrame los permi");
+    let c = a.confirm.as_ref().unwrap();
+    assert!(c.id == "a1" && !c.armed);
+    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    let mut help = host_chat();
+    help.open_help();
+    assert!(screen_text(&help, 140, 30).contains("un segundo sin teclear"));
+    // `n` and Esc too: no answer while the keys still come, then `n` rejects.
+    let (a, cmds) = feed(a, vec![Input::Tick(2_900), ch('n')]);
+    assert!(cmds.is_empty() && a.confirm.is_some(), "{cmds:?}");
+    let (a, _) = feed(a, vec![Input::Tick(3_899)]);
+    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    let (a, _) = feed(a, vec![Input::Tick(3_900)]);
+    assert!(!screen_text(&a, 100, 30).contains("espera un segundo"));
+    // `s` arms; an Enter sooner than a second after it disarms; `s`, a second, Enter runs it.
+    let (a, cmds) = feed(
+        a,
+        vec![
+            ch('s'),
+            Input::Tick(4_500),
+            key(KeyCode::Enter),
+            Input::Tick(5_500),
+            key(KeyCode::Enter),
+        ],
+    );
+    assert!(
+        cmds.is_empty() && !a.confirm.as_ref().unwrap().armed,
+        "{cmds:?}"
+    );
+    let (_, cmds) = feed(
+        a,
+        vec![
+            Input::Tick(6_500),
+            ch('s'),
+            Input::Tick(7_500),
+            key(KeyCode::Enter),
+        ],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "a1".into(),
+            yes: true
+        }]
+    );
+}
+
+// Review of the sessions bar: with a turn running, Tab and `x` in the list asked to delete another
+// session, its question replaced the one of a set-aside action, and `s` deleted the session.
+#[test]
+fn a_delete_never_comes_over_a_set_aside_question_nor_while_the_chat_is_busy() {
+    let plan = || {
+        Input::Bg(Bg::SessionPlan(Ok((
+            "/s/2_otra.jsonl".into(),
+            "otra".into(),
+            "solo la conversación".into(),
+        ))))
+    };
+    // No delete while a turn runs, a session opens or an approved action runs.
+    for busy in 0..3 {
+        let mut a = host_chat();
+        match busy {
+            0 => a.chat.running = true,
+            1 => a.chat = super::chat::Chat::opening(2, 0),
+            _ => a.answering = 1,
+        }
+        a.screen = Screen::Sessions;
+        a.sessions.sel = 2;
+        let (a, cmds) = feed(a, vec![ch('x')]);
+        assert!(cmds.is_empty() && a.flash.is_some(), "{busy}: {cmds:?}");
+        // A plan asked before it began is dropped when it comes.
+        let (a, _) = feed(a, vec![plan()]);
+        assert!(a.confirm.is_none(), "{busy}");
+    }
+    // A plan that comes late never replaces the question on screen.
+    let mut a = host_chat();
+    a.screen = Screen::Sessions;
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "a1".into(),
+            "«borrar» rm -r x".into(),
+        )]))],
+    );
+    let (a, _) = feed(a, vec![plan()]);
+    assert_eq!(a.confirm.as_ref().unwrap().action, Action::Approve);
+    assert!(a.flash.is_some());
+    let (_, cmds) = feed(a, vec![ch('s'), Input::Tick(5_000), ch('y')]);
+    assert!(
+        !cmds.iter().any(|c| matches!(c, Cmd::DeleteSession { .. })),
+        "{cmds:?}"
+    );
+}
+
+// Review of the sessions bar: a set-aside question that came while another dialog was open waited
+// forever. It shows when that dialog closes; one of a session no longer open says where it waits.
+#[test]
+fn a_question_queued_behind_another_dialog_shows_when_it_closes() {
+    let mut a = host_chat();
+    a.screen = Screen::Sessions;
+    a.sessions.sel = 2;
+    let (a, _) = feed(
+        a,
+        vec![
+            ch('x'),
+            Input::Bg(Bg::SessionPlan(Ok((
+                "/s/2_otra.jsonl".into(),
+                "otra".into(),
+                "solo la conversación".into(),
+            )))),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm -r x".into())])),
+        ],
+    );
+    assert_eq!(a.confirm.as_ref().unwrap().action, Action::DeleteSession);
+    let (a, cmds) = feed(a, vec![Input::Tick(5_000), ch('n')]);
+    assert!(cmds.is_empty());
+    let c = a.confirm.as_ref().unwrap();
+    assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
+    // A question stamped with another session is not answered here.
+    let mut a = host_chat();
+    let mut c = super::app::Confirm::new(Action::Approve, "b2".into(), 0, "«enviar» x".into());
+    c.session = "otra".into();
+    a.asks.push_back(c);
+    a.confirm = Some(super::app::Confirm::new(
+        Action::Promote,
+        "7".into(),
+        0,
+        "x".into(),
+    ));
+    let (a, _) = feed(a, vec![Input::Tick(5_000), ch('n')]);
+    assert!(a.confirm.is_none() && a.asks.is_empty());
+    assert!(
+        a.flash.as_deref().unwrap().contains("clio pending"),
+        "{:?}",
+        a.flash
+    );
+}
+
+// Review of the sessions bar: an approved action runs on a worker; quitting killed it halfway and
+// switching showed its result in another session. While it runs the chat counts as busy.
+#[test]
+fn while_an_approved_action_runs_the_chat_cannot_be_left() {
+    let mut a = host_chat();
+    a.answering = 1;
+    let (a, _) = feed(a, vec![ctrl('c')]);
+    assert!(!a.quit && a.flash.as_deref().unwrap().contains("aprobaste"));
+    let mut a = App {
+        screen: Screen::Sessions,
+        ..a
+    };
+    a.sessions.sel = 2;
+    for k in [key(KeyCode::Enter), ch('n'), ch('q')] {
+        let (next, cmds) = feed(a, vec![k]);
+        a = next;
+        assert!(cmds.is_empty() && !a.quit, "{cmds:?}");
+        assert!(a.flash.as_deref().unwrap().contains("aprobaste"));
+        assert_eq!(a.chat.session_id, "sid");
+    }
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAnswered(Ok("aprobado a1".into())))],
+    );
+    let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+    assert!(matches!(&cmds[..], [Cmd::ChatOpen { .. }]), "{cmds:?}");
+    assert!(!a.chat.session_id.contains("sid"));
+}
+
+// Review of the sessions bar: the first message of a new session was lost by switching, `n` or
+// quitting while it opened. Now those wait, and if it cannot open the message comes back in front
+// of whatever was typed meanwhile.
+#[test]
+fn the_first_message_survives_a_session_that_is_still_opening() {
+    let mut a = app();
+    a.use_pi();
+    a.sessions.set(host_chat().sessions.rows);
+    let mut inputs = typed_at(0, "hola");
+    inputs.push(key(KeyCode::Enter));
+    let (a, cmds) = feed(a, inputs);
+    let seq = match &cmds[..] {
+        [Cmd::ChatOpen { seq, .. }] => *seq,
+        _ => panic!("{cmds:?}"),
+    };
+    let (a, _) = feed(a, vec![ctrl('c')]);
+    assert!(!a.quit && a.flash.as_deref().unwrap().contains("abriendo"));
+    let mut a = App {
+        screen: Screen::Sessions,
+        ..a
+    };
+    a.sessions.sel = 2;
+    for k in [key(KeyCode::Enter), ch('n'), ch('q')] {
+        let (next, cmds) = feed(a, vec![k]);
+        a = next;
+        assert!(cmds.is_empty() && !a.quit, "{cmds:?}");
+        assert_eq!(a.chat.queued.as_deref(), Some("hola"));
+    }
+    let (a, _) = feed(a, vec![key(KeyCode::Tab)]);
+    let (a, _) = feed(a, typed_at(1_000, "y además"));
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Err("sin llave".into()),
+        })],
+    );
+    assert_eq!(a.chat.input, "hola\ny además");
+    assert!(a.chat.is_draft());
+}
+
+// Review of the sessions bar: the terminal reports every move of the pointer, and each one drew the
+// whole screen. A move, a drag or a release is not an input; a click and the wheel are.
+#[test]
+fn pointer_moves_are_not_inputs() {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind as M};
+    let m = |kind| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    for k in [
+        M::Moved,
+        M::Drag(MouseButton::Left),
+        M::Up(MouseButton::Left),
+    ] {
+        assert!(super::input_of(m(k)).is_none(), "{k:?}");
+    }
+    for k in [M::Down(MouseButton::Left), M::ScrollDown, M::ScrollUp] {
+        assert!(super::input_of(m(k)).is_some(), "{k:?}");
+    }
 }

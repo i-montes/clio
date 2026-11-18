@@ -464,6 +464,15 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
             )),
         );
     }
+    if app.pi && app.host {
+        lines.insert(
+            1,
+            Line::from(Span::styled(
+                "«¿Lo ejecuto?» solo oye tras un segundo sin teclear: s, un segundo, Enter lo ejecuta; n o Esc lo rechaza",
+                t.dim(),
+            )),
+        );
+    }
     for r in 0..rows {
         let mut spans = cell(&entries[r]);
         if cols == 2 && r + rows < entries.len() {
