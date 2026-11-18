@@ -805,11 +805,12 @@ impl ToolHost {
                 return self.aside(h, &req, class, None);
             }
             // A session that read text the judge flagged asks before it reaches out, whatever
-            // the command: what it read may be what wants out.
+            // the command: what it read may be what wants out. Root can reach out past any cut.
             if req.tool == "exec" && self.is_suspect(&req.session) {
                 let command = map.get("command").and_then(Value::as_str).unwrap_or("");
                 let network = map.get("network").and_then(Value::as_bool) == Some(true);
-                if network || h.cfg.rules.reaches_out(command) {
+                let rules = &h.cfg.rules;
+                if network || rules.reaches_out(command) || rules.uses_sudo(command) {
                     return self.aside(h, &req, ask::Class::Enviar, Some(SUSPECT_REASON));
                 }
             }
