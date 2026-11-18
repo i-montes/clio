@@ -414,8 +414,16 @@ impl Chat {
         }
     }
 
-    /// The turn is over: a tool still drawn as running did not end, it was stopped.
+    /// The turn is over: a tool still drawn as running did not end, it was stopped; a checklist
+    /// with every item done is not pinned any more.
     pub fn stop_tools(&mut self) {
+        if self
+            .todo
+            .iter()
+            .all(|(s, _)| *s == super::todo::Status::Done)
+        {
+            self.todo.clear();
+        }
         for i in &mut self.items {
             if let Item::Tool { state, .. } = i
                 && *state == ToolState::Running

@@ -502,6 +502,30 @@ fn the_checklist_is_pinned_above_the_status_line_and_only_its_widget_is_read() {
     let (a, _) = feed(a, vec![widget(super::todo::KEY, None)]);
     assert!(a.chat.todo.is_empty());
     assert!(!screen_text(&a, 90, 30).contains("read the config"));
+    // A turn that settles with one item left keeps it pinned; all done, the list goes.
+    let settled = || {
+        Input::Bg(Bg::ChatSettled {
+            result: Err("x".into()),
+            refresh: None,
+        })
+    };
+    let (a, _) = feed(
+        a,
+        vec![
+            widget(super::todo::KEY, Some(&["[x] one", "[ ] two"])),
+            settled(),
+        ],
+    );
+    assert_eq!(a.chat.todo.len(), 2);
+    let (a, _) = feed(
+        a,
+        vec![
+            widget(super::todo::KEY, Some(&["[x] one", "[x] two"])),
+            settled(),
+        ],
+    );
+    assert!(a.chat.todo.is_empty());
+    assert!(!screen_text(&a, 90, 30).contains("two"));
 }
 
 #[test]
