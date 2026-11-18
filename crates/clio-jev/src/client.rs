@@ -366,8 +366,7 @@ mod tests {
     }
 
     fn ask(r: &Rig) -> Result<Answers, JevError> {
-        r.jev
-            .ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q())
+        r.jev.ask(&clean(json!({"person_message": "hola"})), &q())
     }
 
     #[test]
@@ -467,7 +466,7 @@ mod tests {
             r.jev.ask(&clean(json!({})), &Questions::new()),
             Err(JevError::Bad(_))
         ));
-        let big = clean(json!({"mensaje_de_la_persona": "x".repeat(40_000)}));
+        let big = clean(json!({"person_message": "x".repeat(40_000)}));
         assert!(matches!(r.jev.ask(&big, &q()), Err(JevError::Bad(_))));
         assert_eq!(r.calls.load(Ordering::SeqCst), 0);
     }
@@ -493,10 +492,10 @@ mod tests {
                 Box::new(|| Ok("KEY".into())),
                 Arc::new(FixedClock::new(1_000)),
             );
-            let first = jev.ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q());
+            let first = jev.ask(&clean(json!({"person_message": "hola"})), &q());
             assert_eq!(first.is_err(), unusable);
             assert_eq!(
-                jev.ask(&clean(json!({"mensaje_de_la_persona": "hola"})), &q()),
+                jev.ask(&clean(json!({"person_message": "hola"})), &q()),
                 Err(JevError::Budget),
                 "the first call spent the budget (unusable: {unusable})"
             );

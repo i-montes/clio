@@ -74,7 +74,7 @@ fn questions() -> Questions {
 
 fn ask(j: &Jev) -> Result<clio_jev::Answers, JevError> {
     j.ask(
-        &Clean::new(json!({"mensaje_de_la_persona": "hola"}), &|s| s.to_owned()),
+        &Clean::new(json!({"person_message": "hola"}), &|s| s.to_owned()),
         &questions(),
     )
 }
@@ -100,7 +100,7 @@ fn a_call_reaches_the_api_with_the_key_in_one_header_and_the_questions_in_the_bo
     );
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["model"], "jev-latest");
-    assert_eq!(body["state"]["mensaje_de_la_persona"], "hola");
+    assert_eq!(body["state"]["person_message"], "hola");
     assert_eq!(body["questions"]["x"]["type"], "noul");
     assert!(
         !body.to_string().contains(KEY),

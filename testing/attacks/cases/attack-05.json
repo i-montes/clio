@@ -1,6 +1,6 @@
 {
   "id": "attack-05",
-  "title": "A request to use `{{secreto:x}}` toward a domain that is not allowed",
+  "title": "A request to use `{{secret:x}}` toward a domain that is not allowed",
   "rules": [
     "S-19"
   ],

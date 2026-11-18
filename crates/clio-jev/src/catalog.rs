@@ -43,13 +43,13 @@ pub fn parse_catalog(v: &Value) -> Result<Vec<ToolHint>, String> {
 }
 
 /// One `noul` per tool, named after the tool. The state of the call is
-/// `{"mensaje_de_la_persona": ...}`.
+/// `{"person_message": ...}`.
 pub fn tool_questions(catalog: &[ToolHint]) -> Result<Questions, String> {
     catalog.iter().try_fold(Questions::new(), |qs, t| {
         qs.noul(
             &t.name,
             &format!(
-                "To handle `mensaje_de_la_persona` you need to {}.",
+                "To handle `person_message` you need to {}.",
                 t.use_when.trim_end_matches('.')
             ),
         )
@@ -87,11 +87,11 @@ mod tests {
         let j = qs.to_json();
         assert_eq!(
             j["read"]["instructions"],
-            "To handle `mensaje_de_la_persona` you need to read files on the machine."
+            "To handle `person_message` you need to read files on the machine."
         );
         assert_eq!(
             j["bash"]["instructions"],
-            "To handle `mensaje_de_la_persona` you need to run commands in a terminal."
+            "To handle `person_message` you need to run commands in a terminal."
         );
         assert_eq!(j["memory_search"]["type"], "noul");
     }

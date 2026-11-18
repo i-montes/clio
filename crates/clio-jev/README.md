@@ -4,7 +4,7 @@ Client of Jev (TypeSafe System One): closed questions (yes/no or pick an option)
 
 - `wire`: the questions and the answers once checked (nothing missing, nothing of another type, numbers in range, options that were offered).
 - `client`: the call with a time limit (3 s), a circuit breaker (3 failures in a row, 60 s) and a daily token budget. The model is `jev-latest`; the version that answered comes back in every answer and `model_changed()` warns if it changed. The HTTP is done by `adapters/jev/jev_systemone.py` (Python standard library, like the model adapter): the key arrives on standard input from the vault and only goes out to `api.typesafe.ai` over TLS, without following redirects.
-- `catalog`: one yes/no question per tool, generated from the catalog that the guard (`adapters/pi/extensions/clio-guard`, `USE_WHEN`) reports when the session starts. Adding a tool to the guard adds its question; there is no other list. The question names the state key `mensaje_de_la_persona` (the person's message), which the brain fills.
+- `catalog`: one yes/no question per tool, generated from the catalog that the guard (`adapters/pi/extensions/clio-guard`, `USE_WHEN`) reports when the session starts. Adding a tool to the guard adds its question; there is no other list. The question names the state key `person_message` (the person's message), which the brain fills.
 
 Nothing calls this crate yet: delivery 2 connects it to the «before the prompt» step.
 
