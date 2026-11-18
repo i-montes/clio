@@ -7,7 +7,7 @@
 //! The masks are not a wall against the command: with `Systemd` it has `sudo`. They keep Clio's
 //! folders out of an ordinary command's sight, not out of root's reach.
 
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -313,8 +313,20 @@ impl HostJail {
     /// is cut unless asked for, and (with `Systemd`) that `sudo` works. An error means no `exec`.
     pub fn self_test(&self, scratch: &Path) -> Result<(), String> {
         let mask = scratch.join("clio-mask");
-        std::fs::create_dir_all(&mask).map_err(|e| format!("{}: {e}", mask.display()))?;
-        std::fs::write(mask.join("decoy"), "decoy").map_err(|e| format!("decoy: {e}"))?;
+        // Private like everything under Clio's data, whatever the umask (S-23).
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&mask)
+            .map_err(|e| format!("{}: {e}", mask.display()))?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(mask.join("decoy"))
+            .and_then(|mut f| std::io::Write::write_all(&mut f, b"decoy"))
+            .map_err(|e| format!("decoy: {e}"))?;
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("listen: {e}"))?;
         let port = listener

@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -120,7 +120,10 @@ impl Host {
         rule: &str,
         exit_code: Option<i64>,
     ) -> std::io::Result<()> {
-        fs::create_dir_all(&self.cfg.state)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.cfg.state)?;
         let mut line = json!({
             "at_ms": now_ms(),
             "run": self.cfg.run,
@@ -186,8 +189,13 @@ fn record_change(run_dir: &Path, path: &Path, content: Option<&[u8]>) -> std::io
         let (mut backup, mut mode) = (None, None);
         if let Ok(m) = fs::metadata(path) {
             let b = run_dir.join("backups").join(seq.to_string());
-            fs::create_dir_all(run_dir.join("backups"))?;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(run_dir.join("backups"))?;
             fs::copy(path, &b)?;
+            // `copy` keeps the original's mode; the backup is the person's, the mode is in `mode`.
+            fs::set_permissions(&b, fs::Permissions::from_mode(0o600))?;
             (backup, mode) = (Some(b), Some(m.permissions().mode() & 0o7777));
         }
         changes.push(Change {

@@ -210,6 +210,10 @@ impl SessionSource for LocalSource {
             self.copy_of(&id)
         };
         let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
+        if host {
+            // 0700 even if an earlier version left it open (S-23).
+            crate::cli::mkdir_private(&state)?;
+        }
         // The project of the session, for the memory: decided here from the person's own folder
         // (the copy has no history), never by the model.
         let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))

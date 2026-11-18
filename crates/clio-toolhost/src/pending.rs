@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use clio_node::Action;
@@ -130,7 +130,11 @@ fn file(state: &Path, id: &str) -> Result<PathBuf, String> {
 fn write_private(path: &Path, text: &str) -> Result<(), String> {
     let e = |x: std::io::Error| format!("{}: {x}", path.display());
     if let Some(d) = path.parent() {
-        fs::create_dir_all(d).map_err(e)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(d)
+            .map_err(e)?;
     }
     let tmp = path.with_extension("tmp");
     fs::OpenOptions::new()

@@ -113,7 +113,9 @@ impl DayBudget {
         let tmp = file.with_extension("tmp");
         let _ = file
             .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
+            .map_or(Ok(()), |d| {
+                crate::pi::private_dir(d).map_err(|e| std::io::Error::other(e.to_string()))
+            })
             .and_then(|()| {
                 std::fs::OpenOptions::new()
                     .write(true)

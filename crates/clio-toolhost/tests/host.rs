@@ -284,6 +284,73 @@ fn a_write_leaves_a_copy_and_undo_gives_back_content_and_mode() {
     assert!(said.iter().any(|l| l.contains(&p(&old))), "{said:?}");
 }
 
+/// Every folder and file under `dir`, with its mode.
+fn modes(dir: &Path, out: &mut Vec<(PathBuf, u32, bool)>) {
+    for d in std::fs::read_dir(dir).unwrap() {
+        let p = d.unwrap().path();
+        let m = std::fs::symlink_metadata(&p).unwrap();
+        out.push((p.clone(), m.permissions().mode() & 0o777, m.is_dir()));
+        if m.is_dir() {
+            modes(&p, out);
+        }
+    }
+}
+
+// S-23: what host mode leaves in Clio's data (the log, what is set aside, the copies, the mask
+// of the self-test) is the owner's alone, whatever the umask: folders 0700, files 0600.
+#[test]
+fn what_host_mode_creates_is_private_whatever_the_umask() {
+    let e = env();
+    let open = e.r.join("outside/abierto.txt");
+    std::fs::write(&open, "viejo").unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        call(
+            &e,
+            "s",
+            "fs_write",
+            json!({"path": p(&open), "content": "nuevo"})
+        )
+        .ok
+    );
+    assert!(
+        call(
+            &e,
+            "s",
+            "fs_mkdir",
+            json!({"path": p(&e.r.join("outside/d"))})
+        )
+        .ok
+    );
+    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar");
+    let mut all = Vec::new();
+    modes(&e.r.join("clio/data"), &mut all);
+    if exec_ok(&e) {
+        let mask = e.r.join("scratch/clio-mask");
+        all.push((
+            mask.clone(),
+            std::fs::metadata(&mask).unwrap().permissions().mode() & 0o777,
+            true,
+        ));
+        modes(&mask, &mut all);
+    }
+    for want in [
+        "actions.jsonl",
+        "changes.jsonl",
+        "backups",
+        "pending",
+        "questions.json",
+    ] {
+        assert!(
+            all.iter().any(|(p, _, _)| p.ends_with(want)),
+            "{want}: {all:?}"
+        );
+    }
+    for (p, mode, dir) in &all {
+        assert_eq!(*mode, if *dir { 0o700 } else { 0o600 }, "{}", p.display());
+    }
+}
+
 #[test]
 fn every_action_leaves_two_lines_with_keys_struck_out_and_without_the_log_nothing_runs() {
     let e = env();
