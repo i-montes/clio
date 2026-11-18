@@ -46,6 +46,23 @@ pub const MAX_AGENT_PROPOSALS: usize = 5;
 /// Tokens for what is recalled (each fixed block has its own budget).
 pub const RECALL_BUDGET: usize = 400;
 const BLOCKS: [(&str, usize); 3] = [("identidad", 150), ("reglas", 200), ("preferencias", 150)];
+/// The person's blocks: the three made when the memory is opened for writing, and `vigilancia`
+/// (what Clio watches), made on its first write.
+pub const BLOCK_NAMES: [&str; 4] = ["identidad", "reglas", "preferencias", "vigilancia"];
+/// Longest entry of a block, in characters.
+pub const BLOCK_ENTRY_CHARS: usize = 1200;
+/// What a block sent to the model may hold in all, in characters: it is always sent whole.
+pub const BLOCK_SENT_CHARS: usize = 1500;
+
+/// How many entries a block may have.
+fn block_cap(name: &str) -> usize {
+    match name {
+        "identidad" => 4,
+        "reglas" => 6,
+        "preferencias" => 8,
+        _ => 40,
+    }
+}
 
 pub type Res<T> = Result<T, String>;
 
@@ -926,49 +943,155 @@ impl MemoryLink {
 
     /// A fact the person typed: origin `user`, active at once. Optionally in a fixed block.
     pub fn remember(&self, text: &str, block: Option<&str>) -> Res<MemoryId> {
-        self.need_write()?;
-        // The block is looked up first: a wrong name must not leave a memory behind.
-        let block = match block {
-            Some(name) => Some(
-                self.engine
-                    .blocks(self.scope)
-                    .map_err(|e| explain(&e))?
-                    .into_iter()
-                    .find(|b| b.name == name)
-                    .ok_or_else(|| {
-                        format!("no hay un bloque {name:?} (identidad, reglas, preferencias)")
-                    })?,
-            ),
-            None => None,
-        };
-        let out = self
-            .engine
-            .propose(Proposal {
-                scope: self.scope,
-                actor: self.actors.persona,
-                kind: MemoryType::Semantic,
-                content: clean_text(text),
-                topic_key: None,
-                origin: Origin::User,
-                session: None,
-                episode: None,
-                source: Some("persona".into()),
-                valid_from: None,
-                valid_to: None,
-                title: None,
-                category: None,
-            })
-            .map_err(|e| explain(&e))?;
-        if let Some(b) = block {
-            let mut ids = self.engine.block_get(b.id).map_err(|e| explain(&e))?;
-            if !ids.contains(&out.memory) {
-                ids.push(out.memory);
-            }
-            self.engine
-                .block_set(b.id, &ids, self.actors.persona)
-                .map_err(|e| explain(&e))?;
+        if let Some(name) = block {
+            return self.block_add(name, text).map(|r| r.id);
         }
-        Ok(out.memory)
+        self.need_write()?;
+        self.propose_as_person(text, None)
+    }
+
+    /// `text` as the person said it, at once; with `old`, it replaces that memory.
+    fn propose_as_person(&self, text: &str, old: Option<MemoryId>) -> Res<MemoryId> {
+        let p = Proposal {
+            scope: self.scope,
+            actor: self.actors.persona,
+            kind: MemoryType::Semantic,
+            content: clean_text(text),
+            topic_key: None,
+            origin: Origin::User,
+            session: None,
+            episode: None,
+            source: Some("persona".into()),
+            valid_from: None,
+            valid_to: None,
+            title: None,
+            category: None,
+        };
+        match old {
+            Some(old) => self.engine.replace(old, p),
+            None => self.engine.propose(p),
+        }
+        .map(|o| o.memory)
+        .map_err(|e| explain(&e))
+    }
+
+    /// The block named `name` (one of [`BLOCK_NAMES`]), if it was made.
+    fn block_named(&self, name: &str) -> Res<Option<clio_memory::Block>> {
+        if !BLOCK_NAMES.contains(&name) {
+            return Err(format!(
+                "no hay un bloque «{name}»: identidad, reglas, preferencias o vigilancia"
+            ));
+        }
+        Ok(self
+            .engine
+            .blocks(self.scope)
+            .map_err(|e| explain(&e))?
+            .into_iter()
+            .find(|b| b.name == name))
+    }
+
+    /// What the block shows now, in its order. Works on a read-only link. Empty when the block
+    /// does not exist yet.
+    pub fn block_rows(&self, name: &str) -> Res<Vec<MemoryRow>> {
+        match self.block_named(name)? {
+            Some(b) => self.engine.block_current(b.id).map_err(|e| explain(&e)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Refuses an edit that would leave the block past its caps: `rows` with `text` added (or in
+    /// place of entry `at`).
+    fn block_fits(name: &str, rows: &[MemoryRow], at: Option<usize>, text: &str) -> Res<()> {
+        let chars = text.chars().count();
+        if chars > BLOCK_ENTRY_CHARS {
+            return Err(format!(
+                "no cabe: una entrada admite {BLOCK_ENTRY_CHARS} caracteres y esta tiene {chars}"
+            ));
+        }
+        let cap = block_cap(name);
+        if at.is_none() && rows.len() >= cap {
+            return Err(format!("no cabe: el bloque «{name}» admite {cap} entradas"));
+        }
+        if name != "vigilancia" {
+            let total: usize = rows
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != at)
+                .map(|(_, r)| r.content.chars().count())
+                .sum::<usize>()
+                + chars;
+            if total > BLOCK_SENT_CHARS {
+                return Err(format!(
+                    "no cabe: el bloque «{name}» admite {BLOCK_SENT_CHARS} caracteres en total y quedaría en {total}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Where `id` is in the block's rows, or a refusal that names both.
+    fn block_place(name: &str, rows: &[MemoryRow], id: MemoryId) -> Res<usize> {
+        rows.iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| format!("no hay un recuerdo m{} en el bloque «{name}»", id.0))
+    }
+
+    fn block_store(&self, name: &str, ids: &[MemoryId]) -> Res<()> {
+        let block = match self.block_named(name)? {
+            Some(b) => b.id,
+            // Only `vigilancia` is made here: it never goes into the engine's own context.
+            None => self
+                .engine
+                .create_block(self.scope, name, 0, self.actors.persona)
+                .map_err(|e| explain(&e))?,
+        };
+        self.engine
+            .block_set(block, ids, self.actors.persona)
+            .map_err(|e| explain(&e))
+    }
+
+    /// A new last entry of the block, as the person said it.
+    pub fn block_add(&self, name: &str, text: &str) -> Res<MemoryRow> {
+        self.need_write()?;
+        // Every check first: a refused edit must not leave a memory behind.
+        let rows = self.block_rows(name)?;
+        let text = clean_text(text);
+        Self::block_fits(name, &rows, None, &text)?;
+        let id = self.propose_as_person(&text, None)?;
+        let mut ids: Vec<MemoryId> = rows.iter().map(|r| r.id).collect();
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+        self.block_store(name, &ids)?;
+        self.engine.get(id).map_err(|e| explain(&e))
+    }
+
+    /// A new text for entry `id`, in its place: it replaces the memory as the person.
+    pub fn block_replace(&self, name: &str, id: MemoryId, text: &str) -> Res<MemoryRow> {
+        self.need_write()?;
+        let rows = self.block_rows(name)?;
+        let at = Self::block_place(name, &rows, id)?;
+        let text = clean_text(text);
+        Self::block_fits(name, &rows, Some(at), &text)?;
+        let new = self.propose_as_person(&text, Some(id))?;
+        let mut ids: Vec<MemoryId> = rows.iter().map(|r| r.id).collect();
+        ids[at] = new;
+        self.block_store(name, &ids)?;
+        self.engine.get(new).map_err(|e| explain(&e))
+    }
+
+    /// Takes entry `id` out of the block and forgets it as the person (quarantine, restorable).
+    pub fn block_remove(&self, name: &str, id: MemoryId) -> Res<()> {
+        self.need_write()?;
+        let rows = self.block_rows(name)?;
+        let at = Self::block_place(name, &rows, id)?;
+        let mut ids: Vec<MemoryId> = rows.iter().map(|r| r.id).collect();
+        ids.remove(at);
+        self.block_store(name, &ids)?;
+        self.engine
+            .forget(id, self.actors.persona, "la persona lo sacó de su bloque")
+            .map(|_| ())
+            .map_err(|e| explain(&e))
     }
 
     /// Only the person promotes; the agent has no way to reach this.

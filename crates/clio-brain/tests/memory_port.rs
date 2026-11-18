@@ -1951,3 +1951,150 @@ fn a_neighbor_preview_reaches_the_tool_host_whole() {
         .expect("b is a neighbor of a");
     assert_eq!(near.preview, long);
 }
+
+// ---------------------------------------------------------------- the person's blocks
+
+fn texts(link: &MemoryLink, name: &str) -> Vec<String> {
+    link.block_rows(name)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.content)
+        .collect()
+}
+
+#[test]
+fn a_block_keeps_what_the_person_said_in_order() {
+    let w = world();
+    let link = open(&w);
+    link.block_add("identidad", "Eres Clio").unwrap();
+    link.block_add("identidad", "Hablas claro").unwrap();
+    let rows = link.block_rows("identidad").unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.content.as_str()).collect::<Vec<_>>(),
+        ["Eres Clio", "Hablas claro"]
+    );
+    for r in &rows {
+        assert_eq!((r.origin, r.state), (MOrigin::User, State::Active));
+        assert_eq!(link.actor_name(r.actor), "persona");
+    }
+    // A read-only link sees the same.
+    drop(link);
+    let read = MemoryLink::open_read(&w.data, &EmbedModel::none())
+        .unwrap()
+        .unwrap();
+    assert_eq!(texts(&read, "identidad"), ["Eres Clio", "Hablas claro"]);
+}
+
+#[test]
+fn replacing_keeps_the_place_in_the_block() {
+    let w = world();
+    let link = open(&w);
+    let first = link.block_add("reglas", "uno").unwrap();
+    link.block_add("reglas", "dos").unwrap();
+    let new = link
+        .block_replace("reglas", first.id, "uno, mejor")
+        .unwrap();
+    assert_eq!(texts(&link, "reglas"), ["uno, mejor", "dos"]);
+    assert_eq!(new.origin, MOrigin::User);
+    assert_ne!(link.get(first.id).unwrap().state, State::Active);
+}
+
+#[test]
+fn removing_takes_it_out_and_forgets_it() {
+    let w = world();
+    let link = open(&w);
+    let a = link.block_add("preferencias", "se llama Marta").unwrap();
+    link.block_add("preferencias", "vive en Tolú").unwrap();
+    link.block_remove("preferencias", a.id).unwrap();
+    assert_eq!(texts(&link, "preferencias"), ["vive en Tolú"]);
+    assert_eq!(link.get(a.id).unwrap().state, State::Quarantine);
+}
+
+#[test]
+fn an_unknown_block_is_refused() {
+    let w = world();
+    let link = open(&w);
+    let want = "no hay un bloque «nada»: identidad, reglas, preferencias o vigilancia";
+    assert_eq!(link.block_add("nada", "x").unwrap_err(), want);
+    assert_eq!(link.block_rows("nada").unwrap_err(), want);
+    assert!(
+        link.list(State::Active).unwrap().is_empty(),
+        "nothing was written"
+    );
+}
+
+#[test]
+fn an_id_from_another_block_is_refused() {
+    let w = world();
+    let link = open(&w);
+    link.block_add("identidad", "Eres Clio").unwrap();
+    let rule = link.block_add("reglas", "no borras nada").unwrap();
+    assert!(
+        link.block_replace("identidad", rule.id, "otra cosa")
+            .is_err()
+    );
+    assert!(link.block_remove("identidad", rule.id).is_err());
+    assert_eq!(texts(&link, "identidad"), ["Eres Clio"]);
+    assert_eq!(texts(&link, "reglas"), ["no borras nada"]);
+    assert_eq!(link.get(rule.id).unwrap().state, State::Active);
+}
+
+#[test]
+fn a_block_that_would_not_fit_is_refused() {
+    let w = world();
+    let link = open(&w);
+    link.block_add("identidad", &"a".repeat(1000)).unwrap();
+    link.block_add("identidad", &"b".repeat(400)).unwrap();
+    assert_eq!(
+        link.block_add("identidad", &"c".repeat(200)).unwrap_err(),
+        "no cabe: el bloque «identidad» admite 1500 caracteres en total y quedaría en 1600"
+    );
+    assert_eq!(link.block_rows("identidad").unwrap().len(), 2);
+    assert_eq!(
+        link.list(State::Active).unwrap().len(),
+        2,
+        "nothing was written"
+    );
+    // Replacing counts the new text instead of the old one.
+    let first = link.block_rows("identidad").unwrap()[0].id;
+    assert!(
+        link.block_replace("identidad", first, &"d".repeat(1200))
+            .is_err()
+    );
+    assert_eq!(texts(&link, "identidad")[0], "a".repeat(1000));
+    // What she watches is not sent to the model: no total.
+    for i in 0..3 {
+        link.block_add("vigilancia", &format!("{i}{}", "v".repeat(900)))
+            .unwrap();
+    }
+    // One entry is never longer than 1200 characters.
+    assert!(link.block_add("vigilancia", &"v".repeat(1201)).is_err());
+}
+
+#[test]
+fn the_entry_caps_hold() {
+    let w = world();
+    let link = open(&w);
+    for i in 0..4 {
+        link.block_add("identidad", &format!("rasgo {i}")).unwrap();
+    }
+    assert!(link.block_add("identidad", "rasgo 4").is_err());
+    assert_eq!(link.block_rows("identidad").unwrap().len(), 4);
+}
+
+#[test]
+fn vigilancia_is_created_on_the_first_write() {
+    let w = world();
+    let link = open(&w);
+    assert!(link.block_rows("vigilancia").unwrap().is_empty());
+    assert!(
+        !link
+            .engine()
+            .blocks(link.scope())
+            .unwrap()
+            .iter()
+            .any(|b| b.name == "vigilancia")
+    );
+    link.block_add("vigilancia", "el correo del banco").unwrap();
+    assert_eq!(texts(&link, "vigilancia"), ["el correo del banco"]);
+}
