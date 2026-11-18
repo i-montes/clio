@@ -41,12 +41,12 @@ fn one(s: &str) -> String {
 impl Block {
     pub fn context(c: &ContextReport) -> Self {
         let mut b = Self {
-            lines: vec![(Kind::Head, format!("llamada {}", c.call))],
+            lines: vec![(Kind::Head, format!("call {}", c.call))],
         };
         b.lines.push((
             Kind::Dim,
             format!(
-                "  contexto {} tok aprox.: sistema {} ({}) · objetivo {} · herramientas {} · conversación {} ({} turnos) · externo {} ({}) · salidas {} · memoria {} ({})",
+                "  context {} tok approx.: system {} ({}) · objective {} · tools {} · conversation {} ({} turns) · external {} ({}) · outputs {} · memory {} ({})",
                 tokens(c.total()),
                 tokens(c.system),
                 one(&c.prompt_version),
@@ -64,7 +64,7 @@ impl Block {
         for i in &c.external {
             b.lines.push((
                 Kind::Dim,
-                format!("    externo: {} {}", one(&i.name), tokens(i.tokens)),
+                format!("    external: {} {}", one(&i.name), tokens(i.tokens)),
             ));
         }
         b
@@ -73,7 +73,7 @@ impl Block {
     /// What the memory recalled or proposed: one stored line per item.
     pub fn memory(title: &str, lines: &[String]) -> Self {
         let mut b = Self {
-            lines: vec![(Kind::Head, format!("memoria: {}", one(title)))],
+            lines: vec![(Kind::Head, format!("memory: {}", one(title)))],
         };
         for l in lines {
             b.lines.push((Kind::Dim, format!("  {}", one(l))));
@@ -83,14 +83,14 @@ impl Block {
 
     pub fn usage(&mut self, u: &CallUsage) {
         let retry = if u.retries > 0 {
-            format!(" · {} reintentos", u.retries)
+            format!(" · {} retries", u.retries)
         } else {
             String::new()
         };
         self.lines.push((
             Kind::Plain,
             format!(
-                "  modelo {} · entrada {} · salida {} tok · {}{retry}",
+                "  model {} · input {} · output {} tok · {}{retry}",
                 usage::ms_label(u.model_ms),
                 tokens(u64::from(u.input_tokens)),
                 tokens(u64::from(u.output_tokens)),
@@ -103,7 +103,7 @@ impl Block {
         self.lines.push((
             Kind::Plain,
             format!(
-                "  petición: {} mensajes en total ({} car.), nuevos en esta llamada: {}",
+                "  request: {} messages in all ({} ch.), new in this call: {}",
                 x.messages,
                 x.request_chars,
                 x.request.len()
@@ -114,7 +114,7 @@ impl Block {
         }
         self.lines.push((
             Kind::Plain,
-            format!("  respuesta: {} car.", x.response.chars().count()),
+            format!("  reply: {} ch.", x.response.chars().count()),
         ));
         self.text("   ", &x.response);
     }
@@ -130,14 +130,14 @@ impl Block {
 
     pub fn decision(&mut self, d: &DecisionDebug) {
         let (kind, word) = match d.outcome {
-            Outcome::Allow => (Kind::Ok, "permitido"),
-            Outcome::Ask => (Kind::Warn, "pedido"),
-            Outcome::Deny => (Kind::Fail, "negado"),
+            Outcome::Allow => (Kind::Ok, "allowed"),
+            Outcome::Ask => (Kind::Warn, "asked"),
+            Outcome::Deny => (Kind::Fail, "denied"),
         };
         self.lines.push((
             Kind::Plain,
             format!(
-                "  pasarela #{} {} {}",
+                "  gateway #{} {} {}",
                 d.n,
                 one(&d.tool),
                 one(&cut(&d.args, 300))
@@ -145,9 +145,9 @@ impl Block {
         ));
         self.lines.push((
             kind,
-            format!("    {word} · regla {} · {} ms", one(&d.rule), d.tool_ms),
+            format!("    {word} · rule {} · {} ms", one(&d.rule), d.tool_ms),
         ));
-        self.text("    razón:", &d.reason);
+        self.text("    reason:", &d.reason);
     }
 
     pub fn note(&mut self, kind: Kind, text: &str) {
@@ -180,7 +180,7 @@ pub fn fit(s: &str, w: usize, t: Theme) -> String {
 }
 
 /// The stored lines broken to `w` columns: a long line continues indented on the next one, so
-/// the notice at its end (`faltan N caracteres`) is never cut off. A width of 0 means unknown.
+/// the notice at its end (`N characters left out`) is never cut off. A width of 0 means unknown.
 pub fn visual(blocks: &[Block], w: usize) -> Vec<(Kind, String)> {
     let w = if w == 0 { usize::MAX } else { w.max(24) };
     let mut out = Vec::new();
@@ -219,12 +219,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let start = end.saturating_sub(rows);
     let mut lines = vec![section(
         t,
-        "debug: lo que vio y dijo el modelo (saneado)",
+        "debug: what the model saw and said (sanitised)",
         area.width,
     )];
     if all.is_empty() {
         lines.push(Line::from(Span::styled(
-            "todavía no hay llamadas al modelo; el detalle de petición y respuesta empieza con la próxima",
+            "no model calls yet; the request and reply detail starts with the next one",
             t.dim(),
         )));
     }

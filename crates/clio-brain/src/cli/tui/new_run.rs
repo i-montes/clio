@@ -118,9 +118,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                     instruction: n.instruction.trim().to_owned(),
                 }];
             } else if !matches!(n.check, Some(Ok(_))) {
-                app.flash = Some("elige primero una carpeta válida".into());
+                app.flash = Some("pick a valid folder first".into());
             } else {
-                app.flash = Some("escribe qué quieres que haga Clio".into());
+                app.flash = Some("type what you want Clio to do".into());
             }
         }
         _ => match k.code {
@@ -163,7 +163,7 @@ pub fn paste(app: &mut App, text: &str) -> Vec<Cmd> {
 }
 
 fn mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)).replace('.', ",")
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 const LABEL_W: usize = 14;
@@ -193,7 +193,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            label("Carpeta", n.focus == Field::Dir),
+            label("Folder", n.focus == Field::Dir),
             Span::raw(clean(&n.dir)),
             cursor(n.focus == Field::Dir),
         ])),
@@ -205,7 +205,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, l)| {
             let head = if i == 0 {
-                label("Instrucción", n.focus == Field::Instruction)
+                label("Task", n.focus == Field::Instruction)
             } else {
                 Span::raw(" ".repeat(LABEL_W))
             };
@@ -214,8 +214,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     if n.instruction.is_empty() && n.focus != Field::Instruction {
         lines = vec![Line::from(vec![
-            label("Instrucción", false),
-            Span::styled("(escribe qué quieres que haga Clio)", t.dim()),
+            label("Task", false),
+            Span::styled("(type what you want Clio to do)", t.dim()),
         ])];
     }
     if let Some(last) = lines.last_mut() {
@@ -230,7 +230,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let mut info: Vec<Line> = Vec::new();
     match &n.check {
-        None => info.push(Line::from(Span::styled("comprobando la carpeta…", t.dim()))),
+        None => info.push(Line::from(Span::styled("checking the folder…", t.dim()))),
         Some(Err(e)) => info.push(Line::from(vec![
             Span::styled(format!("{} ", t.cross()), t.fail()),
             Span::styled(clean(e), t.fail()),
@@ -239,21 +239,17 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             info.push(Line::from(vec![
                 Span::styled(format!("{} ", t.check()), t.ok()),
                 Span::raw(format!(
-                    "se copiarán {} archivos ({})",
+                    "{} files will be copied ({})",
                     p.files,
                     mb(p.bytes)
                 )),
             ]));
-            info.push(section(
-                t,
-                "NO se copiarán a la copia de trabajo",
-                area.width,
-            ));
+            info.push(section(t, "NOT copied to the working copy", area.width));
             let group = |label: &str, v: &[String], info: &mut Vec<Line>| {
                 if !v.is_empty() {
                     let shown: Vec<String> = v.iter().take(8).map(|s| clean(s)).collect();
                     let more = if v.len() > 8 {
-                        format!(" … y {} más", v.len() - 8)
+                        format!(" … and {} more", v.len() - 8)
                     } else {
                         String::new()
                     };
@@ -263,11 +259,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                     ]));
                 }
             };
-            group("parecen secretos", &p.secrets, &mut info);
-            group("carpetas pesadas o internas", &p.skipped, &mut info);
-            group("enlaces simbólicos", &p.symlinks, &mut info);
+            group("look like secrets", &p.secrets, &mut info);
+            group("heavy or internal folders", &p.skipped, &mut info);
+            group("symbolic links", &p.symlinks, &mut info);
             info.push(Line::from(Span::styled(
-                "siempre: .git, node_modules, target, .venv, __pycache__, .env*, *.pem, *.key, id_rsa*, id_ed25519*, .ssh, .aws, credentials*",
+                "always: .git, node_modules, target, .venv, __pycache__, .env*, *.pem, *.key, id_rsa*, id_ed25519*, .ssh, .aws, credentials*",
                 t.dim(),
             )));
         }

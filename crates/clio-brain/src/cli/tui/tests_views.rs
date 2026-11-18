@@ -95,7 +95,7 @@ fn decision(reason: &str) -> DecisionDebug {
 pub(super) fn live_app() -> App {
     let mut a = with_runs();
     a.screen = Screen::Live;
-    a.live = Live::starting(0, "arregla parse_date");
+    a.live = Live::starting(0, "fix parse_date");
     let mut events: Vec<Bg> = vec![started()];
     let ev = |e: Event| Bg::Agent(e);
     events.extend([
@@ -163,22 +163,22 @@ fn the_status_bar_has_the_four_data_on_every_screen_with_a_run() {
     let (usage_app, _) = feed(live_app(), vec![ch('U')]);
     let (help_app, _) = feed(live_app(), vec![ch('?')]);
     for (name, a, steps, secs, tainted) in [
-        ("inicio", with_runs(), "7/40 pasos", "12 s/10 min", false),
-        ("detalle", detail_app, "7/40 pasos", "12 s/10 min", false),
-        ("en vivo", live_app(), "8/40 pasos", "21 s/10 min", true),
-        ("contexto", context_app, "8/40 pasos", "21 s/10 min", true),
-        ("uso", usage_app, "8/40 pasos", "21 s/10 min", true),
-        ("ayuda", help_app, "8/40 pasos", "21 s/10 min", true),
+        ("home", with_runs(), "7/40 steps", "12 s/10 min", false),
+        ("detail", detail_app, "7/40 steps", "12 s/10 min", false),
+        ("live", live_app(), "8/40 steps", "21 s/10 min", true),
+        ("context", context_app, "8/40 steps", "21 s/10 min", true),
+        ("usage", usage_app, "8/40 steps", "21 s/10 min", true),
+        ("help", help_app, "8/40 steps", "21 s/10 min", true),
     ] {
         // At 120 columns in full; at 80 it shares the line with the keys, shortened, never less.
         let t = screen_text(&a, 120, 30);
         let bar = last_line(&t);
-        let short = |s: &str| s.replace(" pasos", "p").replace(" s/10 min", "s/10m");
+        let short = |s: &str| s.replace(" steps", "st").replace(" s/10 min", "s/10m");
         for want in ["↑12.4k", "↓3.1k", "$0", &short(steps), &short(secs), "31"] {
             assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
         }
         assert!(
-            bar.contains("contexto") || bar.contains("ctx"),
+            bar.contains("context") || bar.contains("ctx"),
             "{name}: {bar:?}"
         );
         let usage = &bar[bar.find('↑').unwrap()..];
@@ -189,7 +189,7 @@ fn the_status_bar_has_the_four_data_on_every_screen_with_a_run() {
             assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
         }
         assert_eq!(bar.contains(" ext"), tainted, "{name}: {bar:?}");
-        assert!(bar.contains("ayuda"), "{name}: {bar:?}");
+        assert!(bar.contains("help"), "{name}: {bar:?}");
         assert_eq!(bar.chars().count(), 80);
     }
 }
@@ -206,7 +206,7 @@ fn the_status_bar_abbreviates_without_cutting_at_the_minimum_size() {
     let t = screen_text(&live_app(), 200, 30);
     let bar = last_line(&t).trim_end();
     assert!(
-        bar.contains("externo") && bar.contains("31 %") && bar.contains("pasos"),
+        bar.contains("external") && bar.contains("31 %") && bar.contains("steps"),
         "{bar:?}"
     );
 }
@@ -214,11 +214,11 @@ fn the_status_bar_abbreviates_without_cutting_at_the_minimum_size() {
 #[test]
 fn without_a_run_the_status_bar_says_so_and_new_job_and_doctor_leave_it_empty() {
     let t = screen_text(&super::tests::app(), 80, 24);
-    assert!(last_line(&t).contains("sin uso todavía"), "{t}");
+    assert!(last_line(&t).contains("no usage yet"), "{t}");
     let (a, _) = feed(with_runs(), vec![ch('n')]);
     let bar = screen_text(&a, 80, 24);
     let bar = last_line(&bar);
-    assert!(!bar.contains('↑') && !bar.contains("sin uso"), "{bar:?}");
+    assert!(!bar.contains('↑') && !bar.contains("no usage"), "{bar:?}");
 }
 
 #[test]
@@ -260,34 +260,34 @@ fn c_opens_the_context_in_layers_and_esc_goes_back() {
     let t = screen_text(&a, 80, 24);
     assert_fits(&t, 80, 24);
     for want in [
-        "contexto ",
+        "context ",
         "31 %",
-        "39.7k de 128k tokens (aprox.)",
-        "prompt de sistema",
+        "39.7k of 128k tokens (approx.)",
+        "system prompt",
         "clio-agent@3",
         "1.2k",
-        "0,9 %",
-        "objetivo / contrato",
-        "tu pedido",
-        "herramientas",
-        "descripciones",
-        "conversación",
-        "7 turnos",
+        "0.9 %",
+        "objective / contract",
+        "your request",
+        "tools",
+        "descriptions",
+        "conversation",
+        "7 turns",
         "3.1k",
-        "externo",
-        "2 lecturas",
+        "external",
+        "2 reads",
         "dates.py",
         "big.json",
         "32.9k",
-        "salidas de herramientas",
-        "cuatro caracteres por token",
+        "tool outputs",
+        "four characters per token",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
     // Each file read is marked as external.
-    let bar = usize::from(last_line(&t).contains("externo"));
+    let bar = usize::from(last_line(&t).contains("external"));
     assert_eq!(
-        t.matches("externo").count() - bar /* status bar */ - 1 /* layer */ - 1 /* note */ + 1,
+        t.matches("external").count() - bar /* status bar */ - 1 /* layer */ - 1 /* note */ + 1,
         2,
         "{t}"
     );
@@ -309,7 +309,7 @@ fn the_layers_add_up_and_the_percentage_matches_the_window() {
     assert_eq!(snap.ctx_percent(), Some(31));
     // The shares printed for the layers are of the window and add up to the total's, within rounding.
     let t = screen_text(&feed(a, vec![ch('c')]).0, 120, 30);
-    assert!(t.contains("31,0 %") || t.contains("0,9 %"), "{t}");
+    assert!(t.contains("31.0 %") || t.contains("0.9 %"), "{t}");
 }
 
 #[test]
@@ -329,9 +329,9 @@ fn the_context_warns_discreetly_past_70_and_past_90_percent() {
         !quiet.contains("70 %") && !quiet.contains("90 %"),
         "{quiet}"
     );
-    assert!(with(90_000).contains("pasa del 70 % de la ventana"));
+    assert!(with(90_000).contains("is over 70 % of the window"));
     let full = with(120_000);
-    assert!(full.contains("casi llena (más del 90 %)"), "{full}");
+    assert!(full.contains("almost full (over 90 %)"), "{full}");
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn an_unknown_window_says_the_default_was_used() {
     a.live.usage.window_known = false;
     let t = screen_text(&feed(a, vec![ch('c')]).0, 80, 24);
     assert!(
-        t.contains("por defecto") && t.contains("no está en el catálogo"),
+        t.contains("default window") && t.contains("not in the catalog"),
         "{t}"
     );
 }
@@ -352,16 +352,16 @@ fn a_run_without_saved_context_says_so() {
     let a = open_detail(with_runs(), d, false);
     let (a, _) = feed(a, vec![ch('c')]);
     let t = screen_text(&a, 80, 24);
-    assert!(t.contains("no guardó las capas del contexto"), "{t}");
+    assert!(t.contains("did not save the context layers"), "{t}");
     assert!(
-        last_line(&t).contains("contexto ─") || last_line(&t).contains("ctx ─"),
+        last_line(&t).contains("context ─") || last_line(&t).contains("ctx ─"),
         "the bar shows a dash, not a made-up number: {}",
         last_line(&t)
     );
     let (a, _) = feed(a, vec![ch('U')]);
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("no guardó el uso por paso") && t.contains("↑12.4k"),
+        t.contains("did not save the usage per step") && t.contains("↑12.4k"),
         "{t}"
     );
 }
@@ -371,16 +371,16 @@ fn c_and_u_open_from_home_detail_and_live_and_esc_returns_to_each() {
     for (name, start, back) in [
         ("home", with_runs(), Screen::Home),
         (
-            "detalle",
+            "detail",
             open_detail(with_runs(), detail(ID1, Status::Pending), false),
             Screen::Detail,
         ),
         (
-            "detalle con diff",
+            "detail with diff",
             open_detail(with_runs(), detail(ID1, Status::Pending), true),
             Screen::Detail,
         ),
-        ("en vivo", live_app(), Screen::Live),
+        ("live", live_app(), Screen::Live),
     ] {
         let (a, _) = feed(start, vec![ch('c')]);
         assert_eq!(a.screen, Screen::Context, "{name}");
@@ -413,7 +413,7 @@ fn with_no_run_the_views_do_not_open() {
         let (a, cmds) = feed(super::tests::app(), vec![ch(k)]);
         assert!(cmds.is_empty());
         assert_eq!(a.screen, Screen::Home);
-        assert_eq!(a.flash.as_deref(), Some("todavía no hay runs"));
+        assert_eq!(a.flash.as_deref(), Some("no runs yet"));
     }
 }
 
@@ -496,14 +496,14 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
     let t = screen_text(&a, 80, 24);
     assert_fits(&t, 80, 24);
     for want in [
-        "uso ↑12.4k ↓3.1k tokens · $0",
-        "paso",
-        "entrada",
-        "salida",
-        "costo",
-        "modelo",
-        "acum.tok",
-        "acum.costo",
+        "usage ↑12.4k ↓3.1k tokens · $0",
+        "step",
+        "input",
+        "output",
+        "cost",
+        "model",
+        "cum.tok",
+        "cum.cost",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
@@ -522,12 +522,12 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
         assert!(row2.contains(want), "{want:?} in {row2:?}");
     }
     for want in [
-        "pasos",
-        "8 de 40",
-        "tiempo",
-        "21 s de 10 min",
-        "costo",
-        "$0 de $0.10",
+        "steps",
+        "8 of 40",
+        "time",
+        "21 s of 10 min",
+        "cost",
+        "$0 of $0.10",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
@@ -535,7 +535,7 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
     let t = screen_text(&a, 60, 16);
     assert_fits(&t, 60, 16);
     assert!(
-        t.contains("acum.$") && t.contains("acum.tok") && t.contains("15.5k"),
+        t.contains("cum.$") && t.contains("cum.tok") && t.contains("15.5k"),
         "{t}"
     );
 }
@@ -556,12 +556,12 @@ fn usage_costs_are_exact_and_accumulate_as_integers() {
         "$0.000001",
         "$0.004",
         "$0.004001",
-        "uso ↑3k ↓300 tokens · $0.004001",
+        "usage ↑3k ↓300 tokens · $0.004001",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
     // The limit line uses the same exact money.
-    assert!(t.contains("$0.004001 de $0.10"), "{t}");
+    assert!(t.contains("$0.004001 of $0.10"), "{t}");
 }
 
 #[test]
@@ -585,39 +585,33 @@ fn tab_opens_the_debug_view_only_while_debug_is_on() {
     let t = screen_text(&a, 160, 60);
     for want in [
         "debug",
-        "llamada 1",
-        "llamada 2",
-        "contexto",
-        "tok aprox.",
-        "sistema 1.2k (clio-agent@3)",
-        "modelo 1.2 s",
-        "entrada 10k",
-        "salida 2k",
-        "petición",
-        "3 mensajes en total (4200 car.)",
+        "call 1",
+        "call 2",
+        "context",
+        "tok approx.",
+        "system 1.2k (clio-agent@3)",
+        "model 1.2 s",
+        "input 10k",
+        "output 2k",
+        "request",
+        "3 messages in all (4200 ch.)",
         "[user] Result of read_file:",
-        "respuesta",
+        "reply",
         "write_file",
-        "pasarela #1 write_file",
-        "negado · regla S-16 · 3 ms",
-        "razón: the path is protected (S-16)",
-        "externo: big.json 32.9k",
+        "gateway #1 write_file",
+        "denied · rule S-16 · 3 ms",
+        "reason: the path is protected (S-16)",
+        "external: big.json 32.9k",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
-    assert!(
-        !t.contains("línea de tiempo"),
-        "the timeline is the other view"
-    );
+    assert!(!t.contains("─ timeline"), "the timeline is the other view");
     // Tab again, or turning debug off, goes back to the timeline.
     let (b, _) = feed(a.clone_view(), vec![key(KeyCode::Tab)]);
-    assert!(screen_text(&b, 100, 30).contains("línea de tiempo"));
+    assert!(screen_text(&b, 100, 30).contains("timeline"));
     let (b, _) = feed(a, vec![ctrl('d')]);
     let t = screen_text(&b, 100, 30);
-    assert!(
-        t.contains("línea de tiempo") && !t.contains("llamada 1"),
-        "{t}"
-    );
+    assert!(t.contains("timeline") && !t.contains("call 1"), "{t}");
 }
 
 impl App {
@@ -637,12 +631,16 @@ fn the_debug_view_cuts_long_text_and_says_how_much_is_missing() {
         .on_event(&Event::Exchange(exchange(3, &"x".repeat(5_000))));
     let (a, _) = feed(a, vec![ctrl('d'), key(KeyCode::Tab)]);
     let t = screen_text(&a, 200, 60);
-    assert!(t.contains("respuesta: 5000 car."), "{t}");
-    assert!(t.contains("(faltan 3500 caracteres)"), "{t}");
+    assert!(t.contains("reply: 5000 ch."), "{t}");
+    assert!(t.contains("(3500 characters left out)"), "{t}");
     assert!(!t.contains(&"x".repeat(1_600)), "cut at 1500");
     // The notice survives a narrow terminal too: long lines continue on the next one.
     let t = screen_text(&a, 80, 40);
-    assert!(t.contains("faltan 3500"), "{t}");
+    // The row breaks by columns, so the notice may continue on the next row.
+    assert!(
+        t.contains("(3500 charac") && t.contains("ters left out)"),
+        "{t}"
+    );
 }
 
 #[test]
@@ -658,9 +656,9 @@ fn the_debug_view_shows_protocol_errors_and_retries() {
     });
     let (a, _) = feed(a, vec![ctrl('d'), key(KeyCode::Tab)]);
     let t = screen_text(&a, 120, 30);
-    assert!(t.contains("2 reintentos") && t.contains("65.0 s"), "{t}");
+    assert!(t.contains("2 retries") && t.contains("65.0 s"), "{t}");
     assert!(
-        t.contains("error de protocolo: no valid JSON object found"),
+        t.contains("protocol error: no valid JSON object found"),
         "{t}"
     );
 }
@@ -675,17 +673,17 @@ fn the_debug_view_scrolls_from_the_newest() {
     let (a, _) = feed(a, vec![ctrl('d'), key(KeyCode::Tab)]);
     let newest = screen_text(&a, 100, 24);
     assert!(
-        newest.contains("llamada 59") && !newest.contains("llamada 1\n"),
+        newest.contains("call 59") && !newest.contains("call 1\n"),
         "{newest}"
     );
     let (a, _) = feed(a, vec![ch('g')]);
     let oldest = screen_text(&a, 100, 24);
     assert!(
-        oldest.contains("llamada 1") && !oldest.contains("llamada 59"),
+        oldest.contains("call 1") && !oldest.contains("call 59"),
         "{oldest}"
     );
     let (a, _) = feed(a, vec![ch('G')]);
-    assert!(screen_text(&a, 100, 24).contains("llamada 59"));
+    assert!(screen_text(&a, 100, 24).contains("call 59"));
     let (a, _) = feed(a, vec![ch('k'), ch('k'), ch('j')]);
     assert_eq!(a.live.scroll, 1);
 }
@@ -742,23 +740,23 @@ fn the_live_screen_has_two_columns_from_100_and_one_below() {
     for (w, h) in [(100, 30), (120, 30), (200, 50)] {
         let t = screen_text(&a, w, h);
         assert_fits(&t, w, h);
-        assert!(t.contains("─ uso") && t.contains("─ contexto"), "{w}: {t}");
+        assert!(t.contains("─ usage") && t.contains("─ context"), "{w}: {t}");
         assert!(
-            t.contains("sistema") && t.contains("externo") && t.contains("pasos"),
+            t.contains("system") && t.contains("external") && t.contains("steps"),
             "{w}: {t}"
         );
         assert!(
-            t.contains("read_file") && t.contains("línea de tiempo"),
+            t.contains("read_file") && t.contains("timeline"),
             "{w}: {t}"
         );
         // The timeline is on the left of the same row as the first layer of the context.
-        let row = t.lines().find(|l| l.contains("sistema")).unwrap();
+        let row = t.lines().find(|l| l.contains("system")).unwrap();
         assert!(row.find('│').is_some(), "{row}");
     }
     for (w, h) in [(60, 16), (80, 24), (99, 30)] {
         let t = screen_text(&a, w, h);
         assert_fits(&t, w, h);
-        assert!(!t.contains("─ uso"), "{w}: one column\n{t}");
+        assert!(!t.contains("─ usage"), "{w}: one column\n{t}");
         assert!(t.contains("read_file") || w < 80, "{w}: {t}");
     }
 }
@@ -775,23 +773,23 @@ fn every_screen_fits_every_size_without_overflow() {
         .finish(Ok(super::tests::summary(ID1, "Final", &["a.py"])));
     let (debug_view, _) = feed(live_app(), vec![ctrl('d'), key(KeyCode::Tab)]);
     let screens: Vec<(&str, App)> = vec![
-        ("inicio", with_runs()),
-        ("inicio vacío", super::tests::app()),
-        ("nuevo", new_run),
-        ("en vivo", live_app()),
-        ("en vivo terminado", finished),
+        ("home", with_runs()),
+        ("home empty", super::tests::app()),
+        ("new", new_run),
+        ("live", live_app()),
+        ("live terminado", finished),
         ("debug", debug_view),
         (
-            "detalle",
+            "detail",
             open_detail(with_runs(), detail(ID1, Status::Pending), false),
         ),
         (
             "diff",
             open_detail(with_runs(), detail(ID1, Status::Pending), true),
         ),
-        ("contexto", feed(live_app(), vec![ch('c')]).0),
-        ("uso", feed(live_app(), vec![ch('U')]).0),
-        ("ayuda", feed(live_app(), vec![ch('?')]).0),
+        ("context", feed(live_app(), vec![ch('c')]).0),
+        ("usage", feed(live_app(), vec![ch('U')]).0),
+        ("help", feed(live_app(), vec![ch('?')]).0),
         ("doctor", doctor),
     ];
     for (name, a) in &screens {
@@ -799,7 +797,7 @@ fn every_screen_fits_every_size_without_overflow() {
             let t = screen_text(a, w, h);
             assert_fits(&t, w, h);
             assert_clean(&t);
-            assert!(!t.contains("Terminal muy pequeña"), "{name} {w}x{h}");
+            assert!(!t.contains("Terminal too small"), "{name} {w}x{h}");
             // The footer (keys and use) is always the last line, under the rule of the top.
             assert!(
                 t.lines().last().is_some_and(|l| !l.trim().is_empty()),
@@ -819,7 +817,7 @@ fn every_screen_fits_every_size_without_overflow() {
 fn the_header_is_one_line_with_folder_model_screen_and_the_debug_mark() {
     let t = screen_text(&with_runs(), 80, 24);
     let first = t.lines().next().unwrap();
-    assert!(first.starts_with(" clio · inicio · proyecto"), "{first:?}");
+    assert!(first.starts_with(" clio · home · project"), "{first:?}");
     assert!(
         first.trim_end().ends_with("beam-free") && !first.contains("debug"),
         "{first:?}"
@@ -836,14 +834,14 @@ fn the_header_is_one_line_with_folder_model_screen_and_the_debug_mark() {
     );
     // The folder follows the run on screen.
     let mut d = detail(ID1, Status::Pending);
-    d.info.workspace = "/srv/otro-proyecto".into();
+    d.info.workspace = "/srv/other-project".into();
     let a = open_detail(with_runs(), d, false);
     assert!(
         screen_text(&a, 80, 24)
             .lines()
             .next()
             .unwrap()
-            .contains("otro-proyecto")
+            .contains("other-project")
     );
 }
 
@@ -852,25 +850,25 @@ fn the_help_and_quit_hints_survive_the_narrowest_terminal() {
     let t = screen_text(&with_runs(), 60, 16);
     let hints = t.lines().nth(15).unwrap();
     assert!(
-        hints.contains("? ayuda") && hints.contains("q salir"),
+        hints.contains("? help") && hints.contains("q quit"),
         "{hints:?}"
     );
     for (name, a) in [
-        ("en vivo", live_app()),
+        ("live", live_app()),
         (
-            "detalle",
+            "detail",
             open_detail(with_runs(), detail(ID1, Status::Pending), false),
         ),
         (
             "diff",
             open_detail(with_runs(), detail(ID1, Status::Pending), true),
         ),
-        ("contexto", feed(live_app(), vec![ch('c')]).0),
+        ("context", feed(live_app(), vec![ch('c')]).0),
         ("doctor", feed(with_runs(), vec![ch('D')]).0),
     ] {
         let t = screen_text(&a, 60, 16);
         let hints = t.lines().nth(15).unwrap();
-        assert!(hints.contains("? ayuda"), "{name}: {hints:?}");
+        assert!(hints.contains("? help"), "{name}: {hints:?}");
     }
 }
 
@@ -879,24 +877,17 @@ fn the_hint_line_comes_from_the_key_map() {
     let t = screen_text(&live_app(), 80, 24);
     let hints = t.lines().nth(23).unwrap();
     assert!(
-        hints.contains("Ctrl-C cancelar") && hints.contains("? ayuda"),
+        hints.contains("Ctrl-C cancel") && hints.contains("? help"),
         "{hints:?}"
     );
     let t = screen_text(&live_app(), 200, 30);
     let hints = t.lines().nth(29).unwrap();
-    for want in [
-        "Ctrl-C",
-        "cancelar",
-        "Tab",
-        "c contexto",
-        "U uso",
-        "? ayuda",
-    ] {
+    for want in ["Ctrl-C", "cancel", "Tab", "c context", "U usage", "? help"] {
         assert!(hints.contains(want), "{want:?} in {hints:?}");
     }
     let (a, _) = feed(live_app(), vec![ch('c')]);
     let t = screen_text(&a, 80, 24);
-    assert!(t.lines().nth(23).unwrap().contains("U ver el uso"));
+    assert!(t.lines().nth(23).unwrap().contains("U see the usage"));
 }
 
 // ------------------------------------------------------------ pictures for the docs
@@ -907,31 +898,31 @@ fn the_hint_line_comes_from_the_key_map() {
 fn print_screens() {
     use super::tests::{app, summary};
     let show = |name: &str, a: &App| println!("===== {name} =====\n{}", screen_text(a, 80, 24));
-    show("inicio", &with_runs());
+    show("home", &with_runs());
     let (mut a, _) = feed(with_runs(), vec![ch('n')]);
-    a.new_run.instruction = "arregla parse_date en dates.py".into();
+    a.new_run.instruction = "fix parse_date en dates.py".into();
     a.new_run.check = Some(Ok(super::new_run::Preview {
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         files: 12,
         bytes: 3 * 1024 * 1024,
         secrets: vec![".env".into()],
         skipped: vec![".git".into(), "node_modules".into()],
         symlinks: vec![],
     }));
-    show("nuevo", &a);
-    show("en vivo", &live_app());
+    show("new", &a);
+    show("live", &live_app());
     let (a, _) = feed(live_app(), vec![ch('c')]);
-    show("contexto", &a);
+    show("context", &a);
     let (a, _) = feed(live_app(), vec![ch('U')]);
-    show("uso", &a);
+    show("usage", &a);
     let (a, _) = feed(live_app(), vec![ctrl('d'), key(KeyCode::Tab)]);
     show("debug", &a);
     show(
-        "detalle",
+        "detail",
         &open_detail(with_runs(), detail(ID1, Status::Pending), false),
     );
     show(
-        "detalle con diff",
+        "detail with diff",
         &open_detail(with_runs(), detail(ID1, Status::Pending), true),
     );
     let (a, _) = feed(
@@ -941,7 +932,7 @@ fn print_screens() {
             Input::Bg(Bg::Planned(Ok(super::app::Planned {
                 id: ID1.into(),
                 files: 2,
-                workspace: "/home/ivan/proyecto".into(),
+                workspace: "/home/ivan/project".into(),
                 names: vec!["M dates.py".into(), "+ notas.md".into()],
                 tainted: Some(false),
             }))),
@@ -953,21 +944,21 @@ fn print_screens() {
     a.doctor.set(report());
     show("doctor", &a);
     let (a, _) = feed(with_runs(), vec![ch('?')]);
-    show("ayuda (inicio)", &a);
+    show("help (home)", &a);
     let (a, _) = feed(live_app(), vec![ch('?')]);
-    show("ayuda (en vivo)", &a);
+    show("help (live)", &a);
     let mut f = live_app();
     f.live.finish(Ok(summary(ID1, "Final", &["dates.py"])));
-    show("en vivo terminado", &f);
+    show("live terminado", &f);
     println!(
-        "===== en vivo 120x30 =====\n{}",
+        "===== live 120x30 =====\n{}",
         screen_text(&live_app(), 120, 30)
     );
     println!(
-        "===== en vivo 60x16 =====\n{}",
+        "===== live 60x16 =====\n{}",
         screen_text(&live_app(), 60, 16)
     );
-    show("inicio sin runs", &app());
+    show("home no runs", &app());
 }
 
 // ------------------------------------------------------------ secrets never reach a view
@@ -1146,7 +1137,7 @@ fn the_selector_and_the_chat_never_draw_hostile_text_and_fit_every_size() {
     app.chat.items = vec![
         Item::User(h.clone()),
         Item::Assistant {
-            text: format!("{h}\n{h} una linea larga {}", "palabra ".repeat(60)),
+            text: format!("{h}\n{h} a long line {}", "word ".repeat(60)),
             live: true,
         },
         Item::Tool {

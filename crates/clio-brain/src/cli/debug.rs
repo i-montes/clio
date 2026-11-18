@@ -97,7 +97,7 @@ pub fn cut(text: &str, max: usize) -> String {
         return text.to_owned();
     }
     let head: String = text.chars().take(max).collect();
-    format!("{head}… (faltan {} caracteres)", n - max)
+    format!("{head}… ({} characters left out)", n - max)
 }
 
 fn outcome_code(o: Outcome) -> &'static str {
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn cut_says_how_much_is_missing() {
         assert_eq!(cut("abc", 5), "abc");
-        assert_eq!(cut("abcdef", 4), "abcd… (faltan 2 caracteres)");
+        assert_eq!(cut("abcdef", 4), "abcd… (2 characters left out)");
     }
 
     #[test]

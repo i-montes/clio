@@ -199,6 +199,8 @@ pub enum Bg {
     SessionPlan(Result<(String, String, String), String>),
     /// A session deleted (or why not), and the list as it is now.
     SessionDeleted(Result<String, String>, Vec<Row>),
+    /// `/undo` ran: what it said, one line each. The box shows them; the chat keeps one note.
+    SessionUndone(Result<Vec<String>, String>),
     ChatOpened {
         seq: u64,
         result: Result<Box<ChatInfo>, String>,
@@ -524,9 +526,9 @@ impl App {
     pub fn open_view(&mut self, view: Screen) {
         if self.run_data().is_none() {
             self.flash = Some(if self.screen == Screen::Home {
-                "todavía no hay runs".into()
+                "no runs yet".into()
             } else {
-                "este run no tiene datos de uso".into()
+                "this run has no usage data".into()
             });
             return;
         }
@@ -571,7 +573,7 @@ impl App {
     }
 
     /// How long a frame may stay on screen with nothing coming in: the sessions drawer shows ages
-    /// («hace 3 min») that go stale without a redraw. `None`: until something comes in.
+    /// ("3 min ago") that go stale without a redraw. `None`: until something comes in.
     pub fn stale_after(&self) -> Option<std::time::Duration> {
         (self.screen == Screen::Sessions).then(|| std::time::Duration::from_secs(30))
     }
@@ -580,13 +582,13 @@ impl App {
     /// it cannot, the flash says why.
     pub fn busy(&mut self) -> bool {
         let why = if self.chat.running {
-            "el agente está trabajando: Esc en el chat aborta el turno; luego cambia de sesión"
+            "the agent is working: Esc in the chat aborts the turn; then switch session"
         } else if self.answering > 0 {
-            "Clio todavía ejecuta lo que aprobaste: espera a que termine; luego cambia de sesión"
+            "Clio is still running what you approved: wait for it to finish; then switch session"
         } else if self.chat.opening {
-            "la sesión se está abriendo: espera a que arranque; luego cambia de sesión"
+            "the session is opening: wait for it to start; then switch session"
         } else if self.chat.compacting {
-            "Pi está compactando el contexto: espera a que termine"
+            "Pi is compacting the context: wait for it to finish"
         } else {
             return false;
         };
@@ -672,10 +674,9 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
                 Some(Act::Debug) => {
                     app.debug = !app.debug;
                     app.flash = Some(if app.debug {
-                        "debug activado (Tab en vivo; se escribe debug.log en la carpeta del run)"
-                            .into()
+                        "debug on (Tab for live; debug.log is written in the run folder)".into()
                     } else {
-                        "debug desactivado".into()
+                        "debug off".into()
                     });
                     return vec![Cmd::Debug(app.debug)];
                 }
@@ -713,7 +714,38 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
     }
 }
 
-/// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead. An action set aside, which
+/// The one line `/undo` leaves in the chat, from the lines `apply::undo_lines` said: a copy
+/// says `undone: N file(s) (…)`, a host session one line per file it gave back or left alone,
+/// and `nothing is left to undo in …` when there was nothing.
+fn undo_note(lines: &[String]) -> String {
+    let first = lines.first().map_or("", |l| l.trim());
+    if first.starts_with("nothing is left to undo") {
+        return "nothing to undo".to_owned();
+    }
+    if let Some(done) = first.strip_prefix("undone: ") {
+        return format!("undone: {done}");
+    }
+    fn said(l: &str) -> &str {
+        l.trim().split(' ').next().unwrap_or("")
+    }
+    let back = lines
+        .iter()
+        .filter(|l| {
+            matches!(said(l), "restored" | "deleted") && !l.trim().starts_with("deleted the folder")
+        })
+        .count();
+    let left = lines
+        .iter()
+        .filter(|l| matches!(said(l), "left" | "could"))
+        .count();
+    if left == 0 {
+        format!("undone: {back} file(s) went back as they were")
+    } else {
+        format!("undone: {back} file(s) went back as they were, {left} left alone")
+    }
+}
+
+/// The reply to a confirmation: only `y` (or `s`, still accepted) goes ahead. An action set aside, which
 /// is asked when a turn ends while the person may be typing, hears its first key only once it
 /// has been on screen for `QUIET_MS` and no key came for as long (`quiet`): then `s` arms it and
 /// `n` or Esc rejects it. Once armed, Enter
@@ -746,7 +778,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         yes_key
     };
     if !yes && c.action != Action::Approve {
-        app.flash = Some("cancelado: no se cambió nada".into());
+        app.flash = Some("cancelled: nothing was changed".into());
         return vec![];
     }
     match c.action {
@@ -786,7 +818,7 @@ pub(super) fn next_ask(app: &mut App) {
             app.confirm = Some(c);
         } else {
             app.flash = Some(format!(
-                "{} es de otra sesión: espera en `clio pending`",
+                "{} belongs to another session: it waits in `clio pending`",
                 c.id
             ));
         }
@@ -799,7 +831,7 @@ fn dropped(app: &mut App, what: &str) -> bool {
         return false;
     }
     app.flash = Some(format!(
-        "{what} llegó con otra pregunta abierta: pídelo otra vez"
+        "{what} arrived while another question was open: ask again"
     ));
     true
 }
@@ -872,14 +904,14 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
         },
         Bg::Planned(Ok(p)) => {
-            if dropped(app, &format!("el plan de {}", p.id)) {
+            if dropped(app, &format!("the plan for {}", p.id)) {
                 return vec![];
             }
             // The plan takes a while. If the person is no longer looking at that run, a dialog
             // popping up now would turn the next key they type into an answer.
             if !looking_at(app, &p.id) {
                 app.flash = Some(format!(
-                    "el plan de {} quedó listo, pero cambiaste de pantalla: pídelo otra vez",
+                    "the plan for {} was ready, but you changed screen: ask again",
                     p.id
                 ));
                 return vec![];
@@ -888,9 +920,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             c.names = p.names;
             c.note = match p.tainted {
                 Some(true) => {
-                    Some("El agente leyó contenido de fuera: revisa el diff con cuidado.".into())
+                    Some("The agent read outside content: check the diff carefully.".into())
                 }
-                None => Some("Sin registro de lo que leyó el agente: revisa el diff.".into()),
+                None => Some("No record of what the agent read: check the diff.".into()),
                 Some(false) => None,
             };
             app.confirm = Some(c);
@@ -938,13 +970,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::SessionPlan(r) => {
             match r {
                 // A turn, an open or an approval that started meanwhile: no delete now.
-                Ok(_) if dropped(app, "lo que se borraría") || app.busy() => {}
+                Ok(_) if dropped(app, "what would be deleted") || app.busy() => {}
                 Ok((file, title, what)) if app.screen == Screen::Sessions => {
                     app.confirm = Some(Confirm::new(
                         Action::DeleteSession,
                         file,
                         0,
-                        format!("«{title}»: {what}"),
+                        format!("\"{title}\": {what}"),
                     ));
                 }
                 Ok(_) => {}
@@ -1061,7 +1093,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.chat.customs = customs;
             if !left.is_empty() && app.chat.menu.is_some() {
                 app.flash = Some(format!(
-                    "comandos sin usar: {} (el nombre va en a-z, 0-9 y -, sin chocar con uno de Clio, y el archivo pesa hasta 32 kB)",
+                    "commands left out: {} (the name uses a-z, 0-9 and -, must not clash with one of Clio's, and the file is at most 32 kB)",
                     clean(&left.join(", "))
                 ));
             }
@@ -1091,7 +1123,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::Named(r) => match r {
             Ok(title) => {
-                app.flash = Some(format!("título: {}", clean(&title)));
+                app.flash = Some(format!("title: {}", clean(&title)));
                 app.chat.title = title;
                 vec![Cmd::LoadSessions]
             }
@@ -1104,7 +1136,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.chat.compacting = false;
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
-                Err(e) => super::chat::Item::Error(format!("no se pudo compactar: {e}")),
+                Err(e) => super::chat::Item::Error(format!("could not compact: {e}")),
             });
             if let Some(r) = refresh {
                 app.chat.refresh(&r);
@@ -1117,13 +1149,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     let mut lines: Vec<String> = rows.iter().map(|(_, l, _)| l.clone()).collect();
                     let picks = rows.into_iter().map(|(id, _, what)| (id, what)).collect();
                     if lines.is_empty() {
-                        lines.push("nada de esta sesión espera tu visto bueno".into());
+                        lines.push("nothing in this session waits for your approval".into());
                     }
-                    let mut m = Modal::text("Pendientes", lines);
+                    let mut m = Modal::text("Pending", lines);
                     m.picks = picks;
                     if others > 0 {
                         m.foot = Some(format!(
-                            "y {others} de otras sesiones: clio pending en una terminal"
+                            "and {others} from other sessions: clio pending in a terminal"
                         ));
                     }
                     app.modal = Some(m);
@@ -1135,6 +1167,18 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::Modal(r) => {
             match r {
                 Ok(m) => app.modal = Some(m),
+                Err(e) => app.notice = Some(e),
+            }
+            vec![]
+        }
+        Bg::SessionUndone(r) => {
+            match r {
+                Ok(lines) => {
+                    app.chat
+                        .items
+                        .push(super::chat::Item::Note(undo_note(&lines)));
+                    app.modal = Some(Modal::text("Undo", lines));
+                }
                 Err(e) => app.notice = Some(e),
             }
             vec![]
@@ -1156,7 +1200,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 Ok(summary) => {
                     if let Some(a) = &summary.assessment {
                         app.chat.items.push(super::chat::Item::Note(format!(
-                            "pedido juzgado como {}",
+                            "request judged as {}",
                             a.notice()
                         )));
                     }
@@ -1202,7 +1246,7 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-/// A thin labeled line: `─ título ──────────`.
+/// A thin labeled line: `─ title ──────────`.
 pub fn section(t: Theme, title: &str, width: u16) -> Line<'static> {
     let used = text::width(title) + 3;
     let tail = t.rule().repeat(usize::from(width).saturating_sub(used));
@@ -1218,15 +1262,15 @@ pub const MIN_H: u16 = 16;
 
 fn screen_name(app: &App) -> &'static str {
     match app.screen {
-        Screen::Home => "inicio",
-        Screen::NewRun => "nuevo trabajo",
-        Screen::Live => "en vivo",
-        Screen::Detail => "detalle",
+        Screen::Home => "home",
+        Screen::NewRun => "new run",
+        Screen::Live => "live",
+        Screen::Detail => "detail",
         Screen::Doctor => "doctor",
-        Screen::Help => "ayuda",
-        Screen::Context => "contexto",
-        Screen::Usage => "uso",
-        Screen::Memory => "memoria",
+        Screen::Help => "help",
+        Screen::Context => "context",
+        Screen::Usage => "usage",
+        Screen::Memory => "memory",
         Screen::Sessions | Screen::Chat => "chat",
     }
 }
@@ -1237,11 +1281,11 @@ fn folder_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
 }
 
-/// The chat's title: the session's, as the list has it, or "nueva sesión" for a draft.
+/// The chat's title: the session's, as the list has it, or "new session" for a draft.
 fn chat_title(app: &App) -> String {
     let c = &app.chat;
     if c.is_draft() {
-        return "nueva sesión".into();
+        return "new session".into();
     }
     super::sessions::open_pos(app)
         .and_then(|p| p.checked_sub(1))
@@ -1257,18 +1301,18 @@ fn warnings(app: &App) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(h) = &app.home.header {
         if h.config_error.is_some() {
-            v.push("la configuración no carga".to_owned());
+            v.push("config does not load".to_owned());
         } else if h.key == super::home::KeyState::Missing {
-            v.push("falta la llave del modelo".to_owned());
+            v.push("model key missing".to_owned());
         }
-        if h.vault.starts_with("creada") {
-            v.push("vault detenida".to_owned());
+        if h.vault.starts_with("created") {
+            v.push("vault stopped".to_owned());
         }
     }
     if let Some((_, _, fail)) = app.home.doctor
         && fail > 0
     {
-        v.push(format!("doctor: {}", plural(fail, "fallo", "fallos")));
+        v.push(format!("doctor: {}", plural(fail, "failure", "failures")));
     }
     if app.debug {
         v.push("debug".to_owned());
@@ -1276,7 +1320,7 @@ fn warnings(app: &App) -> Vec<String> {
     v
 }
 
-/// `clio · título` on the left; on the right what is wrong, in the warning color, and the model.
+/// `clio · title` on the left; on the right what is wrong, in the warning color, and the model.
 fn draw_top(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let w = usize::from(area.width);
@@ -1299,7 +1343,7 @@ fn draw_top(f: &mut Frame, area: Rect, app: &App) {
     };
     let sep = format!(" {} ", t.dot());
     let warns = warnings(app).join(&sep);
-    // With Pi, how hard the model thinks too: `claude-sonnet-5-5 · bajo`.
+    // With Pi, how hard the model thinks too: `claude-sonnet-5-5 · low`.
     let model = app
         .home
         .header
@@ -1419,7 +1463,7 @@ fn usage_line(app: &App, w: usize) -> Vec<Span<'static>> {
     let line = match app.run_data() {
         Some((snap, _)) => status::line(t, &snap, w),
         None if matches!(app.screen, Screen::NewRun | Screen::Doctor) => Line::default(),
-        None => Line::from(Span::styled("sin uso todavía", t.dim())),
+        None => Line::from(Span::styled("no usage yet", t.dim())),
     };
     line.spans
 }
@@ -1429,7 +1473,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if area.width < MIN_W || area.height < MIN_H {
         f.render_widget(
             Paragraph::new(format!(
-                "Terminal muy pequeña: se necesita al menos {MIN_W}x{MIN_H} y esta es de {}x{}. Agrándala.",
+                "Terminal too small: it needs at least {MIN_W}x{MIN_H} and this one is {}x{}. Make it larger.",
                 area.width, area.height
             ))
             .wrap(Wrap { trim: true }),
@@ -1522,27 +1566,29 @@ pub fn draw(f: &mut Frame, app: &App) {
             .lines()
             .map(|l| Line::from(l.to_owned()))
             .collect();
-        let hint = Line::from(Span::styled("cualquier tecla cierra", t.dim()));
-        dialog(f, area, t, " Aviso ", lines, hint, t.fail());
+        let hint = Line::from(Span::styled("any key closes", t.dim()));
+        dialog(f, area, t, " Notice ", lines, hint, t.fail());
     }
 }
 
 fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
     let t = app.theme;
     let verb = match c.action {
-        Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
-        Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
+        Action::Apply => format!("Apply {} file(s) in", c.files),
+        Action::Undo => format!("Undo what was applied ({} file(s)) in", c.files),
         Action::Promote => format!(
-            "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
+            "Approve memory m{} (it becomes active and will be remembered)",
             c.id
         ),
-        Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
-        Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
-        Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
-        Action::UndoSession => "Deshacer los cambios de archivos de esta sesión en".to_owned(),
+        Action::Archive => format!("Archive memory m{} (it will no longer be remembered)", c.id),
+        Action::DeleteSession => {
+            "Delete the session (this cannot be undone); it removes:".to_owned()
+        }
+        Action::Approve => format!("Clio set aside {}. Run it?", c.id),
+        Action::UndoSession => "Undo this session's file changes in".to_owned(),
     };
     let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
-    // A set-aside action (`«borrar» …`): its class in the warning color, the command under it.
+    // A set-aside action (`«delete» …`): its class in the warning color, the command under it.
     let what = clean(&c.workspace);
     match what.split_once('»') {
         Some((class, rest)) if c.action == Action::Approve && class.starts_with('«') => {
@@ -1556,7 +1602,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
     }
     if c.names.len() > CONFIRM_FILES {
         lines.push(Line::from(Span::styled(
-            format!("  … y {} más", c.names.len() - CONFIRM_FILES),
+            format!("  … and {} more", c.names.len() - CONFIRM_FILES),
             t.dim(),
         )));
     }
@@ -1567,22 +1613,22 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
     if c.action == Action::Approve && !c.armed && !app.quiet() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "espera un segundo sin teclear para responder…",
+            "wait a second without typing to answer…",
             t.dim(),
         )));
     }
     let d = format!("   {}   ", t.dot());
     let hint = if c.action == Action::Approve {
         Line::from(vec![
-            Span::styled(if c.armed { "Enter" } else { "s y Enter" }, t.key()),
-            Span::styled(" sí, ejecutarlo", t.dim()),
+            Span::styled(if c.armed { "Enter" } else { "y then Enter" }, t.key()),
+            Span::styled(" yes, run it", t.dim()),
             Span::styled(d, t.dim()),
-            Span::styled(if c.armed { "otra tecla" } else { "n o Esc" }, t.key()),
+            Span::styled(if c.armed { "other key" } else { "n or Esc" }, t.key()),
             Span::styled(
                 if c.armed {
-                    " vuelve atrás"
+                    " goes back"
                 } else {
-                    " no, rechazarlo"
+                    " no, reject it"
                 },
                 t.dim(),
             ),
@@ -1590,10 +1636,10 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
     } else {
         Line::from(vec![
             Span::styled("y", t.key()),
-            Span::styled(" sí, continuar", t.dim()),
+            Span::styled(" yes, go on", t.dim()),
             Span::styled(d, t.dim()),
-            Span::styled("cualquier otra tecla", t.key()),
-            Span::styled(" cancela", t.dim()),
+            Span::styled("any other key", t.key()),
+            Span::styled(" cancels", t.dim()),
         ])
     };
     let border = if matches!(c.action, Action::Approve | Action::DeleteSession) {
@@ -1602,9 +1648,9 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         t.accent_line()
     };
     let title = if c.action == Action::Approve {
-        " Visto bueno "
+        " Approval "
     } else {
-        " Confirmar "
+        " Confirm "
     };
     dialog(f, area, t, title, lines, hint, border);
 }

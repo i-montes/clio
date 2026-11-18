@@ -13,13 +13,13 @@ use super::tests::THEME;
 use crate::cli::chat::{Row, RowKind};
 use crate::cli::usage::RunLimits;
 
-pub(super) const ANSWER: &str = "## Lo que pesa\n\nCasi todo está en `/var/lib`:\n\n- **docker**: 56G, imágenes viejas y *volúmenes*\n- containerd: 39G\n  - snapshots: 30G\n\n1. Revisa con `docker system df`.\n2. Lee [la guía](https://docs.docker.com/config/pruning/).\n\n> Ojo: no borré nada.\n\n```sh\nsudo du -xh --max-depth=1 /var/lib 2>/dev/null | sort -rh | head -n 20\n```\n\nAñoro 日本語 y ❤\u{fe0f} sin romper la línea.";
+pub(super) const ANSWER: &str = "## What weighs most\n\nAlmost all of it is in `/var/lib`:\n\n- **docker**: 56G, old images and *volumes*\n- containerd: 39G\n  - snapshots: 30G\n\n1. Check with `docker system df`.\n2. Read [the guide](https://docs.docker.com/config/pruning/).\n\n> Note: I deleted nothing.\n\n```sh\nsudo du -xh --max-depth=1 /var/lib 2>/dev/null | sort -rh | head -n 20\n```\n\nI like 日本語 and ❤\u{fe0f} without breaking the line.";
 
-pub(super) const TABLE: &str = "Los que más memoria usan:\n\n| PID | Proceso | Memoria (RSS) | Qué es |\n|---|---|---|---|\n| 4071 | java | ~678 MB | el servidor de Minecraft, con su mundo cargado en memoria |\n| 812 | dockerd | 96 MB | Docker |\n| 1 | systemd | 12 MB | 日本語 ❤\u{fe0f} |\n\nAparté el borrado de los volúmenes: espera tu visto bueno.";
+pub(super) const TABLE: &str = "The ones that use the most memory:\n\n| PID | Process | Memory (RSS) | What it is |\n|---|---|---|---|\n| 4071 | java | ~678 MB | the Minecraft server, with its world loaded in memory |\n| 812 | dockerd | 96 MB | Docker |\n| 1 | systemd | 12 MB | 日本語 ❤\u{fe0f} |\n\nI set the volume deletion aside: it waits for your approval.";
 
 /// The Pi chat with a model and nothing wrong, as `clio` opens.
 pub(super) fn pi(host: bool) -> App {
-    let mut a = App::new("/home/ivan/proyecto", THEME);
+    let mut a = App::new("/home/ivan/project", THEME);
     a.use_pi();
     a.host = host;
     a.home.header = Some(Header {
@@ -27,7 +27,7 @@ pub(super) fn pi(host: bool) -> App {
         thinking: "low".into(),
         key: KeyState::Present,
         connector: "anthropic".into(),
-        vault: "activa".into(),
+        vault: "active".into(),
         config_error: None,
         limits: RunLimits::default(),
         window: 200_000,
@@ -51,20 +51,15 @@ pub(super) fn rows() -> Vec<Row> {
     };
     vec![
         row(
-            "¿Qué carpetas de root pesan más en este servidor?",
+            "Which root folders weigh most on this server?",
             "/s/1_sid.jsonl",
             3,
             4,
         ),
-        row(
-            "¿Qué es lo que más pesa en el disco?",
-            "/s/2_b.jsonl",
-            26,
-            3,
-        ),
+        row("What weighs the most on the disk?", "/s/2_b.jsonl", 26, 3),
         Row {
-            unavailable: Some("no es de Clio".into()),
-            ..row("una sesión de Pi a mano", "/s/3_c.jsonl", 60 * 5, 9)
+            unavailable: Some("not a Clio session".into()),
+            ..row("a Pi session by hand", "/s/3_c.jsonl", 60 * 5, 9)
         },
     ]
 }
@@ -79,7 +74,7 @@ pub(super) fn conversation(host: bool) -> App {
         .opened("sid".into(), "/home/ivan".into(), &[], None, 0);
     let c = &mut a.chat;
     c.items.push(Item::User(
-        "¿Qué carpetas de root pesan más en este servidor (por ejemplo bajo /var/lib)? Solo mira, no borres ni cambies nada.".into(),
+        "Which root folders weigh most on this server (for example under /var/lib)? Only look, do not delete or change anything.".into(),
     ));
     let tool = |id: &str, reason: &str, cmd: &str, state, ms| Item::Tool {
         id: id.into(),
@@ -91,14 +86,14 @@ pub(super) fn conversation(host: bool) -> App {
     };
     c.items.push(tool(
         "1",
-        "Medir carpetas más pesadas",
+        "Measure the heaviest folders",
         "sudo du -xh --max-depth=1 / 2>/dev/null | sort -rh | head -n 20",
         ToolState::Failed,
         Some(120_000),
     ));
     c.items.push(tool(
         "2",
-        "Medir por partes",
+        "Measure in parts",
         "sudo timeout 50 du -xh --max-depth=1 /var 2>/dev/null | sort -rh",
         ToolState::Ok,
         Some(80_000),
@@ -110,7 +105,7 @@ pub(super) fn conversation(host: bool) -> App {
         live: false,
     });
     c.items.push(Item::Note(
-        "pedido juzgado como nivel 1 (solo mirar)".into(),
+        "request judged as level 1 · simple (by what you ask)".into(),
     ));
     c.on_event(&Event::MessageUpdate {
         usage: Some(clio_brain::pi::rpc::Usage {
@@ -129,7 +124,7 @@ fn approve(a: &mut App, quiet: bool) {
         Action::Approve,
         "a1b2".into(),
         0,
-        "«borrar» rm -r /var/lib/docker/volumes/viejo (borra 3 carpetas)".into(),
+        "«delete» rm -r /var/lib/docker/volumes/old (deletes 3 folders)".into(),
     );
     c.session = "sid".into();
     a.confirm = Some(c);
@@ -170,36 +165,39 @@ fn question_with(a: &mut App, answers: &[&str], quiet: bool, typed: Option<&str>
 /// Every state, by name.
 pub(super) fn states() -> Vec<(&'static str, App)> {
     let mut out = vec![
-        ("borrador vacío, en este servidor", pi(true)),
-        ("borrador vacío, en una copia", pi(false)),
-        ("conversación", conversation(true)),
+        ("empty draft, on this server", pi(true)),
+        ("empty draft, in a copy", pi(false)),
+        ("conversation", conversation(true)),
     ];
     let mut a = conversation(true);
     a.chat.start_turn(188_000);
-    a.chat.items.push(Item::User("y además mira /home".into()));
+    a.chat
+        .items
+        .push(Item::User("and also look at /home".into()));
     a.chat.items.push(Item::Assistant {
-        text: "Miro **/home** ahora; con `du -sh`".into(),
+        text: "Looking at **/home** now; with `du -sh`".into(),
         live: true,
     });
-    a.chat
-        .set_input("mejor solo /home/ivan, y dime cuánto pesa cada carpeta de primer nivel".into());
-    out.push(("turno en marcha, escribiendo", a));
+    a.chat.set_input(
+        "better only /home/ivan, and tell me how much each first-level folder weighs".into(),
+    );
+    out.push(("turn running, typing", a));
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;
-    out.push(("sesiones abiertas", a));
+    out.push(("sessions open", a));
     let mut a = conversation(true);
     approve(&mut a, false);
-    out.push(("pregunta apartada, dentro del segundo", a));
+    out.push(("set-aside question, within the second", a));
     let mut a = conversation(true);
     approve(&mut a, true);
     a.confirm.as_mut().unwrap().armed = true;
-    out.push(("pregunta apartada, después del segundo, con s", a));
+    out.push(("set-aside question, after the second, armed", a));
     for (name, quiet, typed) in [
-        ("Clio pregunta, dentro del segundo", false, None),
-        ("Clio pregunta, segunda opción elegida", true, None),
+        ("Clio asks, within the second", false, None),
+        ("Clio asks, second option picked", true, None),
         (
-            "Clio pregunta, Other… escrito",
+            "Clio asks, Other… typed",
             true,
             Some("MariaDB, the one ops already runs"),
         ),
@@ -210,7 +208,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     }
     let mut a = conversation(false);
     question_with(&mut a, &super::tests_ask::LONG, true, None);
-    out.push(("Clio pregunta, una descripción larga", a));
+    out.push(("Clio asks, a long description", a));
     let mut a = conversation(false);
     a.chat.start_turn(188_000);
     a.chat.todo = super::todo::parse(
@@ -225,17 +223,17 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         ]
         .map(String::from),
     );
-    out.push(("lista de pasos", a));
+    out.push(("checklist", a));
     let mut a = conversation(true);
     a.host = true;
     a.chat.jobs = 2;
     a.chat.items.push(super::chat::Item::Note(
         "2 background commands are still running; all stop when the session ends".into(),
     ));
-    out.push(("comandos en segundo plano", a));
+    out.push(("background commands", a));
     for (name, typed, suspect) in [
-        ("Clio pide un secreto, vacío", 0, false),
-        ("Clio pide un secreto, con caracteres", 23, true),
+        ("Clio asks for a secret, empty", 0, false),
+        ("Clio asks for a secret, with characters", 23, true),
     ] {
         let mut a = conversation(false);
         let mut s = super::ask::SecretAsk::new(
@@ -265,16 +263,16 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         Action::DeleteSession,
         "/s/2_b.jsonl".into(),
         0,
-        "«¿Qué es lo que más pesa en el disco?»: la conversación y su copia de trabajo".into(),
+        "\"What weighs the most on the disk?\": the conversation and its working copy".into(),
     ));
-    out.push(("borrar una sesión", a));
+    out.push(("delete a session", a));
     let mut a = conversation(true);
     a.chat.items.truncate(1);
     a.chat.items.push(Item::Tool {
         id: "4".into(),
         name: "bash".into(),
-        summary: "sudo rm -r /var/lib/docker/volumes/viejo".into(),
-        reason: "Borrar volúmenes viejos".into(),
+        summary: "sudo rm -r /var/lib/docker/volumes/old".into(),
+        reason: "Delete old volumes".into(),
         state: ToolState::SetAside,
         ms: Some(30),
     });
@@ -282,7 +280,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         id: "5".into(),
         name: "bash".into(),
         summary: "ps -eo pid,comm,rss --sort=-rss | head".into(),
-        reason: "Ver qué procesos usan más memoria".into(),
+        reason: "See which processes use the most memory".into(),
         state: ToolState::Ok,
         ms: Some(1_200),
     });
@@ -291,20 +289,20 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         live: false,
     });
     a.chat.items.push(Item::Note(
-        "aprobado a1b2: sudo rm -r /var/lib/docker/volumes/viejo (salida 0)".into(),
+        "approved a1b2: sudo rm -r /var/lib/docker/volumes/old (exit 0)".into(),
     ));
-    out.push(("tabla y una acción apartada", a));
+    out.push(("table and a set-aside action", a));
     let mut a = pi(true);
     a.chat = Chat::opening(1, 0);
     a.chat.opening = false;
-    a.chat.title = "¿Qué es lo que más pesa en el disco?".into();
-    a.chat.failed = Some("no se pudo abrir la sesión: Pi terminó al arrancar (código 1)".into());
-    out.push(("error al abrir", a));
+    a.chat.title = "What weighs the most on the disk?".into();
+    a.chat.failed = Some("could not open the session: Pi exited while starting (code 1)".into());
+    out.push(("error on open", a));
     let mut a = pi(false);
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
     a.home.doctor = Some((30, 2, 2));
     a.debug = true;
-    out.push(("algo anda mal: llave, doctor, debug", a));
+    out.push(("something is wrong: key, doctor, debug", a));
     out.extend(command_states());
     out
 }
@@ -317,16 +315,13 @@ fn command_states() -> Vec<(&'static str, App)> {
         a.chat.set_input(input.into());
         a.chat.menu = Some(Menu::default());
         a.chat.customs = vec![Custom {
-            name: "revisa".into(),
-            what: "Revisa un archivo con cuidado".into(),
-            body: "Revisa $ARGUMENTS".into(),
+            name: "review".into(),
+            what: "Review a file carefully".into(),
+            body: "Review $ARGUMENTS".into(),
         }];
         a
     };
-    let mut out = vec![
-        ("menú de comandos", menu("/")),
-        ("menú filtrado", menu("/co")),
-    ];
+    let mut out = vec![("command menu", menu("/")), ("filtered menu", menu("/co"))];
     let choice = |value: &str, label: &str, current: bool, blocked: Option<&str>| Choice {
         value: value.into(),
         label: label.into(),
@@ -340,7 +335,7 @@ fn command_states() -> Vec<(&'static str, App)> {
         .collect();
     a.chat.menu.as_mut().unwrap().pick = Some((Run::Effort, Some(levels)));
     a.chat.menu.as_mut().unwrap().sel = 2;
-    out.push(("elegir el esfuerzo", a));
+    out.push(("pick the effort", a));
     let mut a = menu("/connector");
     a.chat.menu.as_mut().unwrap().pick = Some((
         Run::Connector,
@@ -350,7 +345,7 @@ fn command_states() -> Vec<(&'static str, App)> {
                 "claude",
                 "claude · claude-sonnet-5-5",
                 false,
-                Some("sin llave: clio connect claude"),
+                Some("no key: clio connect claude"),
             ),
             choice(
                 "anthropic-api",
@@ -360,26 +355,26 @@ fn command_states() -> Vec<(&'static str, App)> {
             ),
         ]),
     ));
-    out.push(("elegir el conector", a));
+    out.push(("pick the connector", a));
     let mut a = conversation(true);
     commands::start(&mut a, Target::Builtin(Run::Usage), "");
     out.push(("/usage", a));
     let mut a = conversation(true);
     let mut m = Modal::text(
-        "Pendientes",
+        "Pending",
         vec![
-            "a1b2  «borrar»  sudo rm -r /var/lib/docker/volumes/viejo  · desde 2026-11-18 10:02 UTC · vence 2026-11-19 10:02 UTC".into(),
-            "c3d4  «servicio»  systemctl restart nginx  · desde 2026-11-18 10:05 UTC · vence 2026-11-19 10:05 UTC".into(),
+            "a1b2  «delete»  sudo rm -r /var/lib/docker/volumes/old  · since 2026-11-18 10:02 UTC · expires 2026-11-19 10:02 UTC".into(),
+            "c3d4  «control»  systemctl restart nginx  · since 2026-11-18 10:05 UTC · expires 2026-11-19 10:05 UTC".into(),
         ],
     );
     m.picks = vec![
         (
             "a1b2".into(),
-            "«borrar» sudo rm -r /var/lib/docker/volumes/viejo".into(),
+            "«delete» sudo rm -r /var/lib/docker/volumes/old".into(),
         ),
-        ("c3d4".into(), "«servicio» systemctl restart nginx".into()),
+        ("c3d4".into(), "«control» systemctl restart nginx".into()),
     ];
-    m.foot = Some("y 1 de otras sesiones: clio pending en una terminal".into());
+    m.foot = Some("and 1 from other sessions: clio pending in a terminal".into());
     a.modal = Some(m);
     out.push(("/pending", a));
     out
@@ -417,7 +412,7 @@ fn tui_gallery() {
         }
     }
     let mut a = super::tests::with_runs();
-    for (name, s) in [("inicio", Screen::Home), ("ayuda del chat", Screen::Help)] {
+    for (name, s) in [("home", Screen::Home), ("chat help", Screen::Help)] {
         a.screen = s;
         if s == Screen::Help {
             a = pi(true);
@@ -426,7 +421,7 @@ fn tui_gallery() {
         println!("==== {name} (100x30)");
         println!("{}", screen_text(&a, 100, 30));
     }
-    println!("==== ayuda del chat, entera (100x90)");
+    println!("==== chat help, whole (100x90)");
     println!("{}", screen_text(&a, 100, 90));
 }
 
@@ -459,7 +454,7 @@ fn every_chat_state_fits_is_clean_and_has_an_ascii_form() {
             .chars()
             .filter(|c| {
                 !c.is_ascii()
-                    && !"áéíóúñÁÉÍÓÚÑü¿¡…·«»".contains(*c)
+                    && !"…·«»".contains(*c)
                     && !ANSWER.contains(*c)
                     && !TABLE.contains(*c)
                     && !rows().iter().any(|r| r.title.contains(*c))
@@ -480,12 +475,12 @@ fn the_chat_spans_the_width_minus_the_margins() {
         (left, right)
     };
     let mut a = conversation(true);
-    a.chat.items.push(Item::User("palabra ".repeat(60)));
+    a.chat.items.push(Item::User("word ".repeat(60)));
     let t = screen_text(&a, 160, 40);
     // The person's message wraps at the full width (the old column stopped at 96), not at it.
     let widest = t
         .lines()
-        .filter(|l| l.contains("palabra"))
+        .filter(|l| l.contains("word"))
         .map(|l| super::text::width(l.trim_end()))
         .max()
         .unwrap();

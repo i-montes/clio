@@ -157,8 +157,8 @@ out = {}
 if scenario in ("quit", "ctrl_c"):
     pid, fd = spawn()
     out["alt_on"] = pump(fd, lambda: ALT_ON in buf)
-    pump(fd, lambda: b"recientes" in buf)
-    out["title_drawn"] = b"recientes" in buf
+    pump(fd, lambda: b"recent" in buf)
+    out["title_drawn"] = b"recent" in buf
     out["during"] = modes(fd)
     os.write(fd, b"q" if scenario == "quit" else b"\x03")
     out["code"] = finish(pid, fd)
@@ -168,7 +168,7 @@ elif scenario in ("sigterm", "sighup"):
     # Closing the terminal window (SIGHUP) or `kill` (SIGTERM) must give the terminal back too.
     pid, fd = spawn()
     out["alt_on"] = pump(fd, lambda: ALT_ON in buf)
-    pump(fd, lambda: b"recientes" in buf)
+    pump(fd, lambda: b"recent" in buf)
     os.kill(pid, signal.SIGTERM if scenario == "sigterm" else signal.SIGHUP)
     out["code"] = finish(pid, fd)
     out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0
@@ -203,7 +203,7 @@ elif scenario == "help_when_piped":
     out["escapes"] = b"\x1b" in p.stdout
 elif scenario in ("live", "cancel"):
     pid, fd = spawn()
-    pump(fd, lambda: b"recientes" in buf)
+    pump(fd, lambda: b"recent" in buf)
     time.sleep(0.3)
     os.write(fd, b"n")
     time.sleep(0.3)
@@ -248,7 +248,7 @@ elif scenario in ("views", "debug_env"):
     # (c), the usage table (U), the help (?), redraw (Ctrl-L), and a clean exit. The terminal
     # stream is a diff, so each step only looks at what was written after the key.
     pid, fd = spawn({"CLIO_DEBUG": "1"} if scenario == "debug_env" else None)
-    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    out["opened"] = pump(fd, lambda: b"recent" in buf, 10)
     if scenario == "debug_env":
         out["debug_from_env"] = pump(fd, lambda: b"debug" in buf, 5)
     else:
@@ -259,13 +259,13 @@ elif scenario in ("views", "debug_env"):
         mark = len(buf)
         os.write(fd, b"c")
         # One word of a layer: the diff skips unchanged cells, so a phrase can arrive in pieces.
-        out["context"] = pump(fd, lambda: b"objetivo" in buf[mark:], 8)
+        out["context"] = pump(fd, lambda: b"objective" in buf[mark:], 8)
         mark = len(buf)
         os.write(fd, b"U")
-        out["usage"] = pump(fd, lambda: b"acum." in buf[mark:], 8)
+        out["usage"] = pump(fd, lambda: b"cum." in buf[mark:], 8)
         mark = len(buf)
         os.write(fd, b"?")
-        out["help"] = pump(fd, lambda: b"atajos" in buf[mark:], 8)
+        out["help"] = pump(fd, lambda: b"keys" in buf[mark:], 8)
         os.write(fd, b"?")
         time.sleep(0.2)
         os.write(fd, b"\x1b")  # back to the home screen
@@ -281,23 +281,23 @@ elif scenario in ("views", "debug_env"):
 elif scenario == "memory":
     # The Memory screen: m opens it, / searches, Esc clears and goes back, q leaves.
     pid, fd = spawn()
-    out["opened"] = pump(fd, lambda: b"recientes" in buf, 10)
+    out["opened"] = pump(fd, lambda: b"recent" in buf, 10)
     mark = len(buf)
     os.write(fd, b"m")
     out["memory_screen"] = pump(fd, lambda: b"ZAFIRO" in buf[mark:], 10)
-    out["pending_section"] = b"olvidados" in buf[mark:]
+    out["pending_section"] = b"forgotten" in buf[mark:]
     mark = len(buf)
     os.write(fd, b"/")
     time.sleep(0.2)
     type_text(fd, "zafiro")
-    out["search_counts"] = pump(fd, lambda: b"1 coinciden" in buf[mark:], 8)
+    out["search_counts"] = pump(fd, lambda: b"1 match" in buf[mark:], 8)
     os.write(fd, b"\r")  # leave the search box, keep the filter
     time.sleep(0.2)
     os.write(fd, b"\x1b")  # clears the filter
     time.sleep(0.2)
     mark = len(buf)
     os.write(fd, b"\x1b")  # back to the home screen
-    out["back_home"] = pump(fd, lambda: b"recientes" in buf[mark:], 8)
+    out["back_home"] = pump(fd, lambda: b"recent" in buf[mark:], 8)
     os.write(fd, b"q")
     out["code"] = finish(pid, fd)
     out["alt_off_after_on"] = buf.rfind(ALT_OFF) > buf.find(ALT_ON) >= 0

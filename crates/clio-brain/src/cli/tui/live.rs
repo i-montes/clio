@@ -107,7 +107,7 @@ impl Live {
                     reason: reason.clone(),
                 });
                 self.block()
-                    .note(Kind::Warn, &format!("error de protocolo: {reason}"));
+                    .note(Kind::Warn, &format!("protocol error: {reason}"));
             }
             Event::Final => self.entries.push(Entry::Final { step: self.step }),
             Event::Tool {
@@ -213,8 +213,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                 return vec![];
             }
             app.live.cancelling = true;
-            app.flash =
-                Some("cancelando: termina el paso en curso (otra vez para salir ya)".into());
+            app.flash = Some("cancelling: the current step finishes (again to leave now)".into());
             return vec![Cmd::Cancel];
         }
         Act::Open if done => {
@@ -234,7 +233,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             app.live.scroll = 0;
             app.live.view = match app.live.view {
                 LiveView::Timeline if !debug => {
-                    app.flash = Some("el modo debug está apagado: actívalo con Ctrl-D".into());
+                    app.flash = Some("debug mode is off: turn it on with Ctrl-D".into());
                     LiveView::Timeline
                 }
                 LiveView::Timeline => LiveView::Debug,
@@ -276,26 +275,26 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let head_span = if let Some(r) = &l.outcome {
         match r {
-            Ok(s) if s.succeeded() => Span::styled(format!("{} terminó", t.check()), t.ok()),
+            Ok(s) if s.succeeded() => Span::styled(format!("{} finished", t.check()), t.ok()),
             Ok(s) => Span::styled(
                 format!("{} {}", t.cross(), ending_label(&s.ending)),
                 t.fail(),
             ),
-            Err(_) => Span::styled(format!("{} no pudo trabajar", t.cross()), t.fail()),
+            Err(_) => Span::styled(format!("{} could not work", t.cross()), t.fail()),
         }
     } else if l.cancelling {
         Span::styled(
-            format!("{} cancelando… (termina el paso en curso)", t.bang()),
+            format!("{} cancelling… (the current step finishes)", t.bang()),
             t.warn(),
         )
     } else if l.id.is_none() {
         Span::styled(
-            format!("{} copiando el proyecto…", t.spinner(app.now_ms)),
+            format!("{} copying the project…", t.spinner(app.now_ms)),
             t.accent(),
         )
     } else {
         Span::styled(
-            format!("{} trabajando en la copia…", t.spinner(app.now_ms)),
+            format!("{} working on the copy…", t.spinner(app.now_ms)),
             t.accent(),
         )
     };
@@ -312,7 +311,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                             .unwrap_or_default(),
                         l.level
                             .as_ref()
-                            .map(|v| format!("   nivel {v}"))
+                            .map(|v| format!("   level {v}"))
                             .unwrap_or_default()
                     ),
                     t.dim(),
@@ -345,11 +344,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
 
     if let Some(r) = &l.outcome {
-        let mut lines: Vec<Line> = vec![section(t, "resultado", res.width)];
+        let mut lines: Vec<Line> = vec![section(t, "result", res.width)];
         match r {
             Ok(s) => {
                 lines.push(Line::from(format!(
-                    "{} archivo(s) cambiados {dot} {} {dot} {} pasos {dot} {}",
+                    "{} file(s) changed {dot} {} {dot} {} steps {dot} {}",
                     s.files(),
                     ending_label(&s.ending),
                     s.steps,
@@ -384,10 +383,10 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App) {
         .len()
         .saturating_sub(l.scroll.min(l.entries.len().saturating_sub(rows)));
     let start = end.saturating_sub(rows);
-    let mut lines = vec![section(t, "línea de tiempo", area.width)];
+    let mut lines = vec![section(t, "timeline", area.width)];
     if l.entries.is_empty() {
         lines.push(Line::from(Span::styled(
-            "esperando la primera acción del modelo…",
+            "waiting for the model's first action…",
             t.dim(),
         )));
     } else {
@@ -412,13 +411,13 @@ fn entry_line<'a>(t: Theme, e: &Entry, width: usize) -> Line<'a> {
             chars,
         } => {
             let (mark, word, style) = match (outcome, ran) {
-                (Outcome::Deny, _) => (t.cross(), "negado", t.fail()),
-                (_, false) => (t.bang(), "pedido, sin ejecutar", t.warn()),
-                (Outcome::Ask, true) => (t.bang(), "pedido y aprobado", t.warn()),
-                _ => (t.check(), "permitido", t.ok()),
+                (Outcome::Deny, _) => (t.cross(), "denied", t.fail()),
+                (_, false) => (t.bang(), "asked, not run", t.warn()),
+                (Outcome::Ask, true) => (t.bang(), "asked and approved", t.warn()),
+                _ => (t.check(), "allowed", t.ok()),
             };
             let size = if *ran {
-                format!("  {chars} car.")
+                format!("  {chars} ch.")
             } else {
                 String::new()
             };
@@ -436,12 +435,12 @@ fn entry_line<'a>(t: Theme, e: &Entry, width: usize) -> Line<'a> {
         }
         Entry::Protocol { step, reason } => Line::from(vec![
             Span::styled(format!("{step:>3}  "), t.dim()),
-            Span::styled(format!("{} respuesta inválida ", t.bang()), t.warn()),
+            Span::styled(format!("{} invalid reply ", t.bang()), t.warn()),
             Span::styled(clean(reason), t.dim()),
         ]),
         Entry::Final { step } => Line::from(vec![
             Span::styled(format!("{step:>3}  "), t.dim()),
-            Span::styled(format!("{} el modelo dice que terminó", t.check()), t.ok()),
+            Span::styled(format!("{} the model says it finished", t.check()), t.ok()),
         ]),
     }
 }

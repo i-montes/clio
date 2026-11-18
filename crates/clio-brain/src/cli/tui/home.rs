@@ -147,7 +147,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             return super::new_run::opened(app);
         }
         Act::Refresh => {
-            app.flash = Some("lista actualizada".into());
+            app.flash = Some("list refreshed".into());
             return vec![Cmd::LoadHome];
         }
         Act::Doctor => {
@@ -168,9 +168,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
 fn on_selected(app: &mut App, act: Act) -> Vec<Cmd> {
     let Some(run) = app.home.selected() else {
         app.flash = Some(if app.home.runs.is_empty() {
-            "no hay ningún run; crea uno con n".into()
+            "no runs; make one with n".into()
         } else {
-            "ningún run coincide con el filtro".into()
+            "no run matches the filter".into()
         });
         return vec![];
     };
@@ -178,7 +178,7 @@ fn on_selected(app: &mut App, act: Act) -> Vec<Cmd> {
     match act {
         Act::Undo => {
             if run.status != Status::Applied {
-                app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
+                app.notice = Some("Only a run that was applied can be undone.".into());
                 return vec![];
             }
             app.confirm = Some(Confirm::new(
@@ -199,32 +199,32 @@ fn on_selected(app: &mut App, act: Act) -> Vec<Cmd> {
 pub(super) fn state_line(app: &App, t: Theme, width: usize) -> Vec<Line<'static>> {
     let sep = || Span::styled(format!(" {} ", t.dot()), t.dim());
     let Some(h) = &app.home.header else {
-        return vec![Line::from(Span::styled("cargando…", t.dim()))];
+        return vec![Line::from(Span::styled("loading…", t.dim()))];
     };
     if let Some(e) = &h.config_error {
         return vec![Line::from(vec![
-            Span::styled(format!("{} configuración: ", t.bang()), t.warn()),
+            Span::styled(format!("{} config: ", t.bang()), t.warn()),
             Span::styled(clean(e), t.warn()),
         ])];
     }
     let key = match h.key {
-        KeyState::Present => Span::styled("llave presente", t.dim()),
+        KeyState::Present => Span::styled("key present", t.dim()),
         KeyState::Missing => Span::styled(
-            format!("falta la llave del modelo: clio connect {}", h.connector)
+            format!("model key missing: clio connect {}", h.connector)
                 .trim_end()
                 .to_owned(),
             t.warn(),
         ),
     };
     let doctor = match app.home.doctor {
-        None => Span::styled("doctor: comprobando…", t.dim()),
+        None => Span::styled("doctor: checking…", t.dim()),
         Some((ok, warn, fail)) => Span::styled(
             format!(
                 "doctor: {ok} ok {} {} {} {}",
                 t.dot(),
-                plural(warn, "aviso", "avisos"),
+                plural(warn, "warning", "warnings"),
                 t.dot(),
-                plural(fail, "fallo", "fallos")
+                plural(fail, "failure", "failures")
             ),
             if fail > 0 {
                 t.fail()
@@ -260,7 +260,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let mut lines: Vec<Line> = state_line(app, t, usize::from(area.width));
     lines.push(Line::from(""));
-    lines.push(section(t, "recientes", area.width));
+    lines.push(section(t, "recent", area.width));
     let h = &app.home;
     if h.filtering || !h.filter.is_empty() {
         let n = h.visible().len();
@@ -268,16 +268,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("/", t.accent()),
             Span::raw(clean(&h.filter)),
             Span::styled(if h.filtering { t.cursor() } else { "" }, t.accent()),
-            Span::styled(format!("   {} de {}", n, h.runs.len()), t.dim()),
+            Span::styled(format!("   {} of {}", n, h.runs.len()), t.dim()),
         ]));
     }
     if h.runs.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from("Todavía no hay runs."));
+        lines.push(Line::from("No runs yet."));
         lines.push(Line::from(vec![
-            Span::raw("Pulsa "),
+            Span::raw("Press "),
             Span::styled("n", t.key()),
-            Span::raw(" para pedirle algo a Clio sobre un proyecto."),
+            Span::raw(" to ask Clio something about a project."),
         ]));
         f.render_widget(Paragraph::new(lines), area);
         return;
@@ -285,14 +285,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let visible = h.visible();
     if visible.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Ningún run coincide con el filtro.",
+            "No run matches the filter.",
             t.dim(),
         )));
     }
     let used = lines.len();
     let rows = usize::from(area.height).saturating_sub(used).max(1);
     let skip = (h.sel + 1).saturating_sub(rows);
-    let instr_w = usize::from(area.width).saturating_sub(2 + 15 + 21 + 9);
+    let instr_w = usize::from(area.width).saturating_sub(2 + 15 + 21 + 10);
     for (pos, i) in visible.iter().enumerate().skip(skip).take(rows) {
         let r = &h.runs[*i];
         let selected = pos == h.sel;
@@ -318,7 +318,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!("{:<21}", r.status.label()), st),
             Span::styled(
-                format!("{:>3} arch ", r.files()),
+                format!(
+                    "{:>3} {:<6}",
+                    r.files(),
+                    if r.files() == 1 { "file" } else { "files" }
+                ),
                 if selected { base } else { t.dim() },
             ),
             Span::styled(instr, base),

@@ -740,14 +740,14 @@ mod tests {
     // is still there; and a table still arriving never garbles.
     #[test]
     fn tables_align_wrap_inside_their_columns_and_stream() {
-        let src = "| PID | Proceso | Memoria (RSS) |\n|---|---|---|\n| 4071 | java | ~678 MB |\n| 12 | 日本語 | 1 MB |";
+        let src = "| PID | Process | Memory (RSS) |\n|---|---|---|\n| 4071 | java | ~678 MB |\n| 12 | 日本語 | 1 MB |";
         let l = render(src, 60, T, false);
         let p = plain(&l);
         assert_eq!(
             p,
             [
-                "PID  │ Proceso │ Memoria (RSS)",
-                "─────┼─────────┼──────────────",
+                "PID  │ Process │ Memory (RSS)",
+                "─────┼─────────┼─────────────",
                 "4071 │ java    │ ~678 MB",
                 "12   │ 日本語  │ 1 MB",
             ]

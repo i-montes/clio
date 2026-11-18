@@ -68,7 +68,7 @@ fn debug_clip(e: &Event) -> String {
 /// Adds `more` to a conversation item, up to `MAX_TEXT` for the item and `left` for the whole
 /// conversation, and says once that the rest was dropped. Returns the bytes added.
 fn append_capped(text: &mut String, more: &str, left: usize) -> usize {
-    const MARK: &str = "\n[… el resto se omitió]";
+    const MARK: &str = "\n[… the rest was left out]";
     let room = MAX_TEXT.saturating_sub(text.len()).min(left);
     if more.len() <= room {
         text.push_str(more);
@@ -108,7 +108,7 @@ pub enum ToolState {
     Failed,
     /// The guard or the gateway said no.
     Denied,
-    /// Host mode: set aside for the person's approval (`apartado <id>: …`).
+    /// Host mode: set aside for the person's approval (`set aside <id>: …`).
     SetAside,
     /// Still running when its turn settled or was aborted: it will not end on its own.
     Stopped,
@@ -254,7 +254,7 @@ impl Chat {
     pub fn draft(now_ms: u64) -> Self {
         Self {
             opening: false,
-            title: "nueva sesión".into(),
+            title: "new session".into(),
             ..Self::opening(0, now_ms)
         }
     }
@@ -386,9 +386,9 @@ impl Chat {
     pub fn masked(&mut self, total: u32) {
         if total > self.masked_seen {
             let n = total - self.masked_seen;
-            let (one, many) = ("valor", "valores");
+            let (one, many) = ("value", "values");
             self.items.push(Item::Note(format!(
-                "Clio tachó {n} {} con forma de llave en lo que leyó Pi: el modelo no los ve",
+                "Clio redacted {n} key-shaped {} in what Pi read: the model does not see them",
                 if n == 1 { one } else { many }
             )));
         }
@@ -401,7 +401,7 @@ impl Chat {
     pub fn egress(&mut self, denied: &[String]) {
         for d in denied.iter().skip(self.egress_seen) {
             self.items.push(Item::Note(format!(
-                "la jaula negó una conexión de Pi a {d}"
+                "the jail refused a connection from Pi to {d}"
             )));
         }
         self.egress_seen = denied.len();
@@ -479,7 +479,7 @@ impl Chat {
                     self.items.push(Item::Error(
                         m.error_message
                             .as_deref()
-                            .map_or_else(|| "el modelo devolvió un error".into(), note),
+                            .map_or_else(|| "the model returned an error".into(), note),
                     ));
                 }
             }
@@ -511,7 +511,7 @@ impl Chat {
             }
             Event::CompactionStart { reason } => self
                 .items
-                .push(Item::Note(format!("compactando el contexto ({reason})…"))),
+                .push(Item::Note(format!("compacting the context ({reason})…"))),
             Event::CompactionEnd {
                 aborted,
                 error,
@@ -519,10 +519,10 @@ impl Chat {
                 tokens_after,
                 ..
             } => self.items.push(Item::Note(match (aborted, error) {
-                (_, Some(e)) => format!("la compactación falló: {}", note(e)),
-                (true, _) => "compactación cancelada".into(),
+                (_, Some(e)) => format!("compaction failed: {}", note(e)),
+                (true, _) => "compaction cancelled".into(),
                 _ => format!(
-                    "contexto compactado{}",
+                    "context compacted{}",
                     match (tokens_before, tokens_after) {
                         (Some(a), Some(b)) =>
                             format!(": {} → {} tok", usage::tokens(*a), usage::tokens(*b)),
@@ -536,7 +536,7 @@ impl Chat {
                 delay_ms,
                 error,
             } => self.items.push(Item::Note(format!(
-                "reintento {attempt}/{max_attempts} en {} ({})",
+                "retry {attempt}/{max_attempts} in {} ({})",
                 usage::ms_label(*delay_ms),
                 note(error)
             ))),
@@ -545,13 +545,12 @@ impl Chat {
                 final_error,
                 ..
             } => self.items.push(Item::Error(format!(
-                "los reintentos no bastaron: {}",
+                "the retries were not enough: {}",
                 note(final_error.as_deref().unwrap_or_default())
             ))),
-            Event::ExtensionError { error, .. } => self.items.push(Item::Note(format!(
-                "aviso de la extensión: {}",
-                note(error)
-            ))),
+            Event::ExtensionError { error, .. } => self
+                .items
+                .push(Item::Note(format!("extension warning: {}", note(error)))),
             // Only the checklist's widget: any other key is not drawn.
             Event::ExtensionUiRequest {
                 method,
@@ -612,8 +611,8 @@ pub fn content_text(c: &Value) -> String {
     }
 }
 
-/// A tool that failed because the guard or the gateway refused it is "negado", not "falló"; one the
-/// toolhost set aside for the person (`clio_toolhost::pending`) is "apartado". Only for drawing:
+/// A tool that failed because the guard or the gateway refused it is "denied", not "failed"; one the
+/// toolhost set aside for the person (`clio_toolhost::pending`) is "set aside". Only for drawing:
 /// nothing ever decides on this state.
 fn state_of(is_error: bool, text: &str) -> ToolState {
     let t = text.to_lowercase();
@@ -731,7 +730,7 @@ fn key_composer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let c = &mut app.chat;
     if act == Act::Cancel && !c.aborting {
         c.aborting = true;
-        c.items.push(Item::Note("abortando el turno…".into()));
+        c.items.push(Item::Note("aborting the turn…".into()));
         return vec![Cmd::ChatAbort];
     }
     let (s, at) = (&mut c.input, &mut c.cursor);
@@ -801,9 +800,9 @@ pub fn send_text(app: &mut App, text: String) -> Vec<Cmd> {
     }
     if c.compacting || c.opening || c.failed.is_some() {
         app.flash = Some(if c.compacting {
-            "Pi está compactando el contexto: espera a que termine".into()
+            "Pi is compacting the context: wait for it to finish".into()
         } else {
-            "la sesión todavía no está lista".into()
+            "the session is not ready yet".into()
         });
         // Nothing is lost: what was going out is back in the composer.
         if c.input.is_empty() {
@@ -849,18 +848,18 @@ pub fn paste(app: &mut App, text: &str) {
     super::commands::sync(app, &before);
 }
 
-/// What a tool does, as a title ("Leer archivo"), like Aria's steps.
+/// What a tool does, as a title ("Read file"), like Aria's steps.
 fn title(name: &str, reason: &str) -> String {
     if !reason.is_empty() {
         return clean(reason);
     }
     match name {
-        "read" => "Leer archivo".into(),
-        "write" => "Escribir archivo".into(),
-        "edit" => "Editar archivo".into(),
-        "bash" => "Ejecutar comando".into(),
-        "ls" => "Listar carpeta".into(),
-        "find" => "Buscar archivos".into(),
+        "read" => "Read file".into(),
+        "write" => "Write file".into(),
+        "edit" => "Edit file".into(),
+        "bash" => "Run command".into(),
+        "ls" => "List folder".into(),
+        "find" => "Find files".into(),
         other => clean(other),
     }
 }
@@ -1094,9 +1093,9 @@ fn conversation(
 fn tool_tail(t: Theme, state: ToolState, ms: Option<u64>) -> [String; 3] {
     let word = match state {
         ToolState::Running | ToolState::Ok => "",
-        ToolState::Failed => "falló",
-        ToolState::Denied => "negado",
-        ToolState::SetAside => "apartado",
+        ToolState::Failed => "failed",
+        ToolState::Denied => "denied",
+        ToolState::SetAside => "set aside",
         ToolState::Stopped => "stopped",
     };
     let dur = match ms {
@@ -1161,13 +1160,13 @@ fn tool_line(
 fn welcome(app: &App) -> Vec<Line<'static>> {
     let t = app.theme;
     let place = if app.host {
-        "en este servidor".to_owned()
+        "on this server".to_owned()
     } else {
-        format!("en una copia de {}", clean(&folder_name(&app.cwd)))
+        format!("in a copy of {}", clean(&folder_name(&app.cwd)))
     };
     vec![
         Line::from(Span::styled("clio", t.accent())),
-        Line::from(Span::styled("¿En qué te ayudo?", t.bold())),
+        Line::from(Span::styled("How can I help?", t.bold())),
         Line::from(Span::styled(place, t.dim())),
     ]
 }
@@ -1191,14 +1190,14 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(
             if app.host {
-                "arrancando…"
+                "starting…"
             } else {
-                "copiando el proyecto y arrancando…"
+                "copying the project and starting…"
             },
             t.dim(),
         ));
     } else if c.running && c.aborting {
-        spans.push(Span::styled(format!("{} abortando…", t.bang()), t.warn()));
+        spans.push(Span::styled(format!("{} aborting…", t.bang()), t.warn()));
     } else if c.running {
         let secs = app.now_ms.saturating_sub(c.turn_ms) / 1000;
         spans.push(Span::styled(
@@ -1207,7 +1206,7 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(
             format!(
-                "trabajando {d} {} {d} Esc detiene",
+                "working {d} {} {d} Esc stops",
                 usage::duration(secs),
                 d = t.dot()
             ),
@@ -1228,7 +1227,7 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         spans.push(Span::styled(clean(msg), t.accent_line()));
     }
     let more = if c.scroll > 0 && c.scroll_max.get() > 0 {
-        format!("{} hay más abajo", t.down())
+        format!("{} more below", t.down())
     } else {
         String::new()
     };
@@ -1268,14 +1267,14 @@ pub(super) fn meter(app: &App) -> Vec<Vec<Span<'static>>> {
     if s.cost_micro > 0 {
         text.push_str(&format!(" {} {}", t.dot(), usage::usd(s.cost_micro)));
     }
-    text.push_str(&format!(" {} contexto ", t.dot()));
+    text.push_str(&format!(" {} context ", t.dot()));
     let pct = match s.ctx_percent() {
         Some(p) => Span::styled(format!("{p} %"), t.level(p)),
         None => Span::styled(t.rule().to_owned(), t.dim()),
     };
     vec![
         vec![Span::styled(text, t.dim()), pct.clone()],
-        vec![Span::styled("contexto ", t.dim()), pct.clone()],
+        vec![Span::styled("context ", t.dim()), pct.clone()],
         vec![Span::styled("ctx ", t.dim()), pct],
     ]
 }
@@ -1349,7 +1348,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
             t.fail(),
         ));
         tail.push(Line::from(Span::styled(
-            "    Ctrl-S abre las sesiones",
+            "    Ctrl-S opens the sessions",
             t.dim(),
         )));
     }
@@ -1381,7 +1380,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     }
 
     if app.debug {
-        let mut lines = vec![section(t, "eventos de Pi (crudos)", dbg.width)];
+        let mut lines = vec![section(t, "Pi events (raw)", dbg.width)];
         let room = usize::from(dbg.height).saturating_sub(1);
         let skip = c.raw.len().saturating_sub(room);
         lines.extend(c.raw.iter().skip(skip).map(|r| {
@@ -1415,7 +1414,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     if c.input.is_empty() {
         lines.push(Line::from(vec![
             prompt,
-            Span::styled("Escribe un mensaje…", t.dim()),
+            Span::styled("Type a message…", t.dim()),
         ]));
     } else {
         for (i, (a, b)) in rows.iter().enumerate().skip(top).take(shown) {
@@ -1522,7 +1521,7 @@ mod tests {
         c.on_event(&start(
             "1",
             "bash",
-            json!({"command":"ls","reason":" Revisar la estructura\nmás"}),
+            json!({"command":"ls","reason":" Review the structure\nmás"}),
         ));
         c.on_event(&start("2", "read", json!({"path":"src/a.rs"})));
         let titles: Vec<_> = c
@@ -1533,7 +1532,7 @@ mod tests {
                 _ => unreachable!(),
             })
             .collect();
-        assert_eq!(titles, ["Revisar la estructura", "Leer archivo"]);
+        assert_eq!(titles, ["Review the structure", "Read file"]);
     }
 
     #[test]
@@ -1580,10 +1579,21 @@ mod tests {
         );
     }
 
+    // Sessions saved before the text was English say `denegado`: reopened, it is still a denial.
+    #[test]
+    fn a_denial_in_an_old_spanish_session_is_still_drawn_as_denied() {
+        assert_eq!(
+            state_of(true, "denegado por la regla S-16"),
+            ToolState::Denied
+        );
+        assert_eq!(state_of(true, "denied by rule S-16"), ToolState::Denied);
+        assert_eq!(state_of(true, "ENOENT"), ToolState::Failed);
+    }
+
     // Host mode: a call the toolhost set aside for the person is its own state, drawn in the
     // warning color with «apartado», never as a failure; and a group's summaries start in one
     // column and its endings end at the right edge. Review: the test used the bare answer and
-    // passed while the real one, which comes wrapped by the host, was drawn as «falló».
+    // passed while the real one, which comes wrapped by the host, was drawn as «failed».
     #[test]
     fn a_set_aside_call_is_apartado_and_a_group_lines_up() {
         use clio_gateway::{Source, wrap_untrusted};
@@ -1627,14 +1637,14 @@ mod tests {
         };
         a.chat.items = vec![
             tool(
-                "Borrar volúmenes viejos",
+                "Delete old volumes",
                 "rm -r /var/lib/docker/volumes/viejo",
                 ToolState::SetAside,
                 Some(400),
             ),
-            tool("Ver", "du -sh /var", ToolState::Ok, Some(1_500)),
+            tool("Look", "du -sh /var", ToolState::Ok, Some(1_500)),
             tool(
-                "Un título muy largo que no cabe en treinta columnas",
+                "A very long title that does not fit in thirty columns",
                 "ls",
                 ToolState::Failed,
                 Some(80_000),
@@ -1645,10 +1655,10 @@ mod tests {
         let row = |s: &str| *rows.iter().find(|r| r.contains(s)).unwrap();
         let (r1, r2, r3) = (row("rm -r"), row("du -sh"), row("ls  "));
         assert!(
-            r1.contains("◇ Borrar") && r1.contains("apartado") && !r1.contains("falló"),
+            r1.contains("◇ Delete") && r1.contains("set aside") && !r1.contains("failed"),
             "{screen}"
         );
-        assert!(r3.contains('…') && r3.contains("falló"), "{screen}");
+        assert!(r3.contains('…') && r3.contains("failed"), "{screen}");
         let col = |r: &str, s: &str| text::width(&r[..r.find(s).unwrap()]);
         assert_eq!(col(r1, "rm -r"), col(r2, "du -sh"), "{screen}");
         assert_eq!(col(r2, "du -sh"), col(r3, "ls  "), "{screen}");
@@ -1710,11 +1720,12 @@ mod tests {
         c.masked(2);
         c.masked(2); // the same total after the next turn: nothing new to say
         assert_eq!(notes(&c).len(), 1, "{:?}", notes(&c));
-        assert!(notes(&c)[0].contains("2 valores") && notes(&c)[0].contains("tachó"));
+        assert!(notes(&c)[0].contains("2 key-shaped values") && notes(&c)[0].contains("redacted"));
         c.masked(3);
         assert_eq!(notes(&c).len(), 2);
         assert!(
-            notes(&c)[1].contains("1 valor ") || notes(&c)[1].contains("1 valor"),
+            notes(&c)[1].contains("1 key-shaped value ")
+                || notes(&c)[1].contains("1 key-shaped value"),
             "{:?}",
             notes(&c)
         );
@@ -1738,11 +1749,8 @@ mod tests {
         c.egress(&first);
         c.egress(&first); // the same list again, after the next turn: nothing new to say
         assert_eq!(notes(&c).len(), 1, "{:?}", notes(&c));
-        assert!(notes(&c)[0].contains("example.com:443") && notes(&c)[0].contains("jaula"));
-        let more = vec![
-            "example.com:443".to_owned(),
-            "GET (no es CONNECT)".to_owned(),
-        ];
+        assert!(notes(&c)[0].contains("example.com:443") && notes(&c)[0].contains("jail"));
+        let more = vec!["example.com:443".to_owned(), "GET (not CONNECT)".to_owned()];
         c.egress(&more);
         assert_eq!(notes(&c).len(), 2, "only the new one is added");
         assert!(notes(&c)[1].contains("GET"));
@@ -2153,7 +2161,7 @@ mod tests {
             unavailable: None,
         }]);
         let none = KeyModifiers::NONE;
-        // On "nueva sesión" there is nothing to delete.
+        // On "new session" there is nothing to delete.
         let (app, cmds) = press(app, KeyCode::Char('x'), none);
         assert!(cmds.is_empty() && app.flash.is_some());
         let (app, _) = press(app, KeyCode::Char('j'), none);
@@ -2166,7 +2174,7 @@ mod tests {
             super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
                 "/s/a.jsonl".into(),
                 "t".into(),
-                "la conversación y su copia de trabajo, con 2 archivo(s) cambiados SIN APLICAR a tu carpeta".into(),
+                "the conversation and its working copy, with 2 file(s) changed NOT APPLIED to your folder".into(),
             )))),
         );
         assert!(
@@ -2174,7 +2182,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .workspace
-                .contains("SIN APLICAR")
+                .contains("NOT APPLIED")
         );
         // Anything but y keeps it.
         let (app, cmds) = press(app, KeyCode::Char('n'), none);
@@ -2185,7 +2193,7 @@ mod tests {
             super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
                 "/s/a.jsonl".into(),
                 "t".into(),
-                "solo la conversación".into(),
+                "the conversation only".into(),
             )))),
         );
         let (_, cmds) = press(app, KeyCode::Char('y'), none);
@@ -2216,10 +2224,10 @@ mod tests {
         );
         app.use_pi();
         app.sessions
-            .set(vec![row(None), row(Some("no es de Clio"))]);
+            .set(vec![row(None), row(Some("not a Clio session"))]);
         let none = KeyModifiers::NONE;
         app.screen = Screen::Sessions;
-        // "nueva sesión" opens nothing yet: its first message does.
+        // "new session" opens nothing yet: its first message does.
         let (app, cmds) = press(app, KeyCode::Enter, none);
         assert!(cmds.is_empty() && app.chat.is_draft(), "{cmds:?}");
         assert_eq!(app.screen, Screen::Chat);
@@ -2239,7 +2247,7 @@ mod tests {
         app.use_pi();
         app.screen = Screen::Sessions;
         app.sessions
-            .set(vec![row(None), row(Some("no es de Clio"))]);
+            .set(vec![row(None), row(Some("not a Clio session"))]);
         let (app, _) = press(app, KeyCode::Char('j'), none);
         let (app, cmds) = press(app, KeyCode::Enter, none);
         assert!(
@@ -2252,7 +2260,7 @@ mod tests {
         };
         app.sessions.sel = 2;
         let (app, cmds) = press(app, KeyCode::Enter, none);
-        assert!(cmds.is_empty() && app.notice.as_deref() == Some("no es de Clio"));
+        assert!(cmds.is_empty() && app.notice.as_deref() == Some("not a Clio session"));
     }
 
     /// The Pi screen with two listed sessions, drawn once at `w` columns (a click needs a frame).
@@ -2278,8 +2286,8 @@ mod tests {
             unavailable: None,
         };
         app.sessions.set(vec![
-            row("sesión uno", "/s/1_aaa.jsonl"),
-            row("sesión dos", "/s/2_bbb.jsonl"),
+            row("session one", "/s/1_aaa.jsonl"),
+            row("session two", "/s/2_bbb.jsonl"),
         ]);
         let _ = super::super::tests::screen_text(&app, w, 24);
         app
@@ -2365,7 +2373,7 @@ mod tests {
         a.chat.running = false;
         let (a, _) = update(
             a,
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm -r x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
         );
         assert!(a.animating());
         let (a, _) = update(a, Input::Tick(61_000));
@@ -2391,7 +2399,7 @@ mod tests {
             a.chat.items.push(Item::Note(format!("nota {i}")));
         }
         let t = a.theme;
-        let tail = || vec![Line::from(""), Line::from("falló"), Line::from("fin")];
+        let tail = || vec![Line::from(""), Line::from("failed"), Line::from("fin")];
         let text = |v: &[Line]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
         let (all, start, max) = conversation(&a, t, 60, tail(), 10_000);
         assert_eq!((start, max), (0, 0));
@@ -2431,7 +2439,7 @@ mod tests {
             unicode: true,
             rgb: false,
         };
-        let (x, y) = find(&app, 100, "Escribe un mensaje");
+        let (x, y) = find(&app, 100, "Type a message");
         let look = |app: &App| {
             let mut term =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
@@ -2444,7 +2452,10 @@ mod tests {
         };
         let (focused, cursor) = look(&app);
         assert!(cursor);
-        app.modal = Some(super::super::commands::Modal::text("Uso", vec!["x".into()]));
+        app.modal = Some(super::super::commands::Modal::text(
+            "Usage",
+            vec!["x".into()],
+        ));
         let (with_box, cursor) = look(&app);
         assert!(!cursor && with_box != focused, "{with_box:?}");
     }
@@ -2468,16 +2479,16 @@ mod tests {
         term.draw(|f| super::super::app::draw(f, &app)).unwrap();
         let s = super::super::tests::screen_text(&app, 100, 24);
         assert!(
-            !s.contains("sesión dos") && !s.contains("╭ sesiones"),
+            !s.contains("session two") && !s.contains("╭ sessions"),
             "{s}"
         );
         assert!(
-            s.contains("¿En qué te ayudo?") && s.contains("Escribe un mensaje"),
+            s.contains("How can I help?") && s.contains("Type a message"),
             "{s}"
         );
-        assert!(s.contains("Ctrl-S sesiones"), "{s}");
+        assert!(s.contains("Ctrl-S sessions"), "{s}");
         // The cursor sits where the placeholder starts, inside the composer's box.
-        let (x, y) = find(&app, 100, "Escribe un mensaje");
+        let (x, y) = find(&app, 100, "Type a message");
         let at = term.get_cursor_position().unwrap();
         assert_eq!((at.x, at.y), (x, y));
         let sent = |app: App| {
@@ -2516,13 +2527,13 @@ mod tests {
             app,
             Input::Bg(Bg::ChatOpened {
                 seq,
-                result: Err("sin llave".into()),
+                result: Err("no key".into()),
             }),
         );
         assert_eq!(app.chat.input, "hola");
         assert_eq!(app.chat.cursor, 4);
         assert!(app.chat.is_draft());
-        assert!(matches!(&app.chat.items[..], [Item::Error(e)] if e == "sin llave"));
+        assert!(matches!(&app.chat.items[..], [Item::Error(e)] if e == "no key"));
     }
 
     // Ctrl-S (or F2) opens the drawer with the keys and closes it again, as Esc does; Tab no
@@ -2534,7 +2545,7 @@ mod tests {
         let app = pi_app(false, 100);
         let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.screen, Screen::Chat);
-        assert!(!shows(&app, 100, "sesión dos"));
+        assert!(!shows(&app, 100, "session two"));
         for open in [
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
@@ -2546,12 +2557,12 @@ mod tests {
             ] {
                 let (app, _) = press(pi_app(false, 100), open.code, open.modifiers);
                 assert_eq!(app.screen, Screen::Sessions);
-                assert!(shows(&app, 100, "sesión dos") && shows(&app, 100, "Escribe un mensaje"));
+                assert!(shows(&app, 100, "session two") && shows(&app, 100, "Type a message"));
                 // Narrow: the drawer only, the chat behind it.
-                assert!(shows(&app, 70, "sesión dos") && !shows(&app, 70, "Escribe un mensaje"));
+                assert!(shows(&app, 70, "session two") && !shows(&app, 70, "Type a message"));
                 let (app, _) = press(app, close.code, close.modifiers);
                 assert_eq!(app.screen, Screen::Chat, "{close:?}");
-                assert!(!shows(&app, 100, "sesión dos"));
+                assert!(!shows(&app, 100, "session two"));
             }
         }
     }
@@ -2569,7 +2580,7 @@ mod tests {
             "{cmds:?}"
         );
         assert_eq!(app.screen, Screen::Chat);
-        // "nueva sesión" while the chat is a draft: nothing to open, the drawer closes.
+        // "new session" while the chat is a draft: nothing to open, the drawer closes.
         let (app, cmds) = press(drawer_app(false, 100), KeyCode::Enter, none);
         assert!(cmds.is_empty() && app.screen == Screen::Chat && app.chat.is_draft());
     }
@@ -2577,7 +2588,7 @@ mod tests {
     #[test]
     fn a_click_on_a_row_opens_it_a_click_outside_closes_the_drawer_and_the_wheel_scrolls() {
         let app = drawer_app(false, 100);
-        let (x, y) = find(&app, 100, "sesión dos");
+        let (x, y) = find(&app, 100, "session two");
         let (app, cmds) = mouse(app, left(), x, y);
         assert!(
             matches!(&cmds[..], [Cmd::ChatOpen { target: super::super::app::OpenTarget::Existing { reference }, .. }] if reference == "/s/2_bbb.jsonl"),
@@ -2605,7 +2616,7 @@ mod tests {
         let _ = super::super::tests::screen_text(&app, 100, 24);
         let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollUp, 50, 8);
         assert_eq!(app.chat.scroll, 3);
-        assert!(super::super::tests::screen_text(&app, 100, 24).contains("hay más abajo"));
+        assert!(super::super::tests::screen_text(&app, 100, 24).contains("more below"));
         let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollDown, 50, 8);
         assert_eq!(app.chat.scroll, 0);
         // While a turn runs, a click on another session does not leave it (as Esc never did).
@@ -2616,7 +2627,7 @@ mod tests {
         let (app, cmds) = mouse(app, left(), x, y);
         assert!(cmds.is_empty() && app.flash.is_some(), "{cmds:?}");
         assert!(
-            super::super::tests::screen_text(&app, 100, 24).contains("el agente está trabajando"),
+            super::super::tests::screen_text(&app, 100, 24).contains("the agent is working"),
             "the drawer says why"
         );
     }
@@ -2627,11 +2638,11 @@ mod tests {
     fn a_click_never_answers_the_question_of_a_set_aside_action() {
         use super::super::app::{Action, Confirm};
         let mut app = drawer_app(true, 100);
-        let (x, y) = find(&app, 100, "sesión dos");
-        let mut c = Confirm::new(Action::Approve, "a1".into(), 0, "«borrar» rm -r x".into());
+        let (x, y) = find(&app, 100, "session two");
+        let mut c = Confirm::new(Action::Approve, "a1".into(), 0, "«delete» rm -r x".into());
         c.armed = true;
         app.confirm = Some(c);
-        let (dx, dy) = find(&app, 100, "sí, ejecutarlo");
+        let (dx, dy) = find(&app, 100, "yes, run it");
         for (x, y) in [(x, y), (dx, dy), (70, 10)] {
             for kind in [
                 left(),
@@ -2742,10 +2753,10 @@ mod tests {
         let text = |host| super::super::tests::screen_text(&pi_app(host, 100), 100, 24);
         let host = text(true);
         assert!(
-            host.contains("en este servidor") && !host.contains("en una copia"),
+            host.contains("on this server") && !host.contains("in a copy"),
             "{host}"
         );
-        assert!(text(false).contains("en una copia"));
+        assert!(text(false).contains("in a copy"));
     }
 
     // Second audit, finding 3: a model that prints one huge word with no spaces must not freeze

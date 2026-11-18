@@ -67,7 +67,7 @@ fn a_question_takes_keys_only_after_the_quiet_second_and_answers_with_the_option
     let screen = screen_text(&a, 90, 30);
     assert!(
         screen.contains("Clio asks")
-            && !screen.contains("Visto bueno")
+            && !screen.contains("Approval")
             && screen.contains("Which database?")
             && screen.contains("1  Postgres (recommended)")
             && screen.contains("what the other services use")
@@ -183,7 +183,7 @@ fn a_question_and_an_approval_wait_for_each_other_and_a_turn_end_drops_the_quest
         a,
         vec![
             select("q1", "Which?", &OPTIONS),
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm x".into())])),
         ],
     );
     assert!(a.confirm.is_none() && a.asks.len() == 1);
@@ -398,7 +398,7 @@ fn the_secret_box_says_where_the_value_may_go_and_shows_only_dots() {
             && screen.contains("it can only be sent to http_fetch:api.linear.app")
             && screen.contains("why: to read the issues of the sprint")
             && screen.contains("Esc decline")
-            && !screen.contains("Visto bueno")
+            && !screen.contains("Approval")
             && !screen.contains("tried to give orders"),
         "{screen}"
     );

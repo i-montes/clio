@@ -24,9 +24,9 @@ scenario = sys.argv[1]
 cfg = json.loads(sys.argv[2])
 ENTER, ESC, CTRL_D, CTRL_C, CTRL_S = b"\r", b"\x1b", b"\x04", b"\x03", b"\x13"
 # What the screen shows when the chat waits for a message, and while a turn runs.
-IDLE, BUSY = "Enter enviar", ["trabajando", "arrancando"]
+IDLE, BUSY = "Enter send", ["working", "starting"]
 # The sessions drawer is open.
-DRAWER = "n nueva"
+DRAWER = "n new"
 CHILDREN = []
 RAW = b""
 
@@ -155,7 +155,7 @@ def gone(timeout=20.0):
 def open_new_chat(fd):
     """`clio` opens on a new session with the keys in the chat: nothing to press. The session (a
     run, Pi) starts with its first message."""
-    return wait_screen(fd, "nueva sesión") and wait_screen(fd, "¿En qué te ayudo?", 30)
+    return wait_screen(fd, "new session") and wait_screen(fd, "How can I help?", 30)
 
 
 def idle(fd, timeout=30):
@@ -184,21 +184,21 @@ if scenario == "new_chat":
     # Nothing that cannot be opened is listed (the remote source is not built yet).
     out["no_remote_row"] = "remoto" not in screen()
     send(fd, CTRL_S)
-    out["opened"] = out["opened"] and wait_screen(fd, "Escribe un mensaje", 15, absent=DRAWER)
+    out["opened"] = out["opened"] and wait_screen(fd, "Type a message", 15, absent=DRAWER)
     out["nothing_before_the_first_message"] = len(pi_procs()) == 0
     out["answered"] = ask(fd, "hola", "hello from the fake model")
     out["procs_while_open"] = len(pi_procs())
     s = screen()
     out["user_line_shown"] = "hola" in s
-    out["usage_bar"] = "↑" in s and "contexto" in s
+    out["usage_bar"] = "↑" in s and "context" in s
     out["screen_after_answer"] = s
     send(fd, CTRL_D)
-    out["debug_raw_events"] = wait_screen(fd, "eventos de Pi (crudos)", 10) and "MessageUpdate" in screen()
+    out["debug_raw_events"] = wait_screen(fd, "Pi events (raw)", 10) and "MessageUpdate" in screen()
     send(fd, CTRL_D)
     send(fd, CTRL_S)  # the keys go to the list; the session stays open
-    out["back_in_selector"] = wait_screen(fd, DRAWER, 15, absent="eventos de Pi")
-    out["listed_again"] = wait_screen(fd, "hola", 15) and wait_screen(fd, "ahora", 15)
-    send(fd, b"g")  # "nueva sesión": the session before it closes
+    out["back_in_selector"] = wait_screen(fd, DRAWER, 15, absent="Pi events")
+    out["listed_again"] = wait_screen(fd, "hola", 15) and wait_screen(fd, "now", 15)
+    send(fd, b"g")  # "new session": the session before it closes
     send(fd, ENTER)
     out["procs_after_leaving"] = gone(20)
     open_drawer(fd)
@@ -209,10 +209,10 @@ elif scenario == "abort":
     out["opened"] = open_new_chat(fd)
     type_text(fd, "algo lento")
     send(fd, ENTER)
-    out["working"] = wait_screen(fd, "trabajando", 30)
+    out["working"] = wait_screen(fd, "working", 30)
     time.sleep(1.0)
     send(fd, ESC)
-    out["aborting_shown"] = wait_screen(fd, "abortando", 10) or IDLE in screen()
+    out["aborting_shown"] = wait_screen(fd, "aborting", 10) or IDLE in screen()
     out["idle_again"] = idle(fd)
     out["slow_text_absent"] = "never shown" not in screen()
     out["next_turn_answered"] = ask(fd, "otra vez", "answer after the abort")
@@ -224,10 +224,10 @@ elif scenario == "steer":
     out["opened"] = open_new_chat(fd)
     type_text(fd, "escribe un archivo")
     send(fd, ENTER)
-    out["working"] = wait_screen(fd, "trabajando", 30)
+    out["working"] = wait_screen(fd, "working", 30)
     type_text(fd, "mejor en minúsculas")
     send(fd, ENTER)
-    out["steer_sent"] = wait_screen(fd, "mensaje enviado al agente", 15)
+    out["steer_sent"] = wait_screen(fd, "message sent to the agent", 15)
     out["tool_line"] = wait_screen(fd, "probar", 30)
     out["final"] = wait_screen(fd, "done after the steer", 60) and idle(fd)
     out["tool_ok_with_duration"] = " s" in screen() or " ms" in screen()
@@ -243,7 +243,7 @@ elif scenario == "masked":
     type_text(fd, "lee las llaves")
     send(fd, ENTER)
     out["final"] = wait_screen(fd, "sin ver los valores", 60) and idle(fd)
-    out["note"] = wait_screen(fd, "tachó 2 valores", 15)
+    out["note"] = wait_screen(fd, "redacted 2 key-shaped values", 15)
     out["keys_not_shown"] = "ghp_" not in screen() and "AKIA" not in screen()
     time.sleep(0.5)
     send(fd, CTRL_C)  # idle: Ctrl-C leaves
@@ -258,7 +258,7 @@ elif scenario == "reopen":
     pid, fd = spawn()
     out["selector"] = open_drawer(fd)
     out["row_listed"] = wait_screen(fd, "primera pregunta", 20)
-    send(fd, b"j")  # first row is "nueva sesión"
+    send(fd, b"j")  # first row is "new session"
     send(fd, ENTER)
     out["reopened"] = wait_screen(fd, "first answer", 60) and idle(fd, 60)
     s = screen()
@@ -280,7 +280,7 @@ elif scenario == "one_turn":
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "reopen_turn":
-    # Reopen the session listed as cfg "row" (the first after "nueva sesión") for one more turn.
+    # Reopen the session listed as cfg "row" (the first after "new session") for one more turn.
     out["selector"] = open_drawer(fd)
     out["row_listed"] = wait_screen(fd, cfg["row"], 20)
     send(fd, b"j")

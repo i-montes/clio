@@ -119,7 +119,7 @@ fn variants(t: Theme, s: &Snapshot) -> Vec<Vec<(String, Style)>> {
                 "{} {} {} {}",
                 tok(false),
                 usage::usd(s.cost_micro),
-                steps("p"),
+                steps("st"),
                 time(true)
             ),
             dim,
@@ -130,21 +130,21 @@ fn variants(t: Theme, s: &Snapshot) -> Vec<Vec<(String, Style)>> {
     };
     let mut out = vec![
         join(
-            usage_text(true, " pasos", false),
+            usage_text(true, " steps", false),
             "   ",
-            ctx("contexto", 10, true),
+            ctx("context", 10, true),
             "   ",
-            ext("externo"),
+            ext("external"),
         ),
         join(
-            usage_text(false, " pasos", false),
+            usage_text(false, " steps", false),
             "   ",
             ctx("ctx", 6, true),
             "  ",
-            ext("externo"),
+            ext("external"),
         ),
         join(
-            usage_text(false, "p", true),
+            usage_text(false, "st", true),
             "  ",
             ctx("ctx", 0, false),
             " ",
@@ -203,9 +203,9 @@ mod tests {
         let s = text(&line(t, &snap(false), 120));
         assert_eq!(
             s,
-            "↑12.4k ↓3.1k tok · $0 · 8/40 pasos · 21 s/10 min   contexto ▕███░░░░░░░▏ 31 %"
+            "↑12.4k ↓3.1k tok · $0 · 8/40 steps · 21 s/10 min   context ▕███░░░░░░░▏ 31 %"
         );
-        assert!(text(&line(t, &snap(true), 120)).ends_with("   externo"));
+        assert!(text(&line(t, &snap(true), 120)).ends_with("   external"));
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod tests {
         s.limits = RunLimits::default();
         let out = text(&line(t, &s, 80));
         assert!(
-            out.contains("contexto ─") && out.contains("8 pasos") && out.contains("21 s"),
+            out.contains("context ─") && out.contains("8 steps") && out.contains("21 s"),
             "{out}"
         );
     }

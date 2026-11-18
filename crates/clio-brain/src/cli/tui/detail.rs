@@ -149,7 +149,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             Act::Tab => {
                 let n = d.recalled().len();
                 if n == 0 {
-                    app.flash = Some("este run no usó ningún recuerdo".into());
+                    app.flash = Some("this run used no memory".into());
                 } else {
                     d.mem_sel = (d.mem_sel + 1) % n;
                 }
@@ -161,7 +161,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                         useful: act == Act::Useful,
                     }];
                 }
-                None => app.flash = Some("este run no usó ningún recuerdo".into()),
+                None => app.flash = Some("this run used no memory".into()),
             },
             Act::Diff if !d.rows.is_empty() => {
                 d.in_diff = true;
@@ -189,7 +189,7 @@ fn ask_undo(app: &mut App) {
             d.info.workspace.clone(),
         ));
     } else {
-        app.notice = Some("Solo se puede deshacer un run que ya se aplicó.".into());
+        app.notice = Some("Only a run that was applied can be undone.".into());
     }
 }
 
@@ -219,18 +219,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!(" {} {}", t.dot(), clean(&info.id)), t.dim()),
         ]),
         Line::from(vec![
-            Span::styled("carpeta ", t.dim()),
+            Span::styled("folder  ", t.dim()),
             Span::raw(clean(&info.workspace)),
         ]),
         Line::from(vec![
-            Span::styled("pedido  ", t.dim()),
+            Span::styled("request ", t.dim()),
             Span::raw(clean(&info.instruction)),
         ]),
     ];
     match &info.summary {
         Some(s) => lines.push(Line::from(Span::styled(
             format!(
-                "nivel {} {dot} {} pasos {dot} {} {dot} {} {dot} {} denegadas",
+                "level {} {dot} {} steps {dot} {} {dot} {} {dot} {} denied",
                 s.level,
                 s.steps,
                 usage::ms_label(u64::try_from(s.elapsed_ms).unwrap_or(0)),
@@ -241,7 +241,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             t.dim(),
         ))),
         None => lines.push(Line::from(Span::styled(
-            "sin resumen: el run no llegó a terminar",
+            "no summary: the run did not finish",
             t.fail(),
         ))),
     }
@@ -254,10 +254,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         .map(|s| {
             s.final_message
                 .clone()
-                .unwrap_or_else(|| format!("(sin mensaje final) {}", s.pending.join("; ")))
+                .unwrap_or_else(|| format!("(no final message) {}", s.pending.join("; ")))
         })
         .unwrap_or_default();
-    let mut msg_lines = vec![section(t, "mensaje del agente", area.width)];
+    let mut msg_lines = vec![section(t, "agent message", area.width)];
     msg_lines.extend(
         sanitize::multiline(&msg)
             .lines()
@@ -267,7 +267,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
 
     let mut items: Vec<Line> = Vec::new();
     if d.rows.is_empty() {
-        items.push(Line::from(Span::styled("sin cambios", t.dim())));
+        items.push(Line::from(Span::styled("no changes", t.dim())));
     } else {
         // The heading takes one line; the selected row stays in view.
         let rows_h = usize::from(files_a.height).saturating_sub(1).max(1);
@@ -296,7 +296,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
     let mut all = vec![section(
         t,
-        &format!("archivos cambiados ({})", d.rows.len()),
+        &format!("changed files ({})", d.rows.len()),
         area.width,
     )];
     all.extend(items);
@@ -340,7 +340,7 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
             Span::styled(format!("{} {}", row.kind, clean(&row.rel)), t.bold()),
             Span::styled(
                 format!(
-                    "  {} {}/{} {} línea {}/{}",
+                    "  {} {}/{} {} line {}/{}",
                     t.dot(),
                     d.sel + 1,
                     d.rows.len(),
@@ -356,13 +356,13 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App, d: &Detail) {
     f.render_widget(Paragraph::new(lines), body);
 }
 
-/// `memoria  recordó m3 [m7] · guardó 1 (1 en cuarentena)`: what the memory did in this run. The
+/// `memory  recalled m3 [m7] · saved 1 (1 in quarantine)`: what the memory did in this run. The
 /// memory in brackets is the one `+` and `-` judge (Tab changes it).
 fn memory_line(app: &App, d: &Detail) -> Option<Line<'static>> {
     let t = app.theme;
     let m = d.info.summary.as_ref()?.memory.as_ref()?;
     let recalled = if m.recalled.is_empty() {
-        "no recordó nada".to_owned()
+        "recalled nothing".to_owned()
     } else {
         let ids: Vec<String> = m
             .recalled
@@ -376,19 +376,19 @@ fn memory_line(app: &App, d: &Detail) -> Option<Line<'static>> {
                 }
             })
             .collect();
-        format!("recordó {} (+ útil, - equivocado)", ids.join(" "))
+        format!("recalled {} (+ useful, - wrong)", ids.join(" "))
     };
     let mut text = format!(
-        "{recalled} {} guardó {} ({} en cuarentena)",
+        "{recalled} {} saved {} ({} in quarantine)",
         t.dot(),
         m.saved.len(),
         m.pending
     );
     if !m.rejected.is_empty() {
-        text += &format!(" {} {} rechazado(s)", t.dot(), m.rejected.len());
+        text += &format!(" {} {} rejected", t.dot(), m.rejected.len());
     }
     Some(Line::from(vec![
-        Span::styled("memoria ", t.dim()),
+        Span::styled("memory ", t.dim()),
         Span::raw(clean(&text)),
     ]))
 }

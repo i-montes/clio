@@ -42,7 +42,7 @@ pub(super) const THEME: Theme = Theme {
 };
 
 pub(super) fn app() -> App {
-    App::new("/home/ivan/proyecto", THEME)
+    App::new("/home/ivan/project", THEME)
 }
 
 /// Feeds inputs one by one, collecting every command.
@@ -59,8 +59,8 @@ pub(super) fn feed(mut a: App, inputs: Vec<Input>) -> (App, Vec<Cmd>) {
 pub(super) fn summary(id: &str, ending: &str, files: &[&str]) -> RunSummary {
     RunSummary {
         id: id.into(),
-        workspace: "/home/ivan/proyecto".into(),
-        instruction: "arregla parse_date".into(),
+        workspace: "/home/ivan/project".into(),
+        instruction: "fix parse_date".into(),
         ending: ending.into(),
         level: "Simple".into(),
         steps: 7,
@@ -68,7 +68,7 @@ pub(super) fn summary(id: &str, ending: &str, files: &[&str]) -> RunSummary {
         input_tokens: 12_400,
         output_tokens: 3_100,
         modified: files.iter().map(|s| (*s).to_owned()).collect(),
-        final_message: Some("Arreglé parse_date.\nNo pude correr las pruebas.".into()),
+        final_message: Some("Fixed parse_date.\nCould not run the tests.".into()),
         ..RunSummary::default()
     }
 }
@@ -78,7 +78,7 @@ pub(super) fn info(id: &str, status: Status, instr: &str, files: &[&str]) -> Run
         id: id.into(),
         status,
         instruction: instr.into(),
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         created_ms: Some(0),
         summary: Some(summary(id, "Final", files)),
     }
@@ -101,7 +101,7 @@ pub(super) fn with_runs() -> App {
         thinking: "low".into(),
         key: KeyState::Present,
         connector: "opencode".into(),
-        vault: "sin crear (opcional)".into(),
+        vault: "not created (optional)".into(),
         config_error: None,
         limits: LIMITS,
         window: 128_000,
@@ -113,16 +113,16 @@ pub(super) fn with_runs() -> App {
         info(
             ID1,
             Status::Pending,
-            "arregla parse_date en dates.py",
+            "fix parse_date en dates.py",
             &["dates.py"],
         ),
         info(
             ID2,
             Status::Applied,
-            "agrega un README",
+            "add a README",
             &["README.md", "docs/a.md"],
         ),
-        info(ID3, Status::Failed, "refactoriza todo", &[]),
+        info(ID3, Status::Failed, "refactor everything", &[]),
     ];
     a
 }
@@ -139,12 +139,7 @@ const DIFF: &str = "--- a/dates.py\n+++ b/dates.py\n@@ -1,3 +1,3 @@\n def parse(
 
 pub(super) fn detail(id: &str, status: Status) -> Detail {
     Detail {
-        info: info(
-            id,
-            status,
-            "arregla parse_date",
-            &["dates.py", "docs/new.md"],
-        ),
+        info: info(id, status, "fix parse_date", &["dates.py", "docs/new.md"]),
         rows: vec![
             row('M', "dates.py", DIFF),
             row(
@@ -252,7 +247,7 @@ fn home_keys_new_refresh_doctor_help_quit() {
     assert_eq!(
         cmds,
         vec![Cmd::Check {
-            dir: "/home/ivan/proyecto".into(),
+            dir: "/home/ivan/project".into(),
             seq: 1
         }]
     );
@@ -321,12 +316,7 @@ fn ctrl_l_asks_for_a_redraw_and_ctrl_d_flips_debug_on_every_screen() {
         assert_eq!(b.screen, screen, "redrawing changes no screen");
         let (b, cmds) = feed(b, vec![ctrl('d')]);
         assert_eq!(cmds, vec![Cmd::Debug(true)], "{screen:?}");
-        assert!(
-            b.debug
-                && b.flash
-                    .as_deref()
-                    .is_some_and(|f| f.contains("debug activado"))
-        );
+        assert!(b.debug && b.flash.as_deref().is_some_and(|f| f.contains("debug on")));
         assert_eq!(b.screen, screen, "toggling debug changes no screen");
         let (b, cmds) = feed(b, vec![ctrl('d')]);
         assert_eq!(cmds, vec![Cmd::Debug(false)]);
@@ -367,7 +357,7 @@ fn apply_needs_a_plan_then_a_y() {
     assert_eq!((c.action, c.files), (Action::Apply, 2));
     let text = screen_text(&a, 80, 24);
     assert!(
-        text.contains("Aplicar 2 archivo(s) en") && text.contains("/home/ivan/proyecto"),
+        text.contains("Apply 2 file(s) in") && text.contains("/home/ivan/project"),
         "{text}"
     );
     // Anything but y cancels and nothing is applied.
@@ -381,7 +371,7 @@ fn planned(id: &str, tainted: Option<bool>) -> Planned {
     Planned {
         id: id.into(),
         files: 2,
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         names: vec!["M src/dates.py".into(), "+ notas\u{1b}[2J.md".into()],
         tainted,
     }
@@ -446,10 +436,7 @@ fn a_plan_that_arrives_after_the_person_moved_on_does_not_ask() {
 // when the agent read outside content (or that nothing says so).
 #[test]
 fn the_apply_dialog_names_the_files_and_the_taint() {
-    for (tainted, note) in [
-        (Some(true), "leyó contenido de fuera"),
-        (None, "Sin registro"),
-    ] {
+    for (tainted, note) in [(Some(true), "read outside content"), (None, "No record")] {
         let (a, _) = feed(
             with_runs(),
             vec![Input::Bg(Bg::Planned(Ok(planned(ID1, tainted))))],
@@ -468,7 +455,7 @@ fn the_apply_dialog_names_the_files_and_the_taint() {
     );
     let text = screen_text(&a, 90, 24);
     assert!(
-        !text.contains("leyó contenido de fuera") && !text.contains("Sin registro"),
+        !text.contains("read outside content") && !text.contains("No record"),
         "{text}"
     );
 }
@@ -478,13 +465,13 @@ fn a_refused_plan_shows_the_reasons_and_applies_nothing() {
     let (a, cmds) = feed(
         with_runs(),
         vec![Input::Bg(Bg::Planned(Err(
-            "rechazado, no se aplicó nada:\n  .git/hooks/x: ruta protegida".into(),
+            "rejected, nothing was applied:\n  .git/hooks/x: protected path".into(),
         )))],
     );
     assert!(cmds.is_empty() && a.confirm.is_none());
     let text = screen_text(&a, 80, 24);
     assert!(
-        text.contains("ruta protegida") && text.contains("Aviso"),
+        text.contains("protected path") && text.contains("Notice"),
         "{text}"
     );
     let (a, cmds) = feed(a, vec![ch('y')]);
@@ -512,10 +499,10 @@ fn new_run_validates_before_launching() {
     // No instruction and no check yet: Enter does nothing.
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty() && a.screen == Screen::NewRun);
-    let (a, _) = feed(a, "arregla algo ".chars().map(ch).collect());
+    let (a, _) = feed(a, "fix something ".chars().map(ch).collect());
     // The check answers for the current sequence (1); an old answer is ignored.
     let ok = Preview {
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         files: 3,
         bytes: 10,
         ..Preview::default()
@@ -541,8 +528,8 @@ fn new_run_validates_before_launching() {
     assert_eq!(
         cmds,
         vec![Cmd::Start {
-            dir: "/home/ivan/proyecto".into(),
-            instruction: "arregla algo".into()
+            dir: "/home/ivan/project".into(),
+            instruction: "fix something".into()
         }]
     );
     assert_eq!(a.screen, Screen::Live);
@@ -560,12 +547,12 @@ fn new_run_rejects_an_invalid_folder_and_edits_the_fields() {
         a,
         vec![Input::Bg(Bg::Checked {
             seq,
-            result: Err("rechazo usar / como carpeta de trabajo".into()),
+            result: Err("refused to use / as a working folder".into()),
         })],
     );
     assert!(cmds.is_empty());
     let text = screen_text(&a, 80, 24);
-    assert!(text.contains("rechazo usar /"), "{text}");
+    assert!(text.contains("refused to use /"), "{text}");
     // Backspace edits the folder and asks again; Alt+Enter adds a line to the instruction.
     let (a, cmds) = feed(a, vec![key(KeyCode::Backspace)]);
     assert_eq!(a.new_run.dir, "");
@@ -610,7 +597,7 @@ fn pasted_text_is_cleaned_and_cannot_press_enter() {
         a,
         vec![key(KeyCode::Tab), Input::Paste("/tmp\nx\u{1b}[31m".into())],
     );
-    assert_eq!(a.new_run.dir, "/home/ivan/proyecto/tmpx");
+    assert_eq!(a.new_run.dir, "/home/ivan/project/tmpx");
     assert!(matches!(cmds[0], Cmd::Check { .. }));
 }
 
@@ -618,7 +605,7 @@ pub(super) fn started() -> Bg {
     Bg::Started {
         id: ID1.into(),
         files: 3,
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         usage: RunUsage::new(128_000, true, LIMITS),
     }
 }
@@ -666,10 +653,10 @@ fn live_run_shows_events_and_cancel_asks_twice() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("read_file") && t.contains("permitido") && t.contains("negado"),
+                t.contains("read_file") && t.contains("allowed") && t.contains("denied"),
                 "{t}"
             );
-            assert!(t.contains("S-16") && t.contains("1234 car."), "{t}");
+            assert!(t.contains("S-16") && t.contains("1234 ch."), "{t}");
             // The use of the run, shortened at 80 columns.
             assert!(
                 t.contains("2/40")
@@ -678,7 +665,7 @@ fn live_run_shows_events_and_cancel_asks_twice() {
                 "{t}"
             );
             assert!(
-                !t.contains("contaminada") && !t.contains("leyó archivos"),
+                !t.contains("tainted") && !t.contains("read files"),
                 "the long warning is gone; `externo` says it"
             );
         }
@@ -686,7 +673,7 @@ fn live_run_shows_events_and_cancel_asks_twice() {
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
     assert_eq!(cmds, vec![Cmd::Cancel]);
     assert!(a.live.cancelling && !a.quit);
-    assert!(screen_text(&a, 80, 24).contains("cancelando"));
+    assert!(screen_text(&a, 80, 24).contains("cancelling"));
     // The second press leaves right away (the run stays incomplete; the original was never touched).
     let (a, cmds) = feed(a, vec![ctrl('c')]);
     assert!(cmds.is_empty() && a.quit);
@@ -775,7 +762,7 @@ fn detail_diff_scroll_follows_the_viewport() {
     let a = open_detail(with_runs(), d, true);
     assert!(a.detail.as_ref().unwrap().in_diff);
     let t = screen_text(&a, 80, 24); // draw sets the viewport height
-    assert!(t.contains("línea 1/63"), "{t}");
+    assert!(t.contains("line 1/63"), "{t}");
     let (a, _) = feed(a, vec![ch('G')]);
     let t = screen_text(&a, 80, 24);
     assert!(t.contains("+line 59"), "{t}");
@@ -806,7 +793,7 @@ fn detail_apply_and_undo_ask_first() {
     assert!(cmds.is_empty());
     let c = a.confirm.clone().unwrap();
     assert_eq!((c.action, c.files), (Action::Undo, 2));
-    assert!(screen_text(&a, 80, 24).contains("Deshacer lo aplicado (2 archivo(s))"));
+    assert!(screen_text(&a, 80, 24).contains("Undo what was applied (2 file(s))"));
     let (_, cmds) = feed(a, vec![ch('y')]);
     assert_eq!(cmds, vec![Cmd::Undo { id: ID2.into() }]);
 }
@@ -814,10 +801,7 @@ fn detail_apply_and_undo_ask_first() {
 #[test]
 fn after_applying_the_lists_reload() {
     let a = open_detail(with_runs(), detail(ID1, Status::Pending), false);
-    let (a, cmds) = feed(
-        a,
-        vec![Input::Bg(Bg::Done(Ok("2 archivo(s) aplicados".into())))],
-    );
+    let (a, cmds) = feed(a, vec![Input::Bg(Bg::Done(Ok("2 file(s) applied".into())))]);
     assert_eq!(
         cmds,
         vec![
@@ -828,7 +812,7 @@ fn after_applying_the_lists_reload() {
             }
         ]
     );
-    assert_eq!(a.flash.as_deref(), Some("2 archivo(s) aplicados"));
+    assert_eq!(a.flash.as_deref(), Some("2 file(s) applied"));
 }
 
 #[test]
@@ -851,9 +835,9 @@ fn slash_filters_the_list_and_the_selection_follows_the_filter() {
     assert!(cmds.is_empty() && a.home.filter == "readme");
     assert_eq!(a.home.visible(), vec![1]);
     let t = screen_text(&a, 80, 24);
-    assert!(t.contains("/readme") && t.contains("1 de 3"), "{t}");
+    assert!(t.contains("/readme") && t.contains("1 of 3"), "{t}");
     assert!(
-        t.contains("agrega un README") && !t.contains("arregla parse_date en"),
+        t.contains("add a README") && !t.contains("fix parse_date en"),
         "{t}"
     );
     // Enter leaves the typing and keeps the filter; the keys are shortcuts again.
@@ -890,10 +874,7 @@ fn the_filter_matches_status_and_id_and_says_when_nothing_matches() {
     let (a, _) = feed(a, "zzz".chars().map(ch).collect());
     assert!(a.home.visible().is_empty());
     let t = screen_text(&a, 80, 24);
-    assert!(
-        t.contains("Ningún run coincide") && t.contains("0 de 3"),
-        "{t}"
-    );
+    assert!(t.contains("No run matches") && t.contains("0 of 3"), "{t}");
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter), key(KeyCode::Enter)]);
     assert!(cmds.is_empty() && a.flash.is_some(), "nothing to open");
     // Backspace edits the filter.
@@ -925,13 +906,13 @@ pub(super) fn report() -> Report {
         checks: vec![
             Check {
                 level: Level::Pass,
-                msg: "/home/ivan/.config/clio es privada (700)".into(),
+                msg: "/home/ivan/.config/clio is private (700)".into(),
                 hint: None,
             },
             Check {
                 level: Level::Warn,
-                msg: "conector opencode: falta la llave en el baúl".into(),
-                hint: Some("Con el baúl en marcha: clio connect opencode".into()),
+                msg: "connector opencode: the key is missing from the vault".into(),
+                hint: Some("With the vault running: clio connect opencode".into()),
             },
             Check {
                 level: Level::Fail,
@@ -952,28 +933,25 @@ fn home_draws_state_and_runs_without_overflow() {
         assert_fits(&t, w, h);
         if w >= 80 {
             assert!(
-                t.contains("clio · inicio · proyecto") && t.contains("beam-free"),
+                t.contains("clio · home · project") && t.contains("beam-free"),
                 "{t}"
             );
-            assert!(t.contains("llave presente"), "{t}");
-            assert!(t.contains("doctor: 12 ok · 3 avisos · 0 fallos"), "{t}");
+            assert!(t.contains("key present"), "{t}");
+            assert!(t.contains("doctor: 12 ok · 3 warnings · 0 failures"), "{t}");
             assert!(
                 t.contains("1031-1816-5a67") && t.contains("pending review"),
                 "{t}"
             );
             assert!(t.contains("applied") && t.contains("failed"), "{t}");
-            assert!(t.contains("arregla parse_date en dates.py"), "{t}");
-            assert!(t.contains("q salir") && t.contains("? ayuda"), "{t}");
+            assert!(t.contains("fix parse_date en dates.py"), "{t}");
+            assert!(t.contains("q quit") && t.contains("? help"), "{t}");
             if w >= 120 {
-                assert!(t.contains("/ filtrar") && t.contains("n nuevo"), "{t}");
+                assert!(t.contains("/ filter") && t.contains("n new"), "{t}");
             }
         }
     }
     let t = screen_text(&app(), 80, 24);
-    assert!(
-        t.contains("Todavía no hay runs") && t.contains("cargando"),
-        "{t}"
-    );
+    assert!(t.contains("No runs yet") && t.contains("loading"), "{t}");
 }
 
 #[test]
@@ -982,17 +960,17 @@ fn home_reports_a_missing_key_and_a_broken_config() {
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("falta la llave del modelo: clio connect opencode"),
+        t.contains("model key missing: clio connect opencode"),
         "{t}"
     );
     // A config with no connector still says where to start.
     a.home.header.as_mut().unwrap().connector = String::new();
     let t = screen_text(&a, 80, 24);
-    assert!(t.contains("falta la llave del modelo: clio connect"), "{t}");
+    assert!(t.contains("model key missing: clio connect"), "{t}");
     assert!(!t.contains("clio connect opencode"), "{t}");
     a.home.header.as_mut().unwrap().config_error =
-        Some("config.json: no existe (ejecuta `clio init` primero)".into());
-    assert!(screen_text(&a, 100, 24).contains("ejecuta `clio init` primero"));
+        Some("config.json: does not exist (run `clio init` first)".into());
+    assert!(screen_text(&a, 100, 24).contains("run `clio init` first"));
 }
 
 #[test]
@@ -1024,9 +1002,9 @@ fn there_are_no_boxes_except_in_dialogs() {
 #[test]
 fn new_run_draws_the_checks_and_the_exclusions() {
     let (mut a, _) = feed(with_runs(), vec![ch('n')]);
-    a.new_run.instruction = "arregla algo".into();
+    a.new_run.instruction = "fix something".into();
     a.new_run.check = Some(Ok(Preview {
-        workspace: "/home/ivan/proyecto".into(),
+        workspace: "/home/ivan/project".into(),
         files: 12,
         bytes: 3 * 1024 * 1024,
         secrets: vec![".env".into(), "id_rsa".into()],
@@ -1038,22 +1016,22 @@ fn new_run_draws_the_checks_and_the_exclusions() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("Carpeta") && t.contains("/home/ivan/proyecto"),
+                t.contains("Folder") && t.contains("/home/ivan/project"),
                 "{t}"
             );
             assert!(
-                t.contains("arregla algo") && t.contains("se copiarán 12 archivos (3,0 MB)"),
+                t.contains("fix something") && t.contains("12 files will be copied (3.0 MB)"),
                 "{t}"
             );
-            assert!(t.contains("parecen secretos: .env, id_rsa"), "{t}");
+            assert!(t.contains("look like secrets: .env, id_rsa"), "{t}");
             assert!(
-                t.contains(".git, node_modules") && t.contains("enlaces simbólicos: link"),
+                t.contains(".git, node_modules") && t.contains("symbolic links: link"),
                 "{t}"
             );
         }
     }
-    a.new_run.check = Some(Err("rechazo usar tu carpeta personal".into()));
-    assert!(screen_text(&a, 80, 24).contains("rechazo usar tu carpeta personal"));
+    a.new_run.check = Some(Err("refused to use your home folder".into()));
+    assert!(screen_text(&a, 80, 24).contains("refused to use your home folder"));
 }
 
 #[test]
@@ -1064,15 +1042,15 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("pending review") && t.contains("arregla parse_date"),
+                t.contains("pending review") && t.contains("fix parse_date"),
                 "{t}"
             );
             assert!(
-                t.contains("Arreglé parse_date.") && t.contains("No pude correr las pruebas."),
+                t.contains("Fixed parse_date.") && t.contains("Could not run the tests."),
                 "{t}"
             );
             assert!(
-                t.contains("archivos cambiados (2)")
+                t.contains("changed files (2)")
                     && t.contains("M dates.py")
                     && t.contains("A docs/new.md"),
                 "{t}"
@@ -1133,16 +1111,16 @@ fn doctor_draws_marks_and_one_hint_per_warning() {
         if w >= 80 {
             assert!(
                 t.contains("✓  /home")
-                    && t.contains("!  conector opencode: falta")
+                    && t.contains("!  connector opencode: the key")
                     && t.contains("✗  /x/y"),
                 "{t}"
             );
             assert!(
-                t.contains("→ Con el baúl en marcha: clio connect opencode")
+                t.contains("→ With the vault running: clio connect opencode")
                     && t.contains("→ chmod 700 /x/y"),
                 "{t}"
             );
-            assert!(t.contains("doctor: 1 ok · 1 aviso · 1 fallo"), "{t}");
+            assert!(t.contains("doctor: 1 ok · 1 warning · 1 failure"), "{t}");
         }
     }
 }
@@ -1153,21 +1131,21 @@ fn help_lists_this_screens_keys_in_one_short_view() {
     let t = screen_text(&a, 80, 24);
     assert_fits(&t, 80, 24);
     for want in [
-        "atajos",
+        "keys",
         "Enter",
-        "abrir",
-        "filtrar",
-        "contexto",
-        "uso",
-        "refrescar",
+        "open",
+        "filter",
+        "context",
+        "usage",
+        "refresh",
         "doctor",
-        "salir",
+        "quit",
         "Ctrl-D",
-        "modo debug",
+        "debug mode",
         "Ctrl-L",
-        "redibujar",
-        "aplicar",
-        "deshacer",
+        "redraw",
+        "apply",
+        "undo",
     ] {
         assert!(t.contains(want), "{want}\n{t}");
     }
@@ -1176,14 +1154,14 @@ fn help_lists_this_screens_keys_in_one_short_view() {
     a.before_help = Screen::Live;
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("cancelar") && t.contains("tiempo / debug"),
+        t.contains("cancel") && t.contains("timeline / debug"),
         "{t}"
     );
-    assert!(!t.contains("filtrar"), "{t}");
+    assert!(!t.contains("filter"), "{t}");
     // At the minimum size every key is still there (two columns), and a long list would scroll.
     let t = screen_text(&a, 60, 16);
     assert_fits(&t, 60, 16);
-    for want in ["Ctrl-C", "Tab", "Ctrl-B", "Ctrl-D", "Ctrl-L", "redibujar"] {
+    for want in ["Ctrl-C", "Tab", "Ctrl-B", "Ctrl-D", "Ctrl-L", "redraw"] {
         assert!(t.contains(want), "{want}\n{t}");
     }
     a.before_help = Screen::Home;
@@ -1199,7 +1177,7 @@ fn tiny_terminals_get_a_message_and_nothing_panics() {
     for (w, h) in [(59, 16), (60, 15), (30, 8), (1, 1)] {
         let t = screen_text(&a, w, h);
         if w > 10 {
-            assert!(t.contains("Terminal muy pequeña") || h < 4, "{w}x{h}\n{t}");
+            assert!(t.contains("Terminal too small") || h < 4, "{w}x{h}\n{t}");
         }
     }
     let t = screen_text(&a, 59, 16);
@@ -1351,7 +1329,7 @@ fn hostile_detail() -> Detail {
                 'M',
                 n,
                 &format!(
-                    "--- a/{n}\n+++ b/{n}\n@@ -1,1 +1,1 @@\n-viejo\u{1b}[2J\n+nuevo\u{1b}]0;pwned-title\u{7}\r+FAKE\n \u{202E}reversed\n"
+                    "--- a/{n}\n+++ b/{n}\n@@ -1,1 +1,1 @@\n-viejo\u{1b}[2J\n+new\u{1b}]0;pwned-title\u{7}\r+FAKE\n \u{202E}reversed\n"
                 ),
             )
         })
@@ -1481,7 +1459,7 @@ impl App {
     /// A second copy of the pieces a test needs (the app is not `Clone`: it holds a channel-free
     /// but large state, and cloning it for real use is never wanted).
     pub(super) fn clone_for_test(&self) -> App {
-        let mut b = App::new("/home/ivan/proyecto", self.theme);
+        let mut b = App::new("/home/ivan/project", self.theme);
         b.screen = self.screen;
         b.home.runs = self.home.runs.clone();
         b.home.sel = self.home.sel;
@@ -1532,8 +1510,8 @@ fn short_id_never_panics_on_a_non_ascii_name() {
 #[test]
 fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let asks = vec![
-        ("a1".to_owned(), "«borrar» rm -r datos".to_owned()),
-        ("b2".to_owned(), "«enviar» git push".to_owned()),
+        ("a1".to_owned(), "«delete» rm -r datos".to_owned()),
+        ("b2".to_owned(), "«send» git push".to_owned()),
     ];
     let (a, cmds) = feed(app(), vec![Input::Bg(Bg::ChatAsks(asks))]);
     assert!(cmds.is_empty());
@@ -1541,18 +1519,18 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
     let screen = screen_text(&a, 90, 30);
     assert!(
-        screen.contains("¿Lo ejecuto?")
-            && screen.contains("s y Enter")
-            && screen.contains("n o Esc")
+        screen.contains("Run it?")
+            && screen.contains("y then Enter")
+            && screen.contains("n or Esc")
             && screen.contains("rm -r datos"),
         "{screen}"
     );
     // Its own title, and the class on a line of its own above the command.
     assert!(
-        screen.contains("Visto bueno") && !screen.contains("Confirmar"),
+        screen.contains("Approval") && !screen.contains("Confirm"),
         "{screen}"
     );
-    let class = screen.lines().find(|l| l.contains("«borrar»")).unwrap();
+    let class = screen.lines().find(|l| l.contains("«delete»")).unwrap();
     assert!(!class.contains("rm -r"), "{screen}");
     // Typing on: nothing is answered, and an `s` followed by another key is undone.
     let mut typing = Vec::new();
@@ -1604,12 +1582,12 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let (a, _) = feed(
         a,
         vec![Input::Bg(Bg::ChatAnswered(Ok(
-            "aprobado a1: rm -r datos".into()
+            "approved a1: rm -r datos".into()
         )))],
     );
     assert!(matches!(
         a.chat.items.last(),
-        Some(super::chat::Item::Note(m)) if m.contains("aprobado a1")
+        Some(super::chat::Item::Note(m)) if m.contains("approved a1")
     ));
     assert_eq!(a.answering, 1);
 }
@@ -1653,7 +1631,7 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     let mut inputs = typed_at(1_000, "muéstrame los permi");
     inputs.push(Input::Bg(Bg::ChatAsks(vec![(
         "a1".into(),
-        "«borrar» rm -r x".into(),
+        "«delete» rm -r x".into(),
     )])));
     inputs.extend(typed_at(2_000, "sos"));
     inputs.extend([Input::Tick(2_150), key(KeyCode::Enter)]);
@@ -1662,17 +1640,17 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     assert_eq!(a.chat.input, "muéstrame los permi");
     let c = a.confirm.as_ref().unwrap();
     assert!(c.id == "a1" && !c.armed);
-    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    assert!(screen_text(&a, 100, 30).contains("wait a second"));
     let mut help = host_chat();
     help.open_help();
-    assert!(screen_text(&help, 140, 60).contains("un segundo sin teclear"));
+    assert!(screen_text(&help, 140, 60).contains("a second without typing"));
     // `n` and Esc too: no answer while the keys still come, then `n` rejects.
     let (a, cmds) = feed(a, vec![Input::Tick(2_900), ch('n')]);
     assert!(cmds.is_empty() && a.confirm.is_some(), "{cmds:?}");
     let (a, _) = feed(a, vec![Input::Tick(3_899)]);
-    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    assert!(screen_text(&a, 100, 30).contains("wait a second"));
     let (a, _) = feed(a, vec![Input::Tick(3_900)]);
-    assert!(!screen_text(&a, 100, 30).contains("espera un segundo"));
+    assert!(!screen_text(&a, 100, 30).contains("wait a second"));
     // `s` arms once the second passed, and Enter right after it runs it: no second wait.
     let armed_at = |a: App| {
         let (a, cmds) = feed(a, vec![ch('s')]);
@@ -1685,7 +1663,7 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     let a = armed_at(a);
     let armed_screen = screen_text(&a, 100, 30);
     assert!(
-        !armed_screen.contains("espera un segundo") && armed_screen.contains("Enter sí"),
+        !armed_screen.contains("wait a second") && armed_screen.contains("Enter yes"),
         "{armed_screen}"
     );
     // Any other key while armed disarms it, and the quiet second starts again: an Enter or an
@@ -1723,7 +1701,7 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
 // from when it came on screen; a queued one, from when it is shown, not when it was queued.
 #[test]
 fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
-    let ask = |id: &str| Input::Bg(Bg::ChatAsks(vec![(id.into(), "«borrar» rm -r x".into())]));
+    let ask = |id: &str| Input::Bg(Bg::ChatAsks(vec![(id.into(), "«delete» rm -r x".into())]));
     let mut inputs = typed_at(1_000, "x");
     inputs.extend([Input::Tick(3_500), ask("a1")]);
     inputs.extend([
@@ -1735,7 +1713,7 @@ fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
     let (a, cmds) = feed(host_chat(), inputs);
     assert!(cmds.is_empty(), "{cmds:?}");
     assert!(!a.confirm.as_ref().unwrap().armed);
-    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    assert!(screen_text(&a, 100, 30).contains("wait a second"));
     let (_, cmds) = feed(a, vec![Input::Tick(4_502), ch('s'), key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
@@ -1757,7 +1735,7 @@ fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
             Input::Bg(Bg::SessionPlan(Ok((
                 "/s/2_otra.jsonl".into(),
                 "otra".into(),
-                "solo la conversación".into(),
+                "the conversation only".into(),
             )))),
             ask("b2"),
             Input::Tick(5_000),
@@ -1786,7 +1764,7 @@ fn a_delete_never_comes_over_a_set_aside_question_nor_while_the_chat_is_busy() {
         Input::Bg(Bg::SessionPlan(Ok((
             "/s/2_otra.jsonl".into(),
             "otra".into(),
-            "solo la conversación".into(),
+            "the conversation only".into(),
         ))))
     };
     // No delete while a turn runs, a session opens or an approved action runs.
@@ -1812,7 +1790,7 @@ fn a_delete_never_comes_over_a_set_aside_question_nor_while_the_chat_is_busy() {
         a,
         vec![Input::Bg(Bg::ChatAsks(vec![(
             "a1".into(),
-            "«borrar» rm -r x".into(),
+            "«delete» rm -r x".into(),
         )]))],
     );
     let (a, _) = feed(a, vec![plan()]);
@@ -1839,9 +1817,9 @@ fn a_question_queued_behind_another_dialog_shows_when_it_closes() {
             Input::Bg(Bg::SessionPlan(Ok((
                 "/s/2_otra.jsonl".into(),
                 "otra".into(),
-                "solo la conversación".into(),
+                "the conversation only".into(),
             )))),
-            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm -r x".into())])),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
         ],
     );
     assert_eq!(a.confirm.as_ref().unwrap().action, Action::DeleteSession);
@@ -1851,7 +1829,7 @@ fn a_question_queued_behind_another_dialog_shows_when_it_closes() {
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
     // A question stamped with another session is not answered here.
     let mut a = host_chat();
-    let mut c = super::app::Confirm::new(Action::Approve, "b2".into(), 0, "«enviar» x".into());
+    let mut c = super::app::Confirm::new(Action::Approve, "b2".into(), 0, "«send» x".into());
     c.session = "otra".into();
     a.asks.push_back(c);
     a.confirm = Some(super::app::Confirm::new(
@@ -1876,7 +1854,7 @@ fn while_an_approved_action_runs_the_chat_cannot_be_left() {
     let mut a = host_chat();
     a.answering = 1;
     let (a, _) = feed(a, vec![ctrl('c')]);
-    assert!(!a.quit && a.flash.as_deref().unwrap().contains("aprobaste"));
+    assert!(!a.quit && a.flash.as_deref().unwrap().contains("approved"));
     let mut a = App {
         screen: Screen::Sessions,
         ..a
@@ -1886,12 +1864,12 @@ fn while_an_approved_action_runs_the_chat_cannot_be_left() {
         let (next, cmds) = feed(a, vec![k]);
         a = next;
         assert!(cmds.is_empty() && !a.quit, "{cmds:?}");
-        assert!(a.flash.as_deref().unwrap().contains("aprobaste"));
+        assert!(a.flash.as_deref().unwrap().contains("approved"));
         assert_eq!(a.chat.session_id, "sid");
     }
     let (a, _) = feed(
         a,
-        vec![Input::Bg(Bg::ChatAnswered(Ok("aprobado a1".into())))],
+        vec![Input::Bg(Bg::ChatAnswered(Ok("approved a1".into())))],
     );
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(matches!(&cmds[..], [Cmd::ChatOpen { .. }]), "{cmds:?}");
@@ -1914,7 +1892,7 @@ fn the_first_message_survives_a_session_that_is_still_opening() {
         _ => panic!("{cmds:?}"),
     };
     let (a, _) = feed(a, vec![ctrl('c')]);
-    assert!(!a.quit && a.flash.as_deref().unwrap().contains("abriendo"));
+    assert!(!a.quit && a.flash.as_deref().unwrap().contains("opening"));
     let mut a = App {
         screen: Screen::Sessions,
         ..a
@@ -1976,4 +1954,41 @@ fn the_sessions_drawer_is_redrawn_while_it_is_open() {
     );
     a.screen = Screen::Chat;
     assert_eq!(a.stale_after(), None);
+}
+
+// The question shows `y`; `s` (the Spanish sí) is still accepted, silently. Same timing for both.
+#[test]
+fn y_and_the_old_s_both_arm_the_question_after_its_quiet_second() {
+    for yes in ['y', 's'] {
+        let mut inputs = typed_at(1_000, "x");
+        inputs.extend([
+            Input::Tick(3_500),
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«delete» rm -r x".into())])),
+            Input::Tick(3_501),
+            ch(yes),
+            Input::Tick(3_502),
+            key(KeyCode::Enter),
+        ]);
+        let (a, cmds) = feed(host_chat(), inputs);
+        assert!(
+            cmds.is_empty() && !a.confirm.as_ref().unwrap().armed,
+            "{yes}"
+        );
+        let screen = screen_text(&a, 100, 30);
+        assert!(screen.contains("y then Enter") && !screen.contains("s y Enter"));
+        let (a, cmds) = feed(a, vec![Input::Tick(4_502), ch(yes)]);
+        assert!(
+            cmds.is_empty() && a.confirm.as_ref().unwrap().armed,
+            "{yes}"
+        );
+        let (_, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+        assert_eq!(
+            cmds,
+            vec![Cmd::ChatAnswer {
+                id: "a1".into(),
+                yes: true
+            }],
+            "{yes}"
+        );
+    }
 }

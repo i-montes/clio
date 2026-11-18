@@ -26,7 +26,7 @@ pub struct MRow {
     pub actor: String,
     pub content: String,
     pub source: Option<String>,
-    /// Where it lives: `personal`, `proyecto X`, `lección de X` (empty when it does not say).
+    /// Where it lives: `personal`, `project X`, `lesson from X` (empty when it does not say).
     pub place: String,
     pub title: Option<String>,
 }
@@ -85,7 +85,7 @@ impl MemoryData {
             due: link.review_due()?.len(),
             note: MemoryLink::model_dirs(&dirs.home)
                 .is_empty()
-                .then(|| "sin modelo de embeddings: busca solo por texto".to_owned()),
+                .then(|| "no embeddings model: search by text only".to_owned()),
             missing: false,
         })
     }
@@ -189,17 +189,17 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Act::Bottom => app.memory.sel = n.saturating_sub(1),
         Act::Filter => app.memory.filtering = true,
         Act::Refresh => {
-            app.flash = Some("memoria actualizada".into());
+            app.flash = Some("memory refreshed".into());
             return opened(app);
         }
         Act::Help => app.open_help(),
         Act::Open => {
             if let Some((r, pending)) = app.memory.selected() {
                 let text = format!(
-                    "m{} · {} · {} · origen {} · la escribió {}\n{}\n\n{}",
+                    "m{} · {} · {} · origin {} · written by {}\n{}\n\n{}",
                     r.id,
                     if pending {
-                        "olvidado (en cuarentena)"
+                        "forgotten (in quarantine)"
                     } else {
                         state_label(r.state)
                     },
@@ -208,7 +208,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                     r.actor,
                     r.source
                         .as_deref()
-                        .map_or(String::new(), |s| format!("fuente {s}")),
+                        .map_or(String::new(), |s| format!("source {s}")),
                     r.content
                 );
                 app.notice = Some(text);
@@ -218,7 +218,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Act::Copy => {
             if let Some((r, _)) = app.memory.selected() {
                 let text = sanitize::multiline(&r.content);
-                app.flash = Some(format!("m{} copiado al portapapeles", r.id));
+                app.flash = Some(format!("m{} copied to the clipboard", r.id));
                 return vec![Cmd::Clipboard(text)];
             }
         }
@@ -229,11 +229,12 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
 
 fn ask(app: &mut App, act: Act) -> Vec<Cmd> {
     let Some((r, pending)) = app.memory.selected() else {
-        app.flash = Some("no hay ningún recuerdo seleccionado".into());
+        app.flash = Some("no memory is selected".into());
         return vec![];
     };
     if act == Act::Promote && !pending {
-        app.flash = Some("solo se devuelve lo olvidado; ese ya está activo".into());
+        app.flash =
+            Some("only what was forgotten is brought back; this one is already active".into());
         return vec![];
     }
     let total = r.content.chars().count();
@@ -251,7 +252,7 @@ fn ask(app: &mut App, act: Act) -> Vec<Cmd> {
     // without saying so (the instruction may be after the harmless part).
     if total > SHOWN_CHARS {
         confirm.note = Some(format!(
-            "El texto sigue: se ven {SHOWN_CHARS} de {total} caracteres. Léelo entero (clio memory show m{}) antes de aprobar.",
+            "The text goes on: {SHOWN_CHARS} of {total} characters are shown. Read it whole (clio memory show m{}) before approving.",
             r.id
         ));
     }
@@ -262,7 +263,7 @@ fn ask(app: &mut App, act: Act) -> Vec<Cmd> {
 /// How much of a memory the confirmation shows.
 const SHOWN_CHARS: usize = 300;
 
-/// `m12  cuarentena  episódico    externo   text…`
+/// `m12  quarantine  episodic    externo   text…`
 fn row_line(app: &App, r: &MRow, pending: bool, selected: bool, width: usize) -> Line<'static> {
     let t = app.theme;
     let base = if selected { t.selected() } else { t.plain() };
@@ -276,7 +277,7 @@ fn row_line(app: &App, r: &MRow, pending: bool, selected: bool, width: usize) ->
     };
     let head = format!("{:<6}", format!("m{}", r.id));
     let state = if pending && r.state == State::Quarantine {
-        "olvidado"
+        "forgotten"
     } else {
         state_label(r.state)
     };
@@ -314,7 +315,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     let Some(d) = &m.data else {
         let msg = m.error.as_deref().map_or_else(
-            || "cargando…".to_owned(),
+            || "loading…".to_owned(),
             |e| format!("{} {}", t.bang(), clean(e)),
         );
         f.render_widget(
@@ -332,23 +333,23 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             usize::try_from(d.active)
                 .unwrap_or(usize::MAX)
                 .max(d.recent.len()),
-            "recuerdo activo",
-            "recuerdos activos"
+            "active memory",
+            "active memories"
         ),
         t.dot(),
-        plural(d.pending.len(), "olvidado", "olvidados"),
+        plural(d.pending.len(), "forgotten", "forgotten"),
         t.dot(),
         plural(
             usize::try_from(d.archived).unwrap_or(0),
-            "archivado",
-            "archivados"
+            "archived",
+            "archived"
         ),
     );
     if d.due > 0 {
         state = format!(
             "{state} {} {}",
             t.dot(),
-            plural(d.due, "por revisar", "por revisar")
+            plural(d.due, "to review", "to review")
         );
     }
     if let Some(n) = &d.note {
@@ -363,9 +364,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     )));
     if d.missing {
         lines.push(Line::from(""));
-        lines.push(Line::from("Todavía no hay memoria."));
+        lines.push(Line::from("There is no memory yet."));
         lines.push(Line::from(Span::styled(
-            "Se crea con `clio init` o con el primer run.",
+            "It is created by `clio init` or by the first run.",
             t.dim(),
         )));
         f.render_widget(Paragraph::new(lines), area);
@@ -377,7 +378,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("/", t.accent()),
             Span::raw(clean(&m.filter)),
             Span::styled(if m.filtering { t.cursor() } else { "" }, t.accent()),
-            Span::styled(format!("   {n} coinciden"), t.dim()),
+            Span::styled(format!("   {n} match"), t.dim()),
         ]));
     }
     let vis = m.visible();
@@ -385,9 +386,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             if m.filter.is_empty() {
-                "Todavía no hay recuerdos."
+                "There are no memories yet."
             } else {
-                "Ningún recuerdo coincide."
+                "No memory matches."
             },
             t.dim(),
         )));
@@ -406,7 +407,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 None,
                 section(
                     t,
-                    &format!("olvidados, en cuarentena ({n_pending})"),
+                    &format!("forgotten, in quarantine ({n_pending})"),
                     area.width,
                 ),
             ));
@@ -415,7 +416,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             seen_recent = true;
             rows.push((
                 None,
-                section(t, &format!("recientes ({n_recent})"), area.width),
+                section(t, &format!("recent ({n_recent})"), area.width),
             ));
         }
         rows.push((

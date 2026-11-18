@@ -50,18 +50,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let mut lines: Vec<Line> = Vec::new();
     match &app.doctor.report {
-        None => lines.push(Line::from(Span::styled("comprobando…", t.dim()))),
+        None => lines.push(Line::from(Span::styled("checking…", t.dim()))),
         Some(r) => {
             lines.push(Line::from(Span::styled(
                 format!(
                     "doctor: {} ok {} {} {} {}{}",
                     r.count(Level::Pass),
                     t.dot(),
-                    plural(r.count(Level::Warn), "aviso", "avisos"),
+                    plural(r.count(Level::Warn), "warning", "warnings"),
                     t.dot(),
-                    plural(r.count(Level::Fail), "fallo", "fallos"),
+                    plural(r.count(Level::Fail), "failure", "failures"),
                     if app.doctor.loading {
-                        "   (actualizando…)"
+                        "   (refreshing…)"
                     } else {
                         ""
                     }

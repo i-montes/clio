@@ -74,7 +74,7 @@ pub const COMMANDS: &[Command] = &[
         "model",
         &[],
         "[name]",
-        "cambia el modelo del conector",
+        "switch the connector's model",
         true,
         Run::Model,
     ),
@@ -82,7 +82,7 @@ pub const COMMANDS: &[Command] = &[
         "connector",
         &[],
         "[name]",
-        "cambia el conector (vale para la próxima sesión)",
+        "switch the connector (from the next session)",
         true,
         Run::Connector,
     ),
@@ -90,39 +90,25 @@ pub const COMMANDS: &[Command] = &[
         "effort",
         &[],
         "[level]",
-        "cuánto piensa el modelo",
+        "how hard the model thinks",
         true,
         Run::Effort,
     ),
-    c(
-        "new",
-        &["clear"],
-        "",
-        "empieza una sesión nueva",
-        true,
-        Run::New,
-    ),
+    c("new", &["clear"], "", "start a new session", true, Run::New),
     c(
         "sessions",
         &["resume"],
         "",
-        "abre el panel de sesiones",
+        "open the sessions drawer",
         false,
         Run::Sessions,
     ),
-    c(
-        "name",
-        &[],
-        "<title>",
-        "pone título a la sesión",
-        true,
-        Run::Name,
-    ),
+    c("name", &[], "<title>", "title the session", true, Run::Name),
     c(
         "compact",
         &[],
         "[instructions]",
-        "resume la conversación para liberar contexto",
+        "summarise the conversation to free context",
         true,
         Run::Compact,
     ),
@@ -130,7 +116,7 @@ pub const COMMANDS: &[Command] = &[
         "context",
         &[],
         "",
-        "cuánto contexto lleva la sesión",
+        "how much context the session holds",
         false,
         Run::Context,
     ),
@@ -138,7 +124,7 @@ pub const COMMANDS: &[Command] = &[
         "usage",
         &["cost"],
         "",
-        "tokens, costo, pasos y tiempo de la sesión",
+        "tokens, cost, steps and time of the session",
         false,
         Run::Usage,
     ),
@@ -146,7 +132,7 @@ pub const COMMANDS: &[Command] = &[
         "pending",
         &[],
         "",
-        "lo que espera tu visto bueno",
+        "what waits for your approval",
         false,
         Run::Pending,
     ),
@@ -154,7 +140,7 @@ pub const COMMANDS: &[Command] = &[
         "actions",
         &[],
         "",
-        "lo que hizo esta sesión, acción por acción",
+        "what this session did, action by action",
         false,
         Run::Actions,
     ),
@@ -162,7 +148,7 @@ pub const COMMANDS: &[Command] = &[
         "undo",
         &[],
         "",
-        "deshace los cambios de archivos de esta sesión",
+        "undo this session's file changes",
         true,
         Run::Undo,
     ),
@@ -170,22 +156,22 @@ pub const COMMANDS: &[Command] = &[
         "copy",
         &[],
         "",
-        "copia la última respuesta (OSC 52)",
+        "copy the last answer (OSC 52)",
         false,
         Run::Copy,
     ),
-    c("memory", &[], "", "abre la memoria", false, Run::Memory),
+    c("memory", &[], "", "open the memory", false, Run::Memory),
     c(
         "doctor",
         &[],
         "",
-        "revisa la instalación",
+        "check the installation",
         false,
         Run::Doctor,
     ),
-    c("help", &[], "", "teclas y comandos", false, Run::Help),
+    c("help", &[], "", "keys and commands", false, Run::Help),
     // Like Ctrl-C: not in the middle of a turn, an open or an approval.
-    c("quit", &["exit"], "", "cierra Clio", true, Run::Quit),
+    c("quit", &["exit"], "", "close Clio", true, Run::Quit),
 ];
 
 /// Pi's level for what the person typed (`off` … `max`, as Pi calls them).
@@ -246,7 +232,7 @@ pub fn load_custom(dir: &Path) -> (Vec<Custom>, Vec<String>) {
         out.push(Custom {
             name: name.to_owned(),
             what: if what.is_empty() {
-                "tu comando".to_owned()
+                "your command".to_owned()
             } else {
                 what.to_owned()
             },
@@ -455,7 +441,7 @@ pub fn enter(app: &mut App) -> Vec<Cmd> {
         Some(Entry::Builtin(i)) => start(app, Target::Builtin(COMMANDS[i].run), &args),
         Some(Entry::Custom(i)) => start(app, Target::Custom(i), &args),
         None => {
-            app.flash = Some(format!("no existe el comando /{}", clean(&word)));
+            app.flash = Some(format!("no such command: /{}", clean(&word)));
             vec![]
         }
     }
@@ -528,7 +514,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
         Run::Effort => {
             let Some(level) = level_of(args) else {
                 app.flash = Some(format!(
-                    "no conozco el esfuerzo «{}»: {}",
+                    "unknown effort \"{}\": {}",
                     clean(args),
                     clio_brain::pi::launch::THINKING.join(", ")
                 ));
@@ -538,11 +524,12 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             return vec![Cmd::SetEffort(level.to_owned())];
         }
         Run::Name if args.is_empty() => {
-            app.flash = Some("escribe el título: /name <título>".into());
+            app.flash = Some("type the title: /name <title>".into());
             return vec![];
         }
         Run::Name | Run::Compact | Run::Actions | Run::Undo if draft => {
-            app.flash = Some("la sesión empieza con tu primer mensaje: todavía no hay nada".into());
+            app.flash =
+                Some("the session starts with your first message: there is nothing yet".into());
             return vec![];
         }
         _ => {}
@@ -560,7 +547,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             app.chat.compacting = true;
             app.chat
                 .items
-                .push(super::chat::Item::Note("compactando el contexto…".into()));
+                .push(super::chat::Item::Note("compacting the context…".into()));
             vec![Cmd::Compact(args.to_owned())]
         }
         Run::Context | Run::Usage => {
@@ -571,17 +558,17 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
         Run::Actions => vec![Cmd::LoadActions { run: id }],
         Run::Undo => {
             let mut c = Confirm::new(Action::UndoSession, id, 0, app.chat.workspace.clone());
-            c.note = Some("Lo que la sesión cambió vuelve a como estaba.".into());
+            c.note = Some("What the session changed goes back as it was.".into());
             app.confirm = Some(c);
             vec![]
         }
         Run::Copy => match last_answer(app) {
             Some(text) => {
-                app.flash = Some("copiado".into());
+                app.flash = Some("copied".into());
                 vec![Cmd::Clipboard(text)]
             }
             None => {
-                app.flash = Some("todavía no hay una respuesta que copiar".into());
+                app.flash = Some("there is no answer to copy yet".into());
                 vec![]
             }
         },
@@ -623,30 +610,30 @@ fn numbers(app: &App, context: bool) -> Modal {
     let t = c.meter.total();
     let pct = s
         .ctx_percent()
-        .map_or_else(|| "sin dato todavía".to_owned(), |p| format!("{p} %"));
+        .map_or_else(|| "no data yet".to_owned(), |p| format!("{p} %"));
     let lines = if context {
         vec![
             format!(
-                "contexto      {} de {} tokens ({pct})",
+                "context       {} of {} tokens ({pct})",
                 s.ctx.map_or_else(|| "?".to_owned(), tokens),
                 tokens(s.window)
             ),
-            format!("compactado    {} vez/veces", c.meter.compactions),
+            format!("compacted     {} time(s)", c.meter.compactions),
             String::new(),
-            "/compact resume la conversación y libera contexto.".to_owned(),
+            "/compact summarises the conversation and frees context.".to_owned(),
         ]
     } else {
         vec![
-            format!("entrada       {} tokens", tokens(t.input)),
-            format!("de caché      {} tokens", tokens(t.cache_read)),
-            format!("salida        {} tokens", tokens(t.output)),
-            format!("costo         {}", usage::usd(s.cost_micro)),
-            format!("pasos         {}", s.steps),
-            format!("tiempo        {}", usage::duration(s.secs)),
-            format!("contexto      {pct}"),
+            format!("input         {} tokens", tokens(t.input)),
+            format!("cached        {} tokens", tokens(t.cache_read)),
+            format!("output        {} tokens", tokens(t.output)),
+            format!("cost          {}", usage::usd(s.cost_micro)),
+            format!("steps         {}", s.steps),
+            format!("time          {}", usage::duration(s.secs)),
+            format!("context       {pct}"),
         ]
     };
-    Modal::text(if context { "Contexto" } else { "Uso" }, lines)
+    Modal::text(if context { "Context" } else { "Usage" }, lines)
 }
 
 /// A row of the menu: its head, what it does, whether it is the current one, whether it is blocked.
@@ -657,14 +644,14 @@ fn rows(app: &App, m: &Menu) -> (Vec<Row>, Option<String>) {
     let mut rows: Vec<Row> = Vec::new();
     let mut empty = None;
     match &m.pick {
-        Some((_, None)) => empty = Some("cargando…".to_owned()),
+        Some((_, None)) => empty = Some("loading…".to_owned()),
         Some((run, Some(items))) => {
             for ch in items {
                 let note = ch.blocked.clone().unwrap_or_default();
                 rows.push((ch.label.clone(), note, ch.current, ch.blocked.is_some()));
             }
             if items.is_empty() {
-                empty = Some(format!("/{} no tiene opciones aquí", command(*run).name));
+                empty = Some(format!("/{} has no choices here", command(*run).name));
             }
         }
         None => {
@@ -688,7 +675,7 @@ fn rows(app: &App, m: &Menu) -> (Vec<Row>, Option<String>) {
                 rows.push((head, what, false, false));
             }
             if rows.is_empty() {
-                empty = Some(format!("no hay comandos con «{}»", clean(f)));
+                empty = Some(format!("no commands match \"{}\"", clean(f)));
             }
         }
     }
@@ -771,9 +758,9 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
     let (title, keys) = match &m.pick {
         Some((run, _)) => (
             format!(" /{} ", command(*run).name),
-            " Enter elige · Esc cierra ",
+            " Enter picks · Esc closes ",
         ),
-        None => (String::new(), " Tab completa · Enter ejecuta · Esc cierra "),
+        None => (String::new(), " Tab completes · Enter runs · Esc closes "),
     };
     let mut block = Block::new()
         .borders(Borders::ALL)
@@ -792,7 +779,7 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
 }
 
 /// A click on a row of the menu runs it, as Enter would; only when the rows are still the ones
-/// that were drawn (a click on «cargando…» never picks a choice that came after it).
+/// that were drawn (a click on "loading…" never picks a choice that came after it).
 pub fn click(app: &mut App, x: u16, y: u16) -> Option<Vec<Cmd>> {
     let m = app.chat.menu.as_ref()?;
     let (area, first, drawn) = m.rows_at.get();
@@ -931,15 +918,15 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, m: &Modal) {
     let mut hint = vec![];
     if !m.picks.is_empty() {
         hint.push(Span::styled("Enter", t.key()));
-        hint.push(Span::styled(" preguntar por esta", t.dim()));
+        hint.push(Span::styled(" ask about this one", t.dim()));
         hint.push(Span::styled(d.clone(), t.dim()));
     } else if max > 0 {
         hint.push(Span::styled(format!("{}{}", t.up(), t.down()), t.key()));
-        hint.push(Span::styled(" moverse", t.dim()));
+        hint.push(Span::styled(" move", t.dim()));
         hint.push(Span::styled(d.clone(), t.dim()));
     }
     hint.push(Span::styled("Esc", t.key()));
-    hint.push(Span::styled(" cerrar", t.dim()));
+    hint.push(Span::styled(" close", t.dim()));
     lines.push(Line::from(""));
     lines.push(Line::from(hint));
     let h = u16::try_from(lines.len() + 4).unwrap_or(u16::MAX);

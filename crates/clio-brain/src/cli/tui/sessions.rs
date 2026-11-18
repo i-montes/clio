@@ -1,4 +1,4 @@
-//! The drawer of sessions (the Pi harness): "nueva sesión" and the sessions of every source,
+//! The drawer of sessions (the Pi harness): "new session" and the sessions of every source,
 //! local ones from Pi's own session folder and the remote placeholder. Hidden while the chat has
 //! the keys (`Screen::Chat`); Ctrl-S opens it on the left, with the keys (`Screen::Sessions`), and
 //! the chat stays in sight beside it.
@@ -20,7 +20,7 @@ use crate::cli::chat::{Row, RowKind};
 #[derive(Default)]
 pub struct Sessions {
     pub rows: Vec<Row>,
-    /// 0 is "nueva sesión"; `n > 0` is `rows[n - 1]`.
+    /// 0 is "new session"; `n > 0` is `rows[n - 1]`.
     pub sel: usize,
     pub loading: bool,
     /// Where the last draw put the drawer (empty when hidden) and the chat beside it, and the
@@ -67,7 +67,7 @@ pub(super) fn open_new(app: &mut App) -> Vec<Cmd> {
 }
 
 /// The row of the session open in the chat: found by its id in Pi's file name
-/// (`<time>_<id>.jsonl`), or "nueva sesión" while the new one is a draft or not listed yet; none
+/// (`<time>_<id>.jsonl`), or "new session" while the new one is a draft or not listed yet; none
 /// while one is still opening.
 pub fn open_pos(app: &App) -> Option<usize> {
     let c = &app.chat;
@@ -139,14 +139,14 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Act::Delete if app.busy() => {}
         Act::Delete => match app.sessions.selected() {
             Some(_) if open_pos(app) == Some(app.sessions.sel) => {
-                app.flash = Some("esa sesión está abierta: abre otra antes de borrarla".into());
+                app.flash = Some("that session is open: open another before deleting it".into());
             }
             Some(row) => {
                 return vec![Cmd::PlanSessionDelete {
                     reference: row.reference.clone(),
                 }];
             }
-            None => app.flash = Some("elige una sesión para borrarla".into()),
+            None => app.flash = Some("pick a session to delete it".into()),
         },
         Act::Help => app.open_help(),
         _ => {}
@@ -154,14 +154,14 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     vec![]
 }
 
-/// `hace 5 min`, `hace 2 h`, `hace 3 d`.
+/// `5 min ago`, `2 h ago`, `3 d ago`.
 pub fn ago(now_ms: i64, then_ms: i64) -> String {
     let s = (now_ms - then_ms).max(0) / 1000;
     match s {
-        0..=59 => "ahora".into(),
-        60..=3599 => format!("hace {} min", s / 60),
-        3600..=86_399 => format!("hace {} h", s / 3600),
-        _ => format!("hace {} d", s / 86_400),
+        0..=59 => "now".into(),
+        60..=3599 => format!("{} min ago", s / 60),
+        3600..=86_399 => format!("{} h ago", s / 3600),
+        _ => format!("{} d ago", s / 86_400),
     }
 }
 
@@ -208,7 +208,7 @@ pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
     vec![]
 }
 
-/// The drawer: a box with "nueva sesión" and the sessions, two rows each (the title, and when
+/// The drawer: a box with "new session" and the sessions, two rows each (the title, and when
 /// and how long), the selection across the width, the open one marked; at its foot the keys, or
 /// the last flash.
 pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
@@ -218,7 +218,7 @@ pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_set(t.border())
         .border_style(t.accent_line())
-        .title(Span::styled(" sesiones ", t.bold()));
+        .title(Span::styled(" sessions ", t.bold()));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 3 || inner.width < 8 {
@@ -246,11 +246,11 @@ pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
         }
         let (title, title_style, under, under_style) = if pos == 0 {
             let place = if app.host {
-                "en este servidor".to_owned()
+                "on this server".to_owned()
             } else {
-                format!("en una copia de {}", clean(&folder_of_cwd(&app.cwd)))
+                format!("in a copy of {}", clean(&folder_of_cwd(&app.cwd)))
             };
-            ("+ nueva sesión".to_owned(), t.bold(), place, t.dim())
+            ("+ new session".to_owned(), t.bold(), place, t.dim())
         } else {
             let r = &s.rows[pos - 1];
             match (&r.kind, &r.unavailable) {
@@ -309,7 +309,7 @@ pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
     }
     if s.loading && s.rows.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("   cargando…", t.dim())));
+        lines.push(Line::from(Span::styled("   loading…", t.dim())));
     }
     f.render_widget(
         Paragraph::new(lines),
@@ -328,11 +328,11 @@ pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
             let d = format!(" {} ", t.dot());
             Line::from(vec![
                 Span::styled(" Enter", t.key()),
-                Span::styled(format!(" abrir{d}"), t.dim()),
+                Span::styled(format!(" open{d}"), t.dim()),
                 Span::styled("n", t.key()),
-                Span::styled(format!(" nueva{d}"), t.dim()),
+                Span::styled(format!(" new{d}"), t.dim()),
                 Span::styled("x", t.key()),
-                Span::styled(" borrar", t.dim()),
+                Span::styled(" delete", t.dim()),
             ])
         }
     };

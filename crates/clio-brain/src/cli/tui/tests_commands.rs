@@ -51,7 +51,7 @@ fn slash_opens_the_menu_that_filters_moves_completes_and_closes_leaving_the_text
     assert!(a.chat.menu.is_some());
     let s = screen_text(&a, 100, 30);
     assert!(
-        s.contains("/model [name]") && s.contains("cambia el modelo"),
+        s.contains("/model [name]") && s.contains("switch the connector"),
         "{s}"
     );
     // At most eight rows: the rest scrolls.
@@ -120,11 +120,11 @@ fn the_selected_row_runs_on_enter_and_a_click_runs_its_row() {
 fn an_unknown_command_is_never_sent_and_a_leading_space_makes_a_message() {
     let (a, cmds) = run(open(), "/xyz algo");
     assert!(cmds.is_empty(), "{cmds:?}");
-    assert_eq!(a.flash.as_deref(), Some("no existe el comando /xyz"));
+    assert_eq!(a.flash.as_deref(), Some("no such command: /xyz"));
     assert_eq!(a.chat.input, "/xyz algo");
     // With the menu closed too.
     let (a, _) = feed(a, vec![key(KeyCode::Esc), key(KeyCode::Enter)]);
-    assert_eq!(a.flash.as_deref(), Some("no existe el comando /xyz"));
+    assert_eq!(a.flash.as_deref(), Some("no such command: /xyz"));
     assert!(a.chat.items.is_empty());
 
     let (_, cmds) = run(open(), " /xyz algo");
@@ -186,8 +186,8 @@ fn each_command_asks_for_its_own_work() {
         let word = typed.split(' ').next().unwrap();
         match word {
             "/sessions" | "/resume" => assert_eq!(a.screen, Screen::Sessions),
-            "/context" => assert_eq!(a.modal.as_ref().unwrap().title, "Contexto"),
-            "/usage" | "/cost" => assert_eq!(a.modal.as_ref().unwrap().title, "Uso"),
+            "/context" => assert_eq!(a.modal.as_ref().unwrap().title, "Context"),
+            "/usage" | "/cost" => assert_eq!(a.modal.as_ref().unwrap().title, "Usage"),
             "/help" => assert_eq!(a.screen, Screen::Help),
             "/quit" | "/exit" => assert!(a.quit),
             "/compact" => assert!(a.chat.compacting),
@@ -218,7 +218,7 @@ fn each_command_asks_for_its_own_work() {
 }
 
 // Review: a word that is not a command ran the highlighted one with the typed arguments
-// (`/ hola⏎` saved the model «hola»). With arguments only a whole name or alias runs.
+// (`/ hola⏎` saved the model "hola"). With arguments only a whole name or alias runs.
 #[test]
 fn a_word_with_arguments_runs_only_a_whole_command_name() {
     let draft: fn() -> App = || {
@@ -234,7 +234,7 @@ fn a_word_with_arguments_runs_only_a_whole_command_name() {
             let word = typed.split(' ').next().unwrap();
             assert_eq!(
                 a.flash.as_deref(),
-                Some(format!("no existe el comando {word}").as_str())
+                Some(format!("no such command: {word}").as_str())
             );
         }
     }
@@ -251,7 +251,7 @@ fn a_model_not_on_the_list_is_refused_with_the_list_and_not_saved() {
     let (_t, d) = dirs_with_config();
     let before = std::fs::read_to_string(d.config_file()).unwrap();
     let e = super::set_model(&d, None, "hola").unwrap_err();
-    assert!(e.contains("«hola»") && e.contains("tiene:"), "{e}");
+    assert!(e.contains("\"hola\"") && e.contains("it has:"), "{e}");
     assert_eq!(std::fs::read_to_string(d.config_file()).unwrap(), before);
     let current = Config::load(&d).unwrap().model.model;
     assert!(e.contains(&current), "{e}");
@@ -297,26 +297,26 @@ fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
     let items = vec![Choice {
         value: "claude".into(),
         label: "claude · claude-sonnet-5-5".into(),
-        blocked: Some("sin llave: clio connect claude".into()),
+        blocked: Some("no key: clio connect claude".into()),
         current: false,
     }];
     let (a, _) = feed(
         a,
         vec![Input::Bg(Bg::Choices(Run::Connector, Ok((items, None))))],
     );
-    assert!(screen_text(&a, 100, 30).contains("sin llave: clio connect claude"));
+    assert!(screen_text(&a, 100, 30).contains("no key: clio connect claude"));
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty());
-    assert_eq!(a.flash.as_deref(), Some("sin llave: clio connect claude"));
+    assert_eq!(a.flash.as_deref(), Some("no key: clio connect claude"));
 }
 
-// Review: a click on the «cargando…» row applied the first choice that came after the draw,
+// Review: a click on the «loading…» row applied the first choice that came after the draw,
 // one the person never saw. A click counts only on the rows that were drawn.
 #[test]
 fn a_click_on_the_loading_row_never_picks_a_choice_that_came_later() {
     let (a, _) = run(open(), "/model");
     let s = screen_text(&a, 100, 30);
-    let y = u16::try_from(s.lines().position(|l| l.contains("cargando")).unwrap()).unwrap();
+    let y = u16::try_from(s.lines().position(|l| l.contains("loading")).unwrap()).unwrap();
     let click = || {
         Input::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -424,7 +424,7 @@ fn a_command_that_changes_the_session_waits_and_one_that_reads_does_not() {
     let mut a = open();
     a.chat.running = true;
     let (a, _) = run(a, "/usage");
-    assert_eq!(a.modal.as_ref().unwrap().title, "Uso");
+    assert_eq!(a.modal.as_ref().unwrap().title, "Usage");
     // While compacting, a message waits too, and is not lost.
     let mut a = open();
     a.chat.compacting = true;
@@ -440,7 +440,7 @@ fn a_command_never_replaces_or_answers_an_open_question() {
         Action::Approve,
         "a1".into(),
         0,
-        "«borrar» rm x".into(),
+        "«delete» rm x".into(),
     ));
     let mut inputs = vec![Input::Tick(5_000)];
     inputs.extend(typed("/quit"));
@@ -486,10 +486,7 @@ fn copiar_puts_the_last_answer_on_the_clipboard() {
     let mut a = open();
     let (b, cmds) = run(open(), "/copy");
     assert!(cmds.is_empty());
-    assert_eq!(
-        b.flash.as_deref(),
-        Some("todavía no hay una respuesta que copiar")
-    );
+    assert_eq!(b.flash.as_deref(), Some("there is no answer to copy yet"));
     a.chat.items.push(Item::Assistant {
         text: "primera".into(),
         live: false,
@@ -501,7 +498,7 @@ fn copiar_puts_the_last_answer_on_the_clipboard() {
     });
     let (a, cmds) = run(a, "/copy");
     assert_eq!(cmds, vec![Cmd::Clipboard("**la última**".into())]);
-    assert_eq!(a.flash.as_deref(), Some("copiado"));
+    assert_eq!(a.flash.as_deref(), Some("copied"));
 }
 
 // Review: `/copy` gave the clipboard the model's raw bytes. It copies what was shown: no
@@ -615,7 +612,7 @@ fn the_persons_commands_are_read_named_capped_and_expanded() {
     let revisa = cmds.iter().find(|c| c.name == "revisa").unwrap();
     assert_eq!(revisa.what, "Revisa un archivo");
     assert_eq!(revisa.body, "Revisa $ARGUMENTS con cuidado.");
-    assert_eq!(cmds[1].what, "tu comando");
+    assert_eq!(cmds[1].what, "your command");
     assert!(load_custom(&t.path().join("no-existe")).0.is_empty());
 
     assert_eq!(expand("Revisa $ARGUMENTS ya", "a.rs"), "Revisa a.rs ya");
@@ -633,7 +630,7 @@ fn a_persons_command_is_sent_as_their_message_and_never_read_again() {
         },
         Custom {
             name: "raro".into(),
-            what: "tu comando".into(),
+            what: "your command".into(),
             body: "/quit".into(),
         },
     ];
@@ -646,7 +643,7 @@ fn a_persons_command_is_sent_as_their_message_and_never_read_again() {
         ],
     );
     let s = screen_text(&a, 100, 30);
-    assert!(s.contains("comandos sin usar: Mal.md"), "{s}");
+    assert!(s.contains("commands left out: Mal.md"), "{s}");
     let (a, cmds) = run(a, "revisa src/a.rs");
     assert_eq!(
         cmds,
@@ -685,7 +682,7 @@ fn the_help_lists_every_command() {
     let mut a = open();
     a.open_help();
     let s = screen_text(&a, 120, 120);
-    assert!(s.contains("los comandos"), "{s}");
+    assert!(s.contains("the commands"), "{s}");
     for c in COMMANDS {
         assert!(s.contains(&format!("/{}", c.name)), "/{}\n{s}", c.name);
     }
@@ -780,7 +777,7 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
     assert!(super::set_model(&d, Some(&pi), "claude-opus-5-5").is_err());
     assert_eq!(
         super::set_model(&d, Some(&pi), "kimi-k3").unwrap(),
-        "modelo: kimi-k3"
+        "model: kimi-k3"
     );
     assert!(pi.sent.lock().unwrap().contains(&(
         "set_model".into(),
@@ -800,7 +797,7 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
     assert!(super::set_effort(&d, Some(&pi), "max").is_err());
     assert_eq!(
         super::set_effort(&d, Some(&pi), "high").unwrap(),
-        "esfuerzo: high"
+        "effort: high"
     );
     assert!(
         pi.sent
@@ -811,7 +808,7 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
     // Before the first message: no Pi, every level, saved for the session to come.
     assert_eq!(
         super::set_effort(&d, None, "medium").unwrap(),
-        "esfuerzo: medium"
+        "effort: medium"
     );
     let cfg = Config::load(&d).unwrap();
     assert_eq!(cfg.model.thinking, "medium");
@@ -854,12 +851,12 @@ fn a_draft_lists_what_pi_offered_last_and_other_connectors_under_their_names() {
     assert!(
         super::set_model(&d, None, "anthropic-api claude-nada")
             .unwrap_err()
-            .contains("no tiene el modelo")
+            .contains("has no model")
     );
     assert!(
         super::set_model(&d, None, "anthropic-api claude-opus-5-5")
             .unwrap_err()
-            .contains("no tiene llave")
+            .contains("has no key")
     );
 }
 
@@ -874,7 +871,7 @@ fn a_connector_needs_its_key_and_the_list_marks_the_active_one() {
     assert!(
         super::set_connector(&d, "ninguno")
             .unwrap_err()
-            .contains("no existe el conector")
+            .contains("no such connector")
     );
     for c in &list {
         // No vault here: a connector is usable only with its key in the environment.
@@ -888,12 +885,12 @@ fn a_connector_needs_its_key_and_the_list_marks_the_active_one() {
     }
 }
 
-/// The table for `docs/uso-local.md`:
+/// The table for `docs/usage.md`:
 /// `cargo test -p clio-brain --bin clio print_commands -- --ignored --nocapture`.
 #[test]
 #[ignore = "prints the table of commands; not a check"]
 fn print_commands() {
-    println!("| Comando | También | Qué hace |");
+    println!("| Command | Also | What it does |");
     println!("|---|---|---|");
     for c in COMMANDS {
         let head = if c.args.is_empty() {
@@ -902,11 +899,54 @@ fn print_commands() {
             format!("`/{} {}`", c.name, c.args.replace('|', "\\|"))
         };
         let alias: Vec<String> = c.aliases.iter().map(|a| format!("`/{a}`")).collect();
-        let wait = if c.idle { " (espera al agente)" } else { "" };
+        let wait = if c.idle { " (waits for the agent)" } else { "" };
         println!(
             "| {head} | {} | {}{wait} |",
             alias.join(" "),
             c.what.replace('|', "\\|")
         );
     }
+}
+
+// `/undo` showed its result in a box and left nothing in the chat: now one note says what it did.
+#[test]
+fn undo_leaves_one_note_in_the_chat_saying_what_it_did() {
+    let notes = |a: &super::app::App| -> Vec<String> {
+        a.chat
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Note(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let said = |lines: &[&str]| {
+        let lines = lines.iter().map(|l| (*l).to_owned()).collect();
+        let (a, _) = feed(open(), vec![Input::Bg(Bg::SessionUndone(Ok(lines)))]);
+        a
+    };
+    // A host session: a line per file; the box still shows them all.
+    let a = said(&[
+        "  restored /srv/a.conf",
+        "  deleted /srv/new.txt",
+        "  left /srv/b alone: it changed afterwards",
+    ]);
+    assert_eq!(
+        notes(&a),
+        ["undone: 2 file(s) went back as they were, 1 left alone"]
+    );
+    assert_eq!(a.modal.as_ref().unwrap().title, "Undo");
+    // Nothing to undo.
+    let a = said(&["nothing is left to undo in 20261031-181646-5a67"]);
+    assert_eq!(notes(&a), ["nothing to undo"]);
+    // A copy says its own summary.
+    let a = said(&["undone: 3 file(s) (2 restored, 1 removed)"]);
+    assert_eq!(notes(&a), ["undone: 3 file(s) (2 restored, 1 removed)"]);
+    // A failure is a notice, not a note.
+    let (a, _) = feed(
+        open(),
+        vec![Input::Bg(Bg::SessionUndone(Err("boom".into())))],
+    );
+    assert!(notes(&a).is_empty() && a.notice.as_deref() == Some("boom"));
 }

@@ -63,27 +63,27 @@ fn scrolled(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, app: &App) {
     );
 }
 
-/// `0,9 %`: the share of the window with one decimal.
+/// `0.9 %`: the share of the window with one decimal.
 fn share(tokens: u64, window: u64) -> String {
     let per_mille = if window == 0 {
         0
     } else {
         u64::try_from(u128::from(tokens) * 1000 / u128::from(window)).unwrap_or(u64::MAX)
     };
-    format!("{},{} %", per_mille / 10, per_mille % 10)
+    format!("{}.{} %", per_mille / 10, per_mille % 10)
 }
 
 fn warning(t: Theme, p: u64) -> Option<Line<'static>> {
     match p {
         90.. => Some(Line::from(Span::styled(
             format!(
-                "{} la ventana está casi llena (más del 90 %): el modelo puede recortar o perder contexto",
+                "{} the window is almost full (over 90 %): the model may cut or lose context",
                 t.bang()
             ),
             t.fail(),
         ))),
         70..=89 => Some(Line::from(Span::styled(
-            format!("{} el contexto pasa del 70 % de la ventana", t.bang()),
+            format!("{} the context is over 70 % of the window", t.bang()),
             t.warn(),
         ))),
         _ => None,
@@ -103,71 +103,71 @@ fn layers(c: &ContextReport) -> Vec<Layer> {
     let n = c.external.len();
     vec![
         Layer {
-            label: "prompt de sistema",
-            short: "sistema",
+            label: "system prompt",
+            short: "system",
             detail: clean(&c.prompt_version),
             tokens: c.system,
         },
         Layer {
-            label: "objetivo / contrato",
-            short: "objetivo",
-            detail: "tu pedido".into(),
+            label: "objective / contract",
+            short: "objective",
+            detail: "your request".into(),
             tokens: c.objective,
         },
         Layer {
-            label: "herramientas",
-            short: "herramientas",
-            detail: "descripciones".into(),
+            label: "tools",
+            short: "tools",
+            detail: "descriptions".into(),
             tokens: c.tools,
         },
         Layer {
-            label: "memoria",
-            short: "memoria",
+            label: "memory",
+            short: "memory",
             detail: format!(
                 "{} {}",
                 c.memory_items,
                 if c.memory_items == 1 {
-                    "recuerdo"
+                    "memory"
                 } else {
-                    "recuerdos"
+                    "memories"
                 }
             ),
             tokens: c.memory,
         },
         Layer {
-            label: "conversación",
-            short: "conversación",
+            label: "conversation",
+            short: "conversation",
             detail: format!(
                 "{} {}",
                 c.turns,
-                if c.turns == 1 { "turno" } else { "turnos" }
+                if c.turns == 1 { "turn" } else { "turns" }
             ),
             tokens: c.conversation,
         },
         Layer {
-            label: "externo",
-            short: "externo",
-            detail: format!("{n} {}", if n == 1 { "lectura" } else { "lecturas" }),
+            label: "external",
+            short: "external",
+            detail: format!("{n} {}", if n == 1 { "read" } else { "reads" }),
             tokens: c.external_tokens(),
         },
         Layer {
-            label: "salidas de herramientas",
-            short: "salidas",
+            label: "tool outputs",
+            short: "outputs",
             detail: String::new(),
             tokens: c.tool_outputs,
         },
     ]
 }
 
-/// The title line: `contexto ▕███░░░░░░░▏ 31 %  39,7k de 128k tokens (aprox.)`.
+/// The title line: `context ▕███░░░░░░░▏ 31 %  39.7k of 128k tokens (approx.)`.
 fn context_head(t: Theme, s: &Snapshot, bar: usize, compact: bool) -> Vec<Line<'static>> {
     let Some(total) = s.ctx else {
-        return vec![Line::from(Span::styled("contexto: sin datos", t.dim()))];
+        return vec![Line::from(Span::styled("context: no data", t.dim()))];
     };
     let p = percent(total, s.window);
-    let of = format!("{} de {} tokens (aprox.)", tokens(total), tokens(s.window));
+    let of = format!("{} of {} tokens (approx.)", tokens(total), tokens(s.window));
     let mut head = vec![
-        Span::styled("contexto ", t.bold()),
+        Span::styled("context ", t.bold()),
         Span::styled(format!("{} {p} %", t.bar(p, bar)), t.level(p)),
     ];
     if compact {
@@ -188,7 +188,7 @@ pub fn context_lines(
     let Some(c) = &u.context else {
         out.push(Line::from(""));
         out.push(Line::from(Span::styled(
-            "Este run no guardó las capas del contexto (es anterior a esta función).",
+            "This run did not save the context layers (it predates this feature).",
             t.dim(),
         )));
         return out;
@@ -196,7 +196,7 @@ pub fn context_lines(
     if !s.window_known {
         out.push(Line::from(Span::styled(
             format!(
-                "ventana de {} por defecto: el modelo no está en el catálogo",
+                "default window of {}: the model is not in the catalog",
                 tokens(s.window)
             ),
             t.dim(),
@@ -223,7 +223,7 @@ pub fn context_lines(
             spans.push(Span::styled(format!("  {}", t.bar(p, 12)), t.dim()));
         }
         out.push(Line::from(spans));
-        if l.label == "externo" {
+        if l.label == "external" {
             let shown = if compact { 3 } else { c.external.len() };
             for i in c.external.iter().take(shown) {
                 let room = if compact { 14 } else { 41 };
@@ -235,12 +235,12 @@ pub fn context_lines(
                 out.push(Line::from(vec![
                     Span::styled(format!("    {name:<room$}"), t.dim()),
                     Span::styled(format!("{:>6} ", tokens(i.tokens)), t.dim()),
-                    Span::styled("externo", t.warn()),
+                    Span::styled("external", t.warn()),
                 ]));
             }
             if c.external.len() > shown {
                 out.push(Line::from(Span::styled(
-                    format!("    {} y {} más", t.ellipsis(), c.external.len() - shown),
+                    format!("    {} and {} more", t.ellipsis(), c.external.len() - shown),
                     t.dim(),
                 )));
             }
@@ -253,7 +253,7 @@ pub fn context_lines(
     if !compact {
         out.push(Line::from(""));
         out.push(Line::from(Span::styled(
-            "Aprox.: cuatro caracteres por token. Las capas suman lo que ve el modelo.",
+            "Approx.: four characters per token. The layers add up to what the model sees.",
             t.dim(),
         )));
     }
@@ -268,7 +268,7 @@ pub fn draw_context(f: &mut Frame, area: Rect, app: &App) {
     scrolled(f, area, lines, app);
 }
 
-/// A limit with how much of it is used: `8 de 40  ▕██░░░░░░░░▏ 20 %`.
+/// A limit with how much of it is used: `8 of 40  ▕██░░░░░░░░▏ 20 %`.
 fn limit_line(
     t: Theme,
     label: &str,
@@ -282,10 +282,10 @@ fn limit_line(
     ];
     match (limit, p) {
         (Some(l), Some(p)) => {
-            v.push(Span::styled(format!(" de {l}  "), t.dim()));
+            v.push(Span::styled(format!(" of {l}  "), t.dim()));
             v.push(Span::styled(format!("{} {p} %", t.bar(p, 10)), t.level(p)));
         }
-        _ => v.push(Span::styled("  sin límite", t.dim())),
+        _ => v.push(Span::styled("  no limit", t.dim())),
     }
     Line::from(v)
 }
@@ -296,21 +296,21 @@ fn limit_lines(t: Theme, s: &Snapshot) -> Vec<Line<'static>> {
     vec![
         limit_line(
             t,
-            "pasos",
+            "steps",
             s.steps.to_string(),
             some(u64::from(l.max_steps)).map(|n| n.to_string()),
             some(u64::from(l.max_steps)).map(|n| percent(u64::from(s.steps), n)),
         ),
         limit_line(
             t,
-            "tiempo",
+            "time",
             usage::duration(s.secs),
             some(l.max_seconds).map(usage::duration),
             some(l.max_seconds).map(|n| percent(s.secs, n)),
         ),
         limit_line(
             t,
-            "costo",
+            "cost",
             usage::usd(s.cost_micro),
             some(l.max_cost_micro).map(usage::usd),
             some(l.max_cost_micro).map(|n| percent(s.cost_micro, n)),
@@ -320,7 +320,7 @@ fn limit_lines(t: Theme, s: &Snapshot) -> Vec<Line<'static>> {
 
 pub fn usage_lines(t: Theme, s: &Snapshot, u: &RunUsage, width: u16) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(vec![
-        Span::styled("uso ", t.bold()),
+        Span::styled("usage ", t.bold()),
         Span::raw(format!(
             "{}{} {}{} tokens {} {}",
             t.up(),
@@ -334,7 +334,7 @@ pub fn usage_lines(t: Theme, s: &Snapshot, u: &RunUsage, width: u16) -> Vec<Line
     out.push(Line::from(""));
     if u.calls.is_empty() {
         out.push(Line::from(Span::styled(
-            "Este run no guardó el uso por paso (es anterior a esta función); los totales vienen de su resumen.",
+            "This run did not save the usage per step (it predates this feature); the totals come from its summary.",
             t.dim(),
         )));
     } else {
@@ -343,13 +343,13 @@ pub fn usage_lines(t: Theme, s: &Snapshot, u: &RunUsage, width: u16) -> Vec<Line
         let gap = if wide { "  " } else { " " };
         let (w_in, w_ms, w_cc) = if wide { (7, 8, 10) } else { (6, 7, 9) };
         let (h_in, h_out, h_cc) = if wide {
-            ("entrada", "salida", "acum.costo")
+            ("input", "output", "cum.cost")
         } else {
-            ("entr.", "sal.", "acum.$")
+            ("in", "out", "cum.$")
         };
         let head = format!(
             "{:>4}{gap}{h_in:>w_in$}{gap}{h_out:>w_in$}{gap}{:>9}{gap}{:>w_ms$}{gap}{:>8}{gap}{h_cc:>w_cc$}",
-            "paso", "costo", "modelo", "acum.tok"
+            "step", "cost", "model", "cum.tok"
         );
         out.push(Line::from(Span::styled(head, t.dim())));
         let (mut ci, mut co, mut cc) = (0u64, 0u64, 0u64);
@@ -371,17 +371,17 @@ pub fn usage_lines(t: Theme, s: &Snapshot, u: &RunUsage, width: u16) -> Vec<Line
         let retries: u32 = u.calls.iter().map(|c| c.retries).sum();
         if retries > 0 {
             out.push(Line::from(Span::styled(
-                format!("{retries} reintentos del modelo"),
+                format!("{retries} model retries"),
                 t.warn(),
             )));
         }
     }
     out.push(Line::from(""));
-    out.push(section(t, "frente al límite del run", width));
+    out.push(section(t, "against the run limit", width));
     out.extend(limit_lines(t, s));
     out.push(Line::from(""));
     out.push(Line::from(Span::styled(
-        "Los tokens y el costo los informa el modelo; el contexto es aproximado.",
+        "Tokens and cost are reported by the model; the context is approximate.",
         t.dim(),
     )));
     out
@@ -401,10 +401,10 @@ pub fn draw_side(f: &mut Frame, area: Rect, app: &App) {
     let Some((snap, usage)) = app.run_data() else {
         return;
     };
-    let mut lines = vec![section(t, "contexto", area.width)];
+    let mut lines = vec![section(t, "context", area.width)];
     lines.extend(context_lines(t, &snap, usage, area.width, true));
     lines.push(Line::from(""));
-    lines.push(section(t, "uso", area.width));
+    lines.push(section(t, "usage", area.width));
     lines.push(Line::from(format!(
         "{}{} {}{} tokens {} {}",
         t.up(),
@@ -444,27 +444,27 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
             matches!(a, Act::Cancel | Act::Open)
         })
         .into_iter()
-        .map(|(k, w)| (k, format!("{w} (mientras trabaja)"))),
+        .map(|(k, w)| (k, format!("{w} (while it works)"))),
     );
-    chat.push(("F1".into(), "esta ayuda".into()));
+    chat.push(("F1".into(), "this help".into()));
     // Each section: its title, its keys and what they do, and its notes.
     type Section<'a> = (&'a str, Vec<(String, String)>, Vec<&'a str>);
     let mut sections: Vec<Section> = vec![
-        ("el chat", chat, vec![]),
+        ("the chat", chat, vec![]),
         (
-            "las sesiones",
+            "the sessions",
             binds(keys::Ctx::Sessions, &|a| a != Act::Help),
-            vec!["Ctrl-S o F2 las abre; mientras el agente trabaja no se cambia de sesión."],
+            vec!["Ctrl-S or F2 opens them; while the agent works you cannot switch session."],
         ),
     ];
     if app.host {
         sections.push((
-            "la pregunta de visto bueno",
-            pairs(&[("s y Enter", "ejecutarlo"), ("n o Esc", "rechazarlo")]),
+            "the approval question",
+            pairs(&[("y then Enter", "run it"), ("n or Esc", "reject it")]),
             vec![
-                "Oye la primera tecla tras un segundo a la vista y un segundo sin teclear.",
-                "Con la s puesta, Enter la ejecuta enseguida.",
-                "Otra tecla tras la s la deshace y vuelve a esperar el segundo.",
+                "It hears the first key after a second on screen and a second without typing.",
+                "With the y pressed, Enter runs it at once.",
+                "Another key after the y undoes it and the second starts again.",
             ],
         ));
     }
@@ -481,33 +481,33 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
         })
         .collect();
     sections.push((
-        "los comandos",
+        "the commands",
         cmds,
         vec![
-            "/ al empezar el mensaje abre la lista: Tab completa, Enter ejecuta, Esc la cierra.",
-            "Los tuyos: un .md en ~/.config/clio/commands/; $ARGUMENTS es lo que escribes tras él.",
-            "/copy usa OSC 52: solo copia en terminales que lo permiten.",
+            "/ at the start of the message opens the list: Tab completes, Enter runs, Esc closes it.",
+            "Your own: a .md in ~/.config/clio/commands/; $ARGUMENTS is what you type after it.",
+            "/copy uses OSC 52: it only copies in terminals that allow it.",
         ],
     ));
     sections.push((
-        "el ratón",
+        "the mouse",
         pairs(&[
-            ("clic", "abre una sesión; fuera del panel, lo cierra"),
-            ("rueda", "desplaza lo que está debajo"),
-            ("Shift y arrastrar", "selecciona texto"),
+            ("click", "opens a session; outside the drawer, closes it"),
+            ("wheel", "scrolls what is under it"),
+            ("Shift and drag", "selects text"),
         ]),
-        vec!["Un clic nunca responde una pregunta: solo las teclas."],
+        vec!["A click never answers a question: only the keys do."],
     ));
     let mut other = pairs(&[
-        ("m", "la memoria (en las sesiones)"),
-        ("D", "el doctor (en las sesiones)"),
+        ("m", "the memory (in the sessions)"),
+        ("D", "the doctor (in the sessions)"),
     ]);
     other.extend(
         keys::GLOBAL
             .iter()
             .map(|b| (b.shown.to_owned(), b.what.to_owned())),
     );
-    sections.push(("otras pantallas", other, vec![]));
+    sections.push(("other screens", other, vec![]));
     let key_w = sections
         .iter()
         .flat_map(|(_, rows, _)| rows.iter())
@@ -518,12 +518,12 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
         + 2;
     let width = usize::from(w);
     let mut lines = vec![Line::from(vec![
-        Span::styled("ayuda ", t.bold()),
+        Span::styled("help ", t.bold()),
         Span::styled(
             if app.host {
-                "· Clio trabaja en esta máquina; cada cambio queda registrado"
+                "· Clio works on this machine; every change is recorded"
             } else {
-                "· Clio trabaja en una copia; tú decides qué vuelve al original"
+                "· Clio works on a copy; you decide what goes back to the original"
             },
             t.dim(),
         ),
@@ -554,7 +554,7 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
     let c = &app.chat;
     let snap = c.snapshot(app.now_ms, app.fallback());
     lines.push(Line::from(""));
-    lines.push(section(t, "esta sesión", w));
+    lines.push(section(t, "this session", w));
     let mut spans = vec![Span::raw(" ")];
     spans.extend(super::status::line(t, &snap, width.saturating_sub(1)).spans);
     lines.push(Line::from(spans));
@@ -610,12 +610,12 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
         ]
     };
     let mut lines = vec![Line::from(vec![
-        Span::styled("atajos ", t.bold()),
+        Span::styled("keys ", t.bold()),
         Span::styled(
             if app.host {
-                "· Clio trabaja en esta máquina; cada cambio queda registrado (clio actions, clio undo)"
+                "· Clio works on this machine; every change is recorded (clio actions, clio undo)"
             } else {
-                "· Clio trabaja en una copia; tú decides qué vuelve al original"
+                "· Clio works on a copy; you decide what goes back to the original"
             },
             t.dim(),
         ),

@@ -77,7 +77,7 @@ use super::{Res, work};
 fn memory_id(s: &str) -> Result<clio_memory::MemoryId, String> {
     s.parse::<i64>()
         .map(clio_memory::MemoryId)
-        .map_err(|_| format!("id de recuerdo no válido: {s}"))
+        .map_err(|_| format!("not a valid memory id: {s}"))
 }
 
 static IN_TUI: AtomicBool = AtomicBool::new(false);
@@ -179,7 +179,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     let ended = Arc::new(AtomicUsize::new(0));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
         signal_hook::flag::register_usize(sig, ended.clone(), sig as usize)
-            .map_err(|e| format!("señales: {e}"))?;
+            .map_err(|e| format!("signals: {e}"))?;
     }
     let (_guard, mut term) = Guard::enter(harness == Harness::Pi)?;
     let (tx, rx) = channel::<Input>();
@@ -297,7 +297,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
         if open.is_some() || !closing.is_empty() {
             restore_terminal();
             eprintln!(
-                "clio: cerrando la sesión de Pi y guardando su resumen (unos 35 s como mucho; Ctrl-C para no esperar)…"
+                "clio: closing the Pi session and saving its summary (about 35 s at most; Ctrl-C to not wait)…"
             );
             if let Some(s) = open {
                 s.summarize();
@@ -429,7 +429,7 @@ fn session_by_file(
         .sessions
         .into_iter()
         .find(|s| s.path.display().to_string() == file)
-        .ok_or("esa sesión ya no está")?;
+        .ok_or("that session is gone")?;
     Ok((dir, s))
 }
 
@@ -495,11 +495,11 @@ fn header(dirs: &Dirs) -> Header {
         .as_ref()
         .is_some_and(|r| r.join("vault-person.sock").exists())
     {
-        "activa"
+        "active"
     } else if dirs.data.join("vault.bin").exists() {
-        "creada, detenida (clio vault start)"
+        "created, stopped (clio vault start)"
     } else {
-        "sin crear (opcional)"
+        "not created (optional)"
     };
     Header {
         model,
@@ -528,7 +528,7 @@ fn choices(
     use clio_brain::connector::{self, CONNECTORS};
     use commands::{Choice, Run};
     let cfg = Config::load(d)?;
-    let active = connector::by_provider(&cfg.model.provider).ok_or("sin conector")?;
+    let active = connector::by_provider(&cfg.model.provider).ok_or("no connector")?;
     let choice = |value: &str, label: String, current: bool| Choice {
         value: value.to_owned(),
         label,
@@ -563,9 +563,9 @@ fn choices(
                     c.provider == active.provider,
                 );
                 ch.blocked = if !has_key(d, c) {
-                    Some(format!("sin llave: clio connect {}", c.name))
+                    Some(format!("no key: clio connect {}", c.name))
                 } else if super::home::lacks_bridge(d, c) {
-                    Some("falta el puente de Claude: clio pi install".into())
+                    Some("the Claude bridge is missing: clio pi install".into())
                 } else {
                     None
                 };
@@ -629,7 +629,7 @@ fn session_model(
     let c = clio_brain::connector::CONNECTORS
         .iter()
         .find(|c| c.pi_provider == provider)
-        .ok_or("la sesión no tiene un conector de Clio")?;
+        .ok_or("the session has no Clio connector")?;
     Ok((c, st["model"]["id"].as_str().unwrap_or_default().to_owned()))
 }
 
@@ -697,7 +697,7 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
         let model = model.trim();
         if !known.iter().any(|m| m == model) {
             return Err(format!(
-                "{} no tiene el modelo «{}»; tiene: {}",
+                "{} has no model \"{}\"; it has: {}",
                 c.name,
                 sanitize::line(model),
                 known.join(", ")
@@ -709,7 +709,7 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
         Some(s) => session_model(s)?.0,
         None => {
             let cfg = Config::load(d)?;
-            clio_brain::connector::by_provider(&cfg.model.provider).ok_or("sin conector")?
+            clio_brain::connector::by_provider(&cfg.model.provider).ok_or("no connector")?
         }
     };
     let (known, _) = models(d, session, c)?;
@@ -717,7 +717,7 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
     // with a session open Pi's. Anything else would be saved and break the next session.
     if !known.iter().any(|m| m == name) {
         return Err(format!(
-            "{} no tiene el modelo «{}»; tiene: {}",
+            "{} has no model \"{}\"; it has: {}",
             c.name,
             sanitize::line(name),
             known.join(", ")
@@ -730,7 +730,7 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
         )?;
     }
     super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, name))?;
-    Ok(format!("modelo: {name}"))
+    Ok(format!("model: {name}"))
 }
 
 /// `/connector <name>`: saved for the next session (the one open keeps its connector: its
@@ -743,18 +743,18 @@ fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
 fn switch_connector(d: &Dirs, name: &str, model: Option<&str>) -> Result<String, String> {
     let c = clio_brain::connector::by_name(name.trim()).ok_or_else(|| {
         format!(
-            "no existe el conector «{}»: opencode, claude o anthropic-api",
+            "no such connector \"{}\": opencode, claude or anthropic-api",
             sanitize::line(name)
         )
     })?;
     if !has_key(d, c) {
         return Err(format!(
-            "{} no tiene llave: clio connect {} en una terminal",
+            "{} has no key: run clio connect {} in a terminal",
             c.name, c.name
         ));
     }
     if super::home::lacks_bridge(d, c) {
-        return Err("falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into());
+        return Err("the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install".into());
     }
     let cfg = Config::load_with_provider(d, c.provider)?;
     let model = model.map(str::to_owned).unwrap_or_else(|| {
@@ -766,7 +766,7 @@ fn switch_connector(d: &Dirs, name: &str, model: Option<&str>) -> Result<String,
     });
     super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, &model))?;
     Ok(format!(
-        "conector: {} · {model}. Vale desde la próxima sesión: /new la empieza",
+        "connector: {} · {model}. It applies from the next session: /new starts it",
         c.name
     ))
 }
@@ -775,13 +775,13 @@ fn switch_connector(d: &Dirs, name: &str, model: Option<&str>) -> Result<String,
 /// default from now on.
 fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<String, String> {
     if !clio_brain::pi::launch::THINKING.contains(&level) {
-        return Err(format!("«{}» no es un nivel de Pi", sanitize::line(level)));
+        return Err(format!("\"{}\" is not a Pi level", sanitize::line(level)));
     }
     if let Some(s) = session {
         let have = levels(Some(s))?;
         if !have.iter().any(|l| l == level) {
             return Err(format!(
-                "este modelo no tiene el esfuerzo {level}; tiene: {}",
+                "this model has no effort {level}; it has: {}",
                 have.join(", ")
             ));
         }
@@ -790,7 +790,7 @@ fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<St
     super::connect::edit_model(d, |m| {
         m.insert("thinking".into(), level.into());
     })?;
-    Ok(format!("esfuerzo: {level}"))
+    Ok(format!("effort: {level}"))
 }
 
 /// `/actions`: one row per action, the local time, the tool and the outcome in columns, and
@@ -802,8 +802,8 @@ fn actions_box(log: &[serde_json::Value], offset: i64) -> commands::Modal {
         .collect();
     if rows.is_empty() {
         return commands::Modal::text(
-            "Acciones",
-            vec!["esta sesión no ejecutó ninguna acción en la máquina".into()],
+            "Actions",
+            vec!["this session ran no action on the machine".into()],
         );
     }
     let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
@@ -812,14 +812,14 @@ fn actions_box(log: &[serde_json::Value], offset: i64) -> commands::Modal {
         .iter()
         .map(|[at, tool, out, what]| format!("{at}  {tool:<tool_w$}  {out:<out_w$}  {what}"))
         .collect();
-    let mut m = commands::Modal::text("Acciones", lines);
+    let mut m = commands::Modal::text("Actions", lines);
     m.hang = 8 + 2 + tool_w + 2 + out_w + 2;
     m
 }
 
 fn check(dirs: &Dirs, dir: &str) -> Result<Preview, String> {
     if dir.trim().is_empty() {
-        return Err("escribe la carpeta del proyecto".into());
+        return Err("type the project folder".into());
     }
     let cfg = Config::load(dirs)?;
     let ws = work::validate(&expand(dir, &dirs.home), dirs)?;
@@ -884,13 +884,12 @@ impl Ctx {
         let spawned = std::thread::Builder::new()
             .name("clio-worker".into())
             .spawn(move || {
-                let r = catch_unwind(AssertUnwindSafe(|| f(&dirs, &tx))).map_err(|_| {
-                    "error interno en un hilo de trabajo (es un fallo de Clio)".to_owned()
-                });
+                let r = catch_unwind(AssertUnwindSafe(|| f(&dirs, &tx)))
+                    .map_err(|_| "internal error in a worker thread (a Clio bug)".to_owned());
                 let _ = tx.send(Input::Bg(done(r)));
             });
         if let Err(e) = spawned {
-            self.send(Bg::Done(Err(format!("no se pudo iniciar un hilo: {e}"))));
+            self.send(Bg::Done(Err(format!("could not start a thread: {e}"))));
         }
     }
 
@@ -937,7 +936,7 @@ impl Ctx {
                 move |d, _| {
                     let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?.for_person();
                     link.promote(memory_id(&id)?)?;
-                    Ok::<_, String>(format!("aprobado: m{id}; desde ahora se recuerda"))
+                    Ok::<_, String>(format!("approved: m{id}; it is remembered from now on"))
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
@@ -945,7 +944,7 @@ impl Ctx {
                 move |d, _| {
                     let link = MemoryLink::open_write(&d.data, &EmbedModel::none())?.for_person();
                     link.archive(memory_id(&id)?)?;
-                    Ok::<_, String>(format!("archivado: m{id}; ya no se recuerda"))
+                    Ok::<_, String>(format!("archived: m{id}; it is no longer remembered"))
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
@@ -959,8 +958,8 @@ impl Ctx {
                     };
                     link.feedback(clio_memory::MemoryId(id), signal)?;
                     Ok::<_, String>(format!(
-                        "anotado para m{id}: {} (nunca borra el recuerdo)",
-                        if useful { "útil" } else { "equivocado" }
+                        "noted for m{id}: {} (it never deletes the memory)",
+                        if useful { "useful" } else { "wrong" }
                     ))
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
@@ -982,7 +981,7 @@ impl Ctx {
                         let done = session_by_file(d, &reference).and_then(|(dir, s)| {
                             let p = crate::cli::sessions::plan(d, &dir, &s)?;
                             crate::cli::sessions::delete(&p)?;
-                            Ok(format!("sesión borrada: {}", sanitize::line(&s.title)))
+                            Ok(format!("session deleted: {}", sanitize::line(&s.title)))
                         });
                         (
                             done,
@@ -1020,17 +1019,14 @@ impl Ctx {
                             OpenTarget::Existing { reference } => Target::Existing { reference },
                         };
                         // The local source is the first; the remote rows are never openable.
-                        let opened = sources
-                            .first()
-                            .ok_or("no hay fuente de sesiones")?
-                            .open(&target)?;
+                        let opened = sources.first().ok_or("no session source")?.open(&target)?;
                         let mut g = slot
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if g.latest != seq {
                             drop(g);
                             opened.session.shutdown();
-                            return Err("cancelado".into());
+                            return Err("cancelled".into());
                         }
                         g.session = Some(opened.session.clone());
                         Ok(Box::new(ChatInfo::from(&opened)))
@@ -1043,7 +1039,7 @@ impl Ctx {
             }
             Cmd::ChatSend { text } => {
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::Done(Err("no hay una sesión abierta".into())));
+                    self.send(Bg::Done(Err("no session is open".into())));
                     return;
                 };
                 let cancel = Cancel::new();
@@ -1104,7 +1100,7 @@ impl Ctx {
                     self.spawn(
                         move |_, _| session.steer(&text).map_err(|e| e.to_string()),
                         |r| match r.and_then(|x| x) {
-                            Ok(()) => Bg::Done(Ok("mensaje enviado al agente".into())),
+                            Ok(()) => Bg::Done(Ok("message sent to the agent".into())),
                             Err(e) => Bg::Done(Err(e)),
                         },
                     );
@@ -1112,7 +1108,7 @@ impl Ctx {
             }
             Cmd::ChatAnswer { id, yes } => {
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no hay una sesión abierta".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
                     return;
                 };
                 self.answered.store(true, Ordering::SeqCst);
@@ -1123,7 +1119,7 @@ impl Ctx {
             }
             Cmd::ChatSecret { id, name, value } => {
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no hay una sesión abierta".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
                     return;
                 };
                 // The value is dropped (and zeroed) when the worker is done with it.
@@ -1193,7 +1189,7 @@ impl Ctx {
                 let session = self.current_chat();
                 self.spawn(
                     move |_, _| {
-                        let s = session.ok_or("no hay una sesión abierta")?;
+                        let s = session.ok_or("no session is open")?;
                         s.command("set_session_name", serde_json::json!({ "name": name }))?;
                         Ok::<_, String>(name)
                     },
@@ -1205,7 +1201,7 @@ impl Ctx {
                 self.spawn(
                     move |_, _| {
                         let Some(s) = session else {
-                            return (Err("no hay una sesión abierta".to_owned()), None);
+                            return (Err("no session is open".to_owned()), None);
                         };
                         let fields = if instructions.trim().is_empty() {
                             serde_json::json!({})
@@ -1216,9 +1212,9 @@ impl Ctx {
                             let n = |k: &str| v[k].as_u64().map(usage::tokens);
                             match (n("tokensBefore"), n("estimatedTokensAfter")) {
                                 (Some(a), Some(b)) => {
-                                    format!("contexto compactado: de {a} a unos {b} tokens")
+                                    format!("context compacted: from {a} to about {b} tokens")
                                 }
-                                _ => "contexto compactado".to_owned(),
+                                _ => "context compacted".to_owned(),
                             }
                         });
                         (done, s.refresh().ok())
@@ -1259,12 +1255,7 @@ impl Ctx {
             ),
             Cmd::UndoSession { id } => self.spawn(
                 move |d, _| apply::undo_lines(d, &id, false).map(|(_, lines)| lines),
-                |r| {
-                    Bg::Modal(
-                        r.and_then(|x| x)
-                            .map(|l| commands::Modal::text("Deshacer", l)),
-                    )
-                },
+                |r| Bg::SessionUndone(r.and_then(|x| x)),
             ),
             Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
@@ -1349,7 +1340,7 @@ impl Ctx {
                     // Checked again right before writing: the original may have changed meanwhile.
                     let p = apply::plan(d, &id, false)?;
                     let n = apply::commit(&p)?;
-                    Ok::<_, String>(format!("{n} archivo(s) aplicados. Para deshacer: u"))
+                    Ok::<_, String>(format!("{n} file(s) applied. To undo: u"))
                 },
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
@@ -1357,7 +1348,7 @@ impl Ctx {
                 move |d, _| {
                     let n = apply::undo_run(d, &id, false)?;
                     Ok::<_, String>(format!(
-                        "deshecho: {} archivo(s) vuelven a como estaban",
+                        "undone: {} file(s) go back as they were",
                         n.values().sum::<usize>()
                     ))
                 },
