@@ -62,6 +62,10 @@ fn unlimited() -> u64 {
     u64::MAX
 }
 
+/// The day of a budget whose file is there but cannot be read: it keeps its spent state through
+/// the first day it sees, and starts at zero only the day after.
+const UNREADABLE: i64 = i64::MAX;
+
 impl DayBudget {
     pub fn new(max_cost_micro: u64) -> Self {
         Self {
@@ -74,15 +78,24 @@ impl DayBudget {
         }
     }
 
-    /// The day as `file` keeps it, with these caps, saved there by `save`. A file that cannot be
-    /// read starts the day from zero.
+    /// The day as `file` keeps it, with these caps, saved there by `save`. No file starts the day
+    /// at zero; a file that is there but cannot be read starts it spent (a broken file must not
+    /// hand out a fresh budget).
     /// shortcut: two sessions open at once each keep their own count and the last save wins; a
     /// lock around load-add-save if they ever run side by side for long.
     pub fn kept(file: &Path, max_cost_micro: u64, max_steps: u64) -> Self {
-        let mut d = std::fs::read_to_string(file)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Self>(&t).ok())
-            .unwrap_or_else(|| Self::new(0));
+        let mut d = match std::fs::read_to_string(file) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::new(0),
+            read => read
+                .ok()
+                .and_then(|t| serde_json::from_str::<Self>(&t).ok())
+                .unwrap_or(Self {
+                    day: UNREADABLE,
+                    spent_micro: max_cost_micro,
+                    steps: max_steps,
+                    ..Self::new(0)
+                }),
+        };
         d.max_cost_micro = max_cost_micro;
         d.max_steps = max_steps;
         d.file = Some(file.to_path_buf());
@@ -115,7 +128,9 @@ impl DayBudget {
 
     pub fn spent(&mut self, now_ms: i64) -> u64 {
         let d = now_ms.div_euclid(DAY_MS);
-        if d != self.day {
+        if self.day == UNREADABLE {
+            self.day = d;
+        } else if d != self.day {
             self.day = d;
             self.spent_micro = 0;
             self.steps = 0;

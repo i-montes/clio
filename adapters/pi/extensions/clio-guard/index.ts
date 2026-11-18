@@ -116,7 +116,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 	/** The same refusal the host applies, as an early answer: outside the folder, or a write into a protected one. */
 	function badPath(p: unknown, write: boolean): string | undefined {
 		if (typeof p !== "string" || p.length === 0 || p.includes("\0")) return "the path must be a non-empty string";
-		if (HOST) return undefined; // the host decides: it knows Clio's own folders
+		if (HOST) {
+			// The host decides (it knows Clio's own folders), but it would take `~` as a folder name.
+			return p.startsWith("~")
+				? "usa una ruta absoluta o relativa a la carpeta personal: «~» no se expande aquí"
+				: undefined;
+		}
 		if (p.startsWith("~")) return "the path must be inside the working folder";
 		const rel = relative(cwd, resolve(cwd, p.replace(/^@/, "")));
 		if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return "the path is outside the working folder";

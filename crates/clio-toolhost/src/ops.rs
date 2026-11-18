@@ -21,8 +21,8 @@ use crate::PROTECTED_PATHS;
 const MAX_FILE_BYTES: u64 = 8 << 20;
 const BASH: &str = "/usr/bin/bash";
 const MAX_TIMEOUT_SECS: u64 = 120;
-/// shortcut: a glob stops after this many folders (a glob on `/` would run for minutes), so a
-/// match past it is not found; raise it or add a time limit if real searches hit it.
+/// shortcut: in host mode a glob stops after this many folders (a glob on `/` would run for
+/// minutes), so a match past it is not found; raise it or add a time limit if real searches hit it.
 const MAX_GLOB_DIRS: usize = 20_000;
 
 fn text<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
@@ -232,7 +232,12 @@ fn fs_glob(s: &Sandbox, a: &Value) -> Result<Value> {
         .collect();
     let mut w = Walk {
         skip: &skip,
-        dirs_left: MAX_GLOB_DIRS,
+        // Host mode is the only one whose root is `/`.
+        dirs_left: if s.root().parent().is_none() {
+            MAX_GLOB_DIRS
+        } else {
+            usize::MAX
+        },
     };
     let mut out = Vec::new();
     walk(&dir, &dir, pat, limit, &mut w, &mut out);

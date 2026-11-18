@@ -183,6 +183,8 @@ pub struct Toolhost {
     /// here, put in the service's own environment (Pi never gets it) and shown by nobody else.
     pub said_token: String,
     sock_dir: PathBuf,
+    /// Host mode: the units its `Systemd` launcher started are stopped with it.
+    host: bool,
 }
 
 static TOOLHOSTS: AtomicU32 = AtomicU32::new(0);
@@ -302,6 +304,7 @@ impl Toolhost {
             socket,
             said_token,
             sock_dir,
+            host: host.is_some(),
         };
         // On any failure `this` drops here and stops the process.
         let line = rx.recv_timeout(TOOLHOST_READY).map_err(|_| {
@@ -335,6 +338,9 @@ impl Toolhost {
                 let _ = c.kill();
             }
             let _ = c.wait();
+            if self.host {
+                clio_node::host::stop_units_of(c.id());
+            }
         }
         let _ = std::fs::remove_dir_all(&self.sock_dir);
     }

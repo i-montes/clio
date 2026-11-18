@@ -71,6 +71,26 @@ fn unit_name() -> String {
     )
 }
 
+/// The argv that stops, without waiting, every unit the process `pid` started.
+fn stop_units_args(ctl: &Path, pid: u32) -> Vec<String> {
+    vec![
+        "-n".into(),
+        ctl.to_string_lossy().into_owned(),
+        "stop".into(),
+        "--no-block".into(),
+        format!("clio-host-{pid}-*"),
+    ]
+}
+
+/// Best effort, for whoever started the process `pid` once it is gone: its `Systemd` units
+/// outlive it (killing a `sudo systemd-run` client does not stop its unit). Does nothing without
+/// `sudo` and `systemctl` in the system folders.
+pub fn stop_units_of(pid: u32) {
+    if let (Some(sudo), Some(ctl)) = (find_in_trusted("sudo"), find_in_trusted("systemctl")) {
+        let _ = quiet(Command::new(sudo).args(stop_units_args(&ctl, pid))).status();
+    }
+}
+
 fn quiet(cmd: &mut Command) -> &mut Command {
     cmd.env_clear()
         .stdin(Stdio::null())
@@ -333,5 +353,25 @@ impl HostJail {
             return Err(format!("host launcher self test: {why} ({detail})"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_units_of_a_process_are_stopped_by_its_pid() {
+        let a = super::stop_units_args(std::path::Path::new("/usr/bin/systemctl"), 42);
+        assert_eq!(
+            a,
+            [
+                "-n",
+                "/usr/bin/systemctl",
+                "stop",
+                "--no-block",
+                "clio-host-42-*"
+            ]
+        );
+        // The pattern covers the names `run` gives (`clio-host-<pid>-<n>-<nanos>`).
+        assert!(super::unit_name().starts_with(&format!("clio-host-{}-", std::process::id())));
     }
 }

@@ -126,13 +126,14 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
         }
         cfg.scrubber = Some(s);
     }
+    let where_ = if cfg.host.is_some() {
+        "bash on the real machine, Clio's folders masked; the launcher"
+    } else {
+        "bash in the jail; the jail"
+    };
     let host = Arc::new(ToolHost::new(cfg)?);
     match host.exec_available() {
-        Ok(()) => {
-            eprintln!(
-                "clio-toolhost: exec (bash in the jail) is available (the jail passed its self-test)"
-            )
-        }
+        Ok(()) => eprintln!("clio-toolhost: exec ({where_} passed its self-test) is available"),
         Err(why) => eprintln!("clio-toolhost: exec (bash) is NOT offered: {why}"),
     }
     let server = Server::start(host, &dir)?;

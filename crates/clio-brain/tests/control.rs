@@ -272,3 +272,28 @@ fn the_day_counts_steps_and_cost_across_two_loads_and_resets_the_next_day() {
     assert_eq!(third.steps(), 1);
     assert_eq!(third.spent(day0 + 86_400_000), 0);
 }
+
+// A day file that is there but cannot be read: the day starts spent, not at zero; the next day
+// starts fresh.
+#[test]
+fn a_broken_day_file_starts_the_day_spent() {
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join("day.json");
+    std::fs::write(&file, "{roto").unwrap();
+    let clock = Arc::new(FixedClock::new(1_000_000));
+    let big = Budget {
+        max_steps: 1_000,
+        ..budget()
+    };
+    let mut day = DayBudget::kept(&file, 10_000, 3);
+    let mut c = Controller::new(clock.clone(), "t1", Level::Simple, big);
+    assert_eq!(c.begin_step("a", 0, &mut day), Err(Stop::DaySteps));
+    day.save();
+    let mut again = DayBudget::kept(&file, 10_000, 3);
+    let mut c = Controller::new(clock.clone(), "t2", Level::Simple, big);
+    assert!(c.begin_step("a", 1, &mut again).is_err());
+
+    clock.advance(86_400_000);
+    let mut c = Controller::new(clock, "t3", Level::Simple, big);
+    c.begin_step("b", 0, &mut again).unwrap();
+}
