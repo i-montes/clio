@@ -298,6 +298,28 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     a.chat.title = "What weighs the most on the disk?".into();
     a.chat.failed = Some("could not open the session: Pi exited while starting (code 1)".into());
     out.push(("error on open", a));
+    // `clio` reopened the last conversation: its file, with more before it and a compaction in it.
+    let mut a = pi(true);
+    a.chat = Chat::opening(1, 0);
+    a.chat.title = "Which root folders weigh most on this server?".into();
+    let m = super::tests_continuous::message;
+    a.chat.add_page(
+        &[
+            m("user", "Is nginx still answering on 443?"),
+            m(
+                "assistant",
+                "Yes: **nginx** answers on 443 with the new certificate.",
+            ),
+            serde_json::json!({"type": "compaction", "summary": "s", "firstKeptEntryId": "x"}),
+            m("user", "Which root folders weigh most on this server?"),
+            m(
+                "assistant",
+                "Almost all of it is in `/var/lib`: **docker** 56G, containerd 39G.",
+            ),
+        ],
+        Some(40),
+    );
+    out.push(("reopened conversation, earlier messages and a summary", a));
     let mut a = pi(false);
     a.home.header.as_mut().unwrap().key = KeyState::Missing;
     a.home.doctor = Some((30, 2, 2));

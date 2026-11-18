@@ -104,6 +104,7 @@ fn open_selected(app: &mut App) -> Vec<Cmd> {
     app.chat_seq += 1;
     app.chat = Chat::opening(app.chat_seq, app.now_ms);
     app.chat.title = title;
+    app.chat.file = Some(reference.clone());
     app.screen = Screen::Chat;
     vec![Cmd::ChatOpen {
         seq: app.chat_seq,
@@ -199,6 +200,7 @@ pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
         MouseEventKind::ScrollDown if side => app.sessions.sel = (app.sessions.sel + 1).min(last),
         MouseEventKind::ScrollUp if app.sessions.chat_area.get().contains(at) => {
             app.chat.scroll_by(3);
+            return super::chat::earlier(app);
         }
         MouseEventKind::ScrollDown if app.sessions.chat_area.get().contains(at) => {
             app.chat.scroll_by(-3);

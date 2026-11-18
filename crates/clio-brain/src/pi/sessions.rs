@@ -306,6 +306,78 @@ pub fn list_sessions(dir: &Path) -> SessionList {
     out
 }
 
+/// The turns (a message of the person and what followed it) the chat reads from a session file at
+/// a time.
+pub const HISTORY_TURNS: usize = 200;
+
+/// A page of a session's conversation, as Pi's file recorded it.
+#[derive(Debug, Default, PartialEq)]
+pub struct History {
+    /// The `message` (not `system`) and `compaction` entries of the page, oldest first, whole.
+    pub entries: Vec<Value>,
+    /// The line of the file the page starts at: the page before it ends there.
+    pub first: usize,
+    /// The file has messages before the page.
+    pub more: bool,
+}
+
+/// What a line is, read without the rest of it.
+#[derive(serde::Deserialize)]
+struct Kind {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    message: Option<Role>,
+}
+
+#[derive(serde::Deserialize)]
+struct Role {
+    #[serde(default)]
+    role: String,
+}
+
+/// The last `turns` turns of the session file at `path` that end before line `before` (`None`: the
+/// whole file). Clio only reads Pi's format, never writes it. A line that is not JSON (the last one
+/// while Pi writes it) is skipped; a file that cannot be read is an error.
+pub fn read_history(path: &Path, before: Option<usize>, turns: usize) -> Result<History, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let end = before.unwrap_or(lines.len()).min(lines.len());
+    // The lines the chat draws, and whether each is a message of the person.
+    let kinds: Vec<(usize, bool)> = lines[..end]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let k: Kind = serde_json::from_str(l).ok()?;
+            let role = k.message.map(|m| m.role).unwrap_or_default();
+            match k.kind.as_str() {
+                "message" if role != "system" => Some((i, role == "user")),
+                "compaction" => Some((i, false)),
+                _ => None,
+            }
+        })
+        .collect();
+    let mut start = 0;
+    let mut seen = 0;
+    for (k, (_, user)) in kinds.iter().enumerate().rev() {
+        seen += usize::from(*user);
+        if seen == turns {
+            start = k;
+            break;
+        }
+    }
+    let page = &kinds[start..];
+    Ok(History {
+        entries: page
+            .iter()
+            .filter_map(|(i, _)| serde_json::from_str(lines[*i]).ok())
+            .collect(),
+        first: page.first().map_or(end, |(i, _)| *i),
+        more: start > 0,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -320,5 +392,48 @@ mod tests {
         );
         assert_eq!(parse_iso_ms("nonsense"), None);
         assert_eq!(parse_iso_ms("2024-13-03T14:00:00Z"), None);
+    }
+
+    // The chat's history: pages of whole turns from the end, each ending where the later one
+    // starts; system messages and other entries are left out, a compaction kept where it sits, and
+    // a torn last line (Pi writing it) skipped.
+    #[test]
+    fn the_history_comes_in_pages_of_whole_turns_from_the_end() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("s.jsonl");
+        let msg = |role: &str, text: &str| {
+            serde_json::json!({"type":"message","message":{"role":role,"content":text}}).to_string()
+        };
+        let mut lines = vec![
+            r#"{"type":"session","version":3,"id":"x","cwd":"/"}"#.to_owned(),
+            msg("system", "the prompt"),
+        ];
+        for n in 0..5 {
+            lines.push(msg("user", &format!("q{n}")));
+            lines.push(msg("assistant", &format!("a{n}")));
+            if n == 2 {
+                lines.push(r#"{"type":"compaction","summary":"s","firstKeptEntryId":"e"}"#.into());
+            }
+            lines.push(r#"{"type":"custom","customType":"clio-guard.taint"}"#.into());
+        }
+        let mut file = lines.join("\n");
+        file.push_str("\n{\"type\":\"message\",\"mess");
+        std::fs::write(&p, file).unwrap();
+        let said = |h: &History| -> Vec<String> {
+            h.entries
+                .iter()
+                .map(|e| e["message"]["content"].as_str().unwrap_or("·").to_owned())
+                .collect()
+        };
+        let last = read_history(&p, None, 2).unwrap();
+        assert_eq!(said(&last), ["q3", "a3", "q4", "a4"]);
+        assert!(last.more);
+        let before = read_history(&p, Some(last.first), 2).unwrap();
+        assert_eq!(said(&before), ["q1", "a1", "q2", "a2", "·"]);
+        assert_eq!(before.entries[4]["type"], "compaction");
+        let first = read_history(&p, Some(before.first), 2).unwrap();
+        assert_eq!(said(&first), ["q0", "a0"]);
+        assert!(!first.more);
+        assert!(read_history(&t.path().join("gone.jsonl"), None, 2).is_err());
     }
 }

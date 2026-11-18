@@ -197,6 +197,14 @@ pub struct Chat {
     pub(super) rendered: RefCell<HashMap<usize, (u64, Vec<Line<'static>>)>>,
     /// Items dropped from the front (past `MAX_ITEMS`) so far.
     dropped: usize,
+    /// The Pi session file of a session opened from the list: its history is read from there.
+    pub file: Option<String>,
+    /// What is shown of the file starts at this line, and the file has messages before it.
+    pub earlier: Option<usize>,
+    /// The page before is being read.
+    pub loading_earlier: bool,
+    /// The history came from the file: Pi's own copy (`get_messages`) is not drawn.
+    pub from_file: bool,
     /// How many times an answer's markdown was parsed (a test counts it).
     pub(super) parsed: Cell<usize>,
 }
@@ -246,6 +254,10 @@ impl Chat {
             streamed: false,
             rendered: RefCell::default(),
             dropped: 0,
+            file: None,
+            earlier: None,
+            loading_earlier: false,
+            from_file: false,
             parsed: Cell::new(0),
         }
     }
@@ -297,12 +309,41 @@ impl Chat {
         self.session_id = id;
         self.workspace = workspace;
         self.started_ms = now_ms;
+        // In front of what is already there (a message sent while it opened).
+        let rest = std::mem::take(&mut self.items);
         for m in history {
             self.add_history(m);
         }
+        self.items.extend(rest);
+        self.rendered.take();
         if let Some(r) = refresh {
             self.refresh(&r);
         }
+    }
+
+    /// A page of the session's file in front of what is shown: its messages through the same
+    /// conversion as Pi's, a quiet line where the file has a compaction, and one on top while the
+    /// file has messages before the page (`earlier`, the line the page starts at).
+    pub fn add_page(&mut self, entries: &[Value], earlier: Option<usize>) {
+        if self.items.first() == Some(&Item::Note(EARLIER.into())) {
+            self.items.remove(0);
+        }
+        let rest = std::mem::take(&mut self.items);
+        if earlier.is_some() {
+            self.items.push(Item::Note(EARLIER.into()));
+        }
+        for e in entries {
+            match e["type"].as_str() {
+                Some("message") => self.add_history(&e["message"]),
+                Some("compaction") => self.items.push(Item::Note(SUMMARISED.into())),
+                _ => {}
+            }
+        }
+        self.items.extend(rest);
+        self.earlier = earlier;
+        self.from_file = true;
+        // The items moved: what the last draw rendered is by place.
+        self.rendered.take();
     }
 
     fn add_history(&mut self, m: &Value) {
@@ -574,6 +615,8 @@ impl Chat {
             let extra = self.items.len() - MAX_ITEMS;
             self.items.drain(..extra);
             self.dropped += extra;
+            // A gap would open between what is shown and the page before it.
+            self.earlier = None;
         }
     }
 
@@ -594,6 +637,27 @@ impl Chat {
             // Not shown: nearly every useful session reads a file, so the mark would always be on.
             tainted: false,
         }
+    }
+}
+
+/// The quiet line on top while the session's file has earlier messages.
+pub const EARLIER: &str = "earlier messages · scroll up";
+/// The quiet line where the file has a compaction.
+pub const SUMMARISED: &str = "earlier messages were summarised here";
+
+/// At the very top of what is shown: the page before it, read from the session's file.
+pub fn earlier(app: &mut App) -> Vec<Cmd> {
+    let c = &mut app.chat;
+    match (&c.file, c.earlier) {
+        (Some(file), Some(before)) if !c.loading_earlier && c.scroll >= c.scroll_max.get() => {
+            c.loading_earlier = true;
+            vec![Cmd::LoadHistory {
+                seq: c.seq,
+                file: file.clone(),
+                before,
+            }]
+        }
+        _ => vec![],
     }
 }
 
@@ -760,6 +824,9 @@ fn key_composer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         Act::Top => c.scroll = c.scroll_max.get(),
         Act::Bottom => c.scroll = 0,
         _ => {}
+    }
+    if matches!(act, Act::Up | Act::PageUp | Act::Top) {
+        return earlier(app);
     }
     vec![]
 }

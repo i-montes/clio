@@ -159,6 +159,12 @@ pub enum Cmd {
     UndoSession {
         id: String,
     },
+    /// The page of a session's file that ends before line `before`.
+    LoadHistory {
+        seq: u64,
+        file: String,
+        before: usize,
+    },
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),
     /// Clear the terminal and draw everything again.
@@ -204,6 +210,12 @@ pub enum Bg {
     ChatOpened {
         seq: u64,
         result: Result<Box<ChatInfo>, String>,
+    },
+    /// A page of the history of the chat `seq`, read from its session file.
+    History {
+        seq: u64,
+        file: String,
+        page: Result<clio_brain::pi::sessions::History, String>,
     },
     ChatEvent(clio_brain::pi::rpc::Event),
     /// Host mode: what the turn set aside, one question each: (id, «class» and what).
@@ -999,13 +1011,14 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             let queued = app.chat.queued.take();
             match result {
                 Ok(info) => {
-                    app.chat.opened(
-                        info.id,
-                        info.workspace,
-                        &info.history,
-                        info.refresh,
-                        app.now_ms,
-                    );
+                    // Read from the session's file already; Pi's copy only when it could not be.
+                    let history = if app.chat.from_file {
+                        &[][..]
+                    } else {
+                        &info.history[..]
+                    };
+                    app.chat
+                        .opened(info.id, info.workspace, history, info.refresh, app.now_ms);
                     // A new session's first message: the presentation, if any, is asked in
                     // front of it (`PrePrompt`), so Clio introduces herself and answers.
                     if let Some(text) = queued {
@@ -1042,6 +1055,29 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     }
                 }
             }
+            vec![]
+        }
+        Bg::History { seq, file, page } => {
+            if seq != app.chat.seq {
+                return vec![];
+            }
+            let c = &mut app.chat;
+            let earlier = std::mem::replace(&mut c.loading_earlier, false);
+            match page {
+                Ok(h) => c.add_page(&h.entries, h.more.then_some(h.first)),
+                Err(e) if earlier => {
+                    app.flash = Some(format!("could not read the earlier messages: {e}"));
+                }
+                Err(e) => c.items.push(super::chat::Item::Note(format!(
+                    "the session file could not be read ({e}): showing what Pi keeps of the conversation"
+                ))),
+            }
+            if c.title.is_empty()
+                && let Some(r) = app.sessions.rows.iter().find(|r| r.reference == file)
+            {
+                c.title.clone_from(&r.title);
+            }
+            c.file = Some(file);
             vec![]
         }
         Bg::ChatEvent(e) => {

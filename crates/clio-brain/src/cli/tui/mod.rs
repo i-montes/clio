@@ -35,6 +35,8 @@ mod tests_ask;
 #[cfg(test)]
 mod tests_commands;
 #[cfg(test)]
+mod tests_continuous;
+#[cfg(test)]
 mod tests_gallery;
 #[cfg(test)]
 mod tests_memory;
@@ -43,7 +45,7 @@ mod tests_views;
 
 use std::io::{IsTerminal, Stdout};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -52,6 +54,7 @@ use std::time::{Duration, Instant};
 use clio_brain::agent::{Event, Observer};
 use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::rpc::Cancel;
+use clio_brain::pi::sessions::{HISTORY_TURNS, read_history};
 use clio_memory::Signal;
 use crossterm::event::{self, Event as Term, KeyEventKind};
 use crossterm::terminal::{
@@ -1010,7 +1013,16 @@ impl Ctx {
                 let (sources, slot) = (self.sources.clone(), self.chat.clone());
                 let closing = self.closing.clone();
                 self.spawn(
-                    move |d, _| -> Result<Box<ChatInfo>, String> {
+                    move |d, tx| -> Result<Box<ChatInfo>, String> {
+                        // The history first, from the session's file: on screen before Pi is up.
+                        if let OpenTarget::Existing { reference } = &target {
+                            let page = read_history(Path::new(reference), None, HISTORY_TURNS);
+                            let _ = tx.send(Input::Bg(Bg::History {
+                                seq,
+                                file: reference.clone(),
+                                page,
+                            }));
+                        }
                         wait_closing(&closing);
                         let target = match target {
                             OpenTarget::New { project } => Target::New {
@@ -1257,6 +1269,17 @@ impl Ctx {
                 move |d, _| apply::undo_lines(d, &id, false).map(|(_, lines)| lines),
                 |r| Bg::SessionUndone(r.and_then(|x| x)),
             ),
+            Cmd::LoadHistory { seq, file, before } => {
+                let path = PathBuf::from(&file);
+                self.spawn(
+                    move |_, _| read_history(&path, Some(before), HISTORY_TURNS),
+                    move |r| Bg::History {
+                        seq,
+                        file,
+                        page: r.and_then(|x| x),
+                    },
+                );
+            }
             Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {
                 if let Ok(flag) = self.cancel.lock() {
