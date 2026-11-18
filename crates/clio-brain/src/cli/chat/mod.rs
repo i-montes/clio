@@ -182,6 +182,11 @@ pub trait Session: Send + Sync {
 pub trait SessionSource: Send + Sync {
     fn list(&self) -> Vec<Row>;
     fn open(&self, target: &Target) -> Result<Opened, String>;
+    /// The conversation `clio` reopens (a `Row::reference`): the first listed session that is
+    /// Clio's, of the mode a new session would have and, in copy mode, of `project`. `None`: none.
+    fn last(&self, _project: &std::path::Path) -> Option<String> {
+        None
+    }
 }
 
 /// The same Pi protocol over `ssh <host> clio serve-rpc` stdio. Not built yet: the source is

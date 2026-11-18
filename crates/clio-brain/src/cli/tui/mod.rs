@@ -64,7 +64,9 @@ use crossterm::{cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use self::app::{App, Bg, ChatInfo, Cmd, Input, OpenTarget, Planned, draw, update};
+use self::app::{
+    App, Bg, ChatInfo, Cmd, Input, NOTHING_TO_REOPEN, OpenTarget, Planned, draw, update,
+};
 use self::detail::Detail;
 use self::home::{Header, KeyState};
 use self::memory::MemoryData;
@@ -174,8 +176,8 @@ impl Drop for Guard {
     }
 }
 
-/// Opens the TUI and returns the exit code.
-pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res<i32> {
+/// Opens the TUI and returns the exit code. `new`: a new session, not the last conversation.
+pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: bool) -> Res<i32> {
     install_panic_hook();
     // SIGTERM and SIGHUP (the window closes, `kill`) leave through the normal way out, so the
     // guard gives the terminal back; a handler cannot do that itself, it only sets this.
@@ -203,15 +205,20 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
     app.debug = debug;
+    let mut resume = vec![];
     if harness == Harness::Pi {
         app.use_pi();
+        let cfg = Config::load(&ctx.dirs).ok();
         // As `LocalSource::open` decides it for a new session.
         app.host = mode
-            .or_else(|| Config::load(&ctx.dirs).ok().map(|c| c.mode))
+            .or_else(|| cfg.as_ref().map(|c| c.mode))
             .unwrap_or_default()
             == Mode::Host;
+        if !new && cfg.is_some_and(|c| c.session.continuous) {
+            resume = sessions::resume(&mut app);
+        }
     }
-    for c in app.start_cmds() {
+    for c in app.start_cmds().into_iter().chain(resume) {
         ctx.exec(c);
     }
     let t0 = Instant::now();
@@ -1014,6 +1021,17 @@ impl Ctx {
                 let closing = self.closing.clone();
                 self.spawn(
                     move |d, tx| -> Result<Box<ChatInfo>, String> {
+                        // `clio` alone: the conversation the drawer would list first, opened as
+                        // the drawer opens it.
+                        let target = match target {
+                            OpenTarget::Last { project } => OpenTarget::Existing {
+                                reference: sources
+                                    .first()
+                                    .and_then(|s| s.last(&expand(&project, &d.home)))
+                                    .ok_or(NOTHING_TO_REOPEN)?,
+                            },
+                            t => t,
+                        };
                         // The history first, from the session's file: on screen before Pi is up.
                         if let OpenTarget::Existing { reference } = &target {
                             let page = read_history(Path::new(reference), None, HISTORY_TURNS);
@@ -1029,6 +1047,8 @@ impl Ctx {
                                 project: expand(&project, &d.home),
                             },
                             OpenTarget::Existing { reference } => Target::Existing { reference },
+                            // Turned into the session it names above.
+                            OpenTarget::Last { .. } => return Err(NOTHING_TO_REOPEN.into()),
                         };
                         // The local source is the first; the remote rows are never openable.
                         let opened = sources.first().ok_or("no session source")?.open(&target)?;

@@ -1253,6 +1253,12 @@ fn debug_flag_placement_is_checked() {
     let o = e.try_clio(&["--debug"]);
     assert!(o.status.success() && text(&o.stdout).contains("clio run"));
     assert!(text(&o.stdout).contains("--debug"));
+    // `--new` (a new session instead of the last conversation) is one of the interface's flags.
+    let o = e.try_clio(&["--new"]);
+    assert!(o.status.success() && text(&o.stdout).contains("--new"));
+    let o = e.try_clio(&["--new", "doctor"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("--new"), "{}", text(&o.stderr));
 }
 
 #[test]

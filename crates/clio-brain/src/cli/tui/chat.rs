@@ -205,6 +205,8 @@ pub struct Chat {
     pub loading_earlier: bool,
     /// The history came from the file: Pi's own copy (`get_messages`) is not drawn.
     pub from_file: bool,
+    /// `clio` is reopening the last conversation by itself: if it cannot, a draft.
+    pub resume: bool,
     /// How many times an answer's markdown was parsed (a test counts it).
     pub(super) parsed: Cell<usize>,
 }
@@ -258,6 +260,7 @@ impl Chat {
             earlier: None,
             loading_earlier: false,
             from_file: false,
+            resume: false,
             parsed: Cell::new(0),
         }
     }
@@ -282,6 +285,19 @@ impl Chat {
     pub fn set_input(&mut self, text: String) {
         self.cursor = text.len();
         self.input = text;
+    }
+
+    /// A message that could not go out is back in the composer, in front of anything typed since,
+    /// and out of the conversation.
+    pub fn unsend(&mut self, text: String) {
+        self.items.retain(|i| *i != Item::User(text.clone()));
+        self.rendered.take();
+        let typed = std::mem::take(&mut self.input);
+        self.set_input(if typed.is_empty() {
+            text
+        } else {
+            format!("{text}\n{typed}")
+        });
     }
 
     /// Scrolls the conversation `n` lines up (negative: down), within what the last draw allowed.
@@ -864,6 +880,13 @@ pub fn send_text(app: &mut App, text: String) -> Vec<Cmd> {
                 project: app.cwd.clone(),
             },
         }];
+    }
+    // The session is starting: the message goes out once it is up (one at a time).
+    if c.opening && c.queued.is_none() && c.failed.is_none() {
+        c.scroll = 0;
+        c.items.push(Item::User(text.clone()));
+        c.queued = Some(text);
+        return vec![];
     }
     if c.compacting || c.opening || c.failed.is_some() {
         app.flash = Some(if c.compacting {
@@ -2195,13 +2218,21 @@ mod tests {
         );
     }
 
+    // A chat still opening sends nothing yet: the first message waits for the session (and goes
+    // when it is up), a second stays in the composer.
     #[test]
     fn a_chat_that_is_still_opening_does_not_send() {
         let mut app = open_chat();
         app.chat.opening = true;
         let (app, cmds) = press(typed(app, "hola"), KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.is_empty() && !app.chat.running);
-        assert!(app.flash.is_some() && app.chat.input == "hola");
+        assert_eq!(app.chat.queued.as_deref(), Some("hola"));
+        assert!(
+            app.chat.input.is_empty() && app.chat.items.last() == Some(&Item::User("hola".into()))
+        );
+        let (app, cmds) = press(typed(app, "y más"), KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.is_empty() && !app.chat.running);
+        assert!(app.flash.is_some() && app.chat.input == "y más");
     }
 
     // `x` on a session asks what deleting it removes, shows it, and deletes only on `y`.

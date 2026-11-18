@@ -154,6 +154,30 @@ impl SessionSource for LocalSource {
             .collect()
     }
 
+    fn last(&self, project: &Path) -> Option<String> {
+        let mode = match self.mode {
+            Some(m) => m,
+            None => Config::load(&self.dirs).ok()?.mode,
+        };
+        let project = project.canonicalize().ok();
+        let of_project = |s: &SessionInfo| {
+            let meta = runs::read_json::<runs::Meta>(&self.dirs.runs.join(&s.id).join("meta.json"));
+            project.is_some()
+                && meta
+                    .ok()
+                    .and_then(|m| Path::new(&m.workspace).canonicalize().ok())
+                    == project
+        };
+        list_sessions(&crate::cli::pi::paths(&self.dirs).sessions_dir())
+            .sessions
+            .into_iter()
+            .find(|s| match mode {
+                Mode::Host => self.is_host(s),
+                Mode::Copy => self.is_copy(s) && of_project(s),
+            })
+            .map(|s| s.path.display().to_string())
+    }
+
     fn open(&self, target: &Target) -> Result<Opened, String> {
         let d = &*self.dirs;
         let cfg = Config::load(d)?;
@@ -847,6 +871,60 @@ mod tests {
             bad.iter().all(|r| r.unavailable.is_some()),
             "a forged id made a folder of the person's look like a working copy"
         );
+    }
+
+    // `clio` reopens the first session the drawer lists that is Clio's, of the mode a new session
+    // would have and, in copy mode, of this project; with none, nothing.
+    #[test]
+    fn the_last_conversation_is_the_newest_of_this_mode_and_place() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let (_, sessions) = local_source(&home);
+        let (proj, other) = (home.join("proj"), home.join("other"));
+        let run = |id: &str, host: bool, ws: &Path| {
+            let d = home.join("data/runs").join(id);
+            std::fs::create_dir_all(d.join("sandbox")).unwrap();
+            std::fs::create_dir_all(ws).unwrap();
+            let meta = json!({"id": id, "workspace": ws, "instruction": "x", "created_ms": 0,
+                "host": host});
+            std::fs::write(d.join("meta.json"), meta.to_string()).unwrap();
+            d.join("sandbox")
+        };
+        // Newest first.
+        plant(&sessions, "a.jsonl", "20261101-ffff", &proj);
+        plant(
+            &sessions,
+            "b.jsonl",
+            "20261101-cccc",
+            &run("20261101-cccc", false, &other),
+        );
+        plant(
+            &sessions,
+            "c.jsonl",
+            "20261101-bbbb",
+            &run("20261101-bbbb", false, &proj),
+        );
+        run("20261101-aaaa", true, &home);
+        plant(&sessions, "d.jsonl", "20261101-aaaa", &home);
+        run("20261031-0000", true, &home);
+        plant(&sessions, "e.jsonl", "20261031-0000", &home);
+        for (n, f) in ["e", "d", "c", "b", "a"].iter().enumerate() {
+            let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000 * (n as u64 + 1));
+            std::fs::File::options()
+                .write(true)
+                .open(sessions.join(format!("{f}.jsonl")))
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+        let file = |f: &str| Some(sessions.join(f).display().to_string());
+        let host = local_source(&home).0.with_mode(Some(Mode::Host));
+        assert_eq!(host.last(&proj), file("d.jsonl"));
+        let copy = local_source(&home).0.with_mode(Some(Mode::Copy));
+        assert_eq!(copy.last(&proj), file("c.jsonl"));
+        assert_eq!(copy.last(&other), file("b.jsonl"));
+        assert_eq!(copy.last(&home.join("nowhere")), None);
+        assert_eq!(copy.last(&home), None);
     }
 
     #[test]

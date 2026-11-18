@@ -1,5 +1,5 @@
-//! One continuous conversation: the history of a reopened session comes from its Pi file, a page at
-//! a time.
+//! One continuous conversation: `clio` reopens the last conversation, and the history of a
+//! reopened session comes from its Pi file, a page at a time.
 
 #![allow(clippy::unwrap_used)]
 
@@ -7,9 +7,9 @@ use clio_brain::pi::sessions::History;
 use crossterm::event::KeyCode;
 use serde_json::{Value, json};
 
-use super::app::{App, Bg, ChatInfo, Cmd, Input, OpenTarget, Screen};
+use super::app::{App, Bg, ChatInfo, Cmd, Input, NOTHING_TO_REOPEN, OpenTarget, Screen};
 use super::chat::{EARLIER, Item, SUMMARISED};
-use super::tests::{feed, key};
+use super::tests::{ch, feed, key};
 use super::tests_gallery::{pi, screen_text};
 
 pub(super) fn message(role: &str, text: &str) -> Value {
@@ -197,4 +197,150 @@ fn a_session_file_that_cannot_be_read_falls_back_to_pis_copy() {
         })],
     );
     assert_eq!(texts(&a), t);
+}
+
+/// `clio` alone, as `run` starts it: the drawer's session, opened by itself.
+fn resuming() -> (App, u64) {
+    let mut a = pi(true);
+    let cmds = super::sessions::resume(&mut a);
+    let seq = match &cmds[..] {
+        [
+            Cmd::ChatOpen {
+                seq,
+                target: OpenTarget::Last { project },
+            },
+        ] if project == "/home/ivan/project" => *seq,
+        _ => panic!("{cmds:?}"),
+    };
+    assert!(a.chat.opening && a.chat.resume && !a.chat.is_draft());
+    (a, seq)
+}
+
+fn typed(text: &str) -> Vec<Input> {
+    text.chars().map(ch).collect()
+}
+
+// `clio` reopens the last conversation: its history is on screen at once, the composer takes keys
+// while Pi starts, and a message sent meanwhile goes out once it is up, after the history.
+#[test]
+fn clio_reopens_the_last_conversation_and_sends_what_was_typed_meanwhile() {
+    let (a, seq) = resuming();
+    let mut inputs = typed("and now /home");
+    inputs.push(key(KeyCode::Enter));
+    inputs.extend(typed("draft"));
+    let (a, cmds) = feed(a, inputs);
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(a.chat.queued.as_deref(), Some("and now /home"));
+    assert_eq!(a.chat.input, "draft");
+    let (a, cmds) = feed(
+        a,
+        vec![
+            Input::Bg(Bg::History {
+                seq,
+                file: "/s/1_sid.jsonl".into(),
+                page: Ok(page(
+                    vec![message("user", "q1"), message("assistant", "a1")],
+                    1,
+                    false,
+                )),
+            }),
+            Input::Bg(Bg::ChatOpened {
+                seq,
+                result: Ok(opened("sid", vec![])),
+            }),
+        ],
+    );
+    assert_eq!(texts(&a), ["q1", "a1", "and now /home"]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatSend {
+            text: "and now /home".into()
+        }]
+    );
+    assert!(a.chat.running && a.chat.input == "draft");
+    // The title is the session's, and the drawer marks it open.
+    assert_eq!(super::sessions::open_pos(&a), Some(1));
+    assert_eq!(a.chat.file.as_deref(), Some("/s/1_sid.jsonl"));
+}
+
+// No conversation to reopen: a draft, silently, and a message sent meanwhile starts the new one.
+// One that cannot be reopened: a draft with a note that says why, and the message back in the
+// composer, in front of what was typed since.
+#[test]
+fn with_none_or_a_failure_clio_opens_a_draft() {
+    let (a, seq) = resuming();
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Err(NOTHING_TO_REOPEN.into()),
+        })],
+    );
+    assert!(cmds.is_empty() && a.chat.is_draft() && a.chat.items.is_empty());
+    let (a, seq) = resuming();
+    let mut inputs = typed("hola");
+    inputs.push(key(KeyCode::Enter));
+    let (a, _) = feed(a, inputs);
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Err(NOTHING_TO_REOPEN.into()),
+        })],
+    );
+    assert!(
+        matches!(
+            &cmds[..],
+            [Cmd::ChatOpen {
+                target: OpenTarget::New { .. },
+                ..
+            }]
+        ),
+        "{cmds:?}"
+    );
+    assert_eq!(a.chat.queued.as_deref(), Some("hola"));
+    let (a, seq) = resuming();
+    let mut inputs = typed("hola");
+    inputs.push(key(KeyCode::Enter));
+    inputs.extend(typed("y"));
+    let (a, _) = feed(a, inputs);
+    let (a, cmds) = feed(
+        a,
+        vec![
+            Input::Bg(Bg::History {
+                seq,
+                file: "/s/1_sid.jsonl".into(),
+                page: Ok(page(vec![message("user", "old")], 0, false)),
+            }),
+            Input::Bg(Bg::ChatOpened {
+                seq,
+                result: Err("Pi exited while starting (code 1)".into()),
+            }),
+        ],
+    );
+    assert!(cmds.is_empty() && a.chat.is_draft(), "{cmds:?}");
+    let t = texts(&a);
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].contains("could not reopen the last conversation") && t[0].contains("code 1"));
+    assert_eq!(a.chat.input, "hola\ny");
+}
+
+// A session opened from the drawer that fails: the message sent meanwhile is back in the
+// composer, and the chat says it could not open (it is not a new session to retry with Enter).
+#[test]
+fn a_drawer_session_that_fails_to_open_gives_the_message_back() {
+    let (a, seq) = open_second();
+    let mut inputs = typed("hola");
+    inputs.push(key(KeyCode::Enter));
+    let (a, _) = feed(a, inputs);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Err("no key".into()),
+        })],
+    );
+    assert_eq!(a.chat.input, "hola");
+    assert!(a.chat.failed.is_some() && !a.chat.is_draft());
+    assert!(!a.chat.items.contains(&Item::User("hola".into())));
 }

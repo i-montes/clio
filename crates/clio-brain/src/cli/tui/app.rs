@@ -52,9 +52,21 @@ pub enum Screen {
 /// What to open in a Pi chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenTarget {
-    New { project: String },
-    Existing { reference: String },
+    New {
+        project: String,
+    },
+    Existing {
+        reference: String,
+    },
+    /// The last conversation of this mode and place (`SessionSource::last`), as the drawer
+    /// would open it.
+    Last {
+        project: String,
+    },
 }
+
+/// Why the last conversation was not reopened when there was none: no note, a plain draft.
+pub const NOTHING_TO_REOPEN: &str = "no conversation to reopen";
 
 /// Something to do outside of `update`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -837,6 +849,25 @@ pub(super) fn next_ask(app: &mut App) {
     }
 }
 
+/// `clio` could not reopen the last conversation: a draft, as when there is none, with what was
+/// typed meanwhile kept. With none, a message sent meanwhile starts the new one; a failure says why
+/// in a note and gives the message back to the composer.
+fn reopen_failed(app: &mut App, e: String, queued: Option<String>) -> Vec<Cmd> {
+    let typed = std::mem::take(&mut app.chat.input);
+    app.chat = Chat::draft(app.now_ms);
+    app.chat.set_input(typed);
+    if e == NOTHING_TO_REOPEN {
+        return queued.map_or_else(Vec::new, |text| super::chat::send_text(app, text));
+    }
+    app.chat.items.push(super::chat::Item::Note(format!(
+        "could not reopen the last conversation ({e}): this is a new one"
+    )));
+    if let Some(text) = queued {
+        app.chat.unsend(text);
+    }
+    vec![]
+}
+
 /// A question that comes back late never takes the place of the one on screen.
 fn dropped(app: &mut App, what: &str) -> bool {
     if app.confirm.is_none() && app.prompt.is_none() {
@@ -1035,24 +1066,19 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     }
                 }
                 Err(e) => {
-                    use super::chat::Item;
                     app.chat.opening = false;
-                    match queued {
-                        // Still a new session: what the person wrote is back in the field, in
-                        // front of anything typed meanwhile, and Enter tries again.
-                        Some(text) => {
-                            app.chat.items.retain(|i| *i != Item::User(text.clone()));
-                            app.chat.rendered.take();
-                            app.chat.items.push(Item::Error(e));
-                            let typed = std::mem::take(&mut app.chat.input);
-                            app.chat.set_input(if typed.is_empty() {
-                                text
-                            } else {
-                                format!("{text}\n{typed}")
-                            });
-                        }
-                        None => app.chat.failed = Some(e),
+                    if app.chat.resume {
+                        return reopen_failed(app, e, queued);
                     }
+                    if let Some(text) = queued {
+                        app.chat.unsend(text);
+                        // Still a new session: Enter tries again.
+                        if app.chat.file.is_none() {
+                            app.chat.items.push(super::chat::Item::Error(e));
+                            return vec![];
+                        }
+                    }
+                    app.chat.failed = Some(e);
                 }
             }
             vec![]

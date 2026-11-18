@@ -206,6 +206,22 @@ pub struct Config {
     pub jev: JevCfg,
     #[serde(default)]
     pub memory: MemoryCfg,
+    #[serde(default)]
+    pub session: SessionCfg,
+}
+
+/// One continuous conversation (`docs/specs/2026-11-18-continuous-conversation-design.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCfg {
+    /// `clio` reopens the last conversation instead of a new session (`clio --new` does not).
+    #[serde(default = "yes")]
+    pub continuous: bool,
+}
+
+impl Default for SessionCfg {
+    fn default() -> Self {
+        Self { continuous: true }
+    }
 }
 
 /// The memory of the Pi sessions.
@@ -282,6 +298,7 @@ impl Config {
             },
             jev: JevCfg::default(),
             memory: MemoryCfg::default(),
+            session: SessionCfg::default(),
         }
     }
 

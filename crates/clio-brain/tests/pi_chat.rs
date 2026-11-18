@@ -380,7 +380,7 @@ fn steering_a_running_turn_and_a_tool_line_with_its_duration() {
 
 // S-18: reopening a session writes the API key (a decoy here) nowhere
 #[test]
-fn the_selector_lists_a_session_and_reopens_it_with_its_history() {
+fn clio_reopens_the_last_session_with_its_history() {
     if can_run("reopen", true).is_none() {
         return;
     }
@@ -393,7 +393,6 @@ fn the_selector_lists_a_session_and_reopens_it_with_its_history() {
         &[
             "opened",
             "answered",
-            "selector",
             "row_listed",
             "reopened",
             "history_user",

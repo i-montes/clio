@@ -66,6 +66,20 @@ pub(super) fn open_new(app: &mut App) -> Vec<Cmd> {
     vec![Cmd::ChatClose]
 }
 
+/// `clio` with no arguments: the last conversation of this mode and place, opened the way the
+/// drawer opens one (its history from its file, then Pi); with none, or if it fails, a draft.
+pub fn resume(app: &mut App) -> Vec<Cmd> {
+    app.chat_seq += 1;
+    app.chat = Chat::opening(app.chat_seq, app.now_ms);
+    app.chat.resume = true;
+    vec![Cmd::ChatOpen {
+        seq: app.chat_seq,
+        target: OpenTarget::Last {
+            project: app.cwd.clone(),
+        },
+    }]
+}
+
 /// The row of the session open in the chat: found by its id in Pi's file name
 /// (`<time>_<id>.jsonl`), or "new session" while the new one is a draft or not listed yet; none
 /// while one is still opening.

@@ -11,9 +11,10 @@ use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pending, pi, r
 
 const USAGE: &str = "clio: a personal agent that works on your machine (or on a copy of your project)
 
-  clio [--debug] [--harness pi|builtin] [--host|--copy]
+  clio [--debug] [--harness pi|builtin] [--host|--copy] [--new]
                                               opens the interface (in a terminal); --debug or CLIO_DEBUG=1: debug mode;
-                                              with Pi installed it opens the sessions next to the chat (CLIO_HARNESS=builtin turns that off);
+                                              with Pi installed it reopens the last conversation (--new: a new one) and has
+                                              the sessions next to the chat (CLIO_HARNESS=builtin turns that off);
                                               --host: the tools act on the real machine (the default), --copy: on a copy
                                               (they override \"mode\" in config.json)
   clio init                                   creates ~/.config/clio, ~/.local/share/clio and the runtime folder
@@ -71,21 +72,24 @@ fn harness_for(flag: Option<&str>, mode: Option<Mode>, dirs: &Dirs) -> Res<chat:
 fn dispatch(argv: Vec<String>) -> Res<i32> {
     let mut it = argv.into_iter().peekable();
     // `clio` alone, or with only its own flags, opens the interface.
-    if it
-        .peek()
-        .is_none_or(|a| matches!(a.as_str(), "--debug" | "--harness" | "--host" | "--copy"))
-    {
+    if it.peek().is_none_or(|a| {
+        matches!(
+            a.as_str(),
+            "--debug" | "--harness" | "--host" | "--copy" | "--new"
+        )
+    }) {
         let mut args = Args::new(it.collect());
         let dbg = args.flag("--debug") || debug::env_enabled();
         let harness = args.value("--harness")?;
         let mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
+        let new = args.flag("--new");
         if !args.rest()?.is_empty() {
-            return Err("--debug, --harness, --host and --copy go alone (they open the interface) or after a command: clio run --debug \"...\"".into());
+            return Err("--debug, --harness, --host, --copy and --new go alone (they open the interface) or after a command: clio run --debug \"...\"".into());
         }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let dirs = Dirs::from_env()?;
             let h = harness_for(harness.as_deref(), mode, &dirs)?;
-            return tui::run(dirs, dbg, h, mode);
+            return tui::run(dirs, dbg, h, mode, new);
         }
         println!("{USAGE}");
         return Ok(0);

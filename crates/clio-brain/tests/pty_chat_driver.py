@@ -53,7 +53,8 @@ def screen():
         return ""
 
 
-def spawn():
+def spawn(args=("--new",)):
+    # `--new`: most scenarios start on a new session; `clio` alone reopens the last one.
     env = dict(cfg["env"], CLIO_TUI_SCREEN_DUMP=cfg["dump"])
     try:
         os.unlink(cfg["dump"])
@@ -63,7 +64,7 @@ def spawn():
     if pid == 0:
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
         os.chdir(cfg["cwd"])
-        os.execve(cfg["clio"], ["clio"], env)
+        os.execve(cfg["clio"], ["clio", *args], env)
     CHILDREN.append(pid)
     return pid, fd
 
@@ -255,11 +256,9 @@ elif scenario == "reopen":
     send(fd, CTRL_C)  # idle: Ctrl-C leaves cleanly
     out["code1"] = wait_exit(fd, pid)
     out["procs_after_first"] = len(pi_procs())
-    pid, fd = spawn()
-    out["selector"] = open_drawer(fd)
-    out["row_listed"] = wait_screen(fd, "primera pregunta", 20)
-    send(fd, b"j")  # first row is "new session"
-    send(fd, ENTER)
+    # `clio` alone reopens the last conversation: its history, with no key pressed.
+    pid, fd = spawn(())
+    out["row_listed"] = wait_screen(fd, "primera pregunta", 30)
     out["reopened"] = wait_screen(fd, "first answer", 60) and idle(fd, 60)
     s = screen()
     out["history_user"] = "primera pregunta" in s
