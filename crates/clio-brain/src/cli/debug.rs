@@ -77,7 +77,7 @@ fn scrubber_from(dirs: &Dirs, env: impl Fn(&str) -> Option<String>) -> Scrubber 
     let s = Scrubber::default();
     for c in clio_brain::connector::CONNECTORS.iter() {
         if let Some(k) = env(c.key_env).filter(|k| !k.trim().is_empty()) {
-            s.add("model-api-key", k.trim());
+            s.add(clio_brain::connector::MODEL_KEY_NAME, k.trim());
         }
     }
     let active = super::home::Config::load(dirs)
@@ -85,7 +85,7 @@ fn scrubber_from(dirs: &Dirs, env: impl Fn(&str) -> Option<String>) -> Scrubber 
         .and_then(|c| clio_brain::connector::by_provider(&c.model.provider))
         .and_then(|c| super::vault::model_key(dirs, c).ok());
     if let Some(k) = active {
-        s.add("model-api-key", k.expose());
+        s.add(clio_brain::connector::MODEL_KEY_NAME, k.expose());
     }
     s
 }
@@ -396,6 +396,33 @@ mod tests {
         }
         let none = scrubber_from(&dirs, |_| None).scrub(&format!("x {sentinel} y"));
         assert!(none.contains(&sentinel));
+    }
+
+    // The session's tool host and an approval from the terminal clean a command with the model's
+    // key alike: else `approve` sees a changed command and refuses it.
+    #[test]
+    fn the_session_and_an_approval_strike_the_model_key_under_one_name() {
+        let d = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            config: d.path().join("config"),
+            data: d.path().join("data"),
+            runs: d.path().join("data/runs"),
+            runtime: None,
+            home: d.path().to_path_buf(),
+        };
+        let key = format!("sentinel-{}-{}", "model", "4242");
+        // As `clio toolhost` reads CLIO_TOOLHOST_SCRUB_JSON.
+        let values: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&clio_brain::pi::session::scrub_json(&key)).unwrap();
+        let session = Scrubber::default();
+        for (name, value) in values {
+            session.add(&name, &value);
+        }
+        let approval = scrubber_from(&dirs, |n| (n == "OPENCODE_API_KEY").then(|| key.clone()));
+        let cmd = format!("curl -H 'Authorization: Bearer {key}' https://example.com");
+        let (a, b) = (session.scrub(&cmd), approval.scrub(&cmd));
+        assert!(!a.contains(&key), "{a}");
+        assert_eq!(a, b);
     }
 
     struct Sink(Arc<Mutex<Vec<Event>>>);

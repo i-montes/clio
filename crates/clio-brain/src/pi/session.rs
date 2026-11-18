@@ -44,6 +44,11 @@ pub const GUARD_TOOLS: [&str; 19] = [
 pub const PROMPT_NAME: &str = "clio-agent@19";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@19.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
+/// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
+pub fn scrub_json(key: &str) -> String {
+    json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
+}
+
 pub const HOST_PROMPT_NAME: &str = "clio-host@3";
 pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@3.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
@@ -277,10 +282,7 @@ impl Toolhost {
             .env("CLIO_SAID_TOKEN", &said_token)
             .env("HOME", paths.home_dir())
             .env("PATH", "/usr/bin:/bin")
-            .env(
-                "CLIO_TOOLHOST_SCRUB_JSON",
-                json!({"model_api_key": key.expose()}).to_string(),
-            )
+            .env("CLIO_TOOLHOST_SCRUB_JSON", scrub_json(key.expose()))
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
