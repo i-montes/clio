@@ -170,16 +170,26 @@ fn the_status_bar_has_the_four_data_on_every_screen_with_a_run() {
         ("uso", usage_app, "8/40 pasos", "21 s/10 min", true),
         ("ayuda", help_app, "8/40 pasos", "21 s/10 min", true),
     ] {
-        let t = screen_text(&a, 80, 24);
+        // At 120 columns in full; at 80 it shares the line with the keys, shortened, never less.
+        let t = screen_text(&a, 120, 30);
         let bar = last_line(&t);
-        for want in ["↑12,4k", "↓3,1k", "$0", steps, secs, "31 %"] {
+        let short = |s: &str| s.replace(" pasos", "p").replace(" s/10 min", "s/10m");
+        for want in ["↑12,4k", "↓3,1k", "$0", &short(steps), &short(secs), "31"] {
             assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
         }
         assert!(
             bar.contains("contexto") || bar.contains("ctx"),
             "{name}: {bar:?}"
         );
-        assert_eq!(bar.contains("externo"), tainted, "{name}: {bar:?}");
+        let usage = &bar[bar.find('↑').unwrap()..];
+        assert_eq!(usage.contains("ext"), tainted, "{name}: {bar:?}");
+        let t = screen_text(&a, 80, 24);
+        let bar = last_line(&t);
+        for want in ["↑12,4k", "↓3,1k", "$0", &short(steps), &short(secs), "31%"] {
+            assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
+        }
+        assert_eq!(bar.contains(" ext"), tainted, "{name}: {bar:?}");
+        assert!(bar.contains("ayuda"), "{name}: {bar:?}");
         assert_eq!(bar.chars().count(), 80);
     }
 }
@@ -192,8 +202,8 @@ fn the_status_bar_abbreviates_without_cutting_at_the_minimum_size() {
     for want in ["↑12,4k", "↓3,1k", "$0", "8/40", "21s", "31%", "ext"] {
         assert!(bar.contains(want), "{want:?} not in {bar:?}");
     }
-    // At 80 with the session tainted it still shows everything, shortened.
-    let t = screen_text(&live_app(), 80, 24);
+    // Wide, with the session tainted, it shows everything with more words.
+    let t = screen_text(&live_app(), 200, 30);
     let bar = last_line(&t).trim_end();
     assert!(
         bar.contains("externo") && bar.contains("31 %") && bar.contains("pasos"),
@@ -206,7 +216,9 @@ fn without_a_run_the_status_bar_says_so_and_new_job_and_doctor_leave_it_empty() 
     let t = screen_text(&super::tests::app(), 80, 24);
     assert!(last_line(&t).contains("sin uso todavía"), "{t}");
     let (a, _) = feed(with_runs(), vec![ch('n')]);
-    assert!(last_line(&screen_text(&a, 80, 24)).trim().is_empty());
+    let bar = screen_text(&a, 80, 24);
+    let bar = last_line(&bar);
+    assert!(!bar.contains('↑') && !bar.contains("sin uso"), "{bar:?}");
 }
 
 #[test]
@@ -227,9 +239,11 @@ fn the_context_bar_changes_color_at_70_and_90_percent() {
         let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
         term.draw(|f| super::app::draw(f, &a)).unwrap();
         let buf = term.backend().buffer();
+        // The percentage at the end of the footer.
         let line: String = (0..120).map(|x| buf[(x, 29)].symbol()).collect();
-        let x = line.find('▕').unwrap();
-        buf[(line[..x].chars().count() as u16 + 1, 29)].fg
+        let x = line.trim_end().rfind(' ').unwrap();
+        let x = line[..x].trim_end().rfind(' ').unwrap() + 1;
+        buf[(line[..x].chars().count() as u16, 29)].fg
     };
     assert_eq!(color_of_bar(10_000), Color::Reset, "quiet below 70 %");
     assert_eq!(color_of_bar(95_000), Color::Yellow, "74 %");
@@ -271,8 +285,9 @@ fn c_opens_the_context_in_layers_and_esc_goes_back() {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
     // Each file read is marked as external.
+    let bar = usize::from(last_line(&t).contains("externo"));
     assert_eq!(
-        t.matches("externo").count() - 1 /* status bar */ - 1 /* layer */ - 1 /* note */ + 1,
+        t.matches("externo").count() - bar /* status bar */ - 1 /* layer */ - 1 /* note */ + 1,
         2,
         "{t}"
     );
@@ -339,7 +354,7 @@ fn a_run_without_saved_context_says_so() {
     let t = screen_text(&a, 80, 24);
     assert!(t.contains("no guardó las capas del contexto"), "{t}");
     assert!(
-        last_line(&t).contains("contexto ─"),
+        last_line(&t).contains("contexto ─") || last_line(&t).contains("ctx ─"),
         "the bar shows a dash, not a made-up number: {}",
         last_line(&t)
     );
@@ -785,12 +800,15 @@ fn every_screen_fits_every_size_without_overflow() {
             assert_fits(&t, w, h);
             assert_clean(&t);
             assert!(!t.contains("Terminal muy pequeña"), "{name} {w}x{h}");
-            // The hint line and the status bar are always the last two lines.
-            let n = t.lines().count();
+            // The footer (keys and use) is always the last line, under the rule of the top.
+            assert!(
+                t.lines().last().is_some_and(|l| !l.trim().is_empty()),
+                "{name} {w}x{h}\n{t}"
+            );
             assert!(
                 t.lines()
-                    .nth(n - 2)
-                    .is_some_and(|l| !l.trim().is_empty() || *name == "nuevo"),
+                    .nth(1)
+                    .is_some_and(|l| l.chars().all(|c| c == '─')),
                 "{name} {w}x{h}\n{t}"
             );
         }
@@ -801,22 +819,19 @@ fn every_screen_fits_every_size_without_overflow() {
 fn the_header_is_one_line_with_folder_model_screen_and_the_debug_mark() {
     let t = screen_text(&with_runs(), 80, 24);
     let first = t.lines().next().unwrap();
+    assert!(first.starts_with(" clio · inicio · proyecto"), "{first:?}");
     assert!(
-        first.starts_with("clio · proyecto · beam-free"),
+        first.trim_end().ends_with("beam-free") && !first.contains("debug"),
         "{first:?}"
     );
     assert!(
-        first.trim_end().ends_with("inicio") && !first.contains("debug"),
-        "{first:?}"
-    );
-    assert!(
-        t.lines().nth(1).unwrap().trim().is_empty(),
-        "air under the header"
+        t.lines().nth(1).unwrap().chars().all(|c| c == '─'),
+        "a rule under the top bar"
     );
     let (a, _) = feed(with_runs(), vec![ctrl('d')]);
     let first = screen_text(&a, 80, 24).lines().next().unwrap().to_owned();
     assert!(
-        first.contains("debug") && first.trim_end().ends_with("inicio"),
+        first.contains("debug") && first.trim_end().ends_with("beam-free"),
         "{first:?}"
     );
     // The folder follows the run on screen.
@@ -835,7 +850,7 @@ fn the_header_is_one_line_with_folder_model_screen_and_the_debug_mark() {
 #[test]
 fn the_help_and_quit_hints_survive_the_narrowest_terminal() {
     let t = screen_text(&with_runs(), 60, 16);
-    let hints = t.lines().nth(14).unwrap();
+    let hints = t.lines().nth(15).unwrap();
     assert!(
         hints.contains("? ayuda") && hints.contains("q salir"),
         "{hints:?}"
@@ -854,7 +869,7 @@ fn the_help_and_quit_hints_survive_the_narrowest_terminal() {
         ("doctor", feed(with_runs(), vec![ch('D')]).0),
     ] {
         let t = screen_text(&a, 60, 16);
-        let hints = t.lines().nth(14).unwrap();
+        let hints = t.lines().nth(15).unwrap();
         assert!(hints.contains("? ayuda"), "{name}: {hints:?}");
     }
 }
@@ -862,7 +877,13 @@ fn the_help_and_quit_hints_survive_the_narrowest_terminal() {
 #[test]
 fn the_hint_line_comes_from_the_key_map() {
     let t = screen_text(&live_app(), 80, 24);
-    let hints = t.lines().nth(22).unwrap();
+    let hints = t.lines().nth(23).unwrap();
+    assert!(
+        hints.contains("Ctrl-C cancelar") && hints.contains("? ayuda"),
+        "{hints:?}"
+    );
+    let t = screen_text(&live_app(), 200, 30);
+    let hints = t.lines().nth(29).unwrap();
     for want in [
         "Ctrl-C",
         "cancelar",
@@ -875,7 +896,7 @@ fn the_hint_line_comes_from_the_key_map() {
     }
     let (a, _) = feed(live_app(), vec![ch('c')]);
     let t = screen_text(&a, 80, 24);
-    assert!(t.lines().nth(22).unwrap().contains("U ver el uso"));
+    assert!(t.lines().nth(23).unwrap().contains("U ver el uso"));
 }
 
 // ------------------------------------------------------------ pictures for the docs

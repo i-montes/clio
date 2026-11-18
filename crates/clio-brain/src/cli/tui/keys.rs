@@ -12,6 +12,8 @@ pub enum Key {
     Char(char),
     Ctrl(char),
     Alt(KeyCode),
+    /// Ctrl and a key that is not a letter (Ctrl-←, Ctrl-Inicio).
+    CtrlCode(KeyCode),
     Code(KeyCode),
 }
 
@@ -25,6 +27,7 @@ impl Key {
                 ctrl && matches!(k.code, KeyCode::Char(x) if x.eq_ignore_ascii_case(&c))
             }
             Self::Alt(code) => alt && !ctrl && k.code == code,
+            Self::CtrlCode(code) => ctrl && !alt && k.code == code,
             Self::Code(code) => k.code == code && !ctrl && !alt,
         }
     }
@@ -66,6 +69,18 @@ pub enum Act {
     Delete,
     Useful,
     Wrong,
+    /// Opens or closes the drawer of sessions.
+    Sessions,
+    // Editing the chat's message.
+    Left,
+    Right,
+    LineStart,
+    LineEnd,
+    WordLeft,
+    WordRight,
+    DelBack,
+    DelNext,
+    DelWord,
 }
 
 pub struct Bind {
@@ -94,7 +109,7 @@ const fn b(
     }
 }
 
-use Key::{Alt, Char, Code, Ctrl};
+use Key::{Alt, Char, Code, Ctrl, CtrlCode};
 
 const CTRL_F: Key = Ctrl('f');
 const CTRL_B: Key = Ctrl('b');
@@ -748,14 +763,14 @@ const SESSIONS: &[Bind] = &[
     b(
         &[Char('j'), Code(KeyCode::Down)],
         Act::Down,
-        "j",
+        "j ↓",
         "bajar",
         false,
     ),
     b(
         &[Char('k'), Code(KeyCode::Up)],
         Act::Up,
-        "k",
+        "k ↑",
         "subir",
         false,
     ),
@@ -773,41 +788,142 @@ const SESSIONS: &[Bind] = &[
         "último",
         false,
     ),
-    b(&[ENTER], Act::Open, "Enter", "abrir", true),
-    b(&[Char('n')], Act::New, "n", "nueva", true),
-    b(&[Char('x')], Act::Delete, "x", "borrar", true),
-    b(
-        &[Code(KeyCode::Tab), ESC],
-        Act::Back,
-        "Tab",
-        "ir al chat",
-        true,
-    ),
+    // The drawer's foot shows these three.
+    b(&[ENTER], Act::Open, "Enter", "abrir", false),
+    b(&[Char('n')], Act::New, "n", "nueva", false),
+    b(&[Char('x')], Act::Delete, "x", "borrar", false),
+    b(&[ESC, CTRL_S, F2], Act::Back, "Esc Ctrl-S", "cerrar", true),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('D')], Act::Doctor, "D", "doctor", false),
-    b(&[Char('m')], Act::Memory, "m", "memoria", true),
-    b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", true),
+    b(&[Char('m')], Act::Memory, "m", "memoria", false),
+    b(&[Char('q'), Ctrl('c')], Act::Quit, "q", "salir", false),
     b(&[Char('?')], Act::Help, "?", "ayuda", true),
 ];
 
-/// The scroll keys of the chat; letters are text there, so only arrows and pages.
-macro_rules! chat_scroll {
+const CTRL_S: Key = Ctrl('s');
+const F2: Key = Code(KeyCode::F(2));
+
+/// The keys of the chat's composer and its scroll; letters are text there.
+macro_rules! chat_keys {
     () => {
         [
-            b(&[Code(KeyCode::Up)], Act::Up, "↑", "subir", false),
-            b(&[Code(KeyCode::Down)], Act::Down, "↓", "bajar", false),
+            b(
+                &[Alt(KeyCode::Enter), Ctrl('j')],
+                Act::Newline,
+                "Alt-Enter",
+                "línea nueva",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Left)],
+                Act::Left,
+                "←",
+                "carácter anterior",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Right)],
+                Act::Right,
+                "→",
+                "carácter siguiente",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Home), Ctrl('a')],
+                Act::LineStart,
+                "Inicio Ctrl-A",
+                "principio de la línea",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::End), Ctrl('e')],
+                Act::LineEnd,
+                "Fin Ctrl-E",
+                "final de la línea",
+                false,
+            ),
+            b(
+                &[CtrlCode(KeyCode::Left), Alt(KeyCode::Left)],
+                Act::WordLeft,
+                "Ctrl-←",
+                "palabra anterior",
+                false,
+            ),
+            b(
+                &[CtrlCode(KeyCode::Right), Alt(KeyCode::Right)],
+                Act::WordRight,
+                "Ctrl-→",
+                "palabra siguiente",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Backspace)],
+                Act::DelBack,
+                "Retroceso",
+                "borrar atrás",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Delete)],
+                Act::DelNext,
+                "Supr",
+                "borrar adelante",
+                false,
+            ),
+            b(
+                &[Ctrl('w'), Alt(KeyCode::Backspace)],
+                Act::DelWord,
+                "Ctrl-W",
+                "borrar la palabra",
+                false,
+            ),
+            b(
+                &[Ctrl('u')],
+                Act::Clear,
+                "Ctrl-U",
+                "borrar hasta el principio de la línea",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Up)],
+                Act::Up,
+                "↑",
+                "línea de arriba, o subir la conversación",
+                false,
+            ),
+            b(
+                &[Code(KeyCode::Down)],
+                Act::Down,
+                "↓",
+                "línea de abajo, o bajar la conversación",
+                false,
+            ),
             b(
                 &[CTRL_B, Code(KeyCode::PageUp)],
                 Act::PageUp,
-                "Ctrl-B",
+                "RePág",
                 "página arriba",
                 false,
             ),
             b(
                 &[CTRL_F, Code(KeyCode::PageDown)],
                 Act::PageDown,
-                "Ctrl-F",
+                "AvPág",
                 "página abajo",
+                false,
+            ),
+            b(
+                &[CtrlCode(KeyCode::Home)],
+                Act::Top,
+                "Ctrl-Inicio",
+                "el principio de la conversación",
+                false,
+            ),
+            b(
+                &[CtrlCode(KeyCode::End)],
+                Act::Bottom,
+                "Ctrl-Fin",
+                "lo último",
                 false,
             ),
         ]
@@ -815,70 +931,92 @@ macro_rules! chat_scroll {
 }
 
 const CHAT: &[Bind] = &{
-    let [up, down, pu, pd] = chat_scroll!();
-    [
-        b(&[ENTER], Act::Open, "Enter", "enviar", true),
-        b(
-            &[Alt(KeyCode::Enter), Ctrl('j')],
-            Act::Newline,
-            "Alt-Enter",
-            "línea nueva",
-            true,
-        ),
-        b(
-            &[Ctrl('u')],
-            Act::Clear,
-            "Ctrl-U",
-            "borrar el mensaje",
-            false,
-        ),
+    let [
+        nl,
+        l,
+        r,
+        ls,
+        le,
+        wl,
+        wr,
+        db,
+        dn,
+        dw,
+        cl,
         up,
         down,
         pu,
         pd,
+        top,
+        bottom,
+    ] = chat_keys!();
+    [
+        b(&[ENTER], Act::Open, "Enter", "enviar", true),
+        b(&[CTRL_S, F2], Act::Sessions, "Ctrl-S", "sesiones", true),
+        nl,
+        l,
+        r,
+        ls,
+        le,
+        wl,
+        wr,
+        db,
+        dn,
+        dw,
+        cl,
+        up,
+        down,
+        pu,
+        pd,
+        top,
+        bottom,
+        b(&[Ctrl('c')], Act::Quit, "Ctrl-C", "salir", false),
         b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
-        b(
-            &[Code(KeyCode::Tab), ESC],
-            Act::Back,
-            "Tab",
-            "sesiones",
-            true,
-        ),
-        b(&[Ctrl('c')], Act::Quit, "Ctrl-C", "salir", true),
     ]
 };
 
 const CHAT_RUN: &[Bind] = &{
-    let [up, down, pu, pd] = chat_scroll!();
-    [
-        b(&[ENTER], Act::Open, "Enter", "orientar al agente", true),
-        b(
-            &[Alt(KeyCode::Enter), Ctrl('j')],
-            Act::Newline,
-            "Alt-Enter",
-            "línea nueva",
-            false,
-        ),
-        b(
-            &[Ctrl('u')],
-            Act::Clear,
-            "Ctrl-U",
-            "borrar el mensaje",
-            false,
-        ),
+    let [
+        nl,
+        l,
+        r,
+        ls,
+        le,
+        wl,
+        wr,
+        db,
+        dn,
+        dw,
+        cl,
         up,
         down,
         pu,
         pd,
+        top,
+        bottom,
+    ] = chat_keys!();
+    [
+        b(&[ESC, Ctrl('c')], Act::Cancel, "Esc", "detiene", true),
+        b(&[ENTER], Act::Open, "Enter", "orienta al agente", true),
+        b(&[CTRL_S, F2], Act::Sessions, "Ctrl-S", "sesiones", true),
+        nl,
+        l,
+        r,
+        ls,
+        le,
+        wl,
+        wr,
+        db,
+        dn,
+        dw,
+        cl,
+        up,
+        down,
+        pu,
+        pd,
+        top,
+        bottom,
         b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
-        b(&[Code(KeyCode::Tab)], Act::Back, "Tab", "sesiones", false),
-        b(
-            &[ESC, Ctrl('c')],
-            Act::Cancel,
-            "Esc",
-            "abortar el turno",
-            true,
-        ),
     ]
 };
 
@@ -1043,12 +1181,15 @@ mod tests {
             KeyCode::PageUp => "RePág".to_owned(),
             KeyCode::PageDown => "AvPág".to_owned(),
             KeyCode::F(n) => format!("F{n}"),
+            KeyCode::Backspace => "Retroceso".to_owned(),
+            KeyCode::Delete => "Supr".to_owned(),
             other => format!("{other:?}"),
         };
         match k {
             Key::Char(c) => c.to_string(),
             Key::Ctrl(c) => format!("Ctrl-{}", c.to_ascii_uppercase()),
             Key::Alt(c) => format!("Alt-{}", code(c)),
+            Key::CtrlCode(c) => format!("Ctrl-{}", code(c)),
             Key::Code(c) => code(c),
         }
     }
@@ -1071,7 +1212,7 @@ mod tests {
             (Ctx::Help, "Ayuda"),
             (Ctx::Memory, "Memoria"),
             (Ctx::MemoryFilter, "Memoria, escribiendo la búsqueda"),
-            (Ctx::Sessions, "Sesiones de Pi"),
+            (Ctx::Sessions, "Chat, con las sesiones abiertas (Ctrl-S)"),
             (Ctx::Chat, "Chat, en espera"),
             (Ctx::ChatRun, "Chat, el agente trabaja"),
         ];

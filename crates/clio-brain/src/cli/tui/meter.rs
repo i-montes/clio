@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use super::app::{App, Cmd, Screen, clean, section};
 use super::debug_view::fit;
 use super::keys::{self, Act, lookup};
+use super::text;
 use super::theme::Theme;
 use crate::cli::usage::{self, RunUsage, Snapshot, percent, tokens};
 
@@ -423,64 +424,111 @@ pub fn draw_side(f: &mut Frame, area: Rect, app: &App) {
 
 pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
-    let ctx = app.ctx_of(app.before_help);
-    let mut entries: Vec<(&str, &str)> =
-        keys::table(ctx).iter().map(|b| (b.shown, b.what)).collect();
-    entries.extend(keys::GLOBAL.iter().map(|b| (b.shown, b.what)));
     let w = usize::from(area.width);
-    let widest = entries
+    let from_chat = app.pi && matches!(app.before_help, Screen::Chat | Screen::Sessions);
+    // The keys of where help was opened from; from the chat, also the drawer's.
+    let mut groups: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    let table = |ctx| keys::table(ctx).iter().map(|b| (b.shown, b.what)).collect();
+    if from_chat {
+        groups.push(("el chat", table(keys::Ctx::Chat)));
+        groups.push((
+            "mientras el agente trabaja",
+            keys::table(keys::Ctx::ChatRun)
+                .iter()
+                .filter(|b| matches!(b.act, Act::Cancel | Act::Open))
+                .map(|b| (b.shown, b.what))
+                .collect(),
+        ));
+        groups.push(("las sesiones (Ctrl-S o F2)", table(keys::Ctx::Sessions)));
+    } else {
+        groups.push(("", table(app.ctx_of(app.before_help))));
+    }
+    groups.push((
+        if from_chat { "en todas partes" } else { "" },
+        keys::GLOBAL.iter().map(|b| (b.shown, b.what)).collect(),
+    ));
+    let key_w = groups
         .iter()
-        .map(|(k, what)| 10 + what.chars().count() + k.chars().count().saturating_sub(9))
+        .flat_map(|(_, e)| e.iter())
+        .map(|(k, _)| text::width(k))
+        .max()
+        .unwrap_or(8)
+        + 2;
+    let widest = groups
+        .iter()
+        .flat_map(|(_, e)| e.iter())
+        .map(|(_, what)| key_w + text::width(what))
         .max()
         .unwrap_or(20);
     let cols = if w >= 2 * (widest + 2) { 2 } else { 1 };
-    let rows = entries.len().div_ceil(cols);
     let cell = |(k, what): &(&str, &str)| {
         vec![
-            Span::styled(format!("{k:<10}"), t.key()),
+            Span::styled(format!("{k:<key_w$}"), t.key()),
             Span::raw((*what).to_owned()),
         ]
     };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("atajos ", t.bold()),
-            Span::styled(
-                if app.host {
-                    "· Clio trabaja en esta máquina; cada cambio queda registrado (clio actions, clio undo)"
-                } else {
-                    "· Clio trabaja en una copia; tú decides qué vuelve al original"
-                },
-                t.dim(),
-            ),
-        ]),
-        Line::from(""),
-    ];
-    if app.pi {
-        lines.insert(
-            1,
-            Line::from(Span::styled(
-                "con el ratón: clic abre una sesión o lleva al chat, la rueda desplaza; para seleccionar texto, Shift y arrastrar",
-                t.dim(),
-            )),
-        );
-    }
-    if app.pi && app.host {
-        lines.insert(
-            1,
-            Line::from(Span::styled(
-                "«¿Lo ejecuto?» solo oye tras un segundo sin teclear: s, un segundo, Enter lo ejecuta; n o Esc lo rechaza",
-                t.dim(),
-            )),
-        );
-    }
-    for r in 0..rows {
-        let mut spans = cell(&entries[r]);
-        if cols == 2 && r + rows < entries.len() {
-            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            spans.push(Span::raw(" ".repeat((widest + 2).saturating_sub(used))));
-            spans.extend(cell(&entries[r + rows]));
+    let note = |text: &str, lines: &mut Vec<Line<'static>>| {
+        for row in text::wrap(text, w) {
+            lines.push(Line::from(Span::styled(row, t.dim())));
         }
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled("atajos ", t.bold()),
+        Span::styled(
+            if app.host {
+                "· Clio trabaja en esta máquina; cada cambio queda registrado (clio actions, clio undo)"
+            } else {
+                "· Clio trabaja en una copia; tú decides qué vuelve al original"
+            },
+            t.dim(),
+        ),
+    ])];
+    if app.pi && app.host {
+        note(
+            "«¿Lo ejecuto?» solo oye tras un segundo sin teclear: s, un segundo, Enter lo ejecuta; n o Esc lo rechaza.",
+            &mut lines,
+        );
+    }
+    if app.pi {
+        note(
+            "Con el ratón: clic en una sesión la abre, clic fuera de las sesiones las cierra, la rueda desplaza. Para seleccionar texto, Shift y arrastrar.",
+            &mut lines,
+        );
+    }
+    if from_chat {
+        note(
+            "Desde el chat: Ctrl-S abre las sesiones; ahí m lleva a la memoria y D al doctor.",
+            &mut lines,
+        );
+        // What the footer of the chat leaves out: the steps, the time, the session.
+        let c = &app.chat;
+        let snap = c.snapshot(app.now_ms, app.fallback());
+        let mut spans = vec![Span::styled("esta sesión  ", t.bold())];
+        spans.extend(super::status::line(t, &snap, w.saturating_sub(13)).spans);
+        lines.push(Line::from(""));
         lines.push(Line::from(spans));
+        if !c.session_id.is_empty() {
+            note(
+                &format!("{}   {}", clean(&c.session_id), clean(&c.workspace)),
+                &mut lines,
+            );
+        }
+    }
+    for (title, entries) in &groups {
+        lines.push(Line::from(""));
+        if !title.is_empty() {
+            lines.push(section(t, title, area.width));
+        }
+        let rows = entries.len().div_ceil(cols);
+        for r in 0..rows {
+            let mut spans = cell(&entries[r]);
+            if cols == 2 && r + rows < entries.len() {
+                let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+                spans.push(Span::raw(" ".repeat((widest + 2).saturating_sub(used))));
+                spans.extend(cell(&entries[r + rows]));
+            }
+            lines.push(Line::from(spans));
+        }
     }
     scrolled(f, area, lines, app);
 }

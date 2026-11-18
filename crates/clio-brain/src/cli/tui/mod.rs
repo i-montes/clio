@@ -8,22 +8,27 @@
 
 pub mod app;
 pub mod chat;
+pub mod composer;
 pub mod debug_view;
 pub mod detail;
 pub mod doctor;
 pub mod home;
 pub mod keys;
 pub mod live;
+pub mod markdown;
 pub mod memory;
 pub mod meter;
 pub mod new_run;
 pub mod sanitize;
 pub mod sessions;
 pub mod status;
+pub mod text;
 pub mod theme;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_gallery;
 #[cfg(test)]
 mod tests_memory;
 #[cfg(test)]

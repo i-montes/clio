@@ -97,25 +97,24 @@ fn the_memory_screen_draws_clean_and_exact_at_every_size() {
         assert!(t.contains("memoria"), "{t}");
         assert!(t.contains("olvidados, en cuarentena (2)"), "{w}x{h}\n{t}");
         assert!(t.contains("m12"), "{w}x{h}\n{t}");
-        // The status bar (use and context of the last run) stays on the last line.
+        // The use and context of the last run stay on the last line, the same as the home's
+        // (the footer shares the line with the keys, so its wording may be shorter).
         let last = t.lines().last().unwrap().trim();
-        assert!(!last.is_empty(), "{w}x{h}: status bar is empty\n{t}");
-        assert_eq!(
-            last,
-            screen_text(&with_runs(), w, h)
-                .lines()
-                .last()
-                .unwrap()
-                .trim(),
-            "the status bar is the same as the home's"
-        );
+        let home = screen_text(&with_runs(), w, h);
+        let home_last = home.lines().last().unwrap();
+        for data in ["↑12,4k", "↓3,1k", "$0", "7/40", "31"] {
+            assert!(
+                last.contains(data) && home_last.contains(data),
+                "{w}x{h}: {data} not in {last:?} / {home_last:?}"
+            );
+        }
     }
     let big = screen_text(&a, 120, 30);
     assert!(big.contains("recientes (2)"), "{big}");
     assert!(big.contains("Mi proyecto usa Rust y SQLite"), "{big}");
     assert!(big.contains("sin modelo de embeddings"), "{big}");
-    // The hint line shows the screen's own keys, and `?` is always there.
-    let hints = big.lines().rev().nth(1).unwrap();
+    // The footer shows the screen's own keys, and `?` is always there.
+    let hints = big.lines().last().unwrap();
     for k in ["Enter", "aprobar", "archivar", "buscar", "?"] {
         assert!(hints.contains(k), "{k} missing in {hints:?}");
     }

@@ -3,15 +3,16 @@
 //! returned as a `Cmd` for the runtime (`mod.rs`) to carry out, and its result comes back as an
 //! `Input::Bg`. That is what lets every screen be tested without a terminal.
 //!
-//! The frame is always the same: one header line, the screen, a line of feedback, one line of key
-//! hints and the status bar (use of the run and layer of context) on the very last line.
+//! The frame is always the same: a top bar and a rule under it, the screen, and one footer line
+//! with the keys on the left and the use of the run and its context on the right. The chat of
+//! the Pi harness draws its own column under the top bar (`chat::draw_screen`).
 
 use clio_brain::agent::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::chat::Chat;
 use super::detail::Detail;
@@ -21,10 +22,10 @@ use super::keys::{self, Act, Ctx};
 use super::live::Live;
 use super::memory::{MemoryData, MemoryView};
 use super::new_run::{NewRun, Preview};
-use super::sanitize;
 use super::sessions::Sessions;
 use super::theme::Theme;
 use super::{meter, status};
+use super::{sanitize, text};
 use crate::cli::chat::{Opened, Refresh, Row};
 use crate::cli::doctor::Report;
 use crate::cli::runs::{RunInfo, RunSummary};
@@ -400,7 +401,7 @@ impl App {
 
     /// The window, the limits and the name of the model Clio is set up with, for what a run did
     /// not record.
-    fn fallback(&self) -> (u64, bool, RunLimits) {
+    pub(super) fn fallback(&self) -> (u64, bool, RunLimits) {
         self.home
             .header
             .as_ref()
@@ -823,13 +824,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     // A new session's first message: the presentation, if any, is asked in
                     // front of it (`PrePrompt`), so Clio introduces herself and answers.
                     if let Some(text) = queued {
-                        app.chat.running = true;
+                        app.chat.start_turn(app.now_ms);
                         return vec![Cmd::ChatSend { text }];
                     }
                     // Clio introduces herself: a turn with no words of the person, so nothing
                     // of hers goes into the chat.
                     if info.presentation {
-                        app.chat.running = true;
+                        app.chat.start_turn(app.now_ms);
                         return vec![Cmd::ChatSend {
                             text: String::new(),
                         }];
@@ -845,11 +846,11 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                             app.chat.items.retain(|i| *i != Item::User(text.clone()));
                             app.chat.items.push(Item::Error(e));
                             let typed = std::mem::take(&mut app.chat.input);
-                            app.chat.input = if typed.is_empty() {
+                            app.chat.set_input(if typed.is_empty() {
                                 text
                             } else {
                                 format!("{text}\n{typed}")
-                            };
+                            });
                         }
                         None => app.chat.failed = Some(e),
                     }
@@ -858,6 +859,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             vec![]
         }
         Bg::ChatEvent(e) => {
+            if matches!(e, clio_brain::pi::rpc::Event::AgentStart) && !app.chat.running {
+                app.chat.turn_ms = app.now_ms;
+            }
             app.chat.on_event(&e);
             vec![]
         }
@@ -928,12 +932,12 @@ pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
 
 /// A thin labeled line: `─ título ──────────`.
 pub fn section(t: Theme, title: &str, width: u16) -> Line<'static> {
-    let used = title.chars().count() + 3;
+    let used = text::width(title) + 3;
     let tail = t.rule().repeat(usize::from(width).saturating_sub(used));
     Line::from(vec![
-        Span::styled(format!("{} ", t.rule()), t.dim()),
+        Span::styled(format!("{} ", t.rule()), t.faint()),
         Span::styled(title.to_owned(), t.bold()),
-        Span::styled(format!(" {tail}"), t.dim()),
+        Span::styled(format!(" {tail}"), t.faint()),
     ])
 }
 
@@ -951,8 +955,7 @@ fn screen_name(app: &App) -> &'static str {
         Screen::Context => "contexto",
         Screen::Usage => "uso",
         Screen::Memory => "memoria",
-        Screen::Sessions => "sesiones",
-        Screen::Chat => "chat",
+        Screen::Sessions | Screen::Chat => "chat",
     }
 }
 
@@ -962,86 +965,185 @@ fn folder_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
 }
 
-/// `clio · carpeta · modelo`, and on the right the screen (and `debug` when it is on).
-fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+/// The chat's title: the session's, as the list has it, or "nueva sesión" for a draft.
+fn chat_title(app: &App) -> String {
+    let c = &app.chat;
+    if c.is_draft() {
+        return "nueva sesión".into();
+    }
+    super::sessions::open_pos(app)
+        .and_then(|p| p.checked_sub(1))
+        .and_then(|i| app.sessions.rows.get(i))
+        .map(|r| r.title.clone())
+        .filter(|t| !t.is_empty())
+        .or_else(|| (!c.title.is_empty()).then(|| c.title.clone()))
+        .unwrap_or_else(|| super::home::short_id(&c.session_id))
+}
+
+/// What is wrong, for the top bar: only what is wrong, and nothing about what is fine.
+fn warnings(app: &App) -> Vec<String> {
+    let mut v = Vec::new();
+    if let Some(h) = &app.home.header {
+        if h.config_error.is_some() {
+            v.push("la configuración no carga".to_owned());
+        } else if h.key == super::home::KeyState::Missing {
+            v.push("falta la llave del modelo".to_owned());
+        }
+        if h.vault.starts_with("creada") {
+            v.push("vault detenida".to_owned());
+        }
+    }
+    if let Some((_, _, fail)) = app.home.doctor
+        && fail > 0
+    {
+        v.push(format!("doctor: {}", plural(fail, "fallo", "fallos")));
+    }
+    if app.debug {
+        v.push("debug".to_owned());
+    }
+    v
+}
+
+/// `clio · título` on the left; on the right what is wrong, in the warning color, and the model.
+fn draw_top(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
-    let folder = match app.screen {
-        Screen::Live if !app.live.workspace.is_empty() => folder_name(&app.live.workspace),
-        Screen::Detail => app
-            .detail
-            .as_ref()
-            .map_or_else(|| folder_name(&app.cwd), |d| folder_name(&d.info.workspace)),
-        _ => folder_name(&app.cwd),
+    let w = usize::from(area.width);
+    let pi_chat = app.pi && matches!(app.screen, Screen::Chat | Screen::Sessions);
+    let title = if pi_chat {
+        chat_title(app)
+    } else {
+        let folder = match app.screen {
+            Screen::Live if !app.live.workspace.is_empty() => {
+                Some(folder_name(&app.live.workspace))
+            }
+            Screen::Detail => app.detail.as_ref().map(|d| folder_name(&d.info.workspace)),
+            Screen::Home | Screen::NewRun | Screen::Live => Some(folder_name(&app.cwd)),
+            _ => None,
+        };
+        match folder {
+            Some(f) => format!("{} {} {f}", screen_name(app), t.dot()),
+            None => screen_name(app).to_owned(),
+        }
     };
     let sep = format!(" {} ", t.dot());
-    let mut left = vec![
-        Span::styled("clio", t.bold()),
-        Span::styled(format!("{sep}{}", clean(&folder)), t.plain()),
-    ];
-    if let Some(h) = &app.home.header
-        && h.config_error.is_none()
-    {
-        left.push(Span::styled(format!("{sep}{}", clean(&h.model)), t.dim()));
+    let warns = warnings(app).join(&sep);
+    let model = app
+        .home
+        .header
+        .as_ref()
+        .filter(|h| h.config_error.is_none())
+        .map_or_else(String::new, |h| clean(&h.model));
+    let lead = 1 + 4 + text::width(&sep);
+    // The model gives way to what is wrong, and that is cut before it pushes "clio" out.
+    let both = text::width(&warns) + 3 + text::width(&model);
+    let mut right: Vec<Span> = Vec::new();
+    if warns.is_empty() || both + 5 <= w {
+        if !warns.is_empty() {
+            right.push(Span::styled(warns, t.warn()));
+            right.push(Span::raw("   "));
+        }
+        right.push(Span::styled(model, t.dim()));
+    } else {
+        right.push(Span::styled(
+            text::fit(&warns, w.saturating_sub(6), t.ellipsis()),
+            t.warn(),
+        ));
     }
-    let mut right = vec![Span::styled(screen_name(app), t.dim())];
-    if app.debug {
-        right.insert(0, Span::styled("debug ", t.warn()));
+    let right_w: usize = right.iter().map(|s| text::width(&s.content)).sum();
+    // The title gives way to the right side.
+    let room = w.saturating_sub(lead + right_w + 3);
+    let title = if room >= 6 {
+        text::fit(&clean(&title), room, t.ellipsis())
+    } else {
+        String::new()
+    };
+    let mut left = vec![Span::raw(" "), Span::styled("clio", t.accent())];
+    if !title.is_empty() {
+        left.push(Span::styled(sep, t.dim()));
+        left.push(Span::styled(title, t.dim()));
     }
-    let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let r: usize = right.iter().map(|s| s.content.chars().count()).sum();
-    let pad = usize::from(area.width).saturating_sub(used + r + 1);
-    left.push(Span::raw(" ".repeat(pad)));
-    left.extend(right);
+    let left_w: usize = left.iter().map(|s| text::width(&s.content)).sum();
+    if left_w + right_w < w {
+        left.push(Span::raw(" ".repeat(w - left_w - right_w - 1)));
+        left.extend(right);
+    }
     f.render_widget(Paragraph::new(Line::from(left)), area);
 }
 
-fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
+/// One footer line: the keys of this screen on the left (at most `max_hints`, the help one
+/// always) and on the right the first of `rights` that leaves room for them (or the last one).
+pub fn footer(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    max_hints: usize,
+    rights: Vec<Vec<Span<'static>>>,
+) {
     let t = app.theme;
-    let width = |h: &keys::Bind| h.shown.chars().count() + 1 + h.what.chars().count() + 3;
-    let hints = keys::hints(app.ctx());
-    // The help key is always the last and always shown: the others give way to it.
-    let (help, rest) = match hints.split_last() {
-        Some((h, rest)) if h.act == Act::Help => (Some(*h), rest),
-        _ => (None, hints.as_slice()),
-    };
-    let reserved = help.map_or(0, width);
-    let mut shown: Vec<&keys::Bind> = Vec::new();
-    let mut used = 0usize;
-    for h in rest {
-        if used + width(h) + reserved > usize::from(area.width) {
+    let sep = format!(" {} ", t.dot());
+    let width = |h: &keys::Bind| text::width(h.shown) + 1 + text::width(h.what);
+    // The keys to leave and to get help are always shown, last; the others give way to them.
+    let (pinned, rest): (Vec<&keys::Bind>, Vec<&keys::Bind>) = keys::hints(app.ctx())
+        .into_iter()
+        .partition(|h| matches!(h.act, Act::Help | Act::Quit));
+    let rest = &rest[..rest.len().min(max_hints.saturating_sub(pinned.len()))];
+    let sep_w = text::width(&sep);
+    let all: usize = rest.iter().chain(&pinned).map(|h| width(h) + sep_w).sum();
+    let span_w = |v: &[Span]| v.iter().map(|s| text::width(&s.content)).sum::<usize>();
+    let n = rights.len();
+    let right = rights
+        .into_iter()
+        .enumerate()
+        .find(|(i, r)| all + span_w(r) + 2 <= usize::from(area.width) + sep_w || i + 1 == n)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    let right_w = span_w(&right);
+    let room = usize::from(area.width).saturating_sub(right_w + 2);
+    let mut used = 0;
+    let mut kept: Vec<&keys::Bind> = Vec::new();
+    for h in pinned.iter().rev() {
+        let need = width(h) + sep_w;
+        if used + need > room + sep_w {
             break;
         }
-        used += width(h);
+        used += need;
+        kept.insert(0, *h);
+    }
+    let mut shown: Vec<&keys::Bind> = Vec::new();
+    for h in rest {
+        let need = width(h) + sep_w;
+        if used + need > room + sep_w {
+            break;
+        }
+        used += need;
         shown.push(h);
     }
-    shown.extend(help);
+    shown.extend(kept);
     let mut spans: Vec<Span> = Vec::new();
-    for h in shown {
+    for (i, h) in shown.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(sep.clone(), t.dim()));
+        }
         spans.push(Span::styled(h.shown, t.key()));
-        spans.push(Span::styled(format!(" {}   ", h.what), t.dim()));
+        spans.push(Span::styled(format!(" {}", h.what), t.dim()));
     }
+    let left_w: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+    spans.push(Span::raw(
+        " ".repeat(usize::from(area.width).saturating_sub(left_w + right_w)),
+    ));
+    spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_status(f: &mut Frame, area: Rect, app: &App) {
+/// The use of the run on screen (or the chat's), at most `w` columns.
+fn usage_line(app: &App, w: usize) -> Vec<Span<'static>> {
     let t = app.theme;
     let line = match app.run_data() {
-        _ if matches!(app.screen, Screen::Chat | Screen::Sessions) && app.pi => status::line(
-            t,
-            &app.chat.snapshot(app.now_ms, app.fallback()),
-            usize::from(area.width),
-        ),
-        Some((snap, _)) => status::line(t, &snap, usize::from(area.width)),
-        None => Line::from(Span::styled(
-            if app.screen == Screen::NewRun || app.screen == Screen::Doctor {
-                ""
-            } else {
-                "sin uso todavía"
-            },
-            t.dim(),
-        )),
+        Some((snap, _)) => status::line(t, &snap, w),
+        None if matches!(app.screen, Screen::NewRun | Screen::Doctor) => Line::default(),
+        None => Line::from(Span::styled("sin uso todavía", t.dim())),
     };
-    f.render_widget(Paragraph::new(line), area);
+    line.spans
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -1058,147 +1160,210 @@ pub fn draw(f: &mut Frame, app: &App) {
         return;
     }
     let t = app.theme;
-    let [header, _, body, flash, hints, status] = Layout::vertical([
+    let [top, rule, rest] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
     ])
     .areas(area);
-    draw_header(f, header, app);
-    // One column of air on each side.
-    let body = Rect::new(
-        body.x + 1,
-        body.y,
-        body.width.saturating_sub(2),
-        body.height,
+    draw_top(f, top, app);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            t.rule().repeat(usize::from(rule.width)),
+            t.faint(),
+        )),
+        rule,
     );
-    match app.screen {
-        Screen::Home => super::home::draw(f, body, app),
-        Screen::NewRun => super::new_run::draw(f, body, app),
-        Screen::Live => super::live::draw(f, body, app),
-        Screen::Detail => super::detail::draw(f, body, app),
-        Screen::Doctor => super::doctor::draw(f, body, app),
-        Screen::Context => meter::draw_context(f, body, app),
-        Screen::Usage => meter::draw_usage(f, body, app),
-        Screen::Memory => super::memory::draw(f, body, app),
-        Screen::Sessions | Screen::Chat => super::sessions::draw_both(f, body, app),
-        Screen::Help => meter::draw_help(f, body, app),
-    }
-    if let Some(msg) = &app.flash {
-        f.render_widget(
-            Paragraph::new(Span::styled(format!(" {}", clean(msg)), t.ok())),
-            flash,
+    if app.pi && matches!(app.screen, Screen::Sessions | Screen::Chat) {
+        super::chat::draw_screen(f, rest, app);
+    } else {
+        let [_, body, flash, foot] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(rest);
+        // One column of air on each side.
+        let body = Rect::new(
+            body.x + 1,
+            body.y,
+            body.width.saturating_sub(2),
+            body.height,
         );
-    }
-    draw_hints(
-        f,
-        Rect::new(hints.x + 1, hints.y, hints.width.saturating_sub(1), 1),
-        app,
-    );
-    draw_status(
-        f,
-        Rect::new(status.x + 1, status.y, status.width.saturating_sub(1), 1),
-        app,
-    );
-    if let Some(c) = &app.confirm {
-        let verb = match c.action {
-            Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
-            Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
-            Action::Promote => format!(
-                "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
-                c.id
-            ),
-            Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
-            Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
-            Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
-        };
-        let mut lines = vec![
-            Line::from(Span::styled(verb, t.bold())),
-            Line::from(clean(&c.workspace)),
-        ];
-        for n in c.names.iter().take(CONFIRM_FILES) {
-            lines.push(Line::from(format!("  {}", clean(n))));
+        match app.screen {
+            Screen::Home => super::home::draw(f, body, app),
+            Screen::NewRun => super::new_run::draw(f, body, app),
+            Screen::Live => super::live::draw(f, body, app),
+            Screen::Detail => super::detail::draw(f, body, app),
+            Screen::Doctor => super::doctor::draw(f, body, app),
+            Screen::Context => meter::draw_context(f, body, app),
+            Screen::Usage => meter::draw_usage(f, body, app),
+            Screen::Memory => super::memory::draw(f, body, app),
+            Screen::Sessions | Screen::Chat => {}
+            Screen::Help => meter::draw_help(f, body, app),
         }
-        if c.names.len() > CONFIRM_FILES {
-            lines.push(Line::from(Span::styled(
-                format!("  … y {} más", c.names.len() - CONFIRM_FILES),
-                t.dim(),
-            )));
+        if let Some(msg) = &app.flash {
+            f.render_widget(
+                Paragraph::new(Span::styled(format!(" {}", clean(msg)), t.accent_line())),
+                flash,
+            );
         }
-        if let Some(n) = &c.note {
-            lines.push(Line::from(Span::styled(clean(n), t.warn())));
-        }
-        if c.action == Action::Approve && !app.quiet() {
-            lines.push(Line::from(Span::styled(
-                "espera un segundo sin teclear para responder…",
-                t.dim(),
-            )));
-        }
-        let answers = if c.action == Action::Approve {
-            vec![
-                Span::styled(if c.armed { "Enter" } else { "s y Enter" }, t.key()),
-                Span::raw(" sí, ejecutarlo      "),
-                Span::styled("n o Esc", t.key()),
-                Span::raw(" no (se rechaza)"),
-            ]
+        let foot = Rect::new(foot.x + 1, foot.y, foot.width.saturating_sub(2), 1);
+        // The help opened from the chat shows the chat's use.
+        let right = if app.pi
+            && matches!(app.before_help, Screen::Chat | Screen::Sessions)
+            && app.screen == Screen::Help
+        {
+            super::chat::meter(app)
         } else {
+            let w = usize::from(foot.width);
             vec![
-                Span::styled("y", t.key()),
-                Span::raw(" sí, continuar      "),
-                Span::styled("cualquier otra tecla", t.key()),
-                Span::raw(" cancela"),
+                usage_line(app, w * 3 / 5),
+                usage_line(app, w / 2),
+                usage_line(app, w * 2 / 5),
+                usage_line(app, 0),
             ]
         };
-        lines.extend([Line::from(""), Line::from(answers)]);
-        dialog(f, area, t, " Confirmar ", lines, t.warn());
+        footer(f, foot, app, 6, right);
+    }
+    if let Some(c) = &app.confirm {
+        confirm_dialog(f, area, app, c);
     } else if let Some(n) = &app.notice {
-        let mut lines: Vec<Line> = sanitize::multiline(n)
+        let lines: Vec<Line> = sanitize::multiline(n)
             .lines()
             .map(|l| Line::from(l.to_owned()))
             .collect();
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "(cualquier tecla cierra)",
-            t.dim(),
-        )));
-        dialog(f, area, t, " Aviso ", lines, t.fail());
+        let hint = Line::from(Span::styled("cualquier tecla cierra", t.dim()));
+        dialog(f, area, t, " Aviso ", lines, hint, t.fail());
     }
 }
 
-/// The only boxes of the interface: a question or a message that needs an answer.
+fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
+    let t = app.theme;
+    let verb = match c.action {
+        Action::Apply => format!("Aplicar {} archivo(s) en", c.files),
+        Action::Undo => format!("Deshacer lo aplicado ({} archivo(s)) en", c.files),
+        Action::Promote => format!(
+            "Aprobar el recuerdo m{} (pasa a activo y se recordará)",
+            c.id
+        ),
+        Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
+        Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
+        Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
+    };
+    let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
+    // The class of a set-aside action (`«borrar» …`) in the warning color.
+    let what = clean(&c.workspace);
+    match what.split_once('»') {
+        Some((class, rest)) if c.action == Action::Approve && class.starts_with('«') => {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{class}»"), t.warn()),
+                Span::raw(rest.to_owned()),
+            ]));
+        }
+        _ => lines.push(Line::from(what)),
+    }
+    for n in c.names.iter().take(CONFIRM_FILES) {
+        lines.push(Line::from(format!("  {}", clean(n))));
+    }
+    if c.names.len() > CONFIRM_FILES {
+        lines.push(Line::from(Span::styled(
+            format!("  … y {} más", c.names.len() - CONFIRM_FILES),
+            t.dim(),
+        )));
+    }
+    if let Some(n) = &c.note {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(clean(n), t.warn())));
+    }
+    if c.action == Action::Approve && !app.quiet() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "espera un segundo sin teclear para responder…",
+            t.dim(),
+        )));
+    }
+    let d = format!("   {}   ", t.dot());
+    let hint = if c.action == Action::Approve {
+        Line::from(vec![
+            Span::styled(if c.armed { "Enter" } else { "s y Enter" }, t.key()),
+            Span::styled(" sí, ejecutarlo", t.dim()),
+            Span::styled(d, t.dim()),
+            Span::styled("n o Esc", t.key()),
+            Span::styled(" no, rechazarlo", t.dim()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("y", t.key()),
+            Span::styled(" sí, continuar", t.dim()),
+            Span::styled(d, t.dim()),
+            Span::styled("cualquier otra tecla", t.key()),
+            Span::styled(" cancela", t.dim()),
+        ])
+    };
+    let border = if matches!(c.action, Action::Approve | Action::DeleteSession) {
+        t.warn()
+    } else {
+        t.accent_line()
+    };
+    dialog(f, area, t, " Confirmar ", lines, hint, border);
+}
+
+/// A centered box over the screen: a question or a message that needs a key. The text is wrapped
+/// to the box, with a column and a row of air inside the border, and the keys on the last row.
 fn dialog(
     f: &mut Frame,
     area: Rect,
     t: Theme,
     title: &str,
     lines: Vec<Line<'static>>,
+    hint: Line<'static>,
     border: ratatui::style::Style,
 ) {
-    let w = area.width.saturating_sub(6).clamp(30, 76);
-    // A line longer than the box wraps onto more rows: counting one row per line hid the last
-    // lines (the warning is the last one) behind the border.
-    let inner = usize::from(w.saturating_sub(2)).max(1);
-    let rows: usize = lines.iter().map(|l| l.width().div_ceil(inner).max(1)).sum();
-    let h = (u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(3)).min(area.height);
-    let r = centered(area, w, h.max(5));
-    f.render_widget(Clear, r);
+    let w = area.width.saturating_sub(6).min(72);
+    let inner = usize::from(w.saturating_sub(6)).max(1);
+    // A row of air above and below, when the terminal has the rows for it.
+    let air = area.height >= 24;
+    let mut rows: Vec<Line> = Vec::new();
+    if air {
+        rows.push(Line::from(""));
+    }
+    for l in lines.into_iter().chain([Line::from(""), hint]) {
+        let segs: Vec<(String, ratatui::style::Style)> = l
+            .spans
+            .into_iter()
+            .map(|s| (s.content.into_owned(), s.style))
+            .collect();
+        let none = (Vec::new(), 0);
+        rows.extend(super::markdown::wrap_spans(
+            &segs,
+            inner,
+            none.clone(),
+            none,
+        ));
+    }
+    if air {
+        rows.push(Line::from(""));
+    }
+    let h = (u16::try_from(rows.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2))
+    .min(area.height);
+    let r = centered(area, w, h);
+    // A column of space around it, so the text under it does not touch its border.
     f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::new()
-                .borders(Borders::ALL)
-                .border_type(if t.unicode {
-                    BorderType::Rounded
-                } else {
-                    BorderType::Plain
-                })
-                .border_style(border)
-                .title(Span::styled(title.to_owned(), t.bold())),
-        ),
-        r,
+        Clear,
+        Rect::new(r.x.saturating_sub(1), r.y, r.width + 2, r.height).intersection(area),
     );
+    f.render_widget(Clear, r);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_set(t.border())
+        .border_style(border)
+        .padding(Padding::horizontal(2))
+        .title(Span::styled(title.to_owned(), t.bold()));
+    f.render_widget(Paragraph::new(rows).block(block), r);
 }
 
 /// Counts by label, for the home header and the live panel.

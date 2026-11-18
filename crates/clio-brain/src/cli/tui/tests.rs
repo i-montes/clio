@@ -38,6 +38,7 @@ pub(super) fn ctrl(c: char) -> Input {
 pub(super) const THEME: Theme = Theme {
     color: true,
     unicode: true,
+    rgb: false,
 };
 
 pub(super) fn app() -> App {
@@ -668,8 +669,11 @@ fn live_run_shows_events_and_cancel_asks_twice() {
                 "{t}"
             );
             assert!(t.contains("S-16") && t.contains("1234 car."), "{t}");
+            // The use of the run, shortened at 80 columns.
             assert!(
-                t.contains("2/40") && t.contains("5 s/10 min") && t.contains("externo"),
+                t.contains("2/40")
+                    && (t.contains("5 s/10 min") || t.contains("5s/10m"))
+                    && t.contains("ext"),
                 "{t}"
             );
             assert!(
@@ -946,7 +950,10 @@ fn home_draws_state_and_runs_without_overflow() {
         assert_clean(&t);
         assert_fits(&t, w, h);
         if w >= 80 {
-            assert!(t.contains("clio · proyecto · beam-free"), "{t}");
+            assert!(
+                t.contains("clio · inicio · proyecto") && t.contains("beam-free"),
+                "{t}"
+            );
             assert!(t.contains("llave presente"), "{t}");
             assert!(t.contains("doctor: 12 ok · 3 avisos · 0 fallos"), "{t}");
             assert!(
@@ -955,10 +962,10 @@ fn home_draws_state_and_runs_without_overflow() {
             );
             assert!(t.contains("aplicado") && t.contains("fallido"), "{t}");
             assert!(t.contains("arregla parse_date en dates.py"), "{t}");
-            assert!(
-                t.contains("n nuevo") && t.contains("/ filtrar") && t.contains("q salir"),
-                "{t}"
-            );
+            assert!(t.contains("q salir") && t.contains("? ayuda"), "{t}");
+            if w >= 120 {
+                assert!(t.contains("/ filtrar") && t.contains("n nuevo"), "{t}");
+            }
         }
     }
     let t = screen_text(&app(), 80, 24);
@@ -1230,6 +1237,7 @@ fn without_color_the_theme_uses_no_colors_and_no_unicode_has_ascii_stand_ins() {
     let t = Theme {
         color: false,
         unicode: false,
+        rgb: false,
     };
     for s in [
         t.ok(),
@@ -1266,6 +1274,7 @@ fn without_color_the_theme_uses_no_colors_and_no_unicode_has_ascii_stand_ins() {
     let c = Theme {
         color: true,
         unicode: true,
+        rgb: false,
     };
     assert_eq!(c.ok().fg, Some(ratatui::style::Color::Green));
     // Only the basic palette: nothing indexed or RGB, so the terminal's theme decides.
@@ -1297,6 +1306,7 @@ fn every_screen_is_plain_ascii_without_unicode() {
     let ascii = Theme {
         color: false,
         unicode: false,
+        rgb: false,
     };
     let mut screens = vec![with_runs(), super::tests_views::live_app()];
     screens.push(open_detail(
@@ -1836,7 +1846,7 @@ fn the_first_message_survives_a_session_that_is_still_opening() {
         assert!(cmds.is_empty() && !a.quit, "{cmds:?}");
         assert_eq!(a.chat.queued.as_deref(), Some("hola"));
     }
-    let (a, _) = feed(a, vec![key(KeyCode::Tab)]);
+    let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
     let (a, _) = feed(a, typed_at(1_000, "y además"));
     let (a, _) = feed(
         a,

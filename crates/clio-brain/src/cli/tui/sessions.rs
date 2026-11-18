@@ -1,19 +1,20 @@
-//! The sessions beside the chat (the screen of the Pi harness): "nueva sesión" and the sessions
-//! of every source, local ones from Pi's own session folder and the remote placeholder. No boxes:
-//! the selection is a marker and the accent color. `Screen::Sessions` is this screen with the keys
-//! on the list, `Screen::Chat` with the keys on the chat.
+//! The drawer of sessions (the Pi harness): "nueva sesión" and the sessions of every source,
+//! local ones from Pi's own session folder and the remote placeholder. Hidden while the chat has
+//! the keys (`Screen::Chat`); Ctrl-S opens it on the left, with the keys (`Screen::Sessions`), and
+//! the chat stays in sight beside it.
 
 use std::cell::Cell;
 
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::app::{App, Cmd, OpenTarget, Screen, clean, section};
+use super::app::{App, Cmd, OpenTarget, Screen, clean};
 use super::chat::Chat;
 use super::keys::{Act, Ctx, lookup};
+use super::text;
 use crate::cli::chat::{Row, RowKind};
 
 #[derive(Default)]
@@ -22,18 +23,17 @@ pub struct Sessions {
     /// 0 is "nueva sesión"; `n > 0` is `rows[n - 1]`.
     pub sel: usize,
     pub loading: bool,
-    /// Where the last draw put the list (empty when hidden) and the chat, and the list's first
-    /// row: (y, row, rows shown).
+    /// Where the last draw put the drawer (empty when hidden) and the chat beside it, and the
+    /// drawer's rows: (y of the first, the first entry shown, entries shown, rows per entry).
     pub area: Cell<Rect>,
     pub chat_area: Cell<Rect>,
-    pub list_at: Cell<(u16, usize, usize)>,
+    pub list_at: Cell<(u16, usize, usize, u16)>,
 }
 
-/// Terminals at least this wide show the list beside the chat; narrower ones only while the list
-/// has the keys (Tab).
+/// Terminals narrower than this give the open drawer their whole width.
 pub const WIDE: u16 = 80;
-/// The list's width: "nueva sesión  en este servidor" fits.
-const SIDE_W: u16 = 32;
+/// The drawer's width.
+pub const DRAWER_W: u16 = 38;
 
 impl Sessions {
     pub fn len(&self) -> usize {
@@ -118,7 +118,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     };
     match act {
         Act::Quit if !app.busy() => app.quit = true,
-        Act::Back => app.screen = Screen::Chat,
+        Act::Back | Act::Sessions => app.screen = Screen::Chat,
         Act::Down => app.sessions.sel = (app.sessions.sel + 1).min(last),
         Act::Up => app.sessions.sel = app.sessions.sel.saturating_sub(1),
         Act::Top => app.sessions.sel = 0,
@@ -165,129 +165,171 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
     }
 }
 
-/// A click on a row opens it (as Enter), a click on the chat gives it the keys, and the wheel
+/// A click on a row opens it (as Enter), a click outside the open drawer closes it, and the wheel
 /// scrolls the pane under the pointer. `step` never lets a click reach a question or a message.
 pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
     let at = Position::new(m.column, m.row);
-    let (side, main) = (
-        app.sessions.area.get().contains(at),
-        app.sessions.chat_area.get().contains(at),
-    );
+    let side = app.screen == Screen::Sessions && app.sessions.area.get().contains(at);
     let last = app.sessions.len() - 1;
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) if side => {
-            let (y, first, shown) = app.sessions.list_at.get();
-            if let Some(i) = m.row.checked_sub(y).map(usize::from).filter(|i| *i < shown) {
-                app.sessions.sel = (first + i).min(last);
+            let (y, first, shown, per) = app.sessions.list_at.get();
+            if let Some(i) = m.row.checked_sub(y)
+                && i % per < 2
+                && usize::from(i / per) < shown
+            {
+                app.sessions.sel = (first + usize::from(i / per)).min(last);
                 return open_selected(app);
             }
         }
-        MouseEventKind::Down(MouseButton::Left) if main => app.screen = Screen::Chat,
+        MouseEventKind::Down(MouseButton::Left) if app.screen == Screen::Sessions => {
+            app.screen = Screen::Chat;
+        }
         MouseEventKind::ScrollUp if side => app.sessions.sel = app.sessions.sel.saturating_sub(1),
         MouseEventKind::ScrollDown if side => app.sessions.sel = (app.sessions.sel + 1).min(last),
-        MouseEventKind::ScrollUp if main => app.chat.scroll = app.chat.scroll.saturating_add(3),
-        MouseEventKind::ScrollDown if main => app.chat.scroll = app.chat.scroll.saturating_sub(3),
+        MouseEventKind::ScrollUp if app.sessions.chat_area.get().contains(at) => {
+            app.chat.scroll_by(3);
+        }
+        MouseEventKind::ScrollDown if app.sessions.chat_area.get().contains(at) => {
+            app.chat.scroll_by(-3);
+        }
         _ => {}
     }
     vec![]
 }
 
-/// The screen of the Pi harness: the list on the left and the chat. On a narrow terminal the list
-/// shows only while it has the keys.
-pub fn draw_both(f: &mut Frame, area: Rect, app: &App) {
-    let side_w = if f.area().width >= WIDE || app.screen == Screen::Sessions {
-        SIDE_W
-    } else {
-        0
-    };
-    let [side, _, main] = Layout::horizontal([
-        Constraint::Length(side_w),
-        Constraint::Length(side_w.min(2)),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-    app.sessions.area.set(side);
-    app.sessions.chat_area.set(main);
-    if side_w > 0 {
-        draw(f, side, app);
-    }
-    super::chat::draw(f, main, app);
-}
-
-pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+/// The drawer: a box with "nueva sesión" and the sessions, two rows each (the title, and when
+/// and how long), the selection across the width, the open one marked; at its foot the keys, or
+/// the last flash.
+pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let s = &app.sessions;
-    let mut lines: Vec<Line> = super::home::state_line(app, t, usize::from(area.width));
-    lines.push(Line::from(""));
-    lines.push(section(t, "sesiones de Pi", area.width));
-    let rows = usize::from(area.height).saturating_sub(lines.len()).max(1);
-    let skip = (s.sel + 1).saturating_sub(rows);
-    s.list_at.set((
-        area.y + u16::try_from(lines.len()).unwrap_or(u16::MAX),
-        skip,
-        rows.min(s.len() - skip),
-    ));
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_set(t.border())
+        .border_style(t.accent_line())
+        .title(Span::styled(" sesiones ", t.bold()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 3 || inner.width < 8 {
+        return;
+    }
+    let w = usize::from(inner.width);
+    let list_h = inner.height - 2;
+    // Two rows an entry, and a blank one between entries when they all fit with it.
+    let all = u16::try_from(s.len()).unwrap_or(u16::MAX);
+    let per: u16 = if all.saturating_mul(3).saturating_sub(1) <= list_h {
+        3
+    } else {
+        2
+    };
+    let fits = usize::from(list_h.saturating_add(per - 2) / per).max(1);
+    let skip = (s.sel + 1).saturating_sub(fits);
+    let shown = fits.min(s.len() - skip);
+    s.list_at.set((inner.y, skip, shown, per));
     let now = crate::cli::now_ms();
     let open = open_pos(app);
-    for pos in (0..s.len()).skip(skip).take(rows) {
-        // The selection shows only while the list has the keys; the open one always.
-        let selected = pos == s.sel && app.screen == Screen::Sessions;
-        let base = if selected {
-            t.selected()
-        } else if open == Some(pos) {
-            t.bold()
-        } else {
-            t.plain()
-        };
-        let dim = if selected { base } else { t.dim() };
-        let mark = if selected {
-            Span::styled(format!("{} ", t.sel()), base)
-        } else if open == Some(pos) {
-            Span::styled(format!("{} ", t.rule_v()), t.accent())
-        } else {
-            Span::raw("  ")
-        };
-        if pos == 0 {
+    let mut lines: Vec<Line> = Vec::new();
+    for pos in (0..s.len()).skip(skip).take(shown) {
+        if pos > skip && per == 3 {
+            lines.push(Line::from(""));
+        }
+        let (title, title_style, under, under_style) = if pos == 0 {
             let place = if app.host {
                 "en este servidor".to_owned()
             } else {
                 format!("en una copia de {}", clean(&folder_of_cwd(&app.cwd)))
             };
-            lines.push(Line::from(vec![
-                mark,
-                Span::styled("nueva sesión", base),
-                Span::styled(format!("  {place}"), dim),
-            ]));
-            continue;
-        }
-        let r = &s.rows[pos - 1];
-        let (style, tail) = match (&r.kind, &r.unavailable) {
-            // Its title says it; the why shows below when it is selected.
-            (RowKind::Remote, _) => (t.warn(), String::new()),
-            (_, Some(_)) => (t.warn(), "no es de Clio".to_owned()),
-            _ => (base, r.last_ms.map_or_else(String::new, |ms| ago(now, ms))),
+            ("+ nueva sesión".to_owned(), t.bold(), place, t.dim())
+        } else {
+            let r = &s.rows[pos - 1];
+            match (&r.kind, &r.unavailable) {
+                (RowKind::Remote, why) => (
+                    clean(&r.title),
+                    t.warn(),
+                    why.as_deref().map_or_else(String::new, clean),
+                    t.warn(),
+                ),
+                (_, Some(why)) => (clean(&r.title), t.plain(), clean(why), t.warn()),
+                _ => {
+                    let mut when = r.last_ms.map_or_else(String::new, |ms| ago(now, ms));
+                    if r.messages > 0 {
+                        if !when.is_empty() {
+                            when.push_str(&format!(" {} ", t.dot()));
+                        }
+                        when.push_str(&format!("{} msgs", r.messages));
+                    }
+                    (clean(&r.title), t.plain(), when, t.dim())
+                }
+            }
         };
-        let title_w = usize::from(area.width)
-            .saturating_sub(4 + tail.chars().count())
-            .max(8);
-        let title: String = clean(&r.title).chars().take(title_w).collect();
-        lines.push(Line::from(vec![
-            mark,
-            Span::styled(
-                format!("{title:<title_w$}  "),
-                if selected { base } else { style },
-            ),
-            Span::styled(tail, dim),
-        ]));
+        let mark = if open == Some(pos) {
+            Span::styled(format!("{} ", t.open_mark()), t.accent_line())
+        } else {
+            Span::raw("  ")
+        };
+        let room = w.saturating_sub(4);
+        let row1 = text::fit(&title, room, t.ellipsis());
+        let row2 = text::fit(&under, room, t.ellipsis());
+        let selected = pos == s.sel;
+        let pad = |r: &str| " ".repeat(room.saturating_sub(text::width(r)) + 1);
+        if selected {
+            let sel = t.selection();
+            let mark = Span::styled(mark.content.clone(), sel);
+            lines.push(Line::from(vec![
+                Span::styled(" ", sel),
+                mark,
+                Span::styled(format!("{row1}{}", pad(&row1)), sel),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("   {row2}{}", pad(&row2)),
+                sel,
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                mark,
+                Span::styled(row1, title_style),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(row2, under_style),
+            ]));
+        }
     }
-    if let Some(r) = s.selected()
-        && let Some(why) = &r.unavailable
-        && usize::from(area.height) > lines.len() + 1
-    {
+    if s.loading && s.rows.is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(clean(why), t.warn())));
+        lines.push(Line::from(Span::styled("   cargando…", t.dim())));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            height: list_h,
+            ..inner
+        },
+    );
+    // The foot: a flash (why something cannot be done now) or the keys.
+    let foot = match &app.flash {
+        Some(m) => Line::from(Span::styled(
+            text::fit(&format!(" {}", clean(m)), w, t.ellipsis()),
+            t.accent_line(),
+        )),
+        None => {
+            let d = format!(" {} ", t.dot());
+            Line::from(vec![
+                Span::styled(" Enter", t.key()),
+                Span::styled(format!(" abrir{d}"), t.dim()),
+                Span::styled("n", t.key()),
+                Span::styled(format!(" nueva{d}"), t.dim()),
+                Span::styled("x", t.key()),
+                Span::styled(" borrar", t.dim()),
+            ])
+        }
+    };
+    f.render_widget(
+        Paragraph::new(foot),
+        Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+    );
 }
 
 fn folder_of_cwd(cwd: &str) -> String {

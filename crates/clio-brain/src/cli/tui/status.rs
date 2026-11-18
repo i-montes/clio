@@ -198,6 +198,7 @@ mod tests {
         let t = Theme {
             color: false,
             unicode: true,
+            rgb: false,
         };
         let s = text(&line(t, &snap(false), 120));
         assert_eq!(
@@ -213,6 +214,7 @@ mod tests {
             let t = Theme {
                 color: true,
                 unicode,
+                rgb: false,
             };
             for tainted in [false, true] {
                 for w in [60usize, 61, 70, 79, 80, 90, 100, 120, 200] {
@@ -234,6 +236,7 @@ mod tests {
         let t = Theme {
             color: false,
             unicode: true,
+            rgb: false,
         };
         let mut s = snap(false);
         s.ctx = None;
@@ -250,6 +253,7 @@ mod tests {
         let t = Theme {
             color: true,
             unicode: true,
+            rgb: false,
         };
         let mut s = snap(false);
         s.ctx = Some(120_000);

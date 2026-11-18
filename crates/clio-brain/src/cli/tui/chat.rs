@@ -3,21 +3,26 @@
 //! raw events Pi sends. Use and context are in the status bar. Everything Pi, the model or a tool
 //! said is stored as it came and sanitized when drawn.
 
-use std::cell::Cell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use clio_brain::pi::rpc::{Event, UsageMeter};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use serde_json::Value;
 
 use super::app::{App, Cmd, OpenTarget, Screen, clean, section};
 use super::keys::{Act, lookup};
-use super::sanitize;
+use super::text::{self, wrap, wrap_ranges};
 use super::theme::Theme;
+use super::{composer, markdown, sanitize};
 use crate::cli::chat::Refresh;
 use crate::cli::usage::{self, RunLimits, Snapshot};
 
@@ -138,7 +143,11 @@ pub struct Chat {
     pub title: String,
     pub items: Vec<Item>,
     pub input: String,
+    /// Where the keys write in `input`: a byte position (see `composer::clamp`).
+    pub cursor: usize,
     pub running: bool,
+    /// When the turn on screen started.
+    pub turn_ms: u64,
     pub aborting: bool,
     pub meter: UsageMeter,
     /// Model calls (turns) seen since the chat opened.
@@ -154,11 +163,18 @@ pub struct Chat {
     held: usize,
     /// Lines scrolled up from the newest.
     pub scroll: usize,
+    /// How far up the last draw let it go.
+    pub scroll_max: Cell<usize>,
     pub view_h: Cell<u16>,
     pub view_w: Cell<u16>,
+    /// The columns of the composer's text, at the last draw (for ↑ and ↓ in it).
+    pub input_w: Cell<u16>,
     /// The first message of a new session, sent once it opens.
     pub queued: Option<String>,
     streamed: bool,
+    /// The agent's answers as the last draw rendered them, by what went into them: a long
+    /// conversation is drawn ten times a second and parsing all its markdown each time is slow.
+    rendered: RefCell<HashMap<u64, Vec<Line<'static>>>>,
 }
 
 impl Default for Chat {
@@ -178,7 +194,9 @@ impl Chat {
             title: String::new(),
             items: vec![],
             input: String::new(),
+            cursor: 0,
             running: false,
+            turn_ms: now_ms,
             aborting: false,
             meter: UsageMeter::default(),
             turns: 0,
@@ -189,10 +207,13 @@ impl Chat {
             raw: VecDeque::new(),
             held: 0,
             scroll: 0,
+            scroll_max: Cell::new(0),
             view_h: Cell::new(0),
             view_w: Cell::new(0),
+            input_w: Cell::new(0),
             queued: None,
             streamed: false,
+            rendered: RefCell::default(),
         }
     }
 
@@ -203,6 +224,27 @@ impl Chat {
             title: "nueva sesión".into(),
             ..Self::opening(0, now_ms)
         }
+    }
+
+    /// A turn starts now.
+    pub fn start_turn(&mut self, now_ms: u64) {
+        self.running = true;
+        self.aborting = false;
+        self.turn_ms = now_ms;
+    }
+
+    /// Puts `text` in the composer, the cursor at its end.
+    pub fn set_input(&mut self, text: String) {
+        self.cursor = text.len();
+        self.input = text;
+    }
+
+    /// Scrolls the conversation `n` lines up (negative: down), within what the last draw allowed.
+    pub fn scroll_by(&mut self, n: isize) {
+        self.scroll = self
+            .scroll
+            .saturating_add_signed(n)
+            .min(self.scroll_max.get());
     }
 
     pub fn is_draft(&self) -> bool {
@@ -533,27 +575,58 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let Some(act) = lookup(ctx, k) else {
         return edit(app, k);
     };
-    let page = usize::from(app.chat.view_h.get().max(2) - 1);
-    let max = usize::MAX / 2;
     match act {
-        Act::Quit if !app.busy() => app.quit = true,
-        // The keys go to the list; the session stays open beside it.
-        Act::Back => app.screen = Screen::Sessions,
-        Act::Cancel if !app.chat.aborting => {
-            app.chat.aborting = true;
-            app.chat
-                .items
-                .push(Item::Note("abortando el turno…".into()));
-            return vec![Cmd::ChatAbort];
+        Act::Quit => {
+            if !app.busy() {
+                app.quit = true;
+            }
+            return vec![];
         }
-        Act::Help => app.open_help(),
-        Act::Clear => app.chat.input.clear(),
-        Act::Newline => app.chat.input.push('\n'),
-        Act::Up => app.chat.scroll = (app.chat.scroll + 1).min(max),
-        Act::Down => app.chat.scroll = app.chat.scroll.saturating_sub(1),
-        Act::PageUp => app.chat.scroll = (app.chat.scroll + page).min(max),
-        Act::PageDown => app.chat.scroll = app.chat.scroll.saturating_sub(page),
+        Act::Sessions => {
+            app.screen = Screen::Sessions;
+            return vec![];
+        }
+        Act::Help => {
+            app.open_help();
+            return vec![];
+        }
         Act::Open => return send(app),
+        _ => {}
+    }
+    let page = isize::try_from(app.chat.view_h.get().max(2) - 1).unwrap_or(1);
+    let w = usize::from(app.chat.input_w.get());
+    let c = &mut app.chat;
+    if act == Act::Cancel && !c.aborting {
+        c.aborting = true;
+        c.items.push(Item::Note("abortando el turno…".into()));
+        return vec![Cmd::ChatAbort];
+    }
+    let (s, at) = (&mut c.input, &mut c.cursor);
+    match act {
+        Act::Clear => composer::delete_to_line_start(s, at),
+        Act::Newline => composer::insert(s, at, "\n"),
+        Act::Left => *at = composer::left(s, *at),
+        Act::Right => *at = composer::right(s, *at),
+        Act::LineStart => *at = composer::line_start(s, *at),
+        Act::LineEnd => *at = composer::line_end(s, *at),
+        Act::WordLeft => *at = composer::word_left(s, *at),
+        Act::WordRight => *at = composer::word_right(s, *at),
+        Act::DelBack => composer::backspace(s, at),
+        Act::DelNext => composer::delete(s, at),
+        Act::DelWord => composer::delete_word(s, at),
+        // Inside a message of several rows they move the cursor; past its edge, the conversation.
+        Act::Up => match composer::vertical(s, *at, w, true) {
+            Some(p) => *at = p,
+            None => c.scroll_by(1),
+        },
+        Act::Down => match composer::vertical(s, *at, w, false) {
+            Some(p) => *at = p,
+            None => c.scroll_by(-1),
+        },
+        Act::PageUp => c.scroll_by(page),
+        Act::PageDown => c.scroll_by(-page),
+        Act::Top => c.scroll = c.scroll_max.get(),
+        Act::Bottom => c.scroll = 0,
         _ => {}
     }
     vec![]
@@ -566,7 +639,7 @@ fn send(app: &mut App) -> Vec<Cmd> {
         return vec![];
     }
     if c.is_draft() {
-        c.input.clear();
+        c.set_input(String::new());
         c.items.push(Item::User(text.clone()));
         c.queued = Some(text);
         c.opening = true;
@@ -583,70 +656,37 @@ fn send(app: &mut App) -> Vec<Cmd> {
         app.flash = Some("la sesión todavía no está lista".into());
         return vec![];
     }
-    c.input.clear();
+    c.set_input(String::new());
     c.scroll = 0;
     c.items.push(Item::User(text.clone()));
     if c.running {
         return vec![Cmd::ChatSteer { text }];
     }
-    c.running = true;
-    c.aborting = false;
+    c.start_turn(app.now_ms);
     vec![Cmd::ChatSend { text }]
 }
 
-/// Plain characters, Backspace.
+/// Plain characters go in at the cursor. Nothing that could drive the terminal or hide text is
+/// taken (a typed bidi mark, say): what the composer holds is always safe to draw as it is.
 fn edit(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
-    match k.code {
-        KeyCode::Backspace => {
-            app.chat.input.pop();
-        }
-        KeyCode::Char(c)
-            if !c.is_control()
-                && !k
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            app.chat.input.push(c);
-        }
-        _ => {}
+    if let KeyCode::Char(c) = k.code
+        && !c.is_control()
+        && !clio_brain::pi::text::is_deceptive(c)
+        && !k
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        let mut buf = [0u8; 4];
+        let ch = &mut app.chat;
+        composer::insert(&mut ch.input, &mut ch.cursor, c.encode_utf8(&mut buf));
     }
     vec![]
 }
 
 /// Pasted text goes through the sanitizer: no escape sequences, and it never presses Enter.
 pub fn paste(app: &mut App, text: &str) {
-    app.chat.input.push_str(&sanitize::multiline(text));
-}
-
-/// Breaks `text` into rows of at most `w` characters, at spaces when it can.
-pub fn wrap(text: &str, w: usize) -> Vec<String> {
-    let w = w.max(8);
-    let mut out = Vec::new();
-    for para in text.split('\n') {
-        let mut cur = String::new();
-        for word in para.split(' ') {
-            let mut word = word;
-            // Cut a word longer than the line in one pass: counting what is left on every turn
-            // made a single huge word cost the square of its length, on every frame.
-            while let Some((at, _)) = word.char_indices().nth(w) {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                out.push(word[..at].to_owned());
-                word = &word[at..];
-            }
-            let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
-            if need > w && !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-            if !cur.is_empty() {
-                cur.push(' ');
-            }
-            cur.push_str(word);
-        }
-        out.push(cur);
-    }
-    out
+    let ch = &mut app.chat;
+    composer::insert(&mut ch.input, &mut ch.cursor, &sanitize::multiline(text));
 }
 
 /// What a tool does, as a title ("Leer archivo"), like Aria's steps.
@@ -673,55 +713,109 @@ fn chip(name: &str, summary: &str) -> String {
     summary.to_owned()
 }
 
-/// A kind of block; a blank line separates two blocks of different kinds, and the speaker's label
-/// goes on top of the user's and the agent's blocks.
+/// A kind of item. A blank line goes between two items, except inside a run of tools (a group)
+/// or of notes.
 #[derive(PartialEq, Clone, Copy)]
-enum Block {
+enum Kind {
     User,
     Agent,
     Tools,
     Notes,
 }
 
+/// The widest the chat's column gets.
+pub const COLUMN_MAX: u16 = 96;
+/// The most rows of text the composer shows; past them it scrolls.
+const INPUT_ROWS: usize = 6;
+
+/// `text` wrapped to `w` columns after `lead` (styled) on the first row and as many spaces on
+/// the others.
+fn hanging(text: &str, w: usize, lead: Span<'static>, style: Style) -> Vec<Line<'static>> {
+    let indent = " ".repeat(text::width(&lead.content));
+    let room = w.saturating_sub(indent.len());
+    wrap(&sanitize::multiline(text), room)
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let first = if i == 0 {
+                lead.clone()
+            } else {
+                Span::raw(indent.clone())
+            };
+            Line::from(vec![first, Span::styled(row, style)])
+        })
+        .collect()
+}
+
+/// The conversation as lines of at most `w` columns.
 fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
     let c = &app.chat;
     let mut lines: Vec<Line> = Vec::new();
-    let body = w.saturating_sub(2);
-    let mut last: Option<Block> = None;
-    for it in &c.items {
+    let mut last: Option<Kind> = None;
+    // The titles of a group of tools share one width, so what they worked on lines up.
+    let label_max = (w * 2 / 5).max(12);
+    let mut label_w = vec![0; c.items.len()];
+    let mut i = 0;
+    while i < c.items.len() {
+        let run = c.items[i..]
+            .iter()
+            .take_while(|it| matches!(it, Item::Tool { .. }))
+            .count();
+        let widest = c.items[i..i + run]
+            .iter()
+            .map(|it| match it {
+                Item::Tool { name, reason, .. } => text::width(&title(name, reason)),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+            .min(label_max);
+        label_w[i..i + run].fill(widest);
+        i += run.max(1);
+    }
+    // What this draw renders is kept for the next; what it no longer shows is let go.
+    let mut old = c.rendered.take();
+    let mut fresh = HashMap::new();
+    for (n, it) in c.items.iter().enumerate() {
         let kind = match it {
-            Item::User(_) => Block::User,
-            Item::Assistant { .. } => Block::Agent,
-            Item::Tool { .. } => Block::Tools,
-            Item::Note(_) | Item::Error(_) => Block::Notes,
+            Item::User(_) => Kind::User,
+            Item::Assistant { .. } => Kind::Agent,
+            Item::Tool { .. } => Kind::Tools,
+            Item::Note(_) | Item::Error(_) => Kind::Notes,
         };
-        if last != Some(kind) && last.is_some() {
+        if last != Some(kind) || matches!(kind, Kind::User | Kind::Agent) {
             lines.push(Line::from(""));
         }
         last = Some(kind);
-        let indented =
-            |text: &str, style: ratatui::style::Style, lines: &mut Vec<Line<'static>>| {
-                for row in wrap(&sanitize::multiline(text), body) {
-                    lines.push(Line::from(vec![Span::raw("  "), Span::styled(row, style)]));
-                }
-            };
         match it {
             Item::User(text) => {
-                // The accent marks you, as the composer's `›` does.
-                for (i, row) in wrap(&sanitize::multiline(text), body)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let lead = if i == 0 {
-                        Span::styled(format!("{} ", t.sel()), t.accent())
-                    } else {
-                        Span::raw("  ")
-                    };
-                    lines.push(Line::from(vec![lead, Span::styled(row, t.accent())]));
+                // The accent bar marks the person, on every row.
+                for row in wrap(&sanitize::multiline(text), w.saturating_sub(2)) {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", t.bar_left()), t.accent_line()),
+                        Span::styled(row, t.bold()),
+                    ]));
                 }
             }
-            Item::Assistant { text, .. } => {
-                indented(text, t.plain(), &mut lines);
+            Item::Assistant { text, live } => {
+                let mut h = DefaultHasher::new();
+                (text, w, *live, t).hash(&mut h);
+                let key = h.finish();
+                let rows = old
+                    .remove(&key)
+                    .or_else(|| fresh.get(&key).cloned())
+                    .unwrap_or_else(|| {
+                        markdown::render(text, w.saturating_sub(2), t, *live)
+                            .into_iter()
+                            .map(|l| {
+                                let mut spans = vec![Span::raw("  ")];
+                                spans.extend(l.spans);
+                                Line::from(spans)
+                            })
+                            .collect()
+                    });
+                lines.extend(rows.iter().cloned());
+                fresh.insert(key, rows);
             }
             Item::Tool {
                 name,
@@ -730,130 +824,300 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 state,
                 ms,
                 ..
-            } => {
-                let (mark, word, style) = match state {
-                    ToolState::Running => (t.spinner(app.now_ms), "", t.accent()),
-                    ToolState::Ok => (t.check(), "", t.ok()),
-                    ToolState::Failed => (t.cross(), " falló", t.fail()),
-                    ToolState::Denied => (t.cross(), " negado", t.fail()),
-                };
-                let dur = ms.map_or_else(String::new, |m| format!("  {}", usage::ms_label(m)));
-                let tail = format!("{word}{dur}");
-                let label = title(name, reason);
-                let summary = chip(name, summary);
-                let room = w.saturating_sub(4 + label.chars().count() + 2 + tail.chars().count());
-                let summary = super::debug_view::fit(&clean(&summary), room.max(8), t);
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(format!("{mark} "), style),
-                    Span::styled(label, t.bold()),
-                    Span::styled(format!("  {summary}"), t.dim()),
-                    Span::styled(
-                        tail,
-                        if *state == ToolState::Ok || *state == ToolState::Running {
-                            t.dim()
-                        } else {
-                            style
-                        },
-                    ),
-                ]));
-            }
-            Item::Note(text) => lines.push(Line::from(Span::styled(
-                format!("  {} {}", t.dot(), clean(text)),
+            } => lines.push(tool_line(
+                app,
+                (w, label_w[n]),
+                name,
+                summary,
+                reason,
+                *state,
+                *ms,
+            )),
+            Item::Note(text) => lines.extend(hanging(
+                text,
+                w,
+                Span::styled(format!("  {} ", t.dot()), t.dim()),
                 t.dim(),
-            ))),
-            Item::Error(text) => {
-                for (i, row) in wrap(&sanitize::multiline(text), body.saturating_sub(2))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let lead = if i == 0 {
-                        Span::styled(format!("  {} ", t.cross()), t.fail())
-                    } else {
-                        Span::raw("    ")
-                    };
-                    lines.push(Line::from(vec![lead, Span::styled(row, t.fail())]));
-                }
-            }
+            )),
+            Item::Error(text) => lines.extend(hanging(
+                text,
+                w,
+                Span::styled(format!("  {} ", t.cross()), t.fail()),
+                t.fail(),
+            )),
         }
     }
+    c.rendered.replace(fresh);
     lines
 }
 
-pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+/// One tool: its mark, its title (padded to `label_w`, the group's), what it worked on (cut to
+/// fit) and, on the right, how long it took and how it ended when that was not well.
+fn tool_line(
+    app: &App,
+    (w, label_w): (usize, usize),
+    name: &str,
+    summary: &str,
+    reason: &str,
+    state: ToolState,
+    ms: Option<u64>,
+) -> Line<'static> {
+    let t = app.theme;
+    let (mark, word, style) = match state {
+        ToolState::Running => (t.spinner(app.now_ms), "", t.accent_line()),
+        ToolState::Ok => (t.check(), "", t.ok()),
+        ToolState::Failed => (t.cross(), "falló", t.fail()),
+        ToolState::Denied => (t.cross(), "negado", t.fail()),
+    };
+    let dur = match ms {
+        Some(ms) if ms >= 10_000 => usage::duration(ms / 1000),
+        Some(ms) => usage::ms_label(ms),
+        None => String::new(),
+    };
+    let sep = if word.is_empty() || dur.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", t.dot())
+    };
+    let tail_w = text::width(word) + text::width(&sep) + text::width(&dur);
+    let mut label = text::fit(&title(name, reason), label_w.max(4), t.ellipsis());
+    label.push_str(&" ".repeat(label_w.saturating_sub(text::width(&label))));
+    let used = 4 + text::width(&label);
+    let room = w.saturating_sub(used + 3 + tail_w + 2);
+    let summary = clean(&chip(name, summary));
+    let summary = if room >= 4 && !summary.is_empty() {
+        format!("   {}", text::fit(&summary, room, t.ellipsis()))
+    } else {
+        String::new()
+    };
+    let pad = w.saturating_sub(used + text::width(&summary) + tail_w);
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{mark} "), style),
+        Span::raw(label),
+        Span::styled(summary, t.dim()),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(word, t.fail()),
+        Span::styled(sep, t.dim()),
+        Span::styled(dur, t.dim()),
+    ])
+}
+
+/// The empty new session: who and where, in the middle.
+fn welcome(app: &App) -> Vec<Line<'static>> {
+    let t = app.theme;
+    let place = if app.host {
+        "en este servidor".to_owned()
+    } else {
+        format!("en una copia de {}", clean(&folder_name(&app.cwd)))
+    };
+    vec![
+        Line::from(Span::styled("clio", t.accent())),
+        Line::from(Span::styled("¿En qué te ayudo?", t.bold())),
+        Line::from(Span::styled(place, t.dim())),
+    ]
+}
+
+fn folder_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+/// The line above the composer: what the session is doing now, the last flash, and whether
+/// there is more of the conversation below.
+fn status_line(app: &App, w: usize) -> Line<'static> {
     let t = app.theme;
     let c = &app.chat;
-    let input_text = sanitize::multiline(&c.input);
-    let input_rows: Vec<String> = wrap(&input_text, usize::from(area.width).saturating_sub(2));
-    let input_h = u16::try_from(input_rows.len()).unwrap_or(4).clamp(1, 4);
+    let mut spans: Vec<Span> = vec![Span::raw("  ")];
+    if c.opening {
+        spans.push(Span::styled(
+            format!("{} ", t.spinner(app.now_ms)),
+            t.accent_line(),
+        ));
+        spans.push(Span::styled(
+            if app.host {
+                "arrancando…"
+            } else {
+                "copiando el proyecto y arrancando…"
+            },
+            t.dim(),
+        ));
+    } else if c.running && c.aborting {
+        spans.push(Span::styled(format!("{} abortando…", t.bang()), t.warn()));
+    } else if c.running {
+        let secs = app.now_ms.saturating_sub(c.turn_ms) / 1000;
+        spans.push(Span::styled(
+            format!("{} ", t.spinner(app.now_ms)),
+            t.accent_line(),
+        ));
+        spans.push(Span::styled(
+            format!(
+                "trabajando {d} {} {d} Esc detiene",
+                usage::duration(secs),
+                d = t.dot()
+            ),
+            t.dim(),
+        ));
+    }
+    if let Some(msg) = &app.flash {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled(clean(msg), t.accent_line()));
+    }
+    let more = if c.scroll > 0 && c.scroll_max.get() > 0 {
+        format!("{} hay más abajo", t.down())
+    } else {
+        String::new()
+    };
+    let used: usize = spans.iter().map(|s| text::width(&s.content)).sum();
+    let room = w.saturating_sub(text::width(&more) + 1);
+    if used > room {
+        // The flash is the long part: it is cut, the state never.
+        let cut = text::fit(
+            &spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
+            room,
+            t.ellipsis(),
+        );
+        return Line::from(vec![
+            Span::styled(cut, t.dim()),
+            Span::styled(more, t.dim()),
+        ]);
+    }
+    spans.push(Span::raw(
+        " ".repeat(w.saturating_sub(used + text::width(&more))),
+    ));
+    spans.push(Span::styled(more, t.dim()));
+    Line::from(spans)
+}
+
+/// The right of the chat's footer: tokens in and out, the cost when there is one, and how full
+/// the context is; then shorter forms, for a narrow footer (the context always stays).
+pub(super) fn meter(app: &App) -> Vec<Vec<Span<'static>>> {
+    let t = app.theme;
+    let s = app.chat.snapshot(app.now_ms, app.fallback());
+    let mut text = format!(
+        "{}{} {}{}",
+        t.up(),
+        usage::tokens(s.tokens_in),
+        t.down(),
+        usage::tokens(s.tokens_out)
+    );
+    if s.cost_micro > 0 {
+        text.push_str(&format!(" {} {}", t.dot(), usage::usd(s.cost_micro)));
+    }
+    text.push_str(&format!(" {} contexto ", t.dot()));
+    let pct = match s.ctx_percent() {
+        Some(p) => Span::styled(format!("{p} %"), t.level(p)),
+        None => Span::styled(t.rule().to_owned(), t.dim()),
+    };
+    vec![
+        vec![Span::styled(text, t.dim()), pct.clone()],
+        vec![Span::styled("contexto ", t.dim()), pct.clone()],
+        vec![Span::styled("ctx ", t.dim()), pct],
+    ]
+}
+
+/// The Pi harness's screen under the top bar: the drawer of sessions when it is open, and the
+/// chat in one centered column: the conversation, a status line, the composer and the footer.
+pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
+    let t = app.theme;
+    let c = &app.chat;
+    let (side, rest) = if app.screen == Screen::Sessions {
+        let dw = if area.width < super::sessions::WIDE {
+            area.width
+        } else {
+            super::sessions::DRAWER_W
+        };
+        let [side, rest] =
+            Layout::horizontal([Constraint::Length(dw), Constraint::Min(0)]).areas(area);
+        (side, rest)
+    } else {
+        (Rect::default(), area)
+    };
+    app.sessions.area.set(side);
+    app.sessions.chat_area.set(rest);
+    if side.width > 0 {
+        super::sessions::draw_drawer(f, side, app);
+    }
+    if rest.width < 16 {
+        return;
+    }
+    let cw = rest.width.saturating_sub(4).min(COLUMN_MAX);
+    let col = Rect::new(rest.x + (rest.width - cw) / 2, rest.y, cw, rest.height);
+
+    // The composer: its rows of text, and the one the cursor is on kept in sight.
+    let text_w = usize::from(cw.saturating_sub(6)).max(2);
+    c.input_w.set(u16::try_from(text_w).unwrap_or(u16::MAX));
+    let rows = wrap_ranges(&c.input, text_w);
+    let (cur_row, cur_col) = composer::locate(&c.input, c.cursor, text_w);
+    let shown = rows.len().clamp(1, INPUT_ROWS);
+    let top = cur_row.saturating_sub(INPUT_ROWS - 1);
     let dbg_h: u16 = if app.debug {
         (area.height / 3).clamp(4, 10)
     } else {
         0
     };
-    let [head, conv, dbg, input] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
+    let [conv, dbg, status, input, foot] = Layout::vertical([
+        Constraint::Min(1),
         Constraint::Length(dbg_h),
-        Constraint::Length(input_h + 1),
+        Constraint::Length(1),
+        Constraint::Length(u16::try_from(shown).unwrap_or(1) + 2),
+        Constraint::Length(1),
     ])
-    .areas(area);
+    .areas(col);
 
-    let state = if let Some(e) = &c.failed {
-        Span::styled(format!("{} {}", t.cross(), clean(e)), t.fail())
-    } else if c.opening {
-        Span::styled(
-            format!(
-                "{} {}arrancando Pi…",
-                t.spinner(app.now_ms),
-                if app.host {
-                    ""
-                } else {
-                    "copiando el proyecto y "
-                }
-            ),
-            t.accent(),
-        )
-    } else if c.is_draft() {
-        Span::styled(format!("{} sin empezar", t.dot()), t.dim())
-    } else if c.aborting && c.running {
-        Span::styled(format!("{} abortando…", t.bang()), t.warn())
-    } else if c.running {
-        Span::styled(format!("{} trabajando…", t.spinner(app.now_ms)), t.accent())
-    } else {
-        Span::styled(format!("{} listo", t.check()), t.ok())
+    // The conversation, from the top while it fits, then anchored to the newest line.
+    let text_area = Rect {
+        width: conv.width.saturating_sub(2),
+        ..conv
     };
-    let who = if c.session_id.is_empty() {
-        clean(&c.title)
-    } else {
-        super::home::short_id(&clean(&c.session_id))
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            state,
-            Span::styled(format!("   {who}"), t.dim()),
-            Span::styled(format!("   {}", clean(&c.workspace)), t.dim()),
-        ])),
-        head,
-    );
-
-    // The conversation, anchored to the bottom.
-    let rows = usize::from(conv.height);
     c.view_h.set(conv.height);
-    c.view_w.set(conv.width);
-    let all = conversation(app, t, usize::from(conv.width));
-    let end = all
-        .len()
-        .saturating_sub(c.scroll.min(all.len().saturating_sub(rows)));
-    let start = end.saturating_sub(rows);
-    let mut shown: Vec<Line> = all[start..end].to_vec();
-    if shown.is_empty() && !c.opening && c.failed.is_none() {
-        shown.push(Line::from(Span::styled(
-            "escribe abajo y pulsa Enter",
+    c.view_w.set(text_area.width);
+    let w = usize::from(text_area.width);
+    let mut all = conversation(app, t, w);
+    if let Some(e) = &c.failed {
+        all.push(Line::from(""));
+        all.extend(hanging(
+            e,
+            w,
+            Span::styled(format!("  {} ", t.cross()), t.fail()),
+            t.fail(),
+        ));
+        all.push(Line::from(Span::styled(
+            "    Ctrl-S abre las sesiones",
             t.dim(),
         )));
     }
-    f.render_widget(Paragraph::new(shown), conv);
+    let h = usize::from(conv.height);
+    let max = all.len().saturating_sub(h);
+    c.scroll_max.set(max);
+    if c.is_draft() && c.items.is_empty() {
+        let lines = welcome(app);
+        let y = conv.y + conv.height.saturating_sub(3) / 2;
+        f.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            Rect::new(conv.x, y, conv.width, conv.height.min(3)),
+        );
+    } else {
+        let start = max - c.scroll.min(max);
+        let end = (start + h).min(all.len());
+        f.render_widget(Paragraph::new(all[start..end].to_vec()), text_area);
+        if max > 0 {
+            let mut st = ScrollbarState::new(max + 1)
+                .position(start)
+                .viewport_content_length(h);
+            let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some(t.rule_v()))
+                .track_style(t.faint())
+                .thumb_symbol(if t.unicode { "┃" } else { "#" })
+                .thumb_style(t.dim());
+            f.render_stateful_widget(bar, conv, &mut st);
+        }
+    }
 
     if app.debug {
         let mut lines = vec![section(t, "eventos de Pi (crudos)", dbg.width)];
@@ -861,30 +1125,55 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
         let skip = c.raw.len().saturating_sub(room);
         lines.extend(c.raw.iter().skip(skip).map(|r| {
             Line::from(Span::styled(
-                super::debug_view::fit(&clean(r), usize::from(dbg.width), t),
+                text::fit(&clean(r), usize::from(dbg.width), t.ellipsis()),
                 t.dim(),
             ))
         }));
         f.render_widget(Paragraph::new(lines), dbg);
     }
 
-    let mut lines = vec![section(t, "mensaje", input.width)];
-    let skip = input_rows.len().saturating_sub(usize::from(input_h));
-    let n = input_rows.len();
-    for (i, row) in input_rows.into_iter().enumerate().skip(skip) {
-        let lead = if i == 0 {
-            Span::styled(format!("{} ", t.sel()), t.accent())
-        } else {
-            Span::raw("  ")
-        };
-        let mut spans = vec![lead, Span::raw(row)];
-        // The cursor shows where the keys go.
-        if i + 1 == n && app.screen == Screen::Chat {
-            spans.push(Span::styled(t.cursor(), t.accent()));
+    f.render_widget(
+        Paragraph::new(status_line(app, usize::from(status.width))),
+        status,
+    );
+
+    // The composer has the keys unless the drawer or a dialog does.
+    let focused = app.screen == Screen::Chat && app.confirm.is_none() && app.notice.is_none();
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_set(t.border())
+        .border_style(if focused { t.accent_line() } else { t.faint() });
+    let inner = block.inner(input);
+    f.render_widget(block, input);
+    let prompt = Span::styled(format!(" {} ", t.prompt()), t.accent_line());
+    let mut lines = Vec::new();
+    if c.input.is_empty() {
+        lines.push(Line::from(vec![
+            prompt,
+            Span::styled("Escribe un mensaje…", t.dim()),
+        ]));
+    } else {
+        for (i, (a, b)) in rows.iter().enumerate().skip(top).take(shown) {
+            let lead = if i == 0 {
+                prompt.clone()
+            } else {
+                Span::raw("   ")
+            };
+            lines.push(Line::from(vec![
+                lead,
+                Span::raw(sanitize::line(&c.input[*a..*b])),
+            ]));
         }
-        lines.push(Line::from(spans));
     }
-    f.render_widget(Paragraph::new(lines), input);
+    f.render_widget(Paragraph::new(lines), inner);
+    if focused {
+        let x = inner.x + 3 + u16::try_from(cur_col).unwrap_or(0);
+        let y = inner.y + u16::try_from(cur_row - top).unwrap_or(0);
+        f.set_cursor_position((x.min(inner.right().saturating_sub(1)), y));
+    }
+
+    let foot = Rect::new(foot.x + 2, foot.y, foot.width.saturating_sub(3), 1);
+    super::app::footer(f, foot, app, 4, meter(app));
 }
 
 #[cfg(test)]
@@ -1226,6 +1515,7 @@ mod tests {
             Theme {
                 color: false,
                 unicode: true,
+                rgb: false,
             },
         );
         app.use_pi();
@@ -1304,7 +1594,8 @@ mod tests {
         assert_eq!(cmds, vec![Cmd::ChatAbort]);
         let (app, cmds) = press(app, KeyCode::Esc, none);
         assert!(cmds.is_empty(), "a second Esc does not abort twice");
-        // The run ends: Esc gives the keys to the list and the session stays open; Ctrl-C quits.
+        // The run ends: Esc does nothing, Ctrl-S opens the sessions with the session still open;
+        // Ctrl-C quits.
         let (mut app, _) = super::super::app::update(
             app,
             super::super::app::Input::Bg(super::super::app::Bg::ChatSettled {
@@ -1313,9 +1604,12 @@ mod tests {
             }),
         );
         assert!(!app.chat.running);
-        let (left, cmds) = press(std::mem::replace(&mut app, open_chat()), KeyCode::Esc, none);
-        assert_eq!(left.screen, Screen::Sessions);
+        let (idle, cmds) = press(std::mem::replace(&mut app, open_chat()), KeyCode::Esc, none);
+        assert_eq!(idle.screen, Screen::Chat);
         assert!(cmds.is_empty(), "{cmds:?}");
+        let (left, cmds) = press(idle, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(left.screen, Screen::Sessions);
+        assert!(cmds.is_empty() && left.chat.session_id == "sid", "{cmds:?}");
         let (quit, _) = press(app, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(quit.quit);
     }
@@ -1407,6 +1701,7 @@ mod tests {
             Theme {
                 color: false,
                 unicode: true,
+                rgb: false,
             },
         );
         app.use_pi();
@@ -1479,6 +1774,7 @@ mod tests {
             Theme {
                 color: false,
                 unicode: true,
+                rgb: false,
             },
         );
         app.use_pi();
@@ -1500,6 +1796,7 @@ mod tests {
             Theme {
                 color: false,
                 unicode: true,
+                rgb: false,
             },
         );
         app.use_pi();
@@ -1529,6 +1826,7 @@ mod tests {
             Theme {
                 color: false,
                 unicode: true,
+                rgb: false,
             },
         );
         app.use_pi();
@@ -1548,6 +1846,18 @@ mod tests {
         ]);
         let _ = super::super::tests::screen_text(&app, w, 24);
         app
+    }
+
+    /// `pi_app` with the drawer open, drawn once.
+    fn drawer_app(host: bool, w: u16) -> App {
+        let (app, _) = press(pi_app(host, w), KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(app.screen, Screen::Sessions);
+        let _ = super::super::tests::screen_text(&app, w, 24);
+        // The key that opened it does not count for the quiet rule of a question.
+        App {
+            last_key_ms: None,
+            ..app
+        }
     }
 
     fn mouse(app: App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) -> (App, Vec<Cmd>) {
@@ -1578,10 +1888,11 @@ mod tests {
             .unwrap_or_else(|| panic!("{text:?} not on screen:\n{s}"))
     }
 
-    // `clio` opens on one screen: the sessions on the left, a new chat with the keys, ready to
-    // type; nothing is created until the first message, which goes out once the session opens.
+    // `clio` opens on the chat alone: no sessions in sight, the composer with the keys and the
+    // terminal's cursor in it; nothing is created until the first message, which goes out once
+    // the session opens.
     #[test]
-    fn clio_opens_on_a_new_chat_beside_the_sessions_ready_to_type() {
+    fn clio_opens_on_the_chat_alone_with_the_keys_in_the_composer() {
         use super::super::app::{Bg, ChatInfo, Input, update};
         let app = pi_app(false, 100);
         assert_eq!(app.screen, Screen::Chat);
@@ -1592,12 +1903,22 @@ mod tests {
                 .any(|c| matches!(c, Cmd::ChatOpen { .. })),
             "opening Clio creates no session"
         );
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        term.draw(|f| super::super::app::draw(f, &app)).unwrap();
         let s = super::super::tests::screen_text(&app, 100, 24);
         assert!(
-            s.contains("nueva sesión") && s.contains("sesión dos"),
+            !s.contains("sesión dos") && !s.contains("╭ sesiones"),
             "{s}"
         );
-        assert!(s.contains("escribe abajo y pulsa Enter"), "{s}");
+        assert!(
+            s.contains("¿En qué te ayudo?") && s.contains("Escribe un mensaje"),
+            "{s}"
+        );
+        assert!(s.contains("Ctrl-S sesiones"), "{s}");
+        // The cursor sits where the placeholder starts, inside the composer's box.
+        let (x, y) = find(&app, 100, "Escribe un mensaje");
+        let at = term.get_cursor_position().unwrap();
+        assert_eq!((at.x, at.y), (x, y));
         let sent = |app: App| {
             let (app, cmds) = press(typed(app, "hola"), KeyCode::Enter, KeyModifiers::NONE);
             let seq = match &cmds[..] {
@@ -1638,13 +1959,63 @@ mod tests {
             }),
         );
         assert_eq!(app.chat.input, "hola");
+        assert_eq!(app.chat.cursor, 4);
         assert!(app.chat.is_draft());
         assert!(matches!(&app.chat.items[..], [Item::Error(e)] if e == "sin llave"));
     }
 
+    // Ctrl-S (or F2) opens the drawer with the keys and closes it again, as Esc does; Tab no
+    // longer moves anything. A terminal narrower than `WIDE` gives the drawer its whole width.
     #[test]
-    fn a_click_on_a_row_opens_that_session_and_a_click_on_the_chat_gives_it_the_keys() {
+    fn ctrl_s_toggles_the_drawer_and_a_narrow_terminal_gives_it_the_whole_width() {
+        let shows =
+            |app: &App, w, text| super::super::tests::screen_text(app, w, 24).contains(text);
         let app = pi_app(false, 100);
+        let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Chat);
+        assert!(!shows(&app, 100, "sesión dos"));
+        for open in [
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+        ] {
+            for close in [
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            ] {
+                let (app, _) = press(pi_app(false, 100), open.code, open.modifiers);
+                assert_eq!(app.screen, Screen::Sessions);
+                assert!(shows(&app, 100, "sesión dos") && shows(&app, 100, "Escribe un mensaje"));
+                // Narrow: the drawer only, the chat behind it.
+                assert!(shows(&app, 70, "sesión dos") && !shows(&app, 70, "Escribe un mensaje"));
+                let (app, _) = press(app, close.code, close.modifiers);
+                assert_eq!(app.screen, Screen::Chat, "{close:?}");
+                assert!(!shows(&app, 100, "sesión dos"));
+            }
+        }
+    }
+
+    // Enter on a session in the drawer opens it, closes the drawer and gives the keys to the
+    // composer; Enter on the session already open only closes it.
+    #[test]
+    fn enter_in_the_drawer_opens_the_session_and_closes_the_drawer() {
+        let none = KeyModifiers::NONE;
+        let (app, _) = press(drawer_app(false, 100), KeyCode::Char('j'), none);
+        let (app, _) = press(app, KeyCode::Char('j'), none);
+        let (app, cmds) = press(app, KeyCode::Enter, none);
+        assert!(
+            matches!(&cmds[..], [Cmd::ChatOpen { target: super::super::app::OpenTarget::Existing { reference }, .. }] if reference == "/s/2_bbb.jsonl"),
+            "{cmds:?}"
+        );
+        assert_eq!(app.screen, Screen::Chat);
+        // "nueva sesión" while the chat is a draft: nothing to open, the drawer closes.
+        let (app, cmds) = press(drawer_app(false, 100), KeyCode::Enter, none);
+        assert!(cmds.is_empty() && app.screen == Screen::Chat && app.chat.is_draft());
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_it_a_click_outside_closes_the_drawer_and_the_wheel_scrolls() {
+        let app = drawer_app(false, 100);
         let (x, y) = find(&app, 100, "sesión dos");
         let (app, cmds) = mouse(app, left(), x, y);
         assert!(
@@ -1652,24 +2023,41 @@ mod tests {
             "{cmds:?}"
         );
         assert_eq!(app.screen, Screen::Chat);
-        // The wheel over the list moves it, and a click on the chat brings the keys back.
-        let mut app = App {
-            screen: Screen::Sessions,
-            ..app
-        };
+        // The wheel over the drawer moves its selection; a click outside it closes it.
+        let mut app = drawer_app(false, 100);
         app.sessions.sel = 0;
         let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollDown, x, y);
         assert_eq!(app.sessions.sel, 1);
         let (app, cmds) = mouse(app, left(), 70, 10);
         assert!(cmds.is_empty());
         assert_eq!(app.screen, Screen::Chat);
-        // While a turn runs, a click on another session does not leave it (as Esc never did).
+        // Closed, the left of the screen is the chat: a click there opens nothing.
+        let (app, cmds) = mouse(app, left(), x, y);
+        assert!(cmds.is_empty() && app.screen == Screen::Chat);
+        // The wheel over the chat scrolls the conversation, within what was drawn.
         let mut app = pi_app(false, 100);
+        app.chat = Chat::opening(1, 0);
+        app.chat.opened("sid".into(), String::new(), &[], None, 0);
+        for i in 0..60 {
+            app.chat.items.push(Item::Note(format!("nota {i}")));
+        }
+        let _ = super::super::tests::screen_text(&app, 100, 24);
+        let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollUp, 50, 8);
+        assert_eq!(app.chat.scroll, 3);
+        assert!(super::super::tests::screen_text(&app, 100, 24).contains("hay más abajo"));
+        let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollDown, 50, 8);
+        assert_eq!(app.chat.scroll, 0);
+        // While a turn runs, a click on another session does not leave it (as Esc never did).
+        let mut app = drawer_app(false, 100);
         app.chat = Chat::opening(1, 0);
         app.chat.opened("sid".into(), String::new(), &[], None, 0);
         app.chat.running = true;
         let (app, cmds) = mouse(app, left(), x, y);
         assert!(cmds.is_empty() && app.flash.is_some(), "{cmds:?}");
+        assert!(
+            super::super::tests::screen_text(&app, 100, 24).contains("el agente está trabajando"),
+            "the drawer says why"
+        );
     }
 
     // A set-aside action waits for keys only: no click, on the dialog or anywhere, answers it,
@@ -1677,11 +2065,11 @@ mod tests {
     #[test]
     fn a_click_never_answers_the_question_of_a_set_aside_action() {
         use super::super::app::{Action, Confirm};
-        let mut app = pi_app(true, 100);
+        let mut app = drawer_app(true, 100);
+        let (x, y) = find(&app, 100, "sesión dos");
         let mut c = Confirm::new(Action::Approve, "a1".into(), 0, "«borrar» rm -r x".into());
         c.armed = true;
         app.confirm = Some(c);
-        let (x, y) = find(&app, 100, "sesión dos");
         let (dx, dy) = find(&app, 100, "sí, ejecutarlo");
         for (x, y) in [(x, y), (dx, dy), (70, 10)] {
             for kind in [
@@ -1693,6 +2081,7 @@ mod tests {
                 app = next;
                 assert!(cmds.is_empty(), "{cmds:?}");
                 assert!(app.confirm.as_ref().is_some_and(|c| c.armed));
+                assert_eq!(app.screen, Screen::Sessions);
             }
         }
         // The keys still answer it.
@@ -1707,21 +2096,84 @@ mod tests {
         assert!(app.confirm.is_none());
     }
 
+    // The composer edits where its cursor is: arrows, Home/End and Ctrl-A/E, words, Backspace and
+    // Delete, Ctrl-W, Ctrl-U, Alt-Enter, ↑/↓ between its rows, a paste; ↑ on its first row scrolls
+    // the conversation instead.
     #[test]
-    fn on_a_narrow_terminal_the_list_hides_and_tab_shows_it() {
-        let shows =
-            |app: &App, w| super::super::tests::screen_text(app, w, 24).contains("sesión dos");
-        let app = pi_app(false, 70);
-        assert!(shows(&app, 100) && !shows(&app, 70));
-        let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(app.screen, Screen::Sessions);
-        assert!(shows(&app, 70));
-        let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(app.screen, Screen::Chat);
-        assert!(!shows(&app, 70));
-        // Hidden, it takes no clicks: the left of the screen is the chat.
-        let (app, cmds) = mouse(app, left(), 3, 6);
-        assert!(cmds.is_empty() && app.screen == Screen::Chat);
+    fn the_composer_edits_at_the_cursor_with_the_usual_keys() {
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        let mut app = typed(pi_app(false, 100), "hola mundo");
+        for (code, mods) in [
+            (KeyCode::Left, ctrl),
+            (KeyCode::Left, none),
+            (KeyCode::Right, none),
+        ] {
+            app = press(app, code, mods).0;
+        }
+        app = typed(app, "ñ");
+        assert_eq!(app.chat.input, "hola ñmundo");
+        app = press(app, KeyCode::Char('a'), ctrl).0;
+        app = press(app, KeyCode::Delete, none).0;
+        assert_eq!(app.chat.input, "ola ñmundo");
+        app = press(app, KeyCode::Char('e'), ctrl).0;
+        app = press(app, KeyCode::Backspace, none).0;
+        app = press(app, KeyCode::Char('w'), ctrl).0;
+        assert_eq!(app.chat.input, "ola ");
+        app = press(app, KeyCode::Enter, KeyModifiers::ALT).0;
+        app = typed(app, "segunda");
+        app = press(app, KeyCode::Home, none).0;
+        app = press(app, KeyCode::Up, none).0;
+        assert_eq!(app.chat.cursor, 0, "↑ goes to the row above");
+        app = press(app, KeyCode::Down, none).0;
+        app = press(app, KeyCode::End, none).0;
+        assert_eq!(app.chat.cursor, app.chat.input.len());
+        app = press(app, KeyCode::Char('u'), ctrl).0;
+        assert_eq!(app.chat.input, "ola \n");
+        super::paste(&mut app, "pegado\u{1b}[2J");
+        assert_eq!(
+            (app.chat.input.as_str(), app.chat.cursor),
+            ("ola \npegado", 11)
+        );
+        // A typed bidi mark never gets in.
+        app = press(app, KeyCode::Char('\u{202e}'), none).0;
+        assert_eq!(app.chat.input, "ola \npegado");
+        // On the first row ↑ scrolls the conversation, and Ctrl-End comes back to the newest.
+        let mut app = pi_app(false, 100);
+        app.chat = Chat::opening(1, 0);
+        app.chat.opened("sid".into(), String::new(), &[], None, 0);
+        for i in 0..60 {
+            app.chat.items.push(Item::Note(format!("nota {i}")));
+        }
+        let _ = super::super::tests::screen_text(&app, 100, 24);
+        let app = press(app, KeyCode::Up, none).0;
+        assert_eq!(app.chat.scroll, 1);
+        let app = press(app, KeyCode::Home, ctrl).0;
+        assert_eq!(app.chat.scroll, app.chat.scroll_max.get());
+        let app = press(app, KeyCode::End, ctrl).0;
+        assert_eq!(app.chat.scroll, 0);
+    }
+
+    // What the model says is drawn as markdown, and an escape sequence in it, in a link, a
+    // heading or a code block, never reaches the screen.
+    #[test]
+    fn the_answer_is_drawn_as_markdown_and_clean() {
+        let mut app = pi_app(false, 100);
+        app.chat = Chat::opening(1, 0);
+        app.chat.opened("sid".into(), String::new(), &[], None, 0);
+        app.chat.items.push(Item::Assistant {
+            text: "# Tí\u{1b}]0;x\u{7}tulo\n\n- **uno** y `dos`\n- [tres](http://e.com/\u{1b}[2J)\n\n```\nco\u{1b}[31mde &#27;[2J\n```".into(),
+            live: false,
+        });
+        let s = super::super::tests::screen_text(&app, 100, 24);
+        super::super::tests::assert_clean(&s);
+        for want in ["Título", "• uno y dos", "• tres (http://e.com/)", "│ code"] {
+            assert!(s.contains(want), "{want}\n{s}");
+        }
+        assert!(
+            !s.contains("**") && !s.contains('`') && !s.contains("# "),
+            "{s}"
+        );
     }
 
     #[test]
@@ -1744,8 +2196,9 @@ mod tests {
         let t = std::time::Instant::now();
         let rows = wrap(&word, 80);
         let took = t.elapsed();
-        assert_eq!(rows.len(), 4_000_000usize.div_ceil(80));
-        assert!(rows.iter().all(|r| r.chars().count() <= 80));
+        // Two columns each: 40 to a row of 80.
+        assert_eq!(rows.len(), 4_000_000usize.div_ceil(40));
+        assert!(rows.iter().all(|r| text::width(r) <= 80));
         assert_eq!(rows.concat(), word, "nothing lost, every cut on a boundary");
         assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
     }
@@ -1755,7 +2208,7 @@ mod tests {
         let t =
             "uno dos tres cuatro cinco seis siete ocho nueve diez supercalifragilisticoespialidoso";
         let rows = wrap(t, 12);
-        assert!(rows.iter().all(|r| r.chars().count() <= 12), "{rows:?}");
+        assert!(rows.iter().all(|r| text::width(r) <= 12), "{rows:?}");
         assert_eq!(rows.join("").replace(' ', ""), t.replace(' ', ""));
         assert_eq!(wrap("a\n\nb", 10), vec!["a", "", "b"]);
     }
