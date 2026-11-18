@@ -37,7 +37,7 @@ just audit   # cargo-deny and cargo-audit (S-41)
 
 By default Clio works in host mode ([ADR 0012](docs/decisions/0012-host-mode.md)): the agent acts on your machine, what deletes, spends, sends or touches Clio's own setup waits for your approval (`clio pending`, `clio approve <id>`, `clio reject <id>`, or the question at the end of a chat turn), and everything is logged (`clio actions`). With `--copy`, `"mode": "copy"` in `config.json`, or `clio run --workspace DIR`, it works on a copy of one project instead, and you decide what goes back with `clio diff <id>` and `clio apply <id>`. On Linux, in both modes, Pi runs inside its jail and does not start if the jail cannot be built ([ADR 0009](docs/decisions/0009-pi-runs-inside-a-jail.md)).
 
-Clio ships with who she is. Her primordial memories (the blocks `identidad`, `reglas`, `preferencias` and `vigilancia`) go to the model with authority in every session. In the first chat she introduces herself and asks who you are. You change them by talking to her in a clean session (one that read nothing from outside). `clio memory identity` shows them and `clio memory remember "text" --block B` writes one by hand.
+Clio ships with who she is. Her primordial memories (the blocks `identidad`, `reglas`, `preferencias` and `vigilancia`) go to the model with authority in every session. In the first chat she introduces herself and asks who you are. You change them by talking to her: in a session that read nothing from outside she writes the change at once; in one that did, the change waits for your approval. `clio memory identity` shows them and `clio memory remember "text" --block B` writes one by hand.
 
 Guide: [`docs/usage.md`](docs/usage.md).
 
