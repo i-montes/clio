@@ -95,6 +95,22 @@ pub struct Refresh {
     pub egress_denied: Vec<String>,
     /// How many values the host has struck out of what Pi read, in the whole session.
     pub masked: u32,
+    /// What the judge withheld from the model, in the whole session, oldest first.
+    pub withheld: Vec<Withheld>,
+    /// The judge is on and did not answer at least once in this session.
+    pub judge_silent: bool,
+}
+
+/// A tool result the judge withheld from the model (the guard's `clio-guard.withheld` entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Withheld {
+    /// The model's tool: `bash`, `read`, `ls`, `find`.
+    pub tool: String,
+    /// Its path or command, as the host cleaned it.
+    pub source: String,
+    pub bytes: u64,
+    /// Where the person can read it; `None` if it could not be kept.
+    pub file: Option<String>,
 }
 
 pub struct Opened {

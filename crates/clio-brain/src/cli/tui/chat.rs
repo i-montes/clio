@@ -160,6 +160,10 @@ pub struct Chat {
     egress_seen: usize,
     /// The total of struck-out values the chat has already said.
     masked_seen: u32,
+    /// How many of the judge's withheld results the chat has already said.
+    withheld_seen: usize,
+    /// The chat said the judge did not answer (once per session).
+    judge_said: bool,
     pub raw: VecDeque<String>,
     /// Bytes of text taken from Pi's events so far (see `MAX_HELD`).
     held: usize,
@@ -217,6 +221,8 @@ impl Chat {
             tainted: false,
             egress_seen: 0,
             masked_seen: 0,
+            withheld_seen: 0,
+            judge_said: false,
             raw: VecDeque::new(),
             held: 0,
             scroll: 0,
@@ -339,6 +345,30 @@ impl Chat {
         self.tainted |= r.tainted;
         self.egress(&r.egress_denied);
         self.masked(r.masked);
+        self.judged(&r.withheld, r.judge_silent);
+    }
+
+    /// The judge withheld outside text from the model, or did not answer: say it quietly, with
+    /// where to read what was withheld. `withheld` is the whole session's list so far.
+    pub fn judged(&mut self, withheld: &[super::super::chat::Withheld], silent: bool) {
+        for w in withheld.iter().skip(self.withheld_seen) {
+            let read = w.file.as_deref().map_or_else(
+                || " (it could not be kept)".to_owned(),
+                |f| format!(": read it with less {f}"),
+            );
+            self.items.push(Item::Note(format!(
+                "the judge flagged {} bytes from {} {} as instructions for an AI; the model did not see them{read}",
+                w.bytes, w.tool, w.source
+            )));
+        }
+        self.withheld_seen = self.withheld_seen.max(withheld.len());
+        if silent && !self.judge_said {
+            self.judge_said = true;
+            self.items.push(Item::Note(
+                "the judge did not answer: outside text reached the model unjudged, marked as data"
+                    .into(),
+            ));
+        }
     }
 
     /// The host struck values out of what Pi read (S-18): say how many are new, quietly. The
@@ -1563,6 +1593,42 @@ mod tests {
         let end = |r: &str, s: &str| col(r, s) + text::width(s);
         assert_eq!(end(r1, "0,4 s"), end(r2, "1,5 s"), "{screen}");
         assert_eq!(end(r2, "1,5 s"), end(r3, "1 min 20 s"), "{screen}");
+    }
+
+    #[test]
+    fn what_the_judge_withheld_is_a_quiet_note_with_where_to_read_it() {
+        use crate::cli::chat::Withheld;
+        let mut c = chat();
+        let notes = |c: &Chat| -> Vec<String> {
+            c.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Note(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let w = Withheld {
+            tool: "bash".into(),
+            source: "journalctl -u app".into(),
+            bytes: 812,
+            file: Some("/r/withheld/1.txt".into()),
+        };
+        c.judged(std::slice::from_ref(&w), false);
+        c.judged(std::slice::from_ref(&w), false);
+        let n = notes(&c);
+        assert_eq!(n.len(), 1, "{n:?}");
+        assert!(
+            n[0].contains("812 bytes from bash journalctl -u app"),
+            "{n:?}"
+        );
+        assert!(n[0].contains("less /r/withheld/1.txt"), "{n:?}");
+        // A silent judge is said once.
+        c.judged(std::slice::from_ref(&w), true);
+        c.judged(&[w], true);
+        let n = notes(&c);
+        assert_eq!(n.len(), 2, "{n:?}");
+        assert!(n[1].contains("the judge did not answer"), "{n:?}");
     }
 
     #[test]

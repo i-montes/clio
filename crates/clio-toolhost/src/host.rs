@@ -342,11 +342,15 @@ impl ToolHost {
             "exec" => h.cfg.rules.reads_foreign(command),
             _ => false,
         };
-        if tool == "exec" && (network || h.cfg.rules.reaches_out(command)) {
+        let web = tool == "exec" && (network || h.cfg.rules.reaches_out(command));
+        if web {
             self.mark(&req.session, "web");
         }
         if foreign {
             self.mark(&req.session, "foreign");
+        }
+        if web || foreign {
+            self.judge_later(req, &what);
         }
         Ok((ok, content, data, external))
     }

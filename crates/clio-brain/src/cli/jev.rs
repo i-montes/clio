@@ -250,9 +250,13 @@ fn ask_host(socket: &Path, req: &Value) -> Option<Value> {
 /// few times (the host answers one request at a time and may be busy with a tool); `true` only if
 /// the host said it was done. A mark that could not be made means what is not the person's is not
 /// shown.
-pub fn taint_session(socket: &Path, session: &str) -> bool {
-    let req =
-        json!({"id": "taint", "tool": "taint", "args": {}, "session": session, "call_id": "taint"});
+pub fn taint_session(socket: &Path, session: &str, suspect: bool) -> bool {
+    let args = if suspect {
+        json!({"suspect": true})
+    } else {
+        json!({})
+    };
+    let req = json!({"id": "taint", "tool": "taint", "args": args, "session": session, "call_id": "taint"});
     for _ in 0..2 {
         if ask_host(socket, &req).is_some_and(|a| a["ok"] == true && a["tainted"] == true) {
             return true;
@@ -300,7 +304,7 @@ pub fn preprompt(
         Some(recall),
         scrub,
         Hooks {
-            taint: Arc::new(move || taint_session(&socket, &id)),
+            taint: Arc::new(move || taint_session(&socket, &id, false)),
             log: Arc::new(move |p| log_shown(&log_file, p)),
         },
         Settings {

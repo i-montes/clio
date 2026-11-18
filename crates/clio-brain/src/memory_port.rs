@@ -15,7 +15,7 @@ use clio_memory::{
 };
 use clio_toolhost::{
     BLOCK_TAINTED, BlockEdit, Found, Judging, MemoryItem, MemoryPort, Near, Origin, ProposalDraft,
-    ProposalKind, Proposed, Saved,
+    ProposalKind, Proposed, Saved, TextVerdict,
 };
 
 use crate::memory_judge::{Guard, MemoryJudge};
@@ -429,6 +429,15 @@ impl MemoryPort for LinkPort {
         };
         embed_now(&link);
         Ok(item(&link, &row, 0))
+    }
+
+    fn judge_text(&self, text: &str, source: &str) -> TextVerdict {
+        match self.judge.as_ref().map(|j| j.injection(text, source)) {
+            None => TextVerdict::NoJudge,
+            Some(Some(true)) => TextVerdict::Injection,
+            Some(Some(false)) => TextVerdict::Clean,
+            Some(None) => TextVerdict::NoAnswer,
+        }
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

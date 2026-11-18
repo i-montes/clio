@@ -45,6 +45,10 @@ const TAINT = "clio-guard.taint";
 const TOOLS_ENTRY = "clio-guard.tools";
 const BLOCK_ENTRY = "clio-guard.block";
 const MASKED = "clio-guard.masked";
+// The judge withheld a result from the model; the chat tells the person where to read it.
+const WITHHELD = "clio-guard.withheld";
+// The judge is on and did not answer: the chat says it once.
+const JUDGE = "clio-guard.judge";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
@@ -520,8 +524,11 @@ export default function clioGuard(pi: ExtensionAPI) {
 				...texts.map((b) => ({ text: (b as { text: string }).text, ...(source ? { wrap: source } : {}) })),
 				...strings.map((s) => ({ text: s.holder[s.key] as string })),
 			];
-			const res = await host("filter", { items }, `result:${event.toolCallId}`, undefined, 8_000);
+			// The host may ask the judge (at most 5 s) before it answers.
+			const res = await host("filter", { items }, `result:${event.toolCallId}`, undefined, 15_000);
 			const out = res.data.items as string[];
+			if (res.data.withheld) pi.appendEntry(WITHHELD, { ...res.data.withheld, at: Date.now() });
+			if (res.data.judge === "unanswered") pi.appendEntry(JUDGE, { unanswered: true, at: Date.now() });
 			let i = 0;
 			const content = event.content.map((b) => (b.type === "text" ? { ...b, text: out[i++] } : b));
 			for (const s of strings) s.holder[s.key] = out[i++];

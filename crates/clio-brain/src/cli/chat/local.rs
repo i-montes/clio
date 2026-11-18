@@ -293,7 +293,10 @@ impl SessionSource for LocalSource {
         // marked again in the new service: the mark does not go away by closing the chat.
         let taint_file = run_dir.join("toolhost/tainted.json");
         if taint_file.is_file() {
-            jev::taint_session(&toolhost.socket, &pi.session_id);
+            // A session the judge flagged stays `suspect`: it asks before reaching out.
+            let suspect =
+                std::fs::read_to_string(&taint_file).is_ok_and(|t| t.contains("\"suspect\""));
+            jev::taint_session(&toolhost.socket, &pi.session_id, suspect);
         }
         let s = ChatSession {
             pi,
@@ -464,7 +467,7 @@ impl Session for ChatSession {
         if !approved.is_empty() {
             // What an approved action printed is outside text, read by a service of its own:
             // the session is marked here, as its own toolhost would.
-            jev::taint_session(&self.toolhost.socket, &self.pi.session_id);
+            jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
         }
         let data = approved.join("\n\n");
         run_assessed_with(
@@ -524,7 +527,8 @@ impl Session for ChatSession {
             || entries["entries"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(is_taint));
-        let masked = entries["entries"].as_array().map_or(0, |a| masked_total(a));
+        let all = entries["entries"].as_array().map_or(&[][..], Vec::as_slice);
+        let masked = masked_total(all);
         let egress_denied = self
             .pi
             .jail
@@ -536,6 +540,8 @@ impl Session for ChatSession {
             tainted,
             egress_denied,
             masked,
+            withheld: withheld(all),
+            judge_silent: all.iter().any(|e| e["customType"] == "clio-guard.judge"),
         })
     }
 
@@ -628,6 +634,24 @@ fn masked_total(entries: &[Value]) -> u32 {
         .fold(0u32, |a, n| {
             a.saturating_add(u32::try_from(n).unwrap_or(u32::MAX))
         })
+}
+
+/// What the judge withheld, from the guard's `clio-guard.withheld` entries.
+fn withheld(entries: &[Value]) -> Vec<super::Withheld> {
+    entries
+        .iter()
+        .filter(|e| e["customType"] == "clio-guard.withheld")
+        .map(|e| {
+            let d = &e["data"];
+            let s = |k: &str| d[k].as_str().unwrap_or("").to_owned();
+            super::Withheld {
+                tool: s("tool"),
+                source: s("source"),
+                bytes: d["bytes"].as_u64().unwrap_or(0),
+                file: d["file"].as_str().map(str::to_owned),
+            }
+        })
+        .collect()
 }
 
 fn is_taint(e: &Value) -> bool {

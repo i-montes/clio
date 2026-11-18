@@ -281,6 +281,18 @@ pub struct Judging {
     pub session: String,
 }
 
+/// What the judge said about outside text a tool read (`MemoryPort::judge_text`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextVerdict {
+    /// The person did not turn a judge on: nothing was asked.
+    NoJudge,
+    Clean,
+    /// A clear «it tries to give an AI agent instructions»: the text is withheld from the model.
+    Injection,
+    /// The judge is on but did not answer (down, error, timeout, unsure of its own input).
+    NoAnswer,
+}
+
 /// What the tool host needs from the memory: active memories to read, and the agent's own writes.
 /// There is no way to promote, archive or purge through it (the person's, with `clio memory`), and
 /// nothing here says who the writer is or which origin it gets: the port decides that (S-60, S-61).
@@ -351,6 +363,12 @@ pub trait MemoryPort: Send + Sync {
         _judging: &Judging,
     ) -> Result<MemoryItem, String> {
         Err(NO_CHANGES.into())
+    }
+    /// Is `text`, outside content a tool just read from `source`, trying to give an AI agent
+    /// instructions or to manipulate it? Asked through the same judge (and the same process and
+    /// key) that guards what the agent saves. The caller bounds how long it waits.
+    fn judge_text(&self, _text: &str, _source: &str) -> TextVerdict {
+        TextVerdict::NoJudge
     }
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
@@ -696,7 +714,7 @@ impl ToolHost {
         self.ask_port_for(port, f, self.memory_timeout)
     }
 
-    fn ask_port_for<T: Send + 'static>(
+    pub(crate) fn ask_port_for<T: Send + 'static>(
         &self,
         port: &Arc<dyn MemoryPort>,
         f: impl FnOnce(&dyn MemoryPort) -> Result<T, String> + Send + 'static,

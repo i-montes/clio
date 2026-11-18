@@ -26,6 +26,7 @@
 pub mod ask;
 pub mod cli;
 pub mod host;
+mod judge;
 mod memory;
 mod ops;
 pub mod pending;
@@ -51,9 +52,10 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use host::HostCfg;
+pub use judge::SUSPECT_REASON;
 pub use memory::{
     BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Near, Origin,
-    ProposalDraft, ProposalKind, Proposed, Saved, memory_args,
+    ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict, memory_args,
 };
 pub use sanitize::sanitize;
 pub use server::Server;
@@ -192,6 +194,8 @@ struct Taint {
     sources: Vec<&'static str>,
     /// The person closed the session: only its summary may still be saved (`closing`).
     closing: bool,
+    /// The person was told once that the judge did not answer.
+    judge_silent: bool,
 }
 
 /// An approval for exactly the action the gateway just allowed.
@@ -221,6 +225,8 @@ pub struct ToolHost {
     /// Where the memory tools keep their budget and their log.
     run_dir: PathBuf,
     host: Option<host::Host>,
+    /// Calls that read outside text, waiting for the judge when the guard filters their result.
+    to_judge: Mutex<HashMap<String, judge::ToJudge>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -377,6 +383,7 @@ impl ToolHost {
             said_token: cfg.said_token,
             run_dir: cfg.run_dir,
             host,
+            to_judge: Mutex::new(HashMap::new()),
         })
     }
 
@@ -780,6 +787,11 @@ impl ToolHost {
                     "file"
                 },
             );
+            let what = ["command", "path"]
+                .iter()
+                .find_map(|k| req.args.get(*k).and_then(Value::as_str))
+                .unwrap_or("");
+            self.judge_later(&req, what);
         }
         Response {
             id: req.id,
@@ -858,8 +870,12 @@ impl ToolHost {
     /// as external data. `{"items": [{"text": "...", "wrap": "file" | "tool-result"}]}`.
     /// The brain marks a session: it put into the model's message something the person did not
     /// write (a memory of the agent or from outside). Like every mark, it only ever goes up.
+    /// With `{"suspect": true}` (a session the judge flagged, reopened) it is marked `suspect` too.
     fn taint(&self, req: &Request) -> Response {
         self.mark(&req.session, "memory");
+        if req.args.get("suspect").and_then(Value::as_bool) == Some(true) {
+            self.mark(&req.session, "suspect");
+        }
         Response {
             id: req.id.clone(),
             ok: true,
@@ -920,6 +936,8 @@ impl ToolHost {
         }
         let mut total = 0;
         let mut out = Vec::new();
+        // The texts that go to the model, as data: what the judge reads.
+        let mut wrapped = Vec::new();
         for it in items {
             let Some(text) = it.get("text").and_then(Value::as_str) else {
                 return bad("every item needs a `text`");
@@ -934,17 +952,29 @@ impl ToolHost {
                 Some("tool-result") => Some(Source::ToolResult),
                 Some(_) => return bad("unknown wrap source"),
             };
-            let clean = self.clean(text);
-            out.push(Value::String(match source {
-                Some(s) => wrap_untrusted(s, &clean),
-                None => clean,
-            }));
+            if source.is_some() {
+                wrapped.push(out.len());
+            }
+            out.push(Value::String(self.clean(text)));
+        }
+        let judged = self.judge_result(req, &mut out, &wrapped);
+        for &i in &wrapped {
+            let text = out[i].as_str().unwrap_or_default().to_owned();
+            let s = match items[i].get("wrap").and_then(Value::as_str) {
+                Some("file") => Source::File,
+                _ => Source::ToolResult,
+            };
+            out[i] = Value::String(wrap_untrusted(s, &text));
+        }
+        let mut data = json!({ "items": out });
+        if let (Some(d), Value::Object(j)) = (data.as_object_mut(), judged) {
+            d.extend(j);
         }
         Response {
             id: req.id.clone(),
             ok: true,
             content: String::new(),
-            data: json!({ "items": out }),
+            data,
             decision: DecisionOut {
                 outcome: "allow".into(),
                 rule: "filter".into(),
