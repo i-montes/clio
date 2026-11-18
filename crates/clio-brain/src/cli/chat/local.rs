@@ -23,7 +23,7 @@ use clio_core::SystemClock;
 use clio_brain::agent::AgentConfig;
 use clio_brain::connector;
 use clio_brain::control::{Budget, DayBudget};
-use clio_brain::memory_link::MemoryLink;
+use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::PiError;
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
@@ -199,6 +199,11 @@ impl SessionSource for LocalSource {
         };
         let pi = start(&launch).map_err(text)?;
         let history = pi.client.get_messages().map_err(text)?;
+        // Clio's identity ships with her: written once, on a memory that has none. A memory that
+        // cannot be opened for writing now is left as it is (the next session tries again).
+        if let Ok(link) = MemoryLink::open_write(&d.data, &EmbedModel::none()) {
+            let _ = clio_brain::primordial::seed(&link);
+        }
         // What goes in front of every message: the time, the memories, the tools (Jev optional).
         let entries = pi
             .client

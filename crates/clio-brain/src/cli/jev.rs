@@ -174,15 +174,16 @@ impl MemoryRecall {
 impl Recall for MemoryRecall {
     fn fixed(&self) -> Vec<Candidate> {
         self.with_link(|link| {
-            let engine = link.engine();
             let mut out = Vec::new();
-            for block in engine.blocks(link.scope()).ok()? {
+            // What she watches is read when needed (`memory_block`), not sent every session.
+            for block in ["identidad", "reglas", "preferencias"] {
                 // Each entry as it is now (a correction followed, as the context does).
-                for row in engine.block_current(block.id).ok()? {
+                for row in link.block_rows(block).ok()? {
                     out.push(Candidate {
                         id: row.id.0,
                         text: row.content,
                         person: row.origin == Origin::User,
+                        block: Some(block),
                     });
                 }
             }
@@ -203,6 +204,7 @@ impl Recall for MemoryRecall {
                         id: r.id.0,
                         text: r.content,
                         person: r.origin == Origin::User,
+                        block: None,
                     })
                     .collect(),
             )
@@ -318,6 +320,27 @@ fn log_shown(path: &Path, p: &Prepared) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_she_watches_is_not_sent_every_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = MemoryLink::open_write(tmp.path(), &EmbedModel::none()).unwrap();
+        link.block_add("vigilancia", "el correo del banco").unwrap();
+        link.block_add("preferencias", "se llama Marta").unwrap();
+        link.block_add("identidad", "Eres Clio").unwrap();
+        drop(link);
+        let fixed = MemoryRecall::new(tmp.path(), &[], None).fixed();
+        let got: Vec<(&str, Option<&str>)> =
+            fixed.iter().map(|c| (c.text.as_str(), c.block)).collect();
+        assert_eq!(
+            got,
+            [
+                ("Eres Clio", Some("identidad")),
+                ("se llama Marta", Some("preferencias"))
+            ]
+        );
+        assert!(fixed.iter().all(|c| c.person));
+    }
 
     #[test]
     fn temis_gets_its_own_key_and_everything_else_jevs() {

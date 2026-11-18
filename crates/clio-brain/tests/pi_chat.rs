@@ -828,7 +828,8 @@ fn a_memory_of_the_agent_that_jev_judges_relevant_is_shown_as_data_and_taints_th
     assert_eq!(logs.len(), 1);
     let facts = std::fs::read_to_string(&logs[0]).unwrap();
     assert!(
-        facts.contains("\"ids\":[1]") && !facts.contains("PostgreSQL"),
+        // Clio's identity (m2 to m5, written when the session opened) and then the agent's m1.
+        facts.contains("\"ids\":[2,3,4,5,1]") && !facts.contains("PostgreSQL"),
         "{facts}"
     );
 }
@@ -1223,4 +1224,65 @@ fn a_session_moves_from_claude_to_opencode() {
     w.assert_key_nowhere();
     w.assert_nowhere(&tok);
     assert!(!std::fs::read_to_string(&claude.log).unwrap().contains(&tok));
+}
+
+const IDENTITY_HEADING: &str = "quién eres y cómo trabajas (lo fijó la persona; síguelo):\n";
+
+// Clio ships with who she is: a new machine's first message carries her identity, with authority,
+// and that taints nothing.
+#[test]
+fn a_new_machine_starts_with_clios_identity() {
+    if can_run("identity", false).is_none() {
+        return;
+    }
+    let w = World::new(r#"[{"text":"listo","usage":[10,2]}]"#);
+    // Nothing of the memory is shown that the vault did not clean first.
+    let _vault = start_vault(&w, "jev-test-key-7777");
+    let o = w
+        .clio(&["run", "--harness", "pi", "hola"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let said = what_the_model_was_told(&w);
+    let at = said
+        .find(IDENTITY_HEADING)
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(
+        said[at..].starts_with(&format!(
+            "{IDENTITY_HEADING}[m1] Eres Clio, la asistente personal"
+        )),
+        "{said}"
+    );
+    assert!(find_files(&w.home().join(".local/share/clio"), "tainted.json").is_empty());
+}
+
+/// What the model was told with the message that carried `text`.
+fn told_with(w: &World, text: &str) -> String {
+    let log = std::fs::read_to_string(&w._provider.log).unwrap();
+    log.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|e| e["last_user"].as_str().map(str::to_owned))
+        .find(|t| t.contains(text))
+        .unwrap_or_else(|| panic!("no message carried {text:?}: {log}"))
+}
+
+// A session that is opened again starts again from who Clio is.
+#[test]
+fn a_reopened_session_is_told_who_clio_is_again() {
+    if can_run("identity_reopen", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"text":"primera respuesta","usage":[10,2]},{"text":"segunda respuesta","usage":[10,2]}]"#,
+    );
+    let _vault = start_vault(&w, "jev-test-key-7171");
+    first_turn(&w, &[], &decoy());
+    reopen(&w, &[], &decoy());
+    for asked in ["primera pregunta", "segunda pregunta"] {
+        let said = told_with(&w, asked);
+        assert!(
+            said.contains(&format!("{IDENTITY_HEADING}[m1] Eres Clio")),
+            "{said}"
+        );
+    }
 }
