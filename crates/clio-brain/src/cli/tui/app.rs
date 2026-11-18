@@ -198,7 +198,8 @@ pub enum Bg {
     ChatAnswered(Result<String, String>),
     /// The person's commands (`<config>/commands/*.md`) and the files left out.
     Commands(Vec<Custom>, Vec<String>),
-    Choices(Run, Result<Vec<Choice>, String>),
+    /// A command's choices and the picker's footer.
+    Choices(Run, Result<(Vec<Choice>, Option<String>), String>),
     /// The session's new title.
     Named(Result<String, String>),
     /// What a compaction did, and Pi's totals after it.
@@ -986,9 +987,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 return vec![];
             };
             match r {
-                Ok(items) => {
+                Ok((items, note)) => {
                     m.sel = items.iter().position(|c| c.current).unwrap_or(0);
                     m.pick = Some((run, Some(items)));
+                    m.note = note;
                 }
                 Err(e) => {
                     m.pick = None;

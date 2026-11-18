@@ -298,6 +298,12 @@ impl SessionSource for LocalSource {
                 std::fs::read_to_string(&taint_file).is_ok_and(|t| t.contains("\"suspect\""));
             jev::taint_session(&toolhost.socket, &pi.session_id, suspect);
         }
+        // What Pi offers this connector, kept for `/model` before a session's first message.
+        if let Some(c) = connector::by_provider(&cfg.model.provider)
+            && let Ok(v) = pi.client.request("get_available_models", json!({}))
+        {
+            usage::save_pi_models(d, c.provider, &usage::pi_models_of(&v, c.pi_provider));
+        }
         let s = ChatSession {
             pi,
             toolhost,

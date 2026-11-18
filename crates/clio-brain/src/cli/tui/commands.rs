@@ -340,6 +340,8 @@ pub struct Menu {
     pub sel: usize,
     /// A command's choices; `None` while they load.
     pub pick: Option<(Run, Option<Vec<Choice>>)>,
+    /// What the picker says under its choices (where they came from).
+    pub note: Option<String>,
     /// Where the last draw put the rows: the area, the first row shown, and what the rows said.
     pub rows_at: Cell<(Rect, usize, u64)>,
 }
@@ -364,6 +366,7 @@ pub fn sync(app: &mut App, before: &str) {
         && c.input != before
     {
         m.pick = None;
+        m.note = None;
         m.sel = 0;
     }
 }
@@ -777,6 +780,11 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
         .border_set(t.border())
         .border_style(t.accent_line())
         .title_bottom(Line::from(Span::styled(keys, t.dim())).right_aligned());
+    if let (Some(n), Some(_)) = (&m.note, &m.pick) {
+        let room = w.saturating_sub(text::width(keys) + 2);
+        let n = text::fit(&format!(" {} ", clean(n)), room, t.ellipsis());
+        block = block.title_bottom(Line::from(Span::styled(n, t.dim())).left_aligned());
+    }
     if !title.is_empty() {
         block = block.title(Span::styled(title, t.bold()));
     }

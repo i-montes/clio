@@ -167,6 +167,52 @@ pub fn catalog_models(dirs: &Dirs, provider: &str) -> Vec<String> {
     )
 }
 
+/// Pi's last list of models per connector (its provider id), kept in Clio's data folder: a
+/// chat that has not started has no Pi to ask.
+fn pi_models_file(dirs: &Dirs) -> std::path::PathBuf {
+    dirs.data.join("pi-models.json")
+}
+
+/// The models Pi offered the last time a session of `provider` started; `None` before the first.
+pub fn pi_models(dirs: &Dirs, provider: &str) -> Option<Vec<String>> {
+    let all: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(&std::fs::read_to_string(pi_models_file(dirs)).ok()?).ok()?;
+    all.get(provider).filter(|v| !v.is_empty()).cloned()
+}
+
+/// Keeps what Pi just offered for `provider` (private). Best effort: a list not kept only
+/// means the picker shows an older one, or the catalog.
+pub fn save_pi_models(dirs: &Dirs, provider: &str, models: &[String]) {
+    if models.is_empty() {
+        return;
+    }
+    let file = pi_models_file(dirs);
+    let mut all: std::collections::BTreeMap<String, Vec<String>> = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if all.get(provider).is_some_and(|v| v == models) {
+        return;
+    }
+    all.insert(provider.to_owned(), models.to_vec());
+    if let Ok(text) = serde_json::to_string_pretty(&all) {
+        let _ = super::mkdir_private(&dirs.data)
+            .and_then(|()| super::write_private(&file, text.as_bytes()));
+    }
+}
+
+/// The ids of `get_available_models` that belong to `pi_provider`: the ones this session can
+/// run (its key and its network exit are the only ones the jail has), in Pi's order.
+pub fn pi_models_of(answer: &serde_json::Value, pi_provider: &str) -> Vec<String> {
+    answer["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["provider"] == pi_provider)
+        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 pub fn window_in(catalog: &str, provider: &str, model: &str) -> (u64, bool) {
     Catalog::from_json(catalog)
         .ok()

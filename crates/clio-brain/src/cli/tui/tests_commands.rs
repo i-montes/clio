@@ -1,6 +1,7 @@
 //! The chat's slash commands: the menu, what each command asks the runtime to do, the person's
 //! own commands, and that nothing but the person's typing is ever read as one.
 
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
 use clio_brain::pi::PiError;
@@ -274,9 +275,19 @@ fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
             current: true,
         },
     ];
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Choices(Run::Model, Ok(items)))]);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Choices(
+            Run::Model,
+            Ok((items, Some(super::NO_PI_LIST.into()))),
+        ))],
+    );
     let s = screen_text(&a, 100, 30);
     assert!(s.contains("● kimi-k3") || s.contains("kimi-k3"), "{s}");
+    assert!(
+        s.contains(super::NO_PI_LIST),
+        "the footer says where the list came from: {s}"
+    );
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert_eq!(cmds, vec![Cmd::SetModel("kimi-k3".into())]);
     assert!(a.chat.menu.is_none() && a.chat.input.is_empty());
@@ -289,7 +300,10 @@ fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
         blocked: Some("sin llave: clio connect claude".into()),
         current: false,
     }];
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Choices(Run::Connector, Ok(items)))]);
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Choices(Run::Connector, Ok((items, None))))],
+    );
     assert!(screen_text(&a, 100, 30).contains("sin llave: clio connect claude"));
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty());
@@ -319,7 +333,10 @@ fn a_click_on_the_loading_row_never_picks_a_choice_that_came_later() {
     }];
     let (a, cmds) = feed(
         a,
-        vec![Input::Bg(Bg::Choices(Run::Model, Ok(items))), click()],
+        vec![
+            Input::Bg(Bg::Choices(Run::Model, Ok((items, None)))),
+            click(),
+        ],
     );
     assert!(cmds.is_empty(), "{cmds:?}");
     // Once drawn, the same click picks it.
@@ -723,6 +740,7 @@ impl Session for FakePi {
                 {"provider": "anthropic", "id": "claude-opus-5-5"},
             ]}),
             "get_available_thinking_levels" => json!({"levels": ["off", "low", "medium", "high"]}),
+            "get_state" => json!({"model": {"provider": "opencode-go", "id": "beam-free"}}),
             _ => json!({}),
         })
     }
@@ -753,10 +771,11 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
         sent: Mutex::new(vec![]),
     };
     // Pi's list, only the active connector's models, the configured one marked.
-    let models = super::choices(&d, Some(&pi), Run::Model).unwrap();
+    let (models, note) = super::choices(&d, Some(&pi), Run::Model).unwrap();
     let ids: Vec<&str> = models.iter().map(|c| c.value.as_str()).collect();
     assert_eq!(ids, vec!["beam-free", "kimi-k3"]);
     assert!(models[0].current && !models[1].current);
+    assert_eq!(note, None);
 
     assert!(super::set_model(&d, Some(&pi), "claude-opus-5-5").is_err());
     assert_eq!(
@@ -774,7 +793,7 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
         Some("kimi-k3")
     );
 
-    let levels = super::choices(&d, Some(&pi), Run::Effort).unwrap();
+    let (levels, _) = super::choices(&d, Some(&pi), Run::Effort).unwrap();
     let names: Vec<&str> = levels.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(names, vec!["off", "low", "medium", "high"]);
     assert!(levels[1].current);
@@ -803,9 +822,51 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
 }
 
 #[test]
+fn a_draft_lists_what_pi_offered_last_and_other_connectors_under_their_names() {
+    let (_t, d) = dirs_with_config();
+    let opencode = clio_brain::connector::by_name("opencode").unwrap();
+    let keyed = |c: &clio_brain::connector::Connector| c.name == "anthropic-api";
+    // Pi never asked: the catalog, and the footer says how to see every model.
+    let (v, note) = super::model_choices(&d, None, opencode, "beam-free", &keyed).unwrap();
+    assert_eq!(note.as_deref(), Some(super::NO_PI_LIST));
+    assert!(v.iter().any(|c| c.value == "beam-free" && c.current));
+    // A session of opencode started: Pi's list is kept (private) and shown.
+    let pi = FakePi {
+        sent: Mutex::new(vec![]),
+    };
+    super::choices(&d, Some(&pi), Run::Model).unwrap();
+    let kept = d.data.join("pi-models.json");
+    assert_eq!(
+        std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    crate::cli::usage::save_pi_models(&d, "anthropic", &["claude-opus-5-5".into()]);
+    let (v, note) = super::model_choices(&d, None, opencode, "beam-free", &keyed).unwrap();
+    assert_eq!(note, None);
+    let values: Vec<&str> = v.iter().map(|c| c.value.as_str()).collect();
+    assert_eq!(
+        values,
+        vec!["beam-free", "kimi-k3", "anthropic-api claude-opus-5-5"]
+    );
+    assert_eq!(v[2].label, "anthropic-api · claude-opus-5-5");
+    // Another connector's model must be on its list; a usable one is `/connector` + that model
+    // (here no key: refused the way `/connector` refuses it).
+    assert!(
+        super::set_model(&d, None, "anthropic-api claude-nada")
+            .unwrap_err()
+            .contains("no tiene el modelo")
+    );
+    assert!(
+        super::set_model(&d, None, "anthropic-api claude-opus-5-5")
+            .unwrap_err()
+            .contains("no tiene llave")
+    );
+}
+
+#[test]
 fn a_connector_needs_its_key_and_the_list_marks_the_active_one() {
     let (_t, d) = dirs_with_config();
-    let list = super::choices(&d, None, Run::Connector).unwrap();
+    let (list, _) = super::choices(&d, None, Run::Connector).unwrap();
     let names: Vec<&str> = list.iter().map(|c| c.value.as_str()).collect();
     assert_eq!(names, vec!["opencode", "claude", "anthropic-api"]);
     assert!(list[0].current && !list[1].current);

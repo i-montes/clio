@@ -507,13 +507,17 @@ fn header(dirs: &Dirs) -> Header {
     }
 }
 
-/// What `/model`, `/connector` and `/effort` pick from. With a session open, Pi says which
-/// models and levels it has; before the first message, the catalog and every level.
+/// The picker's footer when a list is the catalog's: Pi was never asked for it.
+const NO_PI_LIST: &str = "open a session once to see every model";
+
+/// What `/model`, `/connector` and `/effort` pick from, and a footer for the picker. With a
+/// session open, Pi says which models and levels it has; before the first message, the models
+/// Pi offered last time (the catalog's before any) and every level.
 fn choices(
     d: &Dirs,
     session: Option<&dyn Session>,
     run: commands::Run,
-) -> Result<Vec<commands::Choice>, String> {
+) -> Result<(Vec<commands::Choice>, Option<String>), String> {
     use clio_brain::connector::{self, CONNECTORS};
     use commands::{Choice, Run};
     let cfg = Config::load(d)?;
@@ -524,11 +528,16 @@ fn choices(
         blocked: None,
         current,
     };
-    Ok(match run {
-        Run::Model => models(d, session, active)?
-            .iter()
-            .map(|m| choice(m, m.clone(), *m == cfg.model.model))
-            .collect(),
+    let mut note = None;
+    let items = match run {
+        Run::Model => {
+            let usable = |c: &clio_brain::connector::Connector| {
+                has_key(d, c) && !super::home::lacks_bridge(d, c)
+            };
+            let (v, n) = model_choices(d, session, active, &cfg.model.model, &usable)?;
+            note = n;
+            v
+        }
         Run::Effort => levels(session)?
             .iter()
             .map(|l| choice(l, l.clone(), *l == cfg.model.thinking))
@@ -557,33 +566,96 @@ fn choices(
             })
             .collect(),
         _ => Vec::new(),
-    })
+    };
+    Ok((items, note))
 }
 
-/// The models of the active connector: Pi's own list when a session is open, else the catalog's
-/// (with the configured one, even when the catalog does not have it).
+/// `/model`'s choices: this session's connector first (the configured one before the first
+/// message), then every other connector that is `usable` (its key in the vault), under its name:
+/// choosing one of those is `/connector` and that model, for the next session. The footer says
+/// when a list is the catalog's.
+fn model_choices(
+    d: &Dirs,
+    session: Option<&dyn Session>,
+    active: &'static clio_brain::connector::Connector,
+    configured: &str,
+    usable: &dyn Fn(&clio_brain::connector::Connector) -> bool,
+) -> Result<(Vec<commands::Choice>, Option<String>), String> {
+    let choice = |value: String, label: String, current: bool| commands::Choice {
+        value,
+        label,
+        blocked: None,
+        current,
+    };
+    let (here, current) = match session {
+        Some(s) => session_model(s)?,
+        None => (active, configured.to_owned()),
+    };
+    let (list, mut catalog) = models(d, session, here)?;
+    let mut v: Vec<commands::Choice> = list
+        .iter()
+        .map(|m| choice(m.clone(), m.clone(), *m == current))
+        .collect();
+    for c in clio_brain::connector::CONNECTORS
+        .iter()
+        .filter(|c| c.provider != here.provider && usable(c))
+    {
+        let (list, from_catalog) = models(d, None, c)?;
+        catalog |= from_catalog;
+        v.extend(list.iter().map(|m| {
+            choice(
+                format!("{} {m}", c.name),
+                format!("{} · {m}", c.name),
+                false,
+            )
+        }));
+    }
+    Ok((v, catalog.then(|| NO_PI_LIST.to_owned())))
+}
+
+/// The connector and the model of the session open now, as Pi says them.
+fn session_model(
+    s: &dyn Session,
+) -> Result<(&'static clio_brain::connector::Connector, String), String> {
+    let st = s.command("get_state", serde_json::json!({}))?;
+    let provider = st["model"]["provider"].as_str().unwrap_or_default();
+    let c = clio_brain::connector::CONNECTORS
+        .iter()
+        .find(|c| c.pi_provider == provider)
+        .ok_or("la sesión no tiene un conector de Clio")?;
+    Ok((c, st["model"]["id"].as_str().unwrap_or_default().to_owned()))
+}
+
+/// The models of connector `c`, and whether the list is the catalog's: Pi's own list when a
+/// session of it is open (kept for later), else the one Pi gave the last time a session of it
+/// started, else the catalog's. The configured model is on it even when the list lacks it.
 fn models(
     d: &Dirs,
     session: Option<&dyn Session>,
     c: &clio_brain::connector::Connector,
-) -> Result<Vec<String>, String> {
-    let mut v: Vec<String> = match session {
-        Some(s) => s.command("get_available_models", serde_json::json!({}))?["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|m| m["provider"] == c.pi_provider)
-            .filter_map(|m| m["id"].as_str().map(str::to_owned))
-            .collect(),
-        None => usage::catalog_models(d, c.provider),
+) -> Result<(Vec<String>, bool), String> {
+    let (mut v, catalog) = match session {
+        Some(s) => {
+            let v = usage::pi_models_of(
+                &s.command("get_available_models", serde_json::json!({}))?,
+                c.pi_provider,
+            );
+            usage::save_pi_models(d, c.provider, &v);
+            (v, false)
+        }
+        None => usage::pi_models(d, c.provider).map_or_else(
+            || (usage::catalog_models(d, c.provider), true),
+            |v| (v, false),
+        ),
     };
     if session.is_none()
         && let Ok(cfg) = Config::load(d)
+        && cfg.model.provider == c.provider
         && !v.contains(&cfg.model.model)
     {
         v.insert(0, cfg.model.model);
     }
-    Ok(v)
+    Ok((v, catalog))
 }
 
 /// The thinking levels: those the session's model has, or all of Pi's before it starts.
@@ -610,9 +682,30 @@ fn levels(session: Option<&dyn Session>) -> Result<Vec<String>, String> {
 /// `/model <name>`: one of the connector's models, for the session open now (Pi switches it)
 /// and as the default from now on.
 fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<String, String> {
-    let cfg = Config::load(d)?;
-    let c = clio_brain::connector::by_provider(&cfg.model.provider).ok_or("sin conector")?;
-    let known = models(d, session, c)?;
+    // `<connector> <model>`: another connector's model is `/connector` and that model.
+    if let Some((cn, model)) = name.trim().split_once(' ')
+        && let Some(c) = clio_brain::connector::by_name(cn)
+    {
+        let (known, _) = models(d, None, c)?;
+        let model = model.trim();
+        if !known.iter().any(|m| m == model) {
+            return Err(format!(
+                "{} no tiene el modelo «{}»; tiene: {}",
+                c.name,
+                sanitize::line(model),
+                known.join(", ")
+            ));
+        }
+        return switch_connector(d, c.name, Some(model));
+    }
+    let c = match session {
+        Some(s) => session_model(s)?.0,
+        None => {
+            let cfg = Config::load(d)?;
+            clio_brain::connector::by_provider(&cfg.model.provider).ok_or("sin conector")?
+        }
+    };
+    let (known, _) = models(d, session, c)?;
     // Only a name on the list: before the first message the catalog's (and the one configured),
     // with a session open Pi's. Anything else would be saved and break the next session.
     if !known.iter().any(|m| m == name) {
@@ -636,6 +729,11 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
 /// `/connector <name>`: saved for the next session (the one open keeps its connector: its
 /// pending questions and its copy belong to it). Back to the model last chosen for it.
 fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
+    switch_connector(d, name, None)
+}
+
+/// `set_connector`, with `model` instead of the one last chosen for it.
+fn switch_connector(d: &Dirs, name: &str, model: Option<&str>) -> Result<String, String> {
     let c = clio_brain::connector::by_name(name.trim()).ok_or_else(|| {
         format!(
             "no existe el conector «{}»: opencode, claude o anthropic-api",
@@ -652,12 +750,13 @@ fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
         return Err("falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into());
     }
     let cfg = Config::load_with_provider(d, c.provider)?;
-    let model = cfg
-        .model
-        .last
-        .get(c.provider)
-        .cloned()
-        .unwrap_or_else(|| c.default_model.to_owned());
+    let model = model.map(str::to_owned).unwrap_or_else(|| {
+        cfg.model
+            .last
+            .get(c.provider)
+            .cloned()
+            .unwrap_or_else(|| c.default_model.to_owned())
+    });
     super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, &model))?;
     Ok(format!(
         "conector: {} · {model}. Vale desde la próxima sesión: /new la empieza",
