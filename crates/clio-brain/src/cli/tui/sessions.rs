@@ -1,14 +1,17 @@
-//! The session selector (the first screen with the Pi harness): "nueva sesión" and the sessions
+//! The sessions beside the chat (the screen of the Pi harness): "nueva sesión" and the sessions
 //! of every source, local ones from Pi's own session folder and the remote placeholder. No boxes:
-//! the selection is a marker and the accent color.
+//! the selection is a marker and the accent color. `Screen::Sessions` is this screen with the keys
+//! on the list, `Screen::Chat` with the keys on the chat.
 
-use crossterm::event::KeyEvent;
+use std::cell::Cell;
+
+use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::app::{App, Cmd, OpenTarget, Screen, clean, plural, section};
+use super::app::{App, Cmd, OpenTarget, Screen, clean, section};
 use super::chat::Chat;
 use super::keys::{Act, Ctx, lookup};
 use crate::cli::chat::{Row, RowKind};
@@ -19,7 +22,18 @@ pub struct Sessions {
     /// 0 is "nueva sesión"; `n > 0` is `rows[n - 1]`.
     pub sel: usize,
     pub loading: bool,
+    /// Where the last draw put the list (empty when hidden) and the chat, and the list's first
+    /// row: (y, row, rows shown).
+    pub area: Cell<Rect>,
+    pub chat_area: Cell<Rect>,
+    pub list_at: Cell<(u16, usize, usize)>,
 }
+
+/// Terminals at least this wide show the list beside the chat; narrower ones only while the list
+/// has the keys (Tab).
+pub const WIDE: u16 = 80;
+/// The list's width: "nueva sesión  en este servidor" fits.
+const SIDE_W: u16 = 32;
 
 impl Sessions {
     pub fn len(&self) -> usize {
@@ -37,16 +51,48 @@ impl Sessions {
     }
 }
 
+/// As leaving the chat always was: a turn that runs is aborted (Esc in the chat) first.
+fn running(app: &mut App) -> bool {
+    if app.chat.running {
+        app.flash = Some(
+            "el agente está trabajando: Esc en el chat aborta el turno; luego cambia de sesión"
+                .into(),
+        );
+    }
+    app.chat.running
+}
+
+/// A new session in the chat. Nothing is created yet: the run and Pi start with its first
+/// message (`chat::send`), so opening Clio leaves nothing on disk.
 fn open_new(app: &mut App) -> Vec<Cmd> {
-    app.chat_seq += 1;
-    app.chat = Chat::opening(app.chat_seq, app.now_ms);
+    if app.chat.is_draft() {
+        app.screen = Screen::Chat;
+        return vec![];
+    }
+    if running(app) {
+        return vec![];
+    }
+    app.chat = Chat::draft(app.now_ms);
     app.screen = Screen::Chat;
-    vec![Cmd::ChatOpen {
-        seq: app.chat_seq,
-        target: OpenTarget::New {
-            project: app.cwd.clone(),
-        },
-    }]
+    vec![Cmd::ChatClose]
+}
+
+/// The row of the session open in the chat: found by its id in Pi's file name
+/// (`<time>_<id>.jsonl`), or "nueva sesión" while the new one is a draft or not listed yet; none
+/// while one is still opening.
+pub fn open_pos(app: &App) -> Option<usize> {
+    let c = &app.chat;
+    if c.session_id.is_empty() {
+        return c.is_draft().then_some(0);
+    }
+    let tail = format!("_{}.jsonl", c.session_id);
+    Some(
+        app.sessions
+            .rows
+            .iter()
+            .position(|r| r.reference.ends_with(&tail))
+            .map_or(0, |i| i + 1),
+    )
 }
 
 fn open_selected(app: &mut App) -> Vec<Cmd> {
@@ -57,6 +103,14 @@ fn open_selected(app: &mut App) -> Vec<Cmd> {
         app.notice = Some(why.clone());
         return vec![];
     }
+    if open_pos(app) == Some(app.sessions.sel) {
+        app.screen = Screen::Chat;
+        return vec![];
+    }
+    if running(app) {
+        return vec![];
+    }
+    let row = &app.sessions.rows[app.sessions.sel - 1];
     let (reference, title) = (row.reference.clone(), row.title.clone());
     app.chat_seq += 1;
     app.chat = Chat::opening(app.chat_seq, app.now_ms);
@@ -74,7 +128,8 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         return vec![];
     };
     match act {
-        Act::Quit => app.quit = true,
+        Act::Quit if !running(app) => app.quit = true,
+        Act::Back => app.screen = Screen::Chat,
         Act::Down => app.sessions.sel = (app.sessions.sel + 1).min(last),
         Act::Up => app.sessions.sel = app.sessions.sel.saturating_sub(1),
         Act::Top => app.sessions.sel = 0,
@@ -92,6 +147,9 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         }
         Act::Memory => return super::memory::opened(app),
         Act::Delete => match app.sessions.selected() {
+            Some(_) if app.chat.opening || open_pos(app) == Some(app.sessions.sel) => {
+                app.flash = Some("esa sesión está abierta: abre otra antes de borrarla".into());
+            }
             Some(row) => {
                 return vec![Cmd::PlanSessionDelete {
                     reference: row.reference.clone(),
@@ -116,6 +174,55 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
     }
 }
 
+/// A click on a row opens it (as Enter), a click on the chat gives it the keys, and the wheel
+/// scrolls the pane under the pointer. `step` never lets a click reach a question or a message.
+pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
+    let at = Position::new(m.column, m.row);
+    let (side, main) = (
+        app.sessions.area.get().contains(at),
+        app.sessions.chat_area.get().contains(at),
+    );
+    let last = app.sessions.len() - 1;
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) if side => {
+            let (y, first, shown) = app.sessions.list_at.get();
+            if let Some(i) = m.row.checked_sub(y).map(usize::from).filter(|i| *i < shown) {
+                app.sessions.sel = (first + i).min(last);
+                return open_selected(app);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) if main => app.screen = Screen::Chat,
+        MouseEventKind::ScrollUp if side => app.sessions.sel = app.sessions.sel.saturating_sub(1),
+        MouseEventKind::ScrollDown if side => app.sessions.sel = (app.sessions.sel + 1).min(last),
+        MouseEventKind::ScrollUp if main => app.chat.scroll = app.chat.scroll.saturating_add(3),
+        MouseEventKind::ScrollDown if main => app.chat.scroll = app.chat.scroll.saturating_sub(3),
+        _ => {}
+    }
+    vec![]
+}
+
+/// The screen of the Pi harness: the list on the left and the chat. On a narrow terminal the list
+/// shows only while it has the keys.
+pub fn draw_both(f: &mut Frame, area: Rect, app: &App) {
+    let side_w = if f.area().width >= WIDE || app.screen == Screen::Sessions {
+        SIDE_W
+    } else {
+        0
+    };
+    let [side, _, main] = Layout::horizontal([
+        Constraint::Length(side_w),
+        Constraint::Length(side_w.min(2)),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    app.sessions.area.set(side);
+    app.sessions.chat_area.set(main);
+    if side_w > 0 {
+        draw(f, side, app);
+    }
+    super::chat::draw(f, main, app);
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let s = &app.sessions;
@@ -124,52 +231,61 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     lines.push(section(t, "sesiones de Pi", area.width));
     let rows = usize::from(area.height).saturating_sub(lines.len()).max(1);
     let skip = (s.sel + 1).saturating_sub(rows);
+    s.list_at.set((
+        area.y + u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        skip,
+        rows.min(s.len() - skip),
+    ));
     let now = crate::cli::now_ms();
+    let open = open_pos(app);
     for pos in (0..s.len()).skip(skip).take(rows) {
-        let selected = pos == s.sel;
-        let base = if selected { t.selected() } else { t.plain() };
+        // The selection shows only while the list has the keys; the open one always.
+        let selected = pos == s.sel && app.screen == Screen::Sessions;
+        let base = if selected {
+            t.selected()
+        } else if open == Some(pos) {
+            t.bold()
+        } else {
+            t.plain()
+        };
         let dim = if selected { base } else { t.dim() };
-        let mark = Span::styled(
-            if selected {
-                format!("{} ", t.sel())
-            } else {
-                "  ".into()
-            },
-            base,
-        );
+        let mark = if selected {
+            Span::styled(format!("{} ", t.sel()), base)
+        } else if open == Some(pos) {
+            Span::styled(format!("{} ", t.rule_v()), t.accent())
+        } else {
+            Span::raw("  ")
+        };
         if pos == 0 {
+            let place = if app.host {
+                "en este servidor".to_owned()
+            } else {
+                format!("en una copia de {}", clean(&folder_of_cwd(&app.cwd)))
+            };
             lines.push(Line::from(vec![
                 mark,
                 Span::styled("nueva sesión", base),
-                Span::styled(
-                    format!("   en una copia de {}", clean(&folder_of_cwd(&app.cwd))),
-                    dim,
-                ),
+                Span::styled(format!("  {place}"), dim),
             ]));
             continue;
         }
         let r = &s.rows[pos - 1];
-        let title_w = usize::from(area.width)
-            .saturating_sub(2 + 14 + 10 + 18)
-            .max(12);
-        let title: String = clean(&r.title).chars().take(title_w).collect();
         let (style, tail) = match (&r.kind, &r.unavailable) {
-            (RowKind::Remote, _) => (t.warn(), clean(&r.detail)),
+            // Its title says it; the why shows below when it is selected.
+            (RowKind::Remote, _) => (t.warn(), String::new()),
             (_, Some(_)) => (t.warn(), "no es de Clio".to_owned()),
-            _ => (dim, r.last_ms.map_or_else(String::new, |ms| ago(now, ms))),
+            _ => (base, r.last_ms.map_or_else(String::new, |ms| ago(now, ms))),
         };
-        let count = if r.kind == RowKind::Remote {
-            String::new()
-        } else {
-            plural(r.messages as usize, "msg", "msgs")
-        };
+        let title_w = usize::from(area.width)
+            .saturating_sub(4 + tail.chars().count())
+            .max(8);
+        let title: String = clean(&r.title).chars().take(title_w).collect();
         lines.push(Line::from(vec![
             mark,
             Span::styled(
                 format!("{title:<title_w$}  "),
                 if selected { base } else { style },
             ),
-            Span::styled(format!("{count:<9} "), dim),
             Span::styled(tail, dim),
         ]));
     }

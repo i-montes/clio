@@ -776,6 +776,13 @@ const SESSIONS: &[Bind] = &[
     b(&[ENTER], Act::Open, "Enter", "abrir", true),
     b(&[Char('n')], Act::New, "n", "nueva", true),
     b(&[Char('x')], Act::Delete, "x", "borrar", true),
+    b(
+        &[Code(KeyCode::Tab), ESC],
+        Act::Back,
+        "Tab",
+        "ir al chat",
+        true,
+    ),
     b(&[Char('r')], Act::Refresh, "r", "refrescar", false),
     b(&[Char('D')], Act::Doctor, "D", "doctor", false),
     b(&[Char('m')], Act::Memory, "m", "memoria", true),
@@ -830,7 +837,13 @@ const CHAT: &[Bind] = &{
         pu,
         pd,
         b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
-        b(&[ESC], Act::Back, "Esc", "sesiones", true),
+        b(
+            &[Code(KeyCode::Tab), ESC],
+            Act::Back,
+            "Tab",
+            "sesiones",
+            true,
+        ),
         b(&[Ctrl('c')], Act::Quit, "Ctrl-C", "salir", true),
     ]
 };
@@ -858,6 +871,7 @@ const CHAT_RUN: &[Bind] = &{
         pu,
         pd,
         b(&[Code(KeyCode::F(1))], Act::Help, "F1", "ayuda", true),
+        b(&[Code(KeyCode::Tab)], Act::Back, "Tab", "sesiones", false),
         b(
             &[ESC, Ctrl('c')],
             Act::Cancel,

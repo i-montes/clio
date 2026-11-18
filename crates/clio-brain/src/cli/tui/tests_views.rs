@@ -1100,6 +1100,7 @@ fn the_selector_and_the_chat_never_draw_hostile_text_and_fit_every_size() {
     let h = HOSTILE.join(" ");
     let mut app = with_runs();
     app.use_pi();
+    app.screen = Screen::Sessions;
     let mut rows = vec![Row {
         kind: RowKind::Session,
         title: h.clone(),

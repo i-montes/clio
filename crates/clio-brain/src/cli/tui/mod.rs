@@ -81,6 +81,7 @@ pub fn restore_terminal() {
     let _ = execute!(
         out,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
         LeaveAlternateScreen,
         cursor::Show
     );
@@ -131,7 +132,8 @@ pub fn osc52(text: &str) -> String {
 struct Guard;
 
 impl Guard {
-    fn enter() -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
+    /// `mouse`: the Pi harness takes clicks and the wheel (selecting text then needs Shift).
+    fn enter(mouse: bool) -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         let e = |x: std::io::Error| format!("terminal: {x}");
         enable_raw_mode().map_err(e)?;
         IN_TUI.store(true, Ordering::SeqCst);
@@ -143,6 +145,9 @@ impl Guard {
             crossterm::event::EnableBracketedPaste
         )
         .map_err(e)?;
+        if mouse {
+            execute!(out, crossterm::event::EnableMouseCapture).map_err(e)?;
+        }
         let term = Terminal::new(CrosstermBackend::new(out)).map_err(e)?;
         Ok((guard, term))
     }
@@ -164,7 +169,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
         signal_hook::flag::register_usize(sig, ended.clone(), sig as usize)
             .map_err(|e| format!("señales: {e}"))?;
     }
-    let (_guard, mut term) = Guard::enter()?;
+    let (_guard, mut term) = Guard::enter(harness == Harness::Pi)?;
     let (tx, rx) = channel::<Input>();
     let dirs = Arc::new(dirs);
     let ctx = Ctx {
@@ -184,6 +189,11 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     app.debug = debug;
     if harness == Harness::Pi {
         app.use_pi();
+        // As `LocalSource::open` decides it for a new session.
+        app.host = mode
+            .or_else(|| Config::load(&ctx.dirs).ok().map(|c| c.mode))
+            .unwrap_or_default()
+            == Mode::Host;
     }
     for c in app.start_cmds() {
         ctx.exec(c);
@@ -209,6 +219,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
             match event::read().map_err(|e| e.to_string())? {
                 Term::Key(k) if k.kind != KeyEventKind::Release => inputs.push(Input::Key(k)),
                 Term::Paste(s) => inputs.push(Input::Paste(s)),
+                Term::Mouse(m) => inputs.push(Input::Mouse(m)),
                 _ => {}
             }
         }

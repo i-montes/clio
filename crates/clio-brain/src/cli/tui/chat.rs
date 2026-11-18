@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use serde_json::Value;
 
-use super::app::{App, Cmd, Screen, clean, section};
+use super::app::{App, Cmd, OpenTarget, Screen, clean, section};
 use super::keys::{Act, lookup};
 use super::sanitize;
 use super::theme::Theme;
@@ -156,6 +156,8 @@ pub struct Chat {
     pub scroll: usize,
     pub view_h: Cell<u16>,
     pub view_w: Cell<u16>,
+    /// The first message of a new session, sent once it opens.
+    pub queued: Option<String>,
     streamed: bool,
 }
 
@@ -189,8 +191,22 @@ impl Chat {
             scroll: 0,
             view_h: Cell::new(0),
             view_w: Cell::new(0),
+            queued: None,
             streamed: false,
         }
+    }
+
+    /// A new session that does not exist yet: its first message creates it.
+    pub fn draft(now_ms: u64) -> Self {
+        Self {
+            opening: false,
+            title: "nueva sesión".into(),
+            ..Self::opening(0, now_ms)
+        }
+    }
+
+    pub fn is_draft(&self) -> bool {
+        !self.opening && self.failed.is_none() && self.session_id.is_empty()
     }
 
     /// The session is open: its history, and Pi's totals if it gave them.
@@ -521,11 +537,8 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let max = usize::MAX / 2;
     match act {
         Act::Quit => app.quit = true,
-        Act::Back => {
-            app.screen = Screen::Sessions;
-            app.sessions.loading = true;
-            return vec![Cmd::ChatClose, Cmd::LoadSessions, Cmd::LoadHome];
-        }
+        // The keys go to the list; the session stays open beside it.
+        Act::Back => app.screen = Screen::Sessions,
         Act::Cancel if !app.chat.aborting => {
             app.chat.aborting = true;
             app.chat
@@ -551,6 +564,20 @@ fn send(app: &mut App) -> Vec<Cmd> {
     let text = c.input.trim().to_owned();
     if text.is_empty() {
         return vec![];
+    }
+    if c.is_draft() {
+        c.input.clear();
+        c.items.push(Item::User(text.clone()));
+        c.queued = Some(text);
+        c.opening = true;
+        app.chat_seq += 1;
+        c.seq = app.chat_seq;
+        return vec![Cmd::ChatOpen {
+            seq: app.chat_seq,
+            target: OpenTarget::New {
+                project: app.cwd.clone(),
+            },
+        }];
     }
     if c.opening || c.failed.is_some() {
         app.flash = Some("la sesión todavía no está lista".into());
@@ -777,11 +804,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     } else if c.opening {
         Span::styled(
             format!(
-                "{} copiando el proyecto y arrancando Pi…",
-                t.spinner(app.now_ms)
+                "{} {}arrancando Pi…",
+                t.spinner(app.now_ms),
+                if app.host {
+                    ""
+                } else {
+                    "copiando el proyecto y "
+                }
             ),
             t.accent(),
         )
+    } else if c.is_draft() {
+        Span::styled(format!("{} sin empezar", t.dot()), t.dim())
     } else if c.aborting && c.running {
         Span::styled(format!("{} abortando…", t.bang()), t.warn())
     } else if c.running {
@@ -844,7 +878,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
             Span::raw("  ")
         };
         let mut spans = vec![lead, Span::raw(row)];
-        if i + 1 == n {
+        // The cursor shows where the keys go.
+        if i + 1 == n && app.screen == Screen::Chat {
             spans.push(Span::styled(t.cursor(), t.accent()));
         }
         lines.push(Line::from(spans));
@@ -1269,7 +1304,7 @@ mod tests {
         assert_eq!(cmds, vec![Cmd::ChatAbort]);
         let (app, cmds) = press(app, KeyCode::Esc, none);
         assert!(cmds.is_empty(), "a second Esc does not abort twice");
-        // The run ends: Esc leaves to the selector and closes the session; Ctrl-C quits.
+        // The run ends: Esc gives the keys to the list and the session stays open; Ctrl-C quits.
         let (mut app, _) = super::super::app::update(
             app,
             super::super::app::Input::Bg(super::super::app::Bg::ChatSettled {
@@ -1280,7 +1315,7 @@ mod tests {
         assert!(!app.chat.running);
         let (left, cmds) = press(std::mem::replace(&mut app, open_chat()), KeyCode::Esc, none);
         assert_eq!(left.screen, Screen::Sessions);
-        assert!(cmds.contains(&Cmd::ChatClose));
+        assert!(cmds.is_empty(), "{cmds:?}");
         let (quit, _) = press(app, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(quit.quit);
     }
@@ -1375,6 +1410,7 @@ mod tests {
             },
         );
         app.use_pi();
+        app.screen = Screen::Sessions;
         app.sessions.set(vec![Row {
             kind: RowKind::Session,
             title: "t".into(),
@@ -1449,11 +1485,16 @@ mod tests {
         app.sessions
             .set(vec![row(None), row(Some("no es de Clio"))]);
         let none = KeyModifiers::NONE;
+        app.screen = Screen::Sessions;
+        // "nueva sesión" opens nothing yet: its first message does.
         let (app, cmds) = press(app, KeyCode::Enter, none);
+        assert!(cmds.is_empty() && app.chat.is_draft(), "{cmds:?}");
+        assert_eq!(app.screen, Screen::Chat);
+        let (app, cmds) = press(typed(app, "hola"), KeyCode::Enter, none);
         assert!(
             matches!(&cmds[..], [Cmd::ChatOpen { target: super::super::app::OpenTarget::New { project }, .. }] if project == "/p/proj")
         );
-        assert_eq!(app.screen, Screen::Chat);
+        assert_eq!(app.chat.queued.as_deref(), Some("hola"));
         let mut app = App::new(
             "/p/proj",
             Theme {
@@ -1462,6 +1503,7 @@ mod tests {
             },
         );
         app.use_pi();
+        app.screen = Screen::Sessions;
         app.sessions
             .set(vec![row(None), row(Some("no es de Clio"))]);
         let (app, _) = press(app, KeyCode::Char('j'), none);
@@ -1477,6 +1519,220 @@ mod tests {
         app.sessions.sel = 2;
         let (app, cmds) = press(app, KeyCode::Enter, none);
         assert!(cmds.is_empty() && app.notice.as_deref() == Some("no es de Clio"));
+    }
+
+    /// The Pi screen with two listed sessions, drawn once at `w` columns (a click needs a frame).
+    fn pi_app(host: bool, w: u16) -> App {
+        use crate::cli::chat::{Row, RowKind};
+        let mut app = App::new(
+            "/p/proj",
+            Theme {
+                color: false,
+                unicode: true,
+            },
+        );
+        app.use_pi();
+        app.host = host;
+        let row = |title: &str, reference: &str| Row {
+            kind: RowKind::Session,
+            title: title.into(),
+            detail: String::new(),
+            messages: 2,
+            last_ms: None,
+            reference: reference.into(),
+            unavailable: None,
+        };
+        app.sessions.set(vec![
+            row("sesión uno", "/s/1_aaa.jsonl"),
+            row("sesión dos", "/s/2_bbb.jsonl"),
+        ]);
+        let _ = super::super::tests::screen_text(&app, w, 24);
+        app
+    }
+
+    fn mouse(app: App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) -> (App, Vec<Cmd>) {
+        super::super::app::update(
+            app,
+            super::super::app::Input::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+    }
+
+    fn left() -> crossterm::event::MouseEventKind {
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+    }
+
+    /// Where `text` is on the screen of `app` at `w` columns: (x, y).
+    fn find(app: &App, w: u16, text: &str) -> (u16, u16) {
+        let s = super::super::tests::screen_text(app, w, 24);
+        s.lines()
+            .enumerate()
+            .find_map(|(y, l)| {
+                l.find(text)
+                    .map(|b| (l[..b].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("{text:?} not on screen:\n{s}"))
+    }
+
+    // `clio` opens on one screen: the sessions on the left, a new chat with the keys, ready to
+    // type; nothing is created until the first message, which goes out once the session opens.
+    #[test]
+    fn clio_opens_on_a_new_chat_beside_the_sessions_ready_to_type() {
+        use super::super::app::{Bg, ChatInfo, Input, update};
+        let app = pi_app(false, 100);
+        assert_eq!(app.screen, Screen::Chat);
+        assert!(app.chat.is_draft());
+        assert!(
+            !app.start_cmds()
+                .iter()
+                .any(|c| matches!(c, Cmd::ChatOpen { .. })),
+            "opening Clio creates no session"
+        );
+        let s = super::super::tests::screen_text(&app, 100, 24);
+        assert!(
+            s.contains("nueva sesión") && s.contains("sesión dos"),
+            "{s}"
+        );
+        assert!(s.contains("escribe abajo y pulsa Enter"), "{s}");
+        let sent = |app: App| {
+            let (app, cmds) = press(typed(app, "hola"), KeyCode::Enter, KeyModifiers::NONE);
+            let seq = match &cmds[..] {
+                [Cmd::ChatOpen { seq, .. }] => *seq,
+                _ => panic!("{cmds:?}"),
+            };
+            (app, seq)
+        };
+        let (app, seq) = sent(pi_app(false, 100));
+        let info = ChatInfo {
+            id: "sid".into(),
+            workspace: String::new(),
+            history: vec![],
+            refresh: None,
+            presentation: true,
+        };
+        let (app, cmds) = update(
+            app,
+            Input::Bg(Bg::ChatOpened {
+                seq,
+                result: Ok(Box::new(info)),
+            }),
+        );
+        assert_eq!(
+            cmds,
+            vec![Cmd::ChatSend {
+                text: "hola".into()
+            }]
+        );
+        assert!(app.chat.running && app.chat.items == vec![Item::User("hola".into())]);
+        // It could not open: the message is back in the field, and Enter tries again.
+        let (app, seq) = sent(pi_app(false, 100));
+        let (app, _) = update(
+            app,
+            Input::Bg(Bg::ChatOpened {
+                seq,
+                result: Err("sin llave".into()),
+            }),
+        );
+        assert_eq!(app.chat.input, "hola");
+        assert!(app.chat.is_draft());
+        assert!(matches!(&app.chat.items[..], [Item::Error(e)] if e == "sin llave"));
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_that_session_and_a_click_on_the_chat_gives_it_the_keys() {
+        let app = pi_app(false, 100);
+        let (x, y) = find(&app, 100, "sesión dos");
+        let (app, cmds) = mouse(app, left(), x, y);
+        assert!(
+            matches!(&cmds[..], [Cmd::ChatOpen { target: super::super::app::OpenTarget::Existing { reference }, .. }] if reference == "/s/2_bbb.jsonl"),
+            "{cmds:?}"
+        );
+        assert_eq!(app.screen, Screen::Chat);
+        // The wheel over the list moves it, and a click on the chat brings the keys back.
+        let mut app = App {
+            screen: Screen::Sessions,
+            ..app
+        };
+        app.sessions.sel = 0;
+        let (app, _) = mouse(app, crossterm::event::MouseEventKind::ScrollDown, x, y);
+        assert_eq!(app.sessions.sel, 1);
+        let (app, cmds) = mouse(app, left(), 70, 10);
+        assert!(cmds.is_empty());
+        assert_eq!(app.screen, Screen::Chat);
+        // While a turn runs, a click on another session does not leave it (as Esc never did).
+        let mut app = pi_app(false, 100);
+        app.chat = Chat::opening(1, 0);
+        app.chat.opened("sid".into(), String::new(), &[], None, 0);
+        app.chat.running = true;
+        let (app, cmds) = mouse(app, left(), x, y);
+        assert!(cmds.is_empty() && app.flash.is_some(), "{cmds:?}");
+    }
+
+    // A set-aside action waits for keys only: no click, on the dialog or anywhere, answers it,
+    // not even when `s` was already typed.
+    #[test]
+    fn a_click_never_answers_the_question_of_a_set_aside_action() {
+        use super::super::app::{Action, Confirm};
+        let mut app = pi_app(true, 100);
+        let mut c = Confirm::new(Action::Approve, "a1".into(), 0, "«borrar» rm -r x".into());
+        c.armed = true;
+        app.confirm = Some(c);
+        let (x, y) = find(&app, 100, "sesión dos");
+        let (dx, dy) = find(&app, 100, "sí, ejecutarlo");
+        for (x, y) in [(x, y), (dx, dy), (70, 10)] {
+            for kind in [
+                left(),
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                crossterm::event::MouseEventKind::ScrollDown,
+            ] {
+                let (next, cmds) = mouse(app, kind, x, y);
+                app = next;
+                assert!(cmds.is_empty(), "{cmds:?}");
+                assert!(app.confirm.as_ref().is_some_and(|c| c.armed));
+            }
+        }
+        // The keys still answer it.
+        let (app, cmds) = press(app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            cmds,
+            vec![Cmd::ChatAnswer {
+                id: "a1".into(),
+                yes: true
+            }]
+        );
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn on_a_narrow_terminal_the_list_hides_and_tab_shows_it() {
+        let shows =
+            |app: &App, w| super::super::tests::screen_text(app, w, 24).contains("sesión dos");
+        let app = pi_app(false, 70);
+        assert!(shows(&app, 100) && !shows(&app, 70));
+        let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Sessions);
+        assert!(shows(&app, 70));
+        let (app, _) = press(app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.screen, Screen::Chat);
+        assert!(!shows(&app, 70));
+        // Hidden, it takes no clicks: the left of the screen is the chat.
+        let (app, cmds) = mouse(app, left(), 3, 6);
+        assert!(cmds.is_empty() && app.screen == Screen::Chat);
+    }
+
+    #[test]
+    fn a_new_session_says_where_it_works() {
+        let text = |host| super::super::tests::screen_text(&pi_app(host, 100), 100, 24);
+        let host = text(true);
+        assert!(
+            host.contains("en este servidor") && !host.contains("en una copia"),
+            "{host}"
+        );
+        assert!(text(false).contains("en una copia"));
     }
 
     // Second audit, finding 3: a model that prints one huge word with no spaces must not freeze

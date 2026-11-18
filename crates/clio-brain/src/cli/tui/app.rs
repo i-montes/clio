@@ -7,7 +7,7 @@
 //! hints and the status bar (use of the run and layer of context) on the very last line.
 
 use clio_brain::agent::Event;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -41,7 +41,8 @@ pub enum Screen {
     Context,
     Usage,
     Memory,
-    /// The Pi harness: the session selector and the chat.
+    /// The Pi harness: one screen, the sessions beside the chat; the keys go to the list
+    /// (`Sessions`) or to the chat (`Chat`).
     Sessions,
     Chat,
 }
@@ -213,6 +214,8 @@ pub struct Planned {
 #[allow(clippy::large_enum_variant)]
 pub enum Input {
     Key(KeyEvent),
+    /// Only with the Pi harness, which turns the mouse on.
+    Mouse(MouseEvent),
     Paste(String),
     Tick(u64),
     Bg(Bg),
@@ -280,6 +283,8 @@ pub struct App {
     pub memory: MemoryView,
     /// The Pi harness is on: the selector replaces the list of runs as the first screen.
     pub pi: bool,
+    /// A new session works on this machine (host mode), not on a copy.
+    pub host: bool,
     pub sessions: Sessions,
     pub chat: Chat,
     pub chat_seq: u64,
@@ -314,6 +319,7 @@ impl App {
             doctor: DoctorView::default(),
             memory: MemoryView::default(),
             pi: false,
+            host: false,
             sessions: Sessions::default(),
             chat: Chat::default(),
             chat_seq: 0,
@@ -336,10 +342,11 @@ impl App {
         v
     }
 
-    /// Turns the Pi harness on: the selector is the first screen.
+    /// Turns the Pi harness on: the first screen is the sessions beside a new chat, ready to type.
     pub fn use_pi(&mut self) {
         self.pi = true;
-        self.screen = Screen::Sessions;
+        self.screen = Screen::Chat;
+        self.chat = Chat::draft(self.now_ms);
         self.sessions.loading = true;
     }
 
@@ -476,6 +483,20 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             }
         }
         Input::Bg(bg) => background(app, bg),
+        // A click never answers a question or closes a message: only keys do.
+        Input::Mouse(m) => {
+            use crossterm::event::MouseEventKind as M;
+            // Moves and releases are not acts of the person (the terminal reports every move).
+            if !matches!(m.kind, M::Down(_) | M::ScrollUp | M::ScrollDown)
+                || app.confirm.is_some()
+                || app.notice.is_some()
+                || !matches!(app.screen, Screen::Sessions | Screen::Chat)
+            {
+                return vec![];
+            }
+            app.flash = None;
+            super::sessions::mouse(app, &m)
+        }
         Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
             app.flash = None;
@@ -706,9 +727,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatOpened { seq, result } => {
             // An answer for a chat the person already left: the runtime has closed it.
-            if seq != app.chat.seq || app.screen != Screen::Chat {
+            if seq != app.chat.seq {
                 return vec![];
             }
+            let queued = app.chat.queued.take();
             match result {
                 Ok(info) => {
                     app.chat.opened(
@@ -718,6 +740,12 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                         info.refresh,
                         app.now_ms,
                     );
+                    // A new session's first message: the presentation, if any, is asked in
+                    // front of it (`PrePrompt`), so Clio introduces herself and answers.
+                    if let Some(text) = queued {
+                        app.chat.running = true;
+                        return vec![Cmd::ChatSend { text }];
+                    }
                     // Clio introduces herself: a turn with no words of the person, so nothing
                     // of hers goes into the chat.
                     if info.presentation {
@@ -728,8 +756,18 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     }
                 }
                 Err(e) => {
+                    use super::chat::Item;
                     app.chat.opening = false;
-                    app.chat.failed = Some(e);
+                    match queued {
+                        // Still a new session: what the person wrote is back in the field, and
+                        // Enter tries again.
+                        Some(text) => {
+                            app.chat.items.retain(|i| *i != Item::User(text.clone()));
+                            app.chat.items.push(Item::Error(e));
+                            app.chat.input = text;
+                        }
+                        None => app.chat.failed = Some(e),
+                    }
                 }
             }
             vec![]
@@ -774,6 +812,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             if let Some(r) = refresh {
                 app.chat.refresh(&r);
+            }
+            // The list beside the chat: a new session shows up, a title changes.
+            if app.pi {
+                return vec![Cmd::LoadSessions];
             }
             vec![]
         }
@@ -898,7 +940,7 @@ fn draw_hints(f: &mut Frame, area: Rect, app: &App) {
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let line = match app.run_data() {
-        _ if app.screen == Screen::Chat => status::line(
+        _ if matches!(app.screen, Screen::Chat | Screen::Sessions) && app.pi => status::line(
             t,
             &app.chat.snapshot(app.now_ms, app.fallback()),
             usize::from(area.width),
@@ -956,8 +998,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Context => meter::draw_context(f, body, app),
         Screen::Usage => meter::draw_usage(f, body, app),
         Screen::Memory => super::memory::draw(f, body, app),
-        Screen::Sessions => super::sessions::draw(f, body, app),
-        Screen::Chat => super::chat::draw(f, body, app),
+        Screen::Sessions | Screen::Chat => super::sessions::draw_both(f, body, app),
         Screen::Help => meter::draw_help(f, body, app),
     }
     if let Some(msg) = &app.flash {

@@ -451,6 +451,15 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
         ]),
         Line::from(""),
     ];
+    if app.pi {
+        lines.insert(
+            1,
+            Line::from(Span::styled(
+                "con el ratón: clic abre una sesión o lleva al chat, la rueda desplaza; para seleccionar texto, Shift y arrastrar",
+                t.dim(),
+            )),
+        );
+    }
     for r in 0..rows {
         let mut spans = cell(&entries[r]);
         if cols == 2 && r + rows < entries.len() {

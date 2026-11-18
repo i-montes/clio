@@ -247,6 +247,7 @@ fn selector_new_session_chat_answer_debug_leave_and_quit_leave_nothing_behind() 
             "selector",
             "remote_row",
             "opened",
+            "nothing_before_the_first_message",
             "answered",
             "user_line_shown",
             "usage_bar",
@@ -1388,7 +1389,8 @@ fn a_reopened_session_is_told_who_clio_is_again() {
 
 const PRESENTATION: &str = "Es tu primera conversación con esta persona";
 
-// The first time, Clio speaks first: nobody typed, and the model was asked to introduce herself.
+// The first time, Clio introduces herself: the session starts with the person's first message, and
+// that message carries the request.
 #[test]
 fn clio_introduces_herself_the_first_time() {
     if can_run("present", true).is_none() {
@@ -1410,8 +1412,8 @@ fn clio_introduces_herself_the_first_time() {
     assert!(said.contains(IDENTITY_HEADING), "{said}");
     assert_eq!(
         clio_brain::pi::envelope::strip(&said),
-        "",
-        "no words of the person"
+        "hola",
+        "the person's words, after the request"
     );
 }
 
