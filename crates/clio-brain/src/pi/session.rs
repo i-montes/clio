@@ -231,6 +231,11 @@ impl Toolhost {
             host,
             secrets,
         } = opts;
+        // Units a `clio` killed before it could stop them do not run forever as the person.
+        // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
+        if host.is_some() && !std::env::var("CLIO_JAIL").is_ok_and(|v| v == "off") {
+            clio_node::host::stop_leftover_units();
+        }
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
             "th-{}-{}",

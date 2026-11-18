@@ -92,6 +92,58 @@ pub fn stop_units_of(pid: u32) {
     }
 }
 
+/// The pids of the `clio-host-<pid>-<n>-<nanos>` units in `listing` (`systemctl list-units
+/// --plain` lines) for which `alive` says no, each once. Only a name of exactly that shape counts.
+fn dead_unit_pids(listing: &str, alive: impl Fn(u32) -> bool) -> Vec<u32> {
+    let mut pids: Vec<u32> = listing
+        .lines()
+        .filter_map(|l| {
+            let name = l.split_whitespace().next()?;
+            let rest = name.strip_suffix(".service")?.strip_prefix("clio-host-")?;
+            let parts: Vec<&str> = rest.split('-').collect();
+            let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+            if parts.len() != 3 || !parts.iter().all(digits) {
+                return None;
+            }
+            parts[0].parse::<u32>().ok().filter(|p| *p > 0)
+        })
+        .filter(|p| !alive(*p))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// When a host-mode session starts: units a `clio` that died without stopping them (SIGKILL, a
+/// crash) left running, with no time limit of their own, are stopped (`stop_units_of`). In a
+/// thread of its own, best effort and silent: it never holds up or breaks the start.
+// shortcut: a pid the system gave to another process since is taken as alive, so that `clio`'s
+// units stay until the next start after it ends; checking it is a `clio` (its start time against
+// the unit's) would catch those too.
+pub fn stop_leftover_units() {
+    let Some(ctl) = find_in_trusted("systemctl") else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let listed = quiet(Command::new(ctl).args([
+            "list-units",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+            "--type=service",
+            "clio-host-*",
+        ]))
+        .stdout(Stdio::piped())
+        .output();
+        let Ok(o) = listed else { return };
+        let alive = |pid: u32| Path::new(&format!("/proc/{pid}")).exists();
+        for pid in dead_unit_pids(&String::from_utf8_lossy(&o.stdout), alive) {
+            stop_units_of(pid);
+        }
+    });
+}
+
 fn quiet(cmd: &mut Command) -> &mut Command {
     cmd.env_clear()
         .stdin(Stdio::null())
@@ -420,5 +472,29 @@ mod tests {
         );
         // The pattern covers the names `run` gives (`clio-host-<pid>-<n>-<nanos>`).
         assert!(super::unit_name().starts_with(&format!("clio-host-{}-", std::process::id())));
+    }
+
+    #[test]
+    fn leftover_units_are_found_only_for_dead_pids_and_only_by_their_exact_name() {
+        let own = format!("{}.service", super::unit_name());
+        let listing = format!(
+            "clio-host-42-0-123.service loaded active running /bin/bash -lc sleep\n\
+             clio-host-42-1-456.service loaded active running x\n\
+             clio-host-7-0-1.service loaded active running x\n\
+             {own} loaded active running x\n\
+             clio-host-9-0-1.service.bak loaded active running x\n\
+             clio-host-9-x-1.service loaded active running x\n\
+             clio-host-9-0.service loaded active running x\n\
+             clio-host--0-1.service loaded active running x\n\
+             clio-host-0-0-1.service loaded active running x\n\
+             evil;clio-host-9-0-1.service loaded active running x\n\
+             clio-host-9-0-1-2.service loaded active running x\n\
+             ssh.service loaded active running x\n"
+        );
+        let me = std::process::id();
+        // 42 is dead, 7 alive (a pid given to another process since counts as alive).
+        let alive = |p: u32| p == 7 || p == me;
+        assert_eq!(super::dead_unit_pids(&listing, alive), [42]);
+        assert!(super::dead_unit_pids("", alive).is_empty());
     }
 }
