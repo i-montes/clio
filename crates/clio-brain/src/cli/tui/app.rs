@@ -275,7 +275,7 @@ pub enum Action {
     /// Host mode: run an action the session set aside. `Confirm::id` is its id and
     /// `Confirm::workspace` its class and what it does. Any other key rejects it.
     Approve,
-    /// `/deshacer`: what the chat's session changed goes back. `Confirm::id` is the session.
+    /// `/undo`: what the chat's session changed goes back. `Confirm::id` is the session.
     UndoSession,
 }
 
@@ -343,7 +343,7 @@ pub struct App {
     pub chat: Chat,
     pub chat_seq: u64,
     pub confirm: Option<Confirm>,
-    /// A box of lines over the chat (`/uso`, `/pendientes`...), under any question.
+    /// A box of lines over the chat (`/usage`, `/pending`...), under any question.
     pub modal: Option<Modal>,
     /// Host mode: the questions waiting behind the one on screen.
     pub asks: std::collections::VecDeque<Confirm>,
@@ -1198,7 +1198,7 @@ fn draw_top(f: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .filter(|h| h.config_error.is_none())
         .map_or_else(String::new, |h| {
-            match super::commands::level_name(&h.thinking) {
+            match super::commands::level_of(&h.thinking) {
                 Some(level) if app.pi => format!("{} {} {level}", clean(&h.model), t.dot()),
                 _ => clean(&h.model),
             }

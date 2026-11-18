@@ -486,7 +486,7 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
         vec![
             "/ al empezar el mensaje abre la lista: Tab completa, Enter ejecuta, Esc la cierra.",
             "Los tuyos: un .md en ~/.config/clio/commands/; $ARGUMENTS es lo que escribes tras él.",
-            "/copiar usa OSC 52: solo copia en terminales que lo permiten.",
+            "/copy usa OSC 52: solo copia en terminales que lo permiten.",
         ],
     ));
     sections.push((

@@ -507,7 +507,7 @@ fn header(dirs: &Dirs) -> Header {
     }
 }
 
-/// What `/modelo`, `/conector` and `/esfuerzo` pick from. With a session open, Pi says which
+/// What `/model`, `/connector` and `/effort` pick from. With a session open, Pi says which
 /// models and levels it has; before the first message, the catalog and every level.
 fn choices(
     d: &Dirs,
@@ -531,10 +531,7 @@ fn choices(
             .collect(),
         Run::Effort => levels(session)?
             .iter()
-            .map(|l| {
-                let label = commands::level_name(l).map_or_else(|| l.clone(), str::to_owned);
-                choice(l, label, *l == cfg.model.thinking)
-            })
+            .map(|l| choice(l, l.clone(), *l == cfg.model.thinking))
             .collect(),
         Run::Connector => CONNECTORS
             .iter()
@@ -610,7 +607,7 @@ fn levels(session: Option<&dyn Session>) -> Result<Vec<String>, String> {
     }))
 }
 
-/// `/modelo <nombre>`: one of the connector's models, for the session open now (Pi switches it)
+/// `/model <name>`: one of the connector's models, for the session open now (Pi switches it)
 /// and as the default from now on.
 fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<String, String> {
     let cfg = Config::load(d)?;
@@ -636,7 +633,7 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
     Ok(format!("modelo: {name}"))
 }
 
-/// `/conector <nombre>`: saved for the next session (the one open keeps its connector: its
+/// `/connector <name>`: saved for the next session (the one open keeps its connector: its
 /// pending questions and its copy belong to it). Back to the model last chosen for it.
 fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
     let c = clio_brain::connector::by_name(name.trim()).ok_or_else(|| {
@@ -663,28 +660,23 @@ fn set_connector(d: &Dirs, name: &str) -> Result<String, String> {
         .unwrap_or_else(|| c.default_model.to_owned());
     super::connect::edit_model(d, |m| super::connect::set_model(m, c.provider, &model))?;
     Ok(format!(
-        "conector: {} · {model}. Vale desde la próxima sesión: /nueva la empieza",
+        "conector: {} · {model}. Vale desde la próxima sesión: /new la empieza",
         c.name
     ))
 }
 
-/// `/esfuerzo <nivel>`: for the session open now (if its model has that level) and as the
+/// `/effort <level>`: for the session open now (if its model has that level) and as the
 /// default from now on.
 fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<String, String> {
     if !clio_brain::pi::launch::THINKING.contains(&level) {
         return Err(format!("«{}» no es un nivel de Pi", sanitize::line(level)));
     }
-    let name = commands::level_name(level).unwrap_or(level);
     if let Some(s) = session {
         let have = levels(Some(s))?;
         if !have.iter().any(|l| l == level) {
-            let names: Vec<&str> = have
-                .iter()
-                .map(|l| commands::level_name(l).unwrap_or(l))
-                .collect();
             return Err(format!(
-                "este modelo no tiene el esfuerzo {name}; tiene: {}",
-                names.join(", ")
+                "este modelo no tiene el esfuerzo {level}; tiene: {}",
+                have.join(", ")
             ));
         }
         s.command("set_thinking_level", serde_json::json!({ "level": level }))?;
@@ -692,10 +684,10 @@ fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<St
     super::connect::edit_model(d, |m| {
         m.insert("thinking".into(), level.into());
     })?;
-    Ok(format!("esfuerzo: {name}"))
+    Ok(format!("esfuerzo: {level}"))
 }
 
-/// `/acciones`: one row per action, the local time, the tool and the outcome in columns, and
+/// `/actions`: one row per action, the local time, the tool and the outcome in columns, and
 /// what it did under the code color (see `Modal::hang`).
 fn actions_box(log: &[serde_json::Value], offset: i64) -> commands::Modal {
     let rows: Vec<[String; 4]> = log

@@ -1606,7 +1606,7 @@ fn connect_claude_trims_stores_and_switches() {
     let mut want = before.clone();
     want["model"]["provider"] = json!("claude");
     want["model"]["model"] = json!("claude-sonnet-5-5");
-    // Remembered as this connector's model, for `/conector` in the chat.
+    // Remembered as this connector's model, for `/connector` in the chat.
     want["model"]["last"] = json!({"claude": "claude-sonnet-5-5"});
     assert_eq!(after, want);
     assert_eq!(mode(&e.home().join(".config/clio/config.json")), 0o600);

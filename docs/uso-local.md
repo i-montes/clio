@@ -635,31 +635,31 @@ clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo
 
 ### Comandos del chat
 
-Un `/` como primera letra de un mensaje vacío abre, sobre el cuadro de escribir, la lista de comandos: cada uno con lo que hace, filtrada por su nombre en español, el inglés o la descripción mientras escribes. `↑` `↓` mueven, `Tab` completa el nombre, `Enter` (o un clic) lo ejecuta y `Esc` cierra la lista dejando el texto. Un comando que no existe no se envía: la línea de estado dice `no existe el comando /x` y el texto se queda. Con argumentos solo vale el nombre entero o su alias (`/m sonnet` no es `/modelo sonnet`); sin ellos, `Enter` ejecuta el resaltado y `Tab` completa un principio de nombre; si de verdad quieres mandar algo que empieza por `/`, empieza el mensaje con un espacio. Solo lo que tú escribes es un comando: nada que diga el modelo o una herramienta pasa por ahí. Los que cambian la sesión esperan a que el agente termine (lo dice la línea de estado); los de solo mirar sirven siempre. Ninguno contesta ni tapa una pregunta abierta.
+Un `/` como primera letra de un mensaje vacío abre, sobre el cuadro de escribir, la lista de comandos: cada uno con lo que hace, filtrada por su nombre, sus alias o la descripción mientras escribes (los nombres de los comandos y de sus valores van en inglés; lo demás, en español). `↑` `↓` mueven, `Tab` completa el nombre, `Enter` (o un clic) lo ejecuta y `Esc` cierra la lista dejando el texto. Un comando que no existe no se envía: la línea de estado dice `no existe el comando /x` y el texto se queda. Con argumentos solo vale el nombre entero o su alias (`/m sonnet` no es `/model sonnet`); sin ellos, `Enter` ejecuta el resaltado y `Tab` completa un principio de nombre; si de verdad quieres mandar algo que empieza por `/`, empieza el mensaje con un espacio. Solo lo que tú escribes es un comando: nada que diga el modelo o una herramienta pasa por ahí. Los que cambian la sesión esperan a que el agente termine (lo dice la línea de estado); los de solo mirar sirven siempre. Ninguno contesta ni tapa una pregunta abierta.
 
 | Comando | También | Qué hace |
 |---|---|---|
-| `/modelo [nombre]` | `/model` | cambia el modelo del conector (espera al agente) |
-| `/conector [nombre]` | `/connector` | cambia el conector (vale para la próxima sesión) (espera al agente) |
-| `/esfuerzo [bajo\|medio\|alto]` | `/effort` | cuánto piensa el modelo (espera al agente) |
-| `/nueva` | `/new` `/clear` | empieza una sesión nueva (espera al agente) |
-| `/sesiones` | `/resume` | abre el panel de sesiones |
-| `/nombre <título>` | `/name` | pone título a la sesión (espera al agente) |
-| `/compactar [instrucciones]` | `/compact` | resume la conversación para liberar contexto (espera al agente) |
-| `/contexto` | `/context` | cuánto contexto lleva la sesión |
-| `/uso` | `/usage` `/cost` | tokens, costo, pasos y tiempo de la sesión |
-| `/pendientes` | `/pending` | lo que espera tu visto bueno |
-| `/acciones` | `/actions` | lo que hizo esta sesión, acción por acción |
-| `/deshacer` | `/undo` | deshace los cambios de archivos de esta sesión (espera al agente) |
-| `/copiar` | `/copy` | copia la última respuesta (OSC 52) |
-| `/memoria` | `/memory` | abre la memoria |
+| `/model [name]` |  | cambia el modelo del conector (espera al agente) |
+| `/connector [name]` |  | cambia el conector (vale para la próxima sesión) (espera al agente) |
+| `/effort [level]` |  | cuánto piensa el modelo (espera al agente) |
+| `/new` | `/clear` | empieza una sesión nueva (espera al agente) |
+| `/sessions` | `/resume` | abre el panel de sesiones |
+| `/name <title>` |  | pone título a la sesión (espera al agente) |
+| `/compact [instructions]` |  | resume la conversación para liberar contexto (espera al agente) |
+| `/context` |  | cuánto contexto lleva la sesión |
+| `/usage` | `/cost` | tokens, costo, pasos y tiempo de la sesión |
+| `/pending` |  | lo que espera tu visto bueno |
+| `/actions` |  | lo que hizo esta sesión, acción por acción |
+| `/undo` |  | deshace los cambios de archivos de esta sesión (espera al agente) |
+| `/copy` |  | copia la última respuesta (OSC 52) |
+| `/memory` |  | abre la memoria |
 | `/doctor` |  | revisa la instalación |
-| `/ayuda` | `/help` | teclas y comandos |
-| `/salir` | `/quit` `/exit` | cierra Clio (espera al agente) |
+| `/help` |  | teclas y comandos |
+| `/quit` | `/exit` | cierra Clio (espera al agente) |
 
-- **`/modelo`, `/conector` y `/esfuerzo`** sin nombre abren sus opciones en la misma lista, con la actual marcada; con nombre la aplican. El nombre de un modelo tiene que estar en su lista: otro se rechaza diciendo cuáles hay, y no se guarda nada. El modelo y el esfuerzo cambian en la sesión abierta (Pi los cambia en el acto) y quedan como los de siempre en `config.json` (`model.model`, `model.thinking`). La lista de modelos es la que Pi tiene para el conector activo; antes del primer mensaje, la del catálogo. El esfuerzo acepta `bajo`, `medio`, `alto` y los nombres de Pi (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), y muestra solo los que tiene el modelo; de fábrica es `low`, porque con el de Pi («medium») un modelo que razona piensa miles de tokens en un paso simple. La cabecera lo dice: `claude-sonnet-5-5 · bajo`. El conector solo ofrece los que tienen llave (los otros salen atenuados: `sin llave: clio connect <nombre>`); se guarda con el último modelo que usaste en él, o con el suyo de fábrica, y **vale para la próxima sesión**: la abierta sigue con el suyo (sus preguntas de visto bueno y su copia son de él). `/nueva` la empieza.
-- **`/contexto` y `/uso`** abren un recuadro con los números de la sesión según Pi. **`/pendientes`** lista lo que esta sesión apartó y sigue esperando; `Enter` sobre uno hace la misma pregunta de visto bueno que al final de un turno, con las mismas reglas. **`/acciones`** muestra el registro de lo que esta sesión ejecutó en la máquina: la hora local (`HH:MM:SS`), la herramienta y el resultado en columnas, y el comando en el color del código (`clio actions` lo da completo, con la hora UTC). **`/deshacer`** pregunta antes y luego devuelve lo que la sesión cambió (en el modo anfitrión, con su propio diario; en una copia, lo aplicado), como `clio undo`.
-- **`/copiar`** pone la última respuesta en el portapapeles con la secuencia OSC 52 de la terminal (en base64, hasta 64 kB): solo funciona en las terminales que la permiten. Copia lo que se ve: las secuencias de escape no pasan, y los caracteres de control, invisibles o de dirección salen como `�`, igual que en pantalla.
+- **`/model`, `/connector` y `/effort`** sin nombre abren sus opciones en la misma lista, con la actual marcada; con nombre la aplican. El nombre de un modelo tiene que estar en su lista: otro se rechaza diciendo cuáles hay, y no se guarda nada. El modelo y el esfuerzo cambian en la sesión abierta (Pi los cambia en el acto) y quedan como los de siempre en `config.json` (`model.model`, `model.thinking`). La lista de modelos es la que Pi tiene para el conector activo; antes del primer mensaje, la del catálogo. El esfuerzo acepta los niveles de Pi (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), y muestra solo los que tiene el modelo; de fábrica es `low`, porque con el de Pi («medium») un modelo que razona piensa miles de tokens en un paso simple. La cabecera lo dice: `claude-sonnet-5-5 · low`. El conector solo ofrece los que tienen llave (los otros salen atenuados: `sin llave: clio connect <nombre>`); se guarda con el último modelo que usaste en él, o con el suyo de fábrica, y **vale para la próxima sesión**: la abierta sigue con el suyo (sus preguntas de visto bueno y su copia son de él). `/new` la empieza.
+- **`/context` y `/usage`** abren un recuadro con los números de la sesión según Pi. **`/pending`** lista lo que esta sesión apartó y sigue esperando; `Enter` sobre uno hace la misma pregunta de visto bueno que al final de un turno, con las mismas reglas. **`/actions`** muestra el registro de lo que esta sesión ejecutó en la máquina: la hora local (`HH:MM:SS`), la herramienta y el resultado en columnas, y el comando en el color del código (`clio actions` lo da completo, con la hora UTC). **`/undo`** pregunta antes y luego devuelve lo que la sesión cambió (en el modo anfitrión, con su propio diario; en una copia, lo aplicado), como `clio undo`.
+- **`/copy`** pone la última respuesta en el portapapeles con la secuencia OSC 52 de la terminal (en base64, hasta 64 kB): solo funciona en las terminales que la permiten. Copia lo que se ve: las secuencias de escape no pasan, y los caracteres de control, invisibles o de dirección salen como `�`, igual que en pantalla.
 - **Tus comandos.** Cada archivo `~/.config/clio/commands/<nombre>.md` es un comando `/<nombre>`: el nombre va en minúsculas, cifras y `-` (los demás se ignoran, con una nota), la primera línea, si empieza por `# `, es su descripción, y lo que escribas después del nombre reemplaza a `$ARGUMENTS` (si el texto no lo tiene, va en una línea aparte al final). Se envía como mensaje tuyo, tal cual, sin volver a leerse como comando. Se leen cada vez que se abre la lista; uno de Clio gana sobre un archivo del mismo nombre o alias, y un archivo de más de 32 kB se ignora, como un enlace, una FIFO o un dispositivo: solo se leen archivos normales. Esa carpeta es de Clio: el agente no puede leerla ni escribirla.
 
 ## El modo anfitrión: Clio en tu máquina real

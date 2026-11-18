@@ -98,12 +98,12 @@ pub struct ModelCfg {
     /// only be a loopback address (checked when the config is loaded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// How hard the model thinks in a Pi session (`/esfuerzo` changes it): one of Pi's levels.
+    /// How hard the model thinks in a Pi session (`/effort` changes it): one of Pi's levels.
     /// `low` by default: at Pi's own default ("medium") a reasoning model thinks for thousands
     /// of tokens on a simple step (measured 46 s against 7 s for the same answer).
     #[serde(default = "thinking_low")]
     pub thinking: String,
-    /// The model last chosen for each connector (by its provider id), so `/conector` comes back
+    /// The model last chosen for each connector (by its provider id), so `/connector` comes back
     /// to it instead of the connector's default.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub last: std::collections::BTreeMap<String, String>,

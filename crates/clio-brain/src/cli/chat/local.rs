@@ -492,7 +492,7 @@ impl Session for ChatSession {
     }
 
     fn answer(&self, id: &str, yes: bool) -> Result<String, String> {
-        // One already put to the person, or one of this session still waiting (`/pendientes`).
+        // One already put to the person, or one of this session still waiting (`/pending`).
         let h = self
             .host
             .as_ref()
@@ -655,7 +655,7 @@ mod tests {
         );
     }
 
-    // `/esfuerzo` saves `model.thinking`: a new session starts Pi with it (`low` when unset).
+    // `/effort` saves `model.thinking`: a new session starts Pi with it (`low` when unset).
     #[test]
     fn the_thinking_level_of_the_config_reaches_pis_arguments() {
         let t = tempfile::tempdir().unwrap();

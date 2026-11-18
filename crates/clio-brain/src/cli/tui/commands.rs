@@ -1,4 +1,4 @@
-//! The chat's slash commands: ONE table (name, English alias, what it does, whether it waits for
+//! The chat's slash commands: ONE table (name, aliases, what it does, whether it waits for
 //! the chat to be idle, what runs it), used by the menu, the help screen and the docs, as
 //! `keys.rs` is for keys. The person's own commands are the `*.md` files of `<config>/commands/`.
 //!
@@ -43,7 +43,7 @@ pub enum Run {
 pub struct Command {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
-    /// What it takes, as the menu shows it (`[nombre]`, `<título>`).
+    /// What it takes, as the menu shows it (`[name]`, `<title>`).
     pub args: &'static str,
     pub what: &'static str,
     /// It changes the session: refused while a turn, an open or an approval runs.
@@ -71,39 +71,39 @@ const fn c(
 
 pub const COMMANDS: &[Command] = &[
     c(
-        "modelo",
-        &["model"],
-        "[nombre]",
+        "model",
+        &[],
+        "[name]",
         "cambia el modelo del conector",
         true,
         Run::Model,
     ),
     c(
-        "conector",
-        &["connector"],
-        "[nombre]",
+        "connector",
+        &[],
+        "[name]",
         "cambia el conector (vale para la próxima sesión)",
         true,
         Run::Connector,
     ),
     c(
-        "esfuerzo",
-        &["effort"],
-        "[bajo|medio|alto]",
+        "effort",
+        &[],
+        "[level]",
         "cuánto piensa el modelo",
         true,
         Run::Effort,
     ),
     c(
-        "nueva",
-        &["new", "clear"],
+        "new",
+        &["clear"],
         "",
         "empieza una sesión nueva",
         true,
         Run::New,
     ),
     c(
-        "sesiones",
+        "sessions",
         &["resume"],
         "",
         "abre el panel de sesiones",
@@ -111,77 +111,70 @@ pub const COMMANDS: &[Command] = &[
         Run::Sessions,
     ),
     c(
-        "nombre",
-        &["name"],
-        "<título>",
+        "name",
+        &[],
+        "<title>",
         "pone título a la sesión",
         true,
         Run::Name,
     ),
     c(
-        "compactar",
-        &["compact"],
-        "[instrucciones]",
+        "compact",
+        &[],
+        "[instructions]",
         "resume la conversación para liberar contexto",
         true,
         Run::Compact,
     ),
     c(
-        "contexto",
-        &["context"],
+        "context",
+        &[],
         "",
         "cuánto contexto lleva la sesión",
         false,
         Run::Context,
     ),
     c(
-        "uso",
-        &["usage", "cost"],
+        "usage",
+        &["cost"],
         "",
         "tokens, costo, pasos y tiempo de la sesión",
         false,
         Run::Usage,
     ),
     c(
-        "pendientes",
-        &["pending"],
+        "pending",
+        &[],
         "",
         "lo que espera tu visto bueno",
         false,
         Run::Pending,
     ),
     c(
-        "acciones",
-        &["actions"],
+        "actions",
+        &[],
         "",
         "lo que hizo esta sesión, acción por acción",
         false,
         Run::Actions,
     ),
     c(
-        "deshacer",
-        &["undo"],
+        "undo",
+        &[],
         "",
         "deshace los cambios de archivos de esta sesión",
         true,
         Run::Undo,
     ),
     c(
-        "copiar",
-        &["copy"],
+        "copy",
+        &[],
         "",
         "copia la última respuesta (OSC 52)",
         false,
         Run::Copy,
     ),
-    c(
-        "memoria",
-        &["memory"],
-        "",
-        "abre la memoria",
-        false,
-        Run::Memory,
-    ),
+    c("memory", &[], "", "abre la memoria", false, Run::Memory),
     c(
         "doctor",
         &[],
@@ -190,51 +183,18 @@ pub const COMMANDS: &[Command] = &[
         false,
         Run::Doctor,
     ),
-    c(
-        "ayuda",
-        &["help"],
-        "",
-        "teclas y comandos",
-        false,
-        Run::Help,
-    ),
+    c("help", &[], "", "teclas y comandos", false, Run::Help),
     // Like Ctrl-C: not in the middle of a turn, an open or an approval.
-    c(
-        "salir",
-        &["quit", "exit"],
-        "",
-        "cierra Clio",
-        true,
-        Run::Quit,
-    ),
+    c("quit", &["exit"], "", "cierra Clio", true, Run::Quit),
 ];
 
-/// Pi's thinking levels and how the person calls them.
-const LEVELS: [(&str, &str); 7] = [
-    ("off", "apagado"),
-    ("minimal", "mínimo"),
-    ("low", "bajo"),
-    ("medium", "medio"),
-    ("high", "alto"),
-    ("xhigh", "muy alto"),
-    ("max", "máximo"),
-];
-
-/// The person's name for one of Pi's levels.
-pub fn level_name(level: &str) -> Option<&'static str> {
-    LEVELS
-        .iter()
-        .find(|(en, _)| *en == level)
-        .map(|(_, es)| *es)
-}
-
-/// Pi's level for what the person typed, in Spanish or as Pi calls it.
+/// Pi's level for what the person typed (`off` … `max`, as Pi calls them).
 pub fn level_of(typed: &str) -> Option<&'static str> {
     let t = typed.trim().to_lowercase();
-    LEVELS
+    clio_brain::pi::launch::THINKING
         .iter()
-        .find(|(en, es)| *en == t || *es == t || es.replace(' ', "") == t)
-        .map(|(en, _)| *en)
+        .find(|l| **l == t)
+        .copied()
 }
 
 /// One of the person's own commands: `<config>/commands/<name>.md`.
@@ -480,7 +440,7 @@ pub fn enter(app: &mut App) -> Vec<Cmd> {
     if let Some(t) = find(app, &word) {
         return start(app, t, &args);
     }
-    // With arguments only a whole name runs: `/m sonnet` must not become `/modelo sonnet`.
+    // With arguments only a whole name runs: `/m sonnet` must not become `/model sonnet`.
     let sel = app.chat.menu.as_ref().map_or(0, |m| m.sel);
     match app
         .chat
@@ -565,8 +525,9 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
         Run::Effort => {
             let Some(level) = level_of(args) else {
                 app.flash = Some(format!(
-                    "no conozco el esfuerzo «{}»: bajo, medio, alto…",
-                    clean(args)
+                    "no conozco el esfuerzo «{}»: {}",
+                    clean(args),
+                    clio_brain::pi::launch::THINKING.join(", ")
                 ));
                 return vec![];
             };
@@ -574,7 +535,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             return vec![Cmd::SetEffort(level.to_owned())];
         }
         Run::Name if args.is_empty() => {
-            app.flash = Some("escribe el título: /nombre <título>".into());
+            app.flash = Some("escribe el título: /name <título>".into());
             return vec![];
         }
         Run::Name | Run::Compact | Run::Actions | Run::Undo if draft => {
@@ -650,7 +611,7 @@ fn last_answer(app: &App) -> Option<String> {
     })
 }
 
-/// The session's numbers, from Pi's own totals: what `/contexto` and `/uso` show (the context
+/// The session's numbers, from Pi's own totals: what `/context` and `/usage` show (the context
 /// and usage screens belong to the builtin loop's runs).
 fn numbers(app: &App, context: bool) -> Modal {
     use crate::cli::usage::{self, tokens};
@@ -669,7 +630,7 @@ fn numbers(app: &App, context: bool) -> Modal {
             ),
             format!("compactado    {} vez/veces", c.meter.compactions),
             String::new(),
-            "/compactar resume la conversación y libera contexto.".to_owned(),
+            "/compact resume la conversación y libera contexto.".to_owned(),
         ]
     } else {
         vec![
@@ -840,14 +801,14 @@ pub fn click(app: &mut App, x: u16, y: u16) -> Option<Vec<Cmd>> {
     Some(enter(app))
 }
 
-/// A box of lines over the chat (`/contexto`, `/uso`, `/pendientes`, `/acciones`): ↑ ↓ and the
-/// page keys move in it, Esc or q closes it. In `/pendientes` each line is an action set aside,
+/// A box of lines over the chat (`/context`, `/usage`, `/pending`, `/actions`): ↑ ↓ and the
+/// page keys move in it, Esc or q closes it. In `/pending` each line is an action set aside,
 /// and Enter asks about the one selected, with the same question (and rules) as after a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modal {
     pub title: String,
     pub lines: Vec<String>,
-    /// `/pendientes`: for each line, the action's id and its «class» and what.
+    /// `/pending`: for each line, the action's id and its «class» and what.
     pub picks: Vec<(String, String)>,
     /// A last line, under the list.
     pub foot: Option<String>,
@@ -855,7 +816,7 @@ pub struct Modal {
     pub scroll: usize,
     /// How far the last draw let it scroll.
     pub max: Cell<usize>,
-    /// The first columns of each line are a lead (`/acciones`: time, tool, outcome); the rest is
+    /// The first columns of each line are a lead (`/actions`: time, tool, outcome); the rest is
     /// a command, in the code color, and its wrapped rows start under it. 0: plain lines.
     pub hang: usize,
 }

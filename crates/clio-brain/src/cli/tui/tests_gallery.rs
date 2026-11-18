@@ -240,15 +240,15 @@ fn command_states() -> Vec<(&'static str, App)> {
         blocked: blocked.map(str::to_owned),
         current,
     };
-    let mut a = menu("/esfuerzo");
+    let mut a = menu("/effort");
     let levels = ["off", "minimal", "low", "medium", "high"]
         .iter()
-        .map(|l| choice(l, commands::level_name(l).unwrap(), *l == "low", None))
+        .map(|l| choice(l, l, *l == "low", None))
         .collect();
     a.chat.menu.as_mut().unwrap().pick = Some((Run::Effort, Some(levels)));
     a.chat.menu.as_mut().unwrap().sel = 2;
     out.push(("elegir el esfuerzo", a));
-    let mut a = menu("/conector");
+    let mut a = menu("/connector");
     a.chat.menu.as_mut().unwrap().pick = Some((
         Run::Connector,
         Some(vec![
@@ -270,7 +270,7 @@ fn command_states() -> Vec<(&'static str, App)> {
     out.push(("elegir el conector", a));
     let mut a = conversation(true);
     commands::start(&mut a, Target::Builtin(Run::Usage), "");
-    out.push(("/uso", a));
+    out.push(("/usage", a));
     let mut a = conversation(true);
     let mut m = Modal::text(
         "Pendientes",
@@ -288,7 +288,7 @@ fn command_states() -> Vec<(&'static str, App)> {
     ];
     m.foot = Some("y 1 de otras sesiones: clio pending en una terminal".into());
     a.modal = Some(m);
-    out.push(("/pendientes", a));
+    out.push(("/pending", a));
     out
 }
 

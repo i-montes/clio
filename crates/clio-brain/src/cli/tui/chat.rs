@@ -177,7 +177,7 @@ pub struct Chat {
     pub menu: Option<super::commands::Menu>,
     /// The person's own commands, as read when the menu last opened.
     pub customs: Vec<super::commands::Custom>,
-    /// `/compactar` runs: nothing is sent until it ends.
+    /// `/compact` runs: nothing is sent until it ends.
     pub compacting: bool,
     streamed: bool,
     /// The text items as the last draw rendered them, by their place in the whole conversation
@@ -2238,7 +2238,7 @@ mod tests {
         }
     }
 
-    // Review: with a box open (`/uso`, `/acciones`…) the composer kept the accent border and the
+    // Review: with a box open (`/usage`, `/actions`…) the composer kept the accent border and the
     // terminal's cursor, as if typing went there.
     #[test]
     fn a_box_over_the_chat_takes_the_focus_from_the_composer() {

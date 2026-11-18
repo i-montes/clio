@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use super::app::{Action, App, Bg, Cmd, Confirm, Input, Screen};
 use super::chat::{Chat, Item};
 use super::commands::{
-    self, COMMANDS, CUSTOM_MAX, Choice, Custom, Run, expand, level_name, level_of, load_custom,
+    self, COMMANDS, CUSTOM_MAX, Choice, Custom, Run, expand, level_of, load_custom,
 };
 use super::tests::{app, ch, feed, key, screen_text};
 use crate::cli::chat::{Refresh, Session};
@@ -50,13 +50,13 @@ fn slash_opens_the_menu_that_filters_moves_completes_and_closes_leaving_the_text
     assert!(a.chat.menu.is_some());
     let s = screen_text(&a, 100, 30);
     assert!(
-        s.contains("/modelo [nombre]") && s.contains("cambia el modelo"),
+        s.contains("/model [name]") && s.contains("cambia el modelo"),
         "{s}"
     );
     // At most eight rows: the rest scrolls.
-    assert!(!s.contains("/salir"), "{s}");
+    assert!(!s.contains("/quit"), "{s}");
 
-    // The filter: the Spanish name, the English alias, the description.
+    // The filter: the name, an alias, the (Spanish) description.
     let names = |a: &App, f: &str| -> Vec<String> {
         commands::matches(a, f)
             .into_iter()
@@ -66,20 +66,25 @@ fn slash_opens_the_menu_that_filters_moves_completes_and_closes_leaving_the_text
             })
             .collect()
     };
-    assert_eq!(names(&a, "es")[0], "esfuerzo");
-    assert_eq!(names(&a, "undo"), vec!["deshacer"]);
-    assert!(names(&a, "tokens").contains(&"uso".to_owned()));
+    assert_eq!(names(&a, "ef")[0], "effort");
+    assert_eq!(names(&a, "undo"), vec!["undo"]);
+    assert_eq!(names(&a, "cos")[0], "usage");
+    assert!(names(&a, "tokens").contains(&"usage".to_owned()));
+    // No Spanish names any more.
+    for es in ["modelo", "esfuerzo", "salir", "deshacer"] {
+        assert!(commands::builtin(es).is_none(), "{es}");
+    }
 
-    let (a, _) = feed(a, typed("es"));
+    let (a, _) = feed(a, typed("ef"));
     let (a, _) = feed(
         a,
         vec![key(KeyCode::Down), key(KeyCode::Up), key(KeyCode::Tab)],
     );
-    assert_eq!(a.chat.input, "/esfuerzo ");
+    assert_eq!(a.chat.input, "/effort ");
     assert!(a.chat.menu.is_some());
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
     assert!(cmds.is_empty() && a.chat.menu.is_none());
-    assert_eq!(a.chat.input, "/esfuerzo ");
+    assert_eq!(a.chat.input, "/effort ");
     // Deleting the slash is not a command any more.
     let (a, _) = feed(open(), vec![ch('/'), key(KeyCode::Backspace)]);
     assert!(a.chat.menu.is_none());
@@ -96,7 +101,7 @@ fn the_selected_row_runs_on_enter_and_a_click_runs_its_row() {
 
     let (a, _) = feed(open(), typed("/me"));
     let s = screen_text(&a, 100, 30);
-    let y = s.lines().position(|l| l.contains("/memoria")).unwrap();
+    let y = s.lines().position(|l| l.contains("/memory")).unwrap();
     let (a, cmds) = super::app::update(
         a,
         Input::Mouse(MouseEvent {
@@ -133,45 +138,45 @@ fn an_unknown_command_is_never_sent_and_a_leading_space_makes_a_message() {
 #[test]
 fn each_command_asks_for_its_own_work() {
     let cases: Vec<(&str, Vec<Cmd>)> = vec![
-        ("/modelo", vec![Cmd::Choices(Run::Model)]),
-        ("/modelo kimi-k3", vec![Cmd::SetModel("kimi-k3".into())]),
+        ("/model", vec![Cmd::Choices(Run::Model)]),
         ("/model kimi-k3", vec![Cmd::SetModel("kimi-k3".into())]),
-        ("/conector", vec![Cmd::Choices(Run::Connector)]),
+        ("/connector", vec![Cmd::Choices(Run::Connector)]),
         (
             "/connector claude",
             vec![Cmd::SetConnector("claude".into())],
         ),
-        ("/esfuerzo", vec![Cmd::Choices(Run::Effort)]),
-        ("/esfuerzo alto", vec![Cmd::SetEffort("high".into())]),
+        ("/effort", vec![Cmd::Choices(Run::Effort)]),
+        ("/effort high", vec![Cmd::SetEffort("high".into())]),
         ("/effort max", vec![Cmd::SetEffort("max".into())]),
-        ("/esfuerzo muy alto", vec![Cmd::SetEffort("xhigh".into())]),
-        ("/nueva", vec![Cmd::ChatClose]),
+        ("/effort XHigh", vec![Cmd::SetEffort("xhigh".into())]),
+        ("/new", vec![Cmd::ChatClose]),
         ("/clear", vec![Cmd::ChatClose]),
-        ("/sesiones", vec![]),
+        ("/sessions", vec![]),
         (
-            "/nombre Arreglo del login",
+            "/name Arreglo del login",
             vec![Cmd::SessionName("Arreglo del login".into())],
         ),
         (
-            "/compactar solo el código",
+            "/compact solo el código",
             vec![Cmd::Compact("solo el código".into())],
         ),
         ("/compact", vec![Cmd::Compact(String::new())]),
-        ("/contexto", vec![]),
-        ("/uso", vec![]),
+        ("/resume", vec![]),
+        ("/context", vec![]),
+        ("/usage", vec![]),
         ("/cost", vec![]),
         (
-            "/pendientes",
+            "/pending",
             vec![Cmd::LoadPending {
                 session: "sid".into(),
             }],
         ),
-        ("/acciones", vec![Cmd::LoadActions { run: "sid".into() }]),
-        ("/deshacer", vec![]),
-        ("/memoria", vec![Cmd::LoadMemory]),
+        ("/actions", vec![Cmd::LoadActions { run: "sid".into() }]),
+        ("/undo", vec![]),
+        ("/memory", vec![Cmd::LoadMemory]),
         ("/doctor", vec![Cmd::RunDoctor]),
-        ("/ayuda", vec![]),
-        ("/salir", vec![]),
+        ("/help", vec![]),
+        ("/quit", vec![]),
         ("/exit", vec![]),
     ];
     for (typed, want) in cases {
@@ -179,20 +184,20 @@ fn each_command_asks_for_its_own_work() {
         assert_eq!(cmds, want, "{typed}");
         let word = typed.split(' ').next().unwrap();
         match word {
-            "/sesiones" => assert_eq!(a.screen, Screen::Sessions),
-            "/contexto" => assert_eq!(a.modal.as_ref().unwrap().title, "Contexto"),
-            "/uso" | "/cost" => assert_eq!(a.modal.as_ref().unwrap().title, "Uso"),
-            "/ayuda" => assert_eq!(a.screen, Screen::Help),
-            "/salir" | "/exit" => assert!(a.quit),
-            "/compactar" | "/compact" => assert!(a.chat.compacting),
-            "/nueva" | "/clear" => assert!(a.chat.is_draft()),
-            "/deshacer" => {
+            "/sessions" | "/resume" => assert_eq!(a.screen, Screen::Sessions),
+            "/context" => assert_eq!(a.modal.as_ref().unwrap().title, "Contexto"),
+            "/usage" | "/cost" => assert_eq!(a.modal.as_ref().unwrap().title, "Uso"),
+            "/help" => assert_eq!(a.screen, Screen::Help),
+            "/quit" | "/exit" => assert!(a.quit),
+            "/compact" => assert!(a.chat.compacting),
+            "/new" | "/clear" => assert!(a.chat.is_draft()),
+            "/undo" => {
                 assert_eq!(a.confirm.as_ref().unwrap().action, Action::UndoSession);
                 let (_, cmds) = feed(a, vec![ch('y')]);
                 assert_eq!(cmds, vec![Cmd::UndoSession { id: "sid".into() }]);
                 continue;
             }
-            "/modelo" | "/conector" | "/esfuerzo" if typed == word => {
+            "/model" | "/connector" | "/effort" if typed == word => {
                 assert!(a.chat.menu.as_ref().unwrap().pick.is_some(), "{typed}");
                 assert_eq!(a.chat.input, word, "{typed}: the text stays while choosing");
                 continue;
@@ -203,7 +208,7 @@ fn each_command_asks_for_its_own_work() {
         assert!(a.chat.input.is_empty(), "{typed}: {:?}", a.chat.input);
     }
     // Wrong arguments say why and leave the text.
-    for typed in ["/esfuerzo enorme", "/nombre"] {
+    for typed in ["/effort enorme", "/effort alto", "/name"] {
         let (a, cmds) = run(open(), typed);
         assert!(cmds.is_empty(), "{typed}");
         assert!(a.flash.is_some(), "{typed}");
@@ -238,7 +243,7 @@ fn a_word_with_arguments_runs_only_a_whole_command_name() {
     assert!(a.chat.input.starts_with("/mod") && a.chat.input.ends_with(' '));
 }
 
-// Review: before the first message `/modelo <name>` saved any plausible name. Only one of the
+// Review: before the first message `/model <name>` saved any plausible name. Only one of the
 // catalog's for the active connector (or the one configured) is taken; nothing else is saved.
 #[test]
 fn a_model_not_on_the_list_is_refused_with_the_list_and_not_saved() {
@@ -254,7 +259,7 @@ fn a_model_not_on_the_list_is_refused_with_the_list_and_not_saved() {
 
 #[test]
 fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
-    let (a, _) = run(open(), "/modelo");
+    let (a, _) = run(open(), "/model");
     let items = vec![
         Choice {
             value: "beam-free".into(),
@@ -277,7 +282,7 @@ fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
     assert!(a.chat.menu.is_none() && a.chat.input.is_empty());
 
     // A connector without a key is shown, dim, and cannot be chosen.
-    let (a, _) = run(open(), "/conector");
+    let (a, _) = run(open(), "/connector");
     let items = vec![Choice {
         value: "claude".into(),
         label: "claude · claude-sonnet-5-5".into(),
@@ -327,7 +332,7 @@ fn a_click_on_the_loading_row_never_picks_a_choice_that_came_later() {
     assert_eq!(cmds, vec![Cmd::SetModel("kimi-k3".into())]);
 }
 
-// Review: `/acciones` showed raw UTC stamps. It shows the local `HH:MM:SS`, the tool and the
+// Review: `/actions` showed raw UTC stamps. It shows the local `HH:MM:SS`, the tool and the
 // outcome in columns, and the command in the code color with its wrapped rows under it.
 #[test]
 fn the_actions_box_shows_local_time_columns_and_the_command_in_code_color() {
@@ -374,14 +379,14 @@ fn the_actions_box_shows_local_time_columns_and_the_command_in_code_color() {
 fn a_command_that_changes_the_session_waits_and_one_that_reads_does_not() {
     for busy in ["running", "opening", "answering", "compacting"] {
         for typed in [
-            "/modelo x",
-            "/conector claude",
-            "/esfuerzo alto",
-            "/compactar",
-            "/nueva",
-            "/nombre t",
-            "/deshacer",
-            "/salir",
+            "/model x",
+            "/connector claude",
+            "/effort alto",
+            "/compact",
+            "/new",
+            "/name t",
+            "/undo",
+            "/quit",
         ] {
             let mut a = open();
             match busy {
@@ -401,7 +406,7 @@ fn a_command_that_changes_the_session_waits_and_one_that_reads_does_not() {
     }
     let mut a = open();
     a.chat.running = true;
-    let (a, _) = run(a, "/uso");
+    let (a, _) = run(a, "/usage");
     assert_eq!(a.modal.as_ref().unwrap().title, "Uso");
     // While compacting, a message waits too, and is not lost.
     let mut a = open();
@@ -421,7 +426,7 @@ fn a_command_never_replaces_or_answers_an_open_question() {
         "«borrar» rm x".into(),
     ));
     let mut inputs = vec![Input::Tick(5_000)];
-    inputs.extend(typed("/salir"));
+    inputs.extend(typed("/quit"));
     inputs.push(key(KeyCode::Enter));
     let (a, cmds) = feed(a, inputs);
     assert!(cmds.is_empty(), "{cmds:?}");
@@ -438,7 +443,7 @@ fn what_the_model_writes_is_never_a_command() {
             Input::Bg(Bg::ChatEvent(Event::MessageUpdate {
                 usage: None,
                 kind: "text_delta".into(),
-                delta: Some("/salir\n/deshacer".into()),
+                delta: Some("/quit\n/undo".into()),
             })),
             Input::Bg(Bg::ChatSettled {
                 result: Err("x".into()),
@@ -452,7 +457,7 @@ fn what_the_model_writes_is_never_a_command() {
     let mut a = app();
     a.use_pi();
     a.chat = Chat::opening(1, 0);
-    let history = vec![json!({"role": "assistant", "content": "/salir"})];
+    let history = vec![json!({"role": "assistant", "content": "/quit"})];
     a.chat
         .opened("sid".into(), String::new(), &history, None, 0);
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
@@ -462,7 +467,7 @@ fn what_the_model_writes_is_never_a_command() {
 #[test]
 fn copiar_puts_the_last_answer_on_the_clipboard() {
     let mut a = open();
-    let (b, cmds) = run(open(), "/copiar");
+    let (b, cmds) = run(open(), "/copy");
     assert!(cmds.is_empty());
     assert_eq!(
         b.flash.as_deref(),
@@ -482,7 +487,7 @@ fn copiar_puts_the_last_answer_on_the_clipboard() {
     assert_eq!(a.flash.as_deref(), Some("copiado"));
 }
 
-// Review: `/copiar` gave the clipboard the model's raw bytes. It copies what was shown: no
+// Review: `/copy` gave the clipboard the model's raw bytes. It copies what was shown: no
 // escape (a bracketed-paste end), no C1 control, no bidi or zero-width character.
 #[test]
 fn copiar_copies_the_answer_as_shown_not_its_raw_bytes() {
@@ -565,11 +570,11 @@ fn the_persons_commands_are_read_named_capped_and_expanded() {
     )
     .unwrap();
     std::fs::write(d.join("resumen.md"), "Resume lo hecho hoy.").unwrap();
-    // `resume` is the English name of /sesiones: the built-in wins.
+    // `resume` is an alias of /sessions and `model` a built-in: the built-in wins.
     std::fs::write(d.join("resume.md"), "x").unwrap();
     std::fs::write(d.join("Mal.md"), "x").unwrap();
     std::fs::write(d.join("con espacio.md"), "x").unwrap();
-    std::fs::write(d.join("modelo.md"), "x").unwrap();
+    std::fs::write(d.join("model.md"), "x").unwrap();
     std::fs::write(d.join("grande.md"), "x".repeat(CUSTOM_MAX as usize + 1)).unwrap();
     std::fs::write(d.join("justo.md"), "y".repeat(CUSTOM_MAX as usize)).unwrap();
     std::fs::write(d.join("binario.md"), [0xff, 0xfe, 0x00]).unwrap();
@@ -586,7 +591,7 @@ fn the_persons_commands_are_read_named_capped_and_expanded() {
             "carpeta.md",
             "con espacio.md",
             "grande.md",
-            "modelo.md",
+            "model.md",
             "resume.md"
         ]
     );
@@ -612,7 +617,7 @@ fn a_persons_command_is_sent_as_their_message_and_never_read_again() {
         Custom {
             name: "raro".into(),
             what: "tu comando".into(),
-            body: "/salir".into(),
+            body: "/quit".into(),
         },
     ];
     let a = open();
@@ -640,23 +645,21 @@ fn a_persons_command_is_sent_as_their_message_and_never_read_again() {
     assert_eq!(
         cmds,
         vec![Cmd::ChatSend {
-            text: "/salir".into()
+            text: "/quit".into()
         }]
     );
     assert!(!a.quit);
 }
 
 #[test]
-fn the_levels_have_spanish_names_both_ways() {
-    assert_eq!(level_name("low"), Some("bajo"));
-    assert_eq!(level_name("xhigh"), Some("muy alto"));
-    assert_eq!(level_name("nope"), None);
-    assert_eq!(level_of("Medio"), Some("medium"));
-    assert_eq!(level_of("muyalto"), Some("xhigh"));
-    assert_eq!(level_of("max"), Some("max"));
-    assert_eq!(level_of("enorme"), None);
+fn the_levels_are_pis_own_names() {
+    assert_eq!(level_of("Medium"), Some("medium"));
+    assert_eq!(level_of(" max "), Some("max"));
+    for es in ["medio", "muy alto", "bajo", "enorme"] {
+        assert_eq!(level_of(es), None, "{es}");
+    }
     for l in clio_brain::pi::launch::THINKING {
-        assert_eq!(level_of(level_name(l).unwrap()), Some(l));
+        assert_eq!(level_of(l), Some(l));
     }
 }
 
@@ -684,7 +687,7 @@ fn the_top_bar_says_the_effort() {
         s.lines()
             .next()
             .unwrap()
-            .contains("claude-sonnet-5-5 · bajo"),
+            .contains("claude-sonnet-5-5 · low"),
         "{s}"
     );
 }
@@ -773,12 +776,12 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
 
     let levels = super::choices(&d, Some(&pi), Run::Effort).unwrap();
     let names: Vec<&str> = levels.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(names, vec!["apagado", "bajo", "medio", "alto"]);
+    assert_eq!(names, vec!["off", "low", "medium", "high"]);
     assert!(levels[1].current);
     assert!(super::set_effort(&d, Some(&pi), "max").is_err());
     assert_eq!(
         super::set_effort(&d, Some(&pi), "high").unwrap(),
-        "esfuerzo: alto"
+        "esfuerzo: high"
     );
     assert!(
         pi.sent
@@ -789,7 +792,7 @@ fn model_and_effort_go_to_pi_and_are_saved_as_the_default() {
     // Before the first message: no Pi, every level, saved for the session to come.
     assert_eq!(
         super::set_effort(&d, None, "medium").unwrap(),
-        "esfuerzo: medio"
+        "esfuerzo: medium"
     );
     let cfg = Config::load(&d).unwrap();
     assert_eq!(cfg.model.thinking, "medium");
