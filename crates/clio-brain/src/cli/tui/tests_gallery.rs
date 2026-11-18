@@ -15,6 +15,8 @@ use crate::cli::usage::RunLimits;
 
 pub(super) const ANSWER: &str = "## Lo que pesa\n\nCasi todo está en `/var/lib`:\n\n- **docker**: 56G, imágenes viejas y *volúmenes*\n- containerd: 39G\n  - snapshots: 30G\n\n1. Revisa con `docker system df`.\n2. Lee [la guía](https://docs.docker.com/config/pruning/).\n\n> Ojo: no borré nada.\n\n```sh\nsudo du -xh --max-depth=1 /var/lib 2>/dev/null | sort -rh | head -n 20\n```\n\nAñoro 日本語 y ❤\u{fe0f} sin romper la línea.";
 
+pub(super) const TABLE: &str = "Los que más memoria usan:\n\n| PID | Proceso | Memoria (RSS) | Qué es |\n|---|---|---|---|\n| 4071 | java | ~678 MB | el servidor de Minecraft, con su mundo cargado en memoria |\n| 812 | dockerd | 96 MB | Docker |\n| 1 | systemd | 12 MB | 日本語 ❤\u{fe0f} |\n\nAparté el borrado de los volúmenes: espera tu visto bueno.";
+
 /// The Pi chat with a model and nothing wrong, as `clio` opens.
 pub(super) fn pi(host: bool) -> App {
     let mut a = App::new("/home/ivan/proyecto", THEME);
@@ -62,13 +64,6 @@ pub(super) fn rows() -> Vec<Row> {
         Row {
             unavailable: Some("no es de Clio".into()),
             ..row("una sesión de Pi a mano", "/s/3_c.jsonl", 60 * 5, 9)
-        },
-        Row {
-            kind: RowKind::Remote,
-            unavailable: Some(
-                "remoto: pendiente (ssh <host> clio serve-rpc todavía no existe)".into(),
-            ),
-            ..row("remoto: pendiente", "remote", 0, 0)
         },
     ]
 }
@@ -179,6 +174,32 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         "«¿Qué es lo que más pesa en el disco?»: la conversación y su copia de trabajo".into(),
     ));
     out.push(("borrar una sesión", a));
+    let mut a = conversation(true);
+    a.chat.items.truncate(1);
+    a.chat.items.push(Item::Tool {
+        id: "4".into(),
+        name: "bash".into(),
+        summary: "sudo rm -r /var/lib/docker/volumes/viejo".into(),
+        reason: "Borrar volúmenes viejos".into(),
+        state: ToolState::SetAside,
+        ms: Some(30),
+    });
+    a.chat.items.push(Item::Tool {
+        id: "5".into(),
+        name: "bash".into(),
+        summary: "ps -eo pid,comm,rss --sort=-rss | head".into(),
+        reason: "Ver qué procesos usan más memoria".into(),
+        state: ToolState::Ok,
+        ms: Some(1_200),
+    });
+    a.chat.items.push(Item::Assistant {
+        text: TABLE.into(),
+        live: false,
+    });
+    a.chat.items.push(Item::Note(
+        "aprobado a1b2: sudo rm -r /var/lib/docker/volumes/viejo (salida 0)".into(),
+    ));
+    out.push(("tabla y una acción apartada", a));
     let mut a = pi(true);
     a.chat = Chat::opening(1, 0);
     a.chat.opening = false;
@@ -267,6 +288,7 @@ fn every_chat_state_fits_is_clean_and_has_an_ascii_form() {
                 !c.is_ascii()
                     && !"áéíóúñÁÉÍÓÚÑü¿¡…·«»".contains(*c)
                     && !ANSWER.contains(*c)
+                    && !TABLE.contains(*c)
                     && !rows().iter().any(|r| r.title.contains(*c))
             })
             .collect();

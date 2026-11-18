@@ -5,7 +5,8 @@
 //!   `clio toolhost` (the only thing that touches the working copy) beside it; both die with the
 //!   session, with the interface, or with the process.
 //! - [`RemoteSource`]: the same protocol over `ssh <host> clio serve-rpc` stdio. A placeholder:
-//!   the trait and the selector row exist, opening says `remoto: pendiente`.
+//!   the trait exists, it lists nothing (a row nobody can open is noise), and opening says
+//!   `remoto: pendiente`.
 //! - [`run`]: `clio run --harness pi`, a whole prompt without a terminal.
 
 pub mod local;
@@ -58,6 +59,8 @@ pub fn resolve(flag: Option<&str>, dirs: &Dirs) -> Res<Harness> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Session,
+    /// A row of the remote source, once it lists any (the drawer already draws them).
+    #[allow(dead_code)]
     Remote,
 }
 
@@ -142,23 +145,16 @@ pub trait SessionSource: Send + Sync {
     fn open(&self, target: &Target) -> Result<Opened, String>;
 }
 
-/// The same Pi protocol over `ssh <host> clio serve-rpc` stdio. Not built yet: the row is there
-/// so the selector, the keys and the trait do not change when it is.
+/// The same Pi protocol over `ssh <host> clio serve-rpc` stdio. Not built yet: the source is
+/// there so the selector, the keys and the trait do not change when it is; until then it lists
+/// no row, since none could be opened.
 pub struct RemoteSource;
 
 const REMOTE_PENDING: &str = "remoto: pendiente (ssh <host> clio serve-rpc todavía no existe)";
 
 impl SessionSource for RemoteSource {
     fn list(&self) -> Vec<Row> {
-        vec![Row {
-            kind: RowKind::Remote,
-            title: "remoto: pendiente".into(),
-            detail: "ssh <host> clio serve-rpc".into(),
-            messages: 0,
-            last_ms: None,
-            reference: String::new(),
-            unavailable: Some(REMOTE_PENDING.into()),
-        }]
+        Vec::new()
     }
 
     fn open(&self, _: &Target) -> Result<Opened, String> {
@@ -181,18 +177,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_remote_source_says_it_is_pending_and_never_opens() {
+    fn the_remote_source_lists_nothing_and_never_opens() {
         let r = RemoteSource;
-        let rows = r.list();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, RowKind::Remote);
-        assert!(
-            rows[0]
-                .unavailable
-                .as_deref()
-                .unwrap()
-                .contains("pendiente")
-        );
+        assert!(r.list().is_empty());
         let e = r.open(&Target::Existing {
             reference: "x".into(),
         });

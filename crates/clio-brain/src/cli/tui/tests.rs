@@ -1526,8 +1526,8 @@ fn short_id_never_panics_on_a_non_ascii_name() {
 
 // Host mode: at the end of a turn, each action the session set aside is one question; `s` and then
 // Enter runs it, `n` or Esc rejects it, and the next one comes. The question opens while the
-// person may be typing: a lone `s`, Enter or any other key decides nothing, and it hears no key
-// until a second passed without one.
+// person may be typing: it hears no key until a second passed without one, and a lone Enter or an
+// `s` followed by another key decides nothing.
 #[test]
 fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let asks = vec![
@@ -1546,6 +1546,13 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
             && screen.contains("rm -r datos"),
         "{screen}"
     );
+    // Its own title, and the class on a line of its own above the command.
+    assert!(
+        screen.contains("Visto bueno") && !screen.contains("Confirmar"),
+        "{screen}"
+    );
+    let class = screen.lines().find(|l| l.contains("«borrar»")).unwrap();
+    assert!(!class.contains("rm -r"), "{screen}");
     // Typing on: nothing is answered, and an `s` followed by another key is undone.
     let mut typing = Vec::new();
     for (i, k) in [
@@ -1657,7 +1664,7 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
     let mut help = host_chat();
     help.open_help();
-    assert!(screen_text(&help, 140, 30).contains("un segundo sin teclear"));
+    assert!(screen_text(&help, 140, 60).contains("un segundo sin teclear"));
     // `n` and Esc too: no answer while the keys still come, then `n` rejects.
     let (a, cmds) = feed(a, vec![Input::Tick(2_900), ch('n')]);
     assert!(cmds.is_empty() && a.confirm.is_some(), "{cmds:?}");
@@ -1665,14 +1672,33 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
     let (a, _) = feed(a, vec![Input::Tick(3_900)]);
     assert!(!screen_text(&a, 100, 30).contains("espera un segundo"));
-    // `s` arms; an Enter sooner than a second after it disarms; `s`, a second, Enter runs it.
+    // `s` arms once the second passed, and Enter right after it runs it: no second wait.
+    let armed_at = |a: App| {
+        let (a, cmds) = feed(a, vec![ch('s')]);
+        assert!(
+            cmds.is_empty() && a.confirm.as_ref().unwrap().armed,
+            "{cmds:?}"
+        );
+        a
+    };
+    let a = armed_at(a);
+    let armed_screen = screen_text(&a, 100, 30);
+    assert!(
+        !armed_screen.contains("espera un segundo") && armed_screen.contains("Enter sí"),
+        "{armed_screen}"
+    );
+    // Any other key while armed disarms it, and the quiet second starts again: an Enter or an
+    // `s` right after decides nothing.
     let (a, cmds) = feed(
         a,
         vec![
-            ch('s'),
-            Input::Tick(4_500),
+            Input::Tick(4_000),
+            ch('x'),
+            Input::Tick(4_100),
             key(KeyCode::Enter),
-            Input::Tick(5_500),
+            Input::Tick(4_200),
+            ch('s'),
+            Input::Tick(4_300),
             key(KeyCode::Enter),
         ],
     );
@@ -1680,15 +1706,8 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
         cmds.is_empty() && !a.confirm.as_ref().unwrap().armed,
         "{cmds:?}"
     );
-    let (_, cmds) = feed(
-        a,
-        vec![
-            Input::Tick(6_500),
-            ch('s'),
-            Input::Tick(7_500),
-            key(KeyCode::Enter),
-        ],
-    );
+    let (a, _) = feed(a, vec![Input::Tick(5_300)]);
+    let (_, cmds) = feed(armed_at(a), vec![key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
         vec![Cmd::ChatAnswer {

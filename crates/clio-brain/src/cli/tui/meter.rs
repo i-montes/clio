@@ -422,31 +422,151 @@ pub fn draw_side(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The help of the Pi chat: one titled section per part of the screen, its keys in an aligned
+/// table and a short note under it when one is needed.
+fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
+    let t = app.theme;
+    let binds = |ctx, keep: &dyn Fn(Act) -> bool| -> Vec<(String, String)> {
+        keys::table(ctx)
+            .iter()
+            .filter(|b| keep(b.act))
+            .map(|b| (b.shown.to_owned(), b.what.to_owned()))
+            .collect()
+    };
+    let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+        v.iter()
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect()
+    };
+    let mut chat = binds(keys::Ctx::Chat, &|a| a != Act::Help);
+    chat.extend(
+        binds(keys::Ctx::ChatRun, &|a| {
+            matches!(a, Act::Cancel | Act::Open)
+        })
+        .into_iter()
+        .map(|(k, w)| (k, format!("{w} (mientras trabaja)"))),
+    );
+    chat.push(("F1".into(), "esta ayuda".into()));
+    // Each section: its title, its keys and what they do, and its notes.
+    type Section<'a> = (&'a str, Vec<(String, String)>, Vec<&'a str>);
+    let mut sections: Vec<Section> = vec![
+        ("el chat", chat, vec![]),
+        (
+            "las sesiones",
+            binds(keys::Ctx::Sessions, &|a| a != Act::Help),
+            vec!["Ctrl-S o F2 las abre; mientras el agente trabaja no se cambia de sesión."],
+        ),
+    ];
+    if app.host {
+        sections.push((
+            "la pregunta de visto bueno",
+            pairs(&[("s y Enter", "ejecutarlo"), ("n o Esc", "rechazarlo")]),
+            vec![
+                "Oye la primera tecla tras un segundo sin teclear; con s, Enter enseguida.",
+                "Otra tecla tras la s la deshace y vuelve a esperar el segundo.",
+            ],
+        ));
+    }
+    sections.push((
+        "el ratón",
+        pairs(&[
+            ("clic", "abre una sesión; fuera del panel, lo cierra"),
+            ("rueda", "desplaza lo que está debajo"),
+            ("Shift y arrastrar", "selecciona texto"),
+        ]),
+        vec!["Un clic nunca responde una pregunta: solo las teclas."],
+    ));
+    let mut other = pairs(&[
+        ("m", "la memoria (en las sesiones)"),
+        ("D", "el doctor (en las sesiones)"),
+    ]);
+    other.extend(
+        keys::GLOBAL
+            .iter()
+            .map(|b| (b.shown.to_owned(), b.what.to_owned())),
+    );
+    sections.push(("otras pantallas", other, vec![]));
+    let key_w = sections
+        .iter()
+        .flat_map(|(_, rows, _)| rows.iter())
+        .map(|(k, _)| text::width(k))
+        .max()
+        .unwrap_or(8)
+        .min(20)
+        + 2;
+    let width = usize::from(w);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("ayuda ", t.bold()),
+        Span::styled(
+            if app.host {
+                "· Clio trabaja en esta máquina; cada cambio queda registrado"
+            } else {
+                "· Clio trabaja en una copia; tú decides qué vuelve al original"
+            },
+            t.dim(),
+        ),
+    ])];
+    for (title, rows, notes) in sections {
+        lines.push(Line::from(""));
+        lines.push(section(t, title, w));
+        for (k, what) in rows {
+            let k = text::fit(&k, key_w - 2, t.ellipsis());
+            let pad = " ".repeat(key_w - text::width(&k));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {k}{pad}"), t.key()),
+                Span::raw(text::fit(
+                    &what,
+                    width.saturating_sub(key_w + 1),
+                    t.ellipsis(),
+                )),
+            ]));
+        }
+        for n in notes {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", text::fit(n, width.saturating_sub(1), t.ellipsis())),
+                t.dim(),
+            )));
+        }
+    }
+    // What the footer of the chat leaves out: the steps, the time, the session.
+    let c = &app.chat;
+    let snap = c.snapshot(app.now_ms, app.fallback());
+    lines.push(Line::from(""));
+    lines.push(section(t, "esta sesión", w));
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(super::status::line(t, &snap, width.saturating_sub(1)).spans);
+    lines.push(Line::from(spans));
+    if !c.session_id.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {}",
+                text::fit(
+                    &format!("{}   {}", clean(&c.session_id), clean(&c.workspace)),
+                    width.saturating_sub(1),
+                    t.ellipsis()
+                )
+            ),
+            t.dim(),
+        )));
+    }
+    lines
+}
+
 pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
     let t = app.theme;
     let w = usize::from(area.width);
     let from_chat = app.pi && matches!(app.before_help, Screen::Chat | Screen::Sessions);
-    // The keys of where help was opened from; from the chat, also the drawer's.
-    let mut groups: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
-    let table = |ctx| keys::table(ctx).iter().map(|b| (b.shown, b.what)).collect();
     if from_chat {
-        groups.push(("el chat", table(keys::Ctx::Chat)));
-        groups.push((
-            "mientras el agente trabaja",
-            keys::table(keys::Ctx::ChatRun)
-                .iter()
-                .filter(|b| matches!(b.act, Act::Cancel | Act::Open))
-                .map(|b| (b.shown, b.what))
-                .collect(),
-        ));
-        groups.push(("las sesiones (Ctrl-S o F2)", table(keys::Ctx::Sessions)));
-    } else {
-        groups.push(("", table(app.ctx_of(app.before_help))));
+        let lines = chat_help(app, area.width);
+        scrolled(f, area, lines, app);
+        return;
     }
-    groups.push((
-        if from_chat { "en todas partes" } else { "" },
-        keys::GLOBAL.iter().map(|b| (b.shown, b.what)).collect(),
-    ));
+    // The keys of where help was opened from; from the chat, also the drawer's.
+    let table = |ctx| keys::table(ctx).iter().map(|b| (b.shown, b.what)).collect();
+    let groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("", table(app.ctx_of(app.before_help))),
+        ("", keys::GLOBAL.iter().map(|b| (b.shown, b.what)).collect()),
+    ];
     let key_w = groups
         .iter()
         .flat_map(|(_, e)| e.iter())
@@ -467,11 +587,6 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
             Span::raw((*what).to_owned()),
         ]
     };
-    let note = |text: &str, lines: &mut Vec<Line<'static>>| {
-        for row in text::wrap(text, w) {
-            lines.push(Line::from(Span::styled(row, t.dim())));
-        }
-    };
     let mut lines = vec![Line::from(vec![
         Span::styled("atajos ", t.bold()),
         Span::styled(
@@ -483,37 +598,6 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
             t.dim(),
         ),
     ])];
-    if app.pi && app.host {
-        note(
-            "«¿Lo ejecuto?» solo oye tras un segundo sin teclear: s, un segundo, Enter lo ejecuta; n o Esc lo rechaza.",
-            &mut lines,
-        );
-    }
-    if app.pi {
-        note(
-            "Con el ratón: clic en una sesión la abre, clic fuera de las sesiones las cierra, la rueda desplaza. Para seleccionar texto, Shift y arrastrar.",
-            &mut lines,
-        );
-    }
-    if from_chat {
-        note(
-            "Desde el chat: Ctrl-S abre las sesiones; ahí m lleva a la memoria y D al doctor.",
-            &mut lines,
-        );
-        // What the footer of the chat leaves out: the steps, the time, the session.
-        let c = &app.chat;
-        let snap = c.snapshot(app.now_ms, app.fallback());
-        let mut spans = vec![Span::styled("esta sesión  ", t.bold())];
-        spans.extend(super::status::line(t, &snap, w.saturating_sub(13)).spans);
-        lines.push(Line::from(""));
-        lines.push(Line::from(spans));
-        if !c.session_id.is_empty() {
-            note(
-                &format!("{}   {}", clean(&c.session_id), clean(&c.workspace)),
-                &mut lines,
-            );
-        }
-    }
     for (title, entries) in &groups {
         lines.push(Line::from(""));
         if !title.is_empty() {

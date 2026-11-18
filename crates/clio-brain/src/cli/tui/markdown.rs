@@ -1,6 +1,6 @@
 //! The agent's text drawn as markdown, wrapped to the column by display width: paragraphs, bold
 //! and italic, inline code, headings, lists (nested, numbered), quotes, code blocks, links, rules
-//! and tables as plain rows.
+//! and tables (aligned columns, wrapped inside them when the table is wider than the column).
 //!
 //! The text is the model's, so it is not trusted: every piece that reaches a line (text, code,
 //! a link's address, raw HTML) goes through `sanitize` after the parser, because the parser itself
@@ -37,6 +37,7 @@ pub fn render(src: &str, w: usize, t: Theme, live: bool) -> Vec<Line<'static>> {
         links: Vec::new(),
         row: Vec::new(),
         head: false,
+        table: Vec::new(),
     };
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
     for ev in Parser::new_ext(&src, opts) {
@@ -96,9 +97,15 @@ struct Render {
     code: Option<(String, String)>,
     links: Vec<(LinkType, String)>,
     /// The cells of a table row.
-    row: Vec<Vec<(String, Style)>>,
+    row: Vec<Cell>,
     head: bool,
+    /// The rows of the table being read (whether each is the header): drawn when it ends, so
+    /// every column knows its width.
+    table: Vec<(bool, Vec<Cell>)>,
 }
+
+/// A table cell: its styled pieces.
+type Cell = Vec<(String, Style)>;
 
 impl Render {
     fn style(&self) -> Style {
@@ -336,23 +343,102 @@ impl Render {
                 self.row.push(cell);
             }
             TagEnd::TableHead | TagEnd::TableRow => {
-                if self.head {
+                let head = std::mem::take(&mut self.head);
+                if head {
                     self.pop_style();
-                    self.head = false;
                 }
+                let row = std::mem::take(&mut self.row);
+                self.table.push((head, row));
+            }
+            TagEnd::Table => {
+                self.table_block();
+                self.blank = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// The table read so far: columns as wide as their widest cell (by display width), the
+    /// header in bold over a thin rule. When it does not fit, the widest columns give way and
+    /// their cells wrap inside them: nothing is cut. A table too narrow even for that is drawn
+    /// one row a line, its cells joined by a bar.
+    fn table_block(&mut self) {
+        let t = self.t;
+        let rows = std::mem::take(&mut self.table);
+        let n = rows.iter().map(|(_, r)| r.len()).max().unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        self.open_block();
+        let (p, pw) = self.prefix(false);
+        let cell_w = |c: &[(String, Style)]| c.iter().map(|(s, _)| width(s)).sum::<usize>();
+        let mut widths = vec![1; n];
+        for (_, row) in &rows {
+            for (i, c) in row.iter().enumerate() {
+                widths[i] = widths[i].max(cell_w(c));
+            }
+        }
+        let bar = format!(" {} ", t.rule_v());
+        let room = self.w.saturating_sub(pw + 3 * (n - 1));
+        if room < 3 * n {
+            for (_, row) in rows {
                 let mut segs = Vec::new();
-                for (i, cell) in std::mem::take(&mut self.row).into_iter().enumerate() {
+                for (i, cell) in row.into_iter().enumerate() {
                     if i > 0 {
-                        segs.push((format!(" {} ", t.rule_v()), t.faint()));
+                        segs.push((bar.clone(), t.faint()));
                     }
                     segs.extend(cell);
                 }
-                let first = self.prefix(true);
-                let rest = self.prefix(false);
+                let (first, rest) = (self.prefix(false), self.prefix(false));
                 self.out.extend(wrap_spans(&segs, self.w, first, rest));
             }
-            TagEnd::Table => self.blank = true,
-            _ => {}
+            return;
+        }
+        while widths.iter().sum::<usize>() > room {
+            let (i, _) = widths
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, w)| **w)
+                .unwrap_or((0, &0));
+            widths[i] -= 1;
+        }
+        let none = || (Vec::new(), 0);
+        for (head, row) in rows {
+            let cells: Vec<Vec<Line<'static>>> = (0..n)
+                .map(|i| {
+                    row.get(i)
+                        .map_or_else(Vec::new, |c| wrap_spans(c, widths[i], none(), none()))
+                })
+                .collect();
+            let h = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            for k in 0..h {
+                let mut spans = p.clone();
+                for (i, cell) in cells.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::styled(bar.clone(), t.faint()));
+                    }
+                    let mut used = 0;
+                    if let Some(l) = cell.get(k) {
+                        used = l.spans.iter().map(|s| width(&s.content)).sum();
+                        spans.extend(l.spans.iter().cloned());
+                    }
+                    // The last column is not padded: no trailing spaces.
+                    if i + 1 < n {
+                        spans.push(Span::raw(" ".repeat(widths[i].saturating_sub(used))));
+                    }
+                }
+                self.out.push(Line::from(spans));
+            }
+            if head {
+                let rule = widths
+                    .iter()
+                    .map(|w| t.rule().repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join(&format!("{0}{1}{0}", t.rule(), t.rule_cross()));
+                let mut spans = p.clone();
+                spans.push(Span::styled(rule, t.faint()));
+                self.out.push(Line::from(spans));
+            }
         }
     }
 
@@ -646,6 +732,52 @@ mod tests {
             p.iter().any(|r| r == "a │ b") && p.iter().any(|r| r == "1 │ 2"),
             "{p:?}"
         );
+        assert!(p.iter().any(|r| r == "──┼──"), "{p:?}");
+    }
+
+    // A table as the model writes it: columns aligned by display width, the header in bold over a
+    // rule; when it is wider than the column, the widest column wraps inside itself and every word
+    // is still there; and a table still arriving never garbles.
+    #[test]
+    fn tables_align_wrap_inside_their_columns_and_stream() {
+        let src = "| PID | Proceso | Memoria (RSS) |\n|---|---|---|\n| 4071 | java | ~678 MB |\n| 12 | 日本語 | 1 MB |";
+        let l = render(src, 60, T, false);
+        let p = plain(&l);
+        assert_eq!(
+            p,
+            [
+                "PID  │ Proceso │ Memoria (RSS)",
+                "─────┼─────────┼──────────────",
+                "4071 │ java    │ ~678 MB",
+                "12   │ 日本語  │ 1 MB",
+            ]
+        );
+        assert!(
+            style_of(&l, "PID")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            !style_of(&l, "4071")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let long = "| a | b |\n|---|---|\n| corto | una celda con muchas palabras que no cabe |";
+        let p = plain(&render(long, 24, T, false));
+        assert!(p.iter().all(|r| width(r) <= 24), "{p:?}");
+        let words: String = p[2..]
+            .iter()
+            .map(|r| r.split('│').nth(1).unwrap().trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(words, "una celda con muchas palabras que no cabe");
+        assert!(p[3].starts_with("      │ "), "{p:?}");
+        for (i, _) in src.char_indices() {
+            let p = plain(&render(&src[..i], 30, T, true));
+            assert!(p.iter().all(|r| width(r) <= 30), "{p:?}");
+        }
     }
 
     #[test]

@@ -108,6 +108,8 @@ pub enum ToolState {
     Failed,
     /// The guard or the gateway said no.
     Denied,
+    /// Host mode: set aside for the person's approval (`apartado <id>: …`).
+    SetAside,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -522,11 +524,18 @@ pub fn content_text(c: &Value) -> String {
     }
 }
 
-/// A tool that failed because the guard or the gateway refused it is "negado", not "falló".
+/// A tool that failed because the guard or the gateway refused it is "negado", not "falló"; one the
+/// toolhost set aside for the person (`clio_toolhost::pending`) is "apartado".
 fn state_of(is_error: bool, text: &str) -> ToolState {
     let t = text.to_lowercase();
+    let aside = text
+        .strip_prefix("apartado ")
+        .and_then(|r| r.split_once(':'))
+        .is_some_and(|(id, _)| !id.is_empty() && !id.contains(char::is_whitespace));
     if !is_error {
         ToolState::Ok
+    } else if aside {
+        ToolState::SetAside
     } else if t.contains("clio-guard:") || t.contains("denied") || t.contains("denegad") {
         ToolState::Denied
     } else {
@@ -725,6 +734,8 @@ enum Kind {
 
 /// The widest the chat's column gets.
 pub const COLUMN_MAX: u16 = 96;
+/// The widest a group's titles get before they are cut.
+const LABEL_MAX: usize = 30;
 /// The most rows of text the composer shows; past them it scrolls.
 const INPUT_ROWS: usize = 6;
 
@@ -752,25 +763,30 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
     let c = &app.chat;
     let mut lines: Vec<Line> = Vec::new();
     let mut last: Option<Kind> = None;
-    // The titles of a group of tools share one width, so what they worked on lines up.
-    let label_max = (w * 2 / 5).max(12);
-    let mut label_w = vec![0; c.items.len()];
+    // The titles of a group of tools share one width, so what they worked on starts in one
+    // column, and so do their endings, so those summaries are cut in one column too.
+    let label_max = (w * 2 / 5).clamp(12, LABEL_MAX);
+    let mut widths = vec![(0, 0); c.items.len()];
     let mut i = 0;
     while i < c.items.len() {
         let run = c.items[i..]
             .iter()
             .take_while(|it| matches!(it, Item::Tool { .. }))
             .count();
-        let widest = c.items[i..i + run]
-            .iter()
-            .map(|it| match it {
-                Item::Tool { name, reason, .. } => text::width(&title(name, reason)),
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0)
-            .min(label_max);
-        label_w[i..i + run].fill(widest);
+        let widest =
+            |f: &dyn Fn(&Item) -> usize| c.items[i..i + run].iter().map(f).max().unwrap_or(0);
+        let label = widest(&|it| match it {
+            Item::Tool { name, reason, .. } => text::width(&title(name, reason)),
+            _ => 0,
+        });
+        let tail = widest(&|it| match it {
+            Item::Tool { state, ms, .. } => tool_tail(t, *state, *ms)
+                .iter()
+                .map(|s| text::width(s))
+                .sum(),
+            _ => 0,
+        });
+        widths[i..i + run].fill((label.min(label_max), tail));
         i += run.max(1);
     }
     // What this draw renders is kept for the next; what it no longer shows is let go.
@@ -826,7 +842,7 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 ..
             } => lines.push(tool_line(
                 app,
-                (w, label_w[n]),
+                (w, widths[n].0, widths[n].1),
                 name,
                 summary,
                 reason,
@@ -851,23 +867,13 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// One tool: its mark, its title (padded to `label_w`, the group's), what it worked on (cut to
-/// fit) and, on the right, how long it took and how it ended when that was not well.
-fn tool_line(
-    app: &App,
-    (w, label_w): (usize, usize),
-    name: &str,
-    summary: &str,
-    reason: &str,
-    state: ToolState,
-    ms: Option<u64>,
-) -> Line<'static> {
-    let t = app.theme;
-    let (mark, word, style) = match state {
-        ToolState::Running => (t.spinner(app.now_ms), "", t.accent_line()),
-        ToolState::Ok => (t.check(), "", t.ok()),
-        ToolState::Failed => (t.cross(), "falló", t.fail()),
-        ToolState::Denied => (t.cross(), "negado", t.fail()),
+/// How a tool ended, for its right end: the word when it did not end well, and how long it took.
+fn tool_tail(t: Theme, state: ToolState, ms: Option<u64>) -> [String; 3] {
+    let word = match state {
+        ToolState::Running | ToolState::Ok => "",
+        ToolState::Failed => "falló",
+        ToolState::Denied => "negado",
+        ToolState::SetAside => "apartado",
     };
     let dur = match ms {
         Some(ms) if ms >= 10_000 => usage::duration(ms / 1000),
@@ -879,25 +885,48 @@ fn tool_line(
     } else {
         format!(" {} ", t.dot())
     };
-    let tail_w = text::width(word) + text::width(&sep) + text::width(&dur);
+    [word.to_owned(), sep, dur]
+}
+
+/// One tool: its mark, its title (padded to `label_w`, the group's), what it worked on (cut where
+/// the group's endings, `tail_w` wide, begin) and, at the right edge, how it ended and how long it
+/// took.
+fn tool_line(
+    app: &App,
+    (w, label_w, tail_w): (usize, usize, usize),
+    name: &str,
+    summary: &str,
+    reason: &str,
+    state: ToolState,
+    ms: Option<u64>,
+) -> Line<'static> {
+    let t = app.theme;
+    let (mark, style) = match state {
+        ToolState::Running => (t.spinner(app.now_ms), t.accent_line()),
+        ToolState::Ok => (t.check(), t.ok()),
+        ToolState::Failed | ToolState::Denied => (t.cross(), t.fail()),
+        ToolState::SetAside => (t.aside(), t.warn()),
+    };
+    let [word, sep, dur] = tool_tail(t, state, ms);
+    let own_tail = text::width(&word) + text::width(&sep) + text::width(&dur);
     let mut label = text::fit(&title(name, reason), label_w.max(4), t.ellipsis());
     label.push_str(&" ".repeat(label_w.saturating_sub(text::width(&label))));
     let used = 4 + text::width(&label);
-    let room = w.saturating_sub(used + 3 + tail_w + 2);
+    let room = w.saturating_sub(used + 3 + tail_w.max(own_tail) + 2);
     let summary = clean(&chip(name, summary));
     let summary = if room >= 4 && !summary.is_empty() {
         format!("   {}", text::fit(&summary, room, t.ellipsis()))
     } else {
         String::new()
     };
-    let pad = w.saturating_sub(used + text::width(&summary) + tail_w);
+    let pad = w.saturating_sub(used + text::width(&summary) + own_tail);
     Line::from(vec![
         Span::raw("  "),
         Span::styled(format!("{mark} "), style),
         Span::raw(label),
         Span::styled(summary, t.dim()),
         Span::raw(" ".repeat(pad)),
-        Span::styled(word, t.fail()),
+        Span::styled(word, style),
         Span::styled(sep, t.dim()),
         Span::styled(dur, t.dim()),
     ])
@@ -1310,6 +1339,57 @@ mod tests {
                 (ToolState::Failed, "nope".to_owned())
             ]
         );
+    }
+
+    // Host mode: a call the toolhost set aside for the person is its own state, drawn in the
+    // warning color with «apartado», never as a failure; and a group's summaries start in one
+    // column and its endings end at the right edge.
+    #[test]
+    fn a_set_aside_call_is_apartado_and_a_group_lines_up() {
+        let aside = "apartado a1b2: «borrar» necesita el visto bueno de la persona.";
+        assert_eq!(state_of(true, aside), ToolState::SetAside);
+        assert_eq!(state_of(true, "apartado: nada"), ToolState::Failed);
+        assert_eq!(state_of(true, "error: apartado x: y"), ToolState::Failed);
+        let mut a = super::super::tests_gallery::pi(true);
+        a.chat = chat();
+        let tool = |reason: &str, cmd: &str, state, ms| Item::Tool {
+            id: String::new(),
+            name: "bash".into(),
+            summary: cmd.into(),
+            reason: reason.into(),
+            state,
+            ms,
+        };
+        a.chat.items = vec![
+            tool(
+                "Borrar volúmenes viejos",
+                "rm -r /var/lib/docker/volumes/viejo",
+                ToolState::SetAside,
+                Some(400),
+            ),
+            tool("Ver", "du -sh /var", ToolState::Ok, Some(1_500)),
+            tool(
+                "Un título muy largo que no cabe en treinta columnas",
+                "ls",
+                ToolState::Failed,
+                Some(80_000),
+            ),
+        ];
+        let screen = super::super::tests_gallery::screen_text(&a, 100, 30);
+        let rows: Vec<&str> = screen.lines().filter(|l| l.contains("   ")).collect();
+        let row = |s: &str| *rows.iter().find(|r| r.contains(s)).unwrap();
+        let (r1, r2, r3) = (row("rm -r"), row("du -sh"), row("ls  "));
+        assert!(
+            r1.contains("◇ Borrar") && r1.contains("apartado") && !r1.contains("falló"),
+            "{screen}"
+        );
+        assert!(r3.contains('…') && r3.contains("falló"), "{screen}");
+        let col = |r: &str, s: &str| text::width(&r[..r.find(s).unwrap()]);
+        assert_eq!(col(r1, "rm -r"), col(r2, "du -sh"), "{screen}");
+        assert_eq!(col(r2, "du -sh"), col(r3, "ls  "), "{screen}");
+        let end = |r: &str, s: &str| col(r, s) + text::width(s);
+        assert_eq!(end(r1, "0,4 s"), end(r2, "1,5 s"), "{screen}");
+        assert_eq!(end(r2, "1,5 s"), end(r3, "1 min 20 s"), "{screen}");
     }
 
     #[test]

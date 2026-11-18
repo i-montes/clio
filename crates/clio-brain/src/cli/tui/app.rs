@@ -582,30 +582,33 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
 }
 
 /// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead. An action set aside, which
-/// is asked when a turn ends while the person may be typing, takes `s` and then Enter; `n` or Esc
-/// rejects it, and any other key only undoes a typed `s`. It hears none of them unless `quiet`
-/// (no key for `QUIET_MS`): a key sooner is ignored and undoes a typed `s`.
+/// is asked when a turn ends while the person may be typing, hears its first key only after
+/// `QUIET_MS` with none (`quiet`): then `s` arms it and `n` or Esc rejects it. Once armed, Enter
+/// runs it at once; any other key disarms it, and the quiet second starts again.
 fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     let Some(mut c) = app.confirm.take() else {
         return vec![];
     };
-    if c.action == Action::Approve && !quiet {
-        c.armed = false;
-        app.confirm = Some(c);
-        return vec![];
-    }
     // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
     let yes_key = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
     let yes = if c.action == Action::Approve {
         let no = k.code == KeyCode::Esc || (plain && matches!(k.code, KeyCode::Char('n' | 'N')));
         let enter = plain && k.code == KeyCode::Enter;
-        if !(no || enter && c.armed) {
-            c.armed = yes_key;
-            app.confirm = Some(c);
-            return vec![];
+        match (c.armed, quiet) {
+            (true, _) if enter => true,
+            (_, true) if no => false,
+            (false, true) if yes_key => {
+                c.armed = true;
+                app.confirm = Some(c);
+                return vec![];
+            }
+            _ => {
+                c.armed = false;
+                app.confirm = Some(c);
+                return vec![];
+            }
         }
-        !no
     } else {
         yes_key
     };
@@ -1256,14 +1259,12 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
     };
     let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
-    // The class of a set-aside action (`«borrar» …`) in the warning color.
+    // A set-aside action (`«borrar» …`): its class in the warning color, the command under it.
     let what = clean(&c.workspace);
     match what.split_once('»') {
         Some((class, rest)) if c.action == Action::Approve && class.starts_with('«') => {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{class}»"), t.warn()),
-                Span::raw(rest.to_owned()),
-            ]));
+            lines.push(Line::from(Span::styled(format!("{class}»"), t.warn())));
+            lines.push(Line::from(Span::styled(rest.trim().to_owned(), t.code())));
         }
         _ => lines.push(Line::from(what)),
     }
@@ -1280,7 +1281,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(clean(n), t.warn())));
     }
-    if c.action == Action::Approve && !app.quiet() {
+    if c.action == Action::Approve && !c.armed && !app.quiet() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "espera un segundo sin teclear para responder…",
@@ -1293,8 +1294,15 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
             Span::styled(if c.armed { "Enter" } else { "s y Enter" }, t.key()),
             Span::styled(" sí, ejecutarlo", t.dim()),
             Span::styled(d, t.dim()),
-            Span::styled("n o Esc", t.key()),
-            Span::styled(" no, rechazarlo", t.dim()),
+            Span::styled(if c.armed { "otra tecla" } else { "n o Esc" }, t.key()),
+            Span::styled(
+                if c.armed {
+                    " vuelve atrás"
+                } else {
+                    " no, rechazarlo"
+                },
+                t.dim(),
+            ),
         ])
     } else {
         Line::from(vec![
@@ -1310,7 +1318,12 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
     } else {
         t.accent_line()
     };
-    dialog(f, area, t, " Confirmar ", lines, hint, border);
+    let title = if c.action == Action::Approve {
+        " Visto bueno "
+    } else {
+        " Confirmar "
+    };
+    dialog(f, area, t, title, lines, hint, border);
 }
 
 /// A centered box over the screen: a question or a message that needs a key. The text is wrapped

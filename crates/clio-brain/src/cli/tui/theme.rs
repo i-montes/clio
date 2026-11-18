@@ -165,6 +165,10 @@ impl Theme {
     pub fn bang(self) -> &'static str {
         "!"
     }
+    /// A tool call set aside for the person's approval.
+    pub fn aside(self) -> &'static str {
+        self.pick("◇", "?")
+    }
     pub fn cross(self) -> &'static str {
         self.pick("✗", "x")
     }
@@ -176,6 +180,10 @@ impl Theme {
     }
     pub fn rule(self) -> &'static str {
         self.pick("─", "-")
+    }
+    /// Where a table's rule meets a column bar.
+    pub fn rule_cross(self) -> &'static str {
+        self.pick("┼", "+")
     }
     pub fn rule_v(self) -> &'static str {
         self.pick("│", "|")

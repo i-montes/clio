@@ -247,7 +247,7 @@ fn selector_new_session_chat_answer_debug_leave_and_quit_leave_nothing_behind() 
         &v,
         &[
             "selector",
-            "remote_row",
+            "no_remote_row",
             "opened",
             "nothing_before_the_first_message",
             "answered",
@@ -257,7 +257,6 @@ fn selector_new_session_chat_answer_debug_leave_and_quit_leave_nothing_behind() 
             "back_in_selector",
             "listed_again",
             "procs_after_leaving",
-            "remote_notice",
         ],
     );
     assert!(

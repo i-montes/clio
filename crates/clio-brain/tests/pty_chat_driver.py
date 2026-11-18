@@ -181,7 +181,8 @@ if scenario == "new_chat":
     out["opened"] = open_new_chat(fd)
     # The sessions are a key away, and the same key puts them away again.
     out["selector"] = open_drawer(fd)
-    out["remote_row"] = wait_screen(fd, "remoto: pendiente")
+    # Nothing that cannot be opened is listed (the remote source is not built yet).
+    out["no_remote_row"] = "remoto" not in screen()
     send(fd, CTRL_S)
     out["opened"] = out["opened"] and wait_screen(fd, "Escribe un mensaje", 15, absent=DRAWER)
     out["nothing_before_the_first_message"] = len(pi_procs()) == 0
@@ -200,13 +201,7 @@ if scenario == "new_chat":
     send(fd, b"g")  # "nueva sesión": the session before it closes
     send(fd, ENTER)
     out["procs_after_leaving"] = gone(20)
-    # The remote row cannot be opened: it says why instead of opening anything.
     open_drawer(fd)
-    send(fd, b"G")
-    send(fd, ENTER)
-    out["remote_notice"] = wait_screen(fd, "todavía no existe", 10)
-    send(fd, b"x")  # any key closes the notice
-    time.sleep(0.2)
     send(fd, b"q")
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = len(pi_procs())
