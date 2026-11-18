@@ -9,10 +9,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::host::{now_ms, private_dir};
-use crate::{Request, TextVerdict, ToolHost, lock};
+use crate::{DecisionOut, MAX_RAW_BYTES, Request, Response, TextVerdict, ToolHost, lock};
 
 /// How long a tool result waits for the judge: past this it goes on as if there were none.
 pub(crate) const JUDGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -148,6 +148,51 @@ impl ToolHost {
         let Some(w) = lock(&self.to_judge).remove(&key(&req.session, call)) else {
             return Value::Null;
         };
+        self.judge_texts(req, out, wrapped, &w)
+    }
+
+    /// `judge`: outside text the brain hands the model itself, with the next message (what an
+    /// action the person approved printed): `{"text", "source"}`. The answer's `content` is what
+    /// the model may get, the text cleaned or the notice; `data` as `filter`'s.
+    pub(crate) fn judge_op(&self, req: &Request, args: &Map<String, Value>) -> Response {
+        let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
+        if s("text").len() > MAX_RAW_BYTES {
+            return self.refuse(
+                &req.id,
+                "protocol",
+                "the text is too large".into(),
+                self.is_tainted(&req.session),
+            );
+        }
+        let w = ToJudge {
+            tool: "bash",
+            source: one_line(&self.clean(s("source"))),
+        };
+        let mut out = [Value::String(self.clean(s("text")))];
+        let data = self.judge_texts(req, &mut out, &[0], &w);
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: out[0].as_str().unwrap_or_default().to_owned(),
+            data,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "judge".into(),
+                reason: "judging text has no effect".into(),
+            },
+            tainted: self.is_tainted(&req.session),
+            external: false,
+        }
+    }
+
+    /// Asks the judge about `out[wrapped]` (see `judge_result`), read from `w`.
+    fn judge_texts(
+        &self,
+        req: &Request,
+        out: &mut [Value],
+        wrapped: &[usize],
+        w: &ToJudge,
+    ) -> Value {
         let (Some(port), false) = (self.memory.clone(), wrapped.is_empty()) else {
             return Value::Null;
         };
@@ -202,7 +247,7 @@ impl ToolHost {
                     Value::Null
                 }
             }
-            TextVerdict::Injection => self.withhold(req, out, wrapped, &w, &text),
+            TextVerdict::Injection => self.withhold(req, out, wrapped, w, &text),
         }
     }
 

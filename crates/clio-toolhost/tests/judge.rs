@@ -467,3 +467,37 @@ fn a_session_that_becomes_suspect_stops_its_jobs_with_the_network() {
     assert_eq!(stopped[0]["network"], true);
     e.host.stop(Duration::from_secs(5));
 }
+
+// What an approved action printed reaches the model with the next message, through the brain:
+// it asks `judge` first. An injection is withheld like a tool result (the notice, the text kept,
+// the session suspect); a clean text comes back cleaned.
+#[test]
+fn the_brain_has_an_approved_actions_output_judged_before_the_model_reads_it() {
+    let e = env(TextVerdict::Injection, true);
+    let r = call(
+        &e,
+        "s",
+        "approve",
+        "judge",
+        json!({"text": LETTER, "source": "tail /var/log/app.log"}),
+    );
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.content.contains("[withheld by Clio]")
+            && r.content.contains("tail /var/log/app.log")
+            && !r.content.contains("curl"),
+        "{r:?}"
+    );
+    let file = PathBuf::from(r.data["withheld"]["file"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(file).unwrap(), LETTER);
+    assert!(r.tainted && sources(&e).contains(&json!("suspect")));
+    let clean = env(TextVerdict::Clean, true);
+    let r = call(
+        &clean,
+        "s",
+        "approve",
+        "judge",
+        json!({"text": "42 files", "source": "ls"}),
+    );
+    assert!(r.ok && r.content == "42 files" && r.data.is_null(), "{r:?}");
+}

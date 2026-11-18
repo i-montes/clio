@@ -602,6 +602,7 @@ impl ToolHost {
         // may have no time limit), so the guard's filter and job_stop are answered meanwhile.
         match req.tool.as_str() {
             "filter" => return self.filter(&req, &map, tainted),
+            "judge" => return self.judge_op(&req, &map),
             "jobs" => return self.job_op(&req, &map),
             "job_output" | "job_stop" if !closing() => return self.job_op(&req, &map),
             _ => {}

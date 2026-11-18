@@ -551,9 +551,24 @@ impl Session for ChatSession {
             pending::reject(&h.dirs, id)?;
             return Ok(format!("rechazado {id}: no se ejecuta"));
         }
-        let what = pending::outcome(&pending::approve(&h.dirs, id)?);
-        locked(&h.approved).push(format!("la persona aprobó {id}: {what}"));
-        Ok(format!("aprobado {id}: {what}"))
+        let p = pending::approve(&h.dirs, id)?;
+        let what = pending::outcome(&p);
+        // What it printed is outside text: the judge reads it before the model does.
+        let (shown, flagged) = jev::judged_for_model(
+            &self.toolhost.socket,
+            &self.pi.session_id,
+            &what,
+            clio_toolhost::pending::shown(&p),
+        )
+        .unwrap_or_else(|| (what.clone(), false));
+        locked(&h.approved).push(format!("la persona aprobó {id}: {shown}"));
+        Ok(if flagged {
+            format!(
+                "aprobado {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
+            )
+        } else {
+            format!("aprobado {id}: {what}")
+        })
     }
 
     fn answer_secret(&self, id: &str, value: Option<&SecretValue>) -> Result<String, String> {
