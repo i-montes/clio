@@ -46,16 +46,16 @@ pub const GUARD_TOOLS: [&str; 22] = [
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
 pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
-pub const PROMPT_NAME: &str = "clio-agent@21";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@21.md");
+pub const PROMPT_NAME: &str = "clio-agent@22";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@22.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@5";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@5.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@6";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@6.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -415,6 +415,6 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 21\n"));
+        assert!(PROMPT.starts_with("version: 22\n"));
     }
 }
