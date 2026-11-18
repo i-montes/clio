@@ -8,3 +8,5 @@
 - The pre-commit secret scan (S-43) is a plain git hook in `.githooks/` calling gitleaks, enabled with `just setup`. No pre-commit framework, so no Python dependency.
 - Coverage (S-04) is a shell script that compares rule ids in `docs/security.md` and `docs/specs/` against files under `tests/` directories, and each spec's numbered acceptance tests against tests named `t<n>_…` or tagged `spec-<crate> #<n>`. It only warns for now; it becomes blocking once the rules have tests.
 - License: `MIT OR Apache-2.0` (workspace default; revisit before the first publish).
+
+Later: the coverage gate became blocking (`scripts/rule-coverage.sh` fails on a rule with neither a test nor a reasoned exemption, S-04), and `clio-memory` moved to its own repository, which Clio pins by the commit of a release tag.

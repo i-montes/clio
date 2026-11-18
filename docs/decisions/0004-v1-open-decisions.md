@@ -14,3 +14,5 @@
 ## Still open
 
 Vector index, encryption at rest, remote API: they wait for evidence (see the spec).
+
+Later: clio-memory now prefers Granite Embedding 311M when it is set up and falls back to potion-multilingual-128M; encryption at rest was decided in [ADR 0011](0011-memory-encryption-at-rest.md).

@@ -65,7 +65,7 @@ Pi in its own network namespace (`--unshare-net`: only a loopback with nothing l
 - The forwarder is a subcommand of `clio` that binds `127.0.0.1:<port>` inside the jail, starts Pi as its child and ends with it. The `clio` binary is mounted read-only.
 - The proxy runs on the host, one per session, with the session's lifetime like the toolhost. It listens on a unix socket in its own 0700 folder (mounted into the jail, like the toolhost's), allows one `host:port` taken from the provider's `base_url` (exact match, no wildcards), refuses anything that is not a well-formed `CONNECT`, limits request size, connections and idle time, and records every refusal.
 - The self-test grows: from inside, a direct TCP connection, the loopback of the host, an abstract socket and a `CONNECT` to a host that is not the provider's must all fail, and the provider's must pass.
-- A refused connection is shown in the chat ("Pi intentó conectar a X: negado"), not only logged: the person supervises there.
+- A refused connection is shown in the chat (Pi tried to reach X: refused), not only logged: the person supervises there.
 - Fail closed as in 3a: if the proxy cannot start, Pi does not start.
 
 **Still open.** Whether a provider ever needs more than one host (a CDN for a model list, a separate auth host): for now one `base_url`, and a second host is a configuration decision, not a wildcard.
@@ -87,8 +87,8 @@ Pi in its own network namespace (`--unshare-net`: only a loopback with nothing l
 - **A fourth place built a `Launch`, outside `crates/`** (the bench). The compiler found it: `Launch.helper` (the `clio` binary) is required, not optional, so no launch path can forget the forwarder.
 - **`clio` runs inside the jail** because every library it links is under `/usr`; a build that links something else would fail the self-test, not run without a network.
 - **Pi's environment gains six variables** (`HTTPS_PROXY`, `HTTP_PROXY`, their lowercase forms, and an empty `NO_PROXY` and `no_proxy`); no destination is exempt from the proxy. `pi_real.rs` pins them.
-- **The self-test decides whether Pi starts, so a flaky self-test is a flaky product.** The proxy wrote its answer with `write!`, which sends each piece of the format on its own, and the probe read it with one `read`: now and then it saw only `HTTP/1.1 `, concluded the proxy let a foreign destination through, and Pi refused to start ("Pi no arranca" in the chat, about one run in three of the chat suite under load). The proxy now answers in one write, the probe reads the status line to its end, and `pi_jail.rs` prepares the jail 60 times, four at a time.
-- **A refused connection is a quiet note in the chat** ("la jaula negó una conexión de Pi a …"), once, with the destination as Pi asked for it.
+- **The self-test decides whether Pi starts, so a flaky self-test is a flaky product.** The proxy wrote its answer with `write!`, which sends each piece of the format on its own, and the probe read it with one `read`: now and then it saw only `HTTP/1.1 `, concluded the proxy let a foreign destination through, and Pi refused to start ("Pi does not start" in the chat, about one run in three of the chat suite under load). The proxy now answers in one write, the probe reads the status line to its end, and `pi_jail.rs` prepares the jail 60 times, four at a time.
+- **A refused connection is a quiet note in the chat** (the jail refused a connection of Pi to …), once, with the destination as Pi asked for it.
 
 ## Claude Code inside the jail (claude connector, 2026-11-17)
 
@@ -103,10 +103,12 @@ The claude connector loads the bridge (`pi-claude-agent-sdk`), which runs the of
 ## Consequences
 
 - S-22 stops depending on "review of the deployment": there is a test that fails.
-- The threat model's table row for the extension changes from "corre como la persona" to the jail's view, and "trabajo futuro" becomes 3b.
+- The threat model's table row for the extension changes from "runs as the person" to the jail's view, and "future work" becomes 3b.
 - One more moving part at start (the self-test costs a `bwrap` start). The tool jail already pays it.
 - `clio doctor` gets a line for Pi's jail next to the tool jail's.
 
 ## Seeing what the host struck out
 
-The chat also says when the host struck values out of what Pi read ("Clio tachó 2 valores con forma de llave en lo que leyó Pi: el modelo no los ve"). The host counts the marks it added and puts the number in the `data` of its answer; the guard records it in the session as a `clio-guard.masked` entry (the same channel as the taint); the chat reads the entries after each turn and says what is new. `pi_chat.rs` checks the whole chain with the real chat, Pi and host.
+The chat also says when the host struck values out of what Pi read (Clio struck out 2 key-shaped values from what Pi read; the model does not see them). The host counts the marks it added and puts the number in the `data` of its answer; the guard records it in the session as a `clio-guard.masked` entry (the same channel as the taint); the chat reads the entries after each turn and says what is new. `pi_chat.rs` checks the whole chain with the real chat, Pi and host.
+
+Later: [ADR 0012](0012-host-mode.md) adds host mode. There the working folder inside Pi's jail is an empty folder, and only the tool host reaches the real machine; the jail itself does not change.

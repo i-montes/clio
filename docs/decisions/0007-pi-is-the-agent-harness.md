@@ -23,3 +23,5 @@ Facts checked against Pi 1.4.0 (published 2026-10-21, MIT, package `@earendil-wo
 ## Consequences
 
 Tasks 098 to 102 change shape: 098 is the Rust side that launches and talks to Pi, 099 is reversed (Pi keeps the sessions; Clio lists and opens them), 100 and 101 are the launch flags plus the guard. The sessions of the abandoned own design are not built. The old `@mariozechner/*` package names are replaced by `@earendil-works/*`.
+
+Later: point 6 was done by [ADR 0009](0009-pi-runs-inside-a-jail.md) (Pi runs in a `bwrap` jail with the provider as its only network destination), and [ADR 0012](0012-host-mode.md) points the tools at the real machine in host mode.

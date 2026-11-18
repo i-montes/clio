@@ -4,7 +4,7 @@ Status: accepted (2026-11-03). Stage 1 (reading) and stage 2 (`memory_propose`, 
 
 ## Context
 
-The chat with Pi, the main path, did not use memory: the guard's `memoryLayer()` was empty, and `memory_link` served only `clio run` (the own loop) and the memory screen. The person asked for "a tool that connects clio agent with clio memory", made "the best way for the security and integrity of the data". Reading cannot hurt the data; writing can drown the person's review (S-25), and a hostile text that reaches memory persists (`docs/threat-model.md`, "La memoria como superficie").
+The chat with Pi, the main path, did not use memory: the guard's `memoryLayer()` was empty, and `memory_link` served only `clio run` (the own loop) and the memory screen. The person asked for "a tool that connects clio agent with clio memory", made "the best way for the security and integrity of the data". Reading cannot hurt the data; writing can drown the person's review (S-25), and a hostile text that reaches memory persists (`docs/threat-model.md`, "Memory as an attack surface").
 
 ## Decision
 
@@ -43,10 +43,11 @@ Rulings: proposals are made during the session, not only at its close (a Pi chat
 
 ## Stage 3: the judge (2026-11-03)
 
-By the person's decision («todo lo debe aprobar Jev»), a proposal no longer always waits in quarantine: when Jev is on, a judge decides it (`docs/specs/2026-11-03-jev-design.md`, S-64). What changes and what does not:
+By the person's decision ("Jev must approve everything"), a proposal no longer always waits in quarantine: when Jev is on, a judge decides it (`docs/specs/2026-11-03-jev-design.md`, S-64). What changes and what does not:
 
 - **The engine** has a fourth kind of actor, `Judge`, that only `Engine::judge()` makes and that can do one thing, `propose_judged`: add (active even where the rules would hold the text), replace an active memory of the same scope and kind, or note that it is already known. The checks of `propose` (quota of the proposer, size, secrets) run first; the memory keeps the agent as its author and origin `external` (reading it still taints a session); the operation is signed by the judge and can be reverted; the judge has no review powers and cannot propose for itself. What the person wrote, or a fixed block holds, is replaced only with the caller's `person_confirmed`.
 - **The tool host's port** (`LinkPort`, in the service process) asks Jev one closed question about the text and up to three similar active memories, and acts only above a confidence (0.8; 0.9 a procedure; +0.05 after the session read something hostile). Anything else (Jev off, down, without key or budget, the vault unable to clean the text, an option that was not offered, the engine refusing) is what it was before: the proposal waits for the person.
 - **To replace what the person wrote**, the judge needs Jev to confirm, from the person's own last words in the session, that they said the new fact. Those words reach the service from the brain (`said`), never from the model.
 - **The model** is told in fixed words what became of its proposal (`saved`, `already known`, `proposed`); the cap per session is 5 if it read something hostile and 30 if not, and the hourly quota of the actor `agente` is the rate limit.
 
+Later: the spec `docs/specs/2026-11-04-clio-memory-standalone-design.md` (S-61, S-65) replaced stages 2 and 3: the memory is the agent's, what it saves with `memory_save` is active at once with its origin marked, quarantine holds only what was forgotten, and Jev checks a save before it is written (S-64). The guard now registers thirteen memory tools.

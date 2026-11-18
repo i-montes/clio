@@ -13,7 +13,7 @@ Three places were possible: **A** around `run_prompt` in `clio-brain` (the Clio 
 - **S-01 and S-11:** control must hold even if Pi or the model misbehave, so it lives in code outside the model and outside Pi's loop. An extension runs inside Pi's process with Pi's privileges and reloads hot (the "extensions can do everything" gap of `docs/security.md`): the wrong place for a limit that must not move.
 - **S-07:** the level and the contract come only from the person's message, so they are computed in the brain before the prompt reaches Pi, and nothing Pi reads can lower the level or change the goal.
 - **Service protocol (ADR 0007, point 3):** the Clio service owns the Pi processes, the sessions and the task record; the terminal is a window onto it and a remote session is the same service on another host. The control layer belongs to the service, not to a window and not to Pi.
-- **«Another process, not the one that wrote» (design v2):** verification becomes true by construction: Pi writes, the brain verifies.
+- **"Another process, not the one that wrote" (design v2):** verification becomes true by construction: Pi writes, the brain verifies.
 - **Memory (S-25 to S-27):** the write at close goes through `memory_link`, the only writer.
 
 ## Shape
