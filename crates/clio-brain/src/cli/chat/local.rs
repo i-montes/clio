@@ -59,11 +59,23 @@ pub fn ready(dirs: &Dirs) -> Res<()> {
 
 pub struct LocalSource {
     dirs: Arc<Dirs>,
+    /// A conversation: Clio introduces herself to a person the memory does not know.
+    presentation: bool,
 }
 
 impl LocalSource {
     pub fn new(dirs: Arc<Dirs>) -> Self {
-        Self { dirs }
+        Self {
+            dirs,
+            presentation: true,
+        }
+    }
+
+    /// One instruction (`clio run`), not a conversation: nobody is there to answer.
+    #[must_use]
+    pub fn one_shot(mut self) -> Self {
+        self.presentation = false;
+        self
     }
 
     /// The only folder a session of Clio may work in: the copy of its run.
@@ -217,6 +229,7 @@ impl SessionSource for LocalSource {
             &pi.session_id,
             &run_dir,
             project.as_deref(),
+            self.presentation,
         );
         pre.set_summaries(cfg.memory.session_summary);
         // A session that was marked before (the service leaves the mark in the run folder) is
@@ -240,7 +253,9 @@ impl SessionSource for LocalSource {
             busy: Mutex::new(()),
         };
         let refresh = s.refresh().ok();
+        let presentation = s.pre.presenting();
         Ok(Opened {
+            presentation,
             id: s.pi.session_id.clone(),
             workspace: work.display().to_string(),
             history,

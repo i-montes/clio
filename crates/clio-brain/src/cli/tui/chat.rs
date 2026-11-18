@@ -1200,6 +1200,47 @@ mod tests {
         app
     }
 
+    // The first time, Clio speaks first: the chat starts a turn with no words of the person, and
+    // nothing of the person's shows for it, now or when the session is opened again.
+    #[test]
+    fn a_session_that_presents_starts_its_own_turn_and_shows_no_words_of_the_person() {
+        use super::super::app::{Bg, ChatInfo, Input, update};
+        let opened = |presentation| {
+            let mut app = open_chat();
+            app.chat = Chat::opening(1, 0);
+            let info = ChatInfo {
+                id: "sid".into(),
+                workspace: String::new(),
+                history: vec![],
+                refresh: None,
+                presentation,
+            };
+            update(
+                app,
+                Input::Bg(Bg::ChatOpened {
+                    seq: 1,
+                    result: Ok(Box::new(info)),
+                }),
+            )
+        };
+        let (app, cmds) = opened(true);
+        assert_eq!(
+            cmds,
+            vec![Cmd::ChatSend {
+                text: String::new()
+            }]
+        );
+        assert!(app.chat.running && app.chat.items.is_empty());
+        let (app, cmds) = opened(false);
+        assert!(cmds.is_empty() && !app.chat.running);
+        // Reopened: the turn's message is only Clio's envelope.
+        let mut c = Chat::opening(1, 0);
+        let wrapped = clio_brain::pi::envelope::wrap("2026-11-03 18:42 -05:00", "");
+        let h = vec![json!({"role":"user","content":[{"type":"text","text":wrapped}]})];
+        c.opened("sid".into(), String::new(), &h, None, 0);
+        assert!(c.items.is_empty());
+    }
+
     #[test]
     fn enter_sends_then_steers_esc_aborts_then_leaves_and_ctrl_c_quits() {
         let none = KeyModifiers::NONE;

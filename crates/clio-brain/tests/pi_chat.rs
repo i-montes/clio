@@ -72,6 +72,21 @@ impl World {
         w
     }
 
+    /// The memory knows who the person is (something in the block `preferencias`).
+    fn known(&self) {
+        let o = self
+            .clio(&[
+                "memory",
+                "remember",
+                "La persona ya se presentó",
+                "--block",
+                "preferencias",
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+
     fn home(&self) -> PathBuf {
         self.tmp.path().join("home")
     }
@@ -112,6 +127,12 @@ impl World {
     /// `pty` with more driver settings in `extra`, more variables, and the `key` that must reach
     /// no screen.
     fn pty_with(&self, scenario: &str, extra: Value, env: &[(&str, &str)], key: &str) -> Value {
+        // The interface has Clio introduce herself to a person the memory does not know yet;
+        // the other scenarios are about something else, so there the person is known (unless
+        // `extra` says `"as_is": true`).
+        if scenario != "present" && extra["as_is"] != json!(true) {
+            self.known();
+        }
         let mut vars = self
             .envs()
             .into_iter()
@@ -1280,9 +1301,145 @@ fn a_reopened_session_is_told_who_clio_is_again() {
     reopen(&w, &[], &decoy());
     for asked in ["primera pregunta", "segunda pregunta"] {
         let said = told_with(&w, asked);
-        assert!(
-            said.contains(&format!("{IDENTITY_HEADING}[m1] Eres Clio")),
-            "{said}"
-        );
+        let at = said
+            .find(IDENTITY_HEADING)
+            .unwrap_or_else(|| panic!("{said}"));
+        assert!(said[at..].contains("] Eres Clio, la asistente"), "{said}");
     }
+}
+
+const PRESENTATION: &str = "Es tu primera conversación con esta persona";
+
+// The first time, Clio speaks first: nobody typed, and the model was asked to introduce herself.
+#[test]
+fn clio_introduces_herself_the_first_time() {
+    if can_run("present", true).is_none() {
+        return;
+    }
+    let w = World::new(r#"[{"text":"Hola, soy Clio. ¿Cómo te llamas?","usage":[10,2]}]"#);
+    let _vault = start_vault(&w, "jev-test-key-7272");
+    let v = w.pty_with(
+        "present",
+        json!({"answer": "Hola, soy Clio"}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["opened", "spoke_first"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    let said = what_the_model_was_told(&w);
+    assert!(said.contains(PRESENTATION), "{said}");
+    assert!(said.contains(IDENTITY_HEADING), "{said}");
+    assert_eq!(
+        clio_brain::pi::envelope::strip(&said),
+        "",
+        "no words of the person"
+    );
+}
+
+// What the person tells her in the presentation is hers, and once she is known the request stops.
+#[test]
+fn the_presentation_saves_who_the_person_is() {
+    if can_run("present_saves", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        &json!([
+            {"tool_calls": [{"name": "memory_block_edit", "arguments": {
+                "reason": "lo que dijo la persona", "name": "preferencias", "action": "add",
+                "text": "Se llama Marta y quiere que le hablen de tú"}}]},
+            {"text": "Encantada, Marta", "usage": [10, 2]},
+            {"text": "segunda respuesta", "usage": [10, 2]},
+        ])
+        .to_string(),
+    );
+    let _vault = start_vault(&w, "jev-test-key-7373");
+    let v = w.pty_with(
+        "present",
+        json!({"answer": "Encantada, Marta"}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["opened", "spoke_first"]);
+    let link = clio_brain::memory_link::MemoryLink::open_read(
+        &w.home().join(".local/share/clio"),
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .unwrap();
+    let rows = link.block_rows("preferencias").unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].content,
+        "Se llama Marta y quiere que le hablen de tú"
+    );
+    assert_eq!(rows[0].origin, clio_memory::Origin::User);
+    drop(link);
+    // Another session, the memory as it is: nobody is asked to introduce herself any more.
+    let v = w.pty_with(
+        "one_turn",
+        json!({"ask": "primera pregunta", "answer": "segunda respuesta", "as_is": true}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["opened", "answered"]);
+    let said = told_with(&w, "primera pregunta");
+    assert!(!said.contains(PRESENTATION), "{said}");
+    assert!(said.contains("Se llama Marta"), "{said}");
+    assert_eq!(presentations(&w), 1, "only the first session asked");
+}
+
+// `clio run` is one instruction, not a conversation: it carries who Clio is, never the request.
+#[test]
+fn clio_run_on_a_new_machine_does_not_present() {
+    if can_run("run_no_present", false).is_none() {
+        return;
+    }
+    let w = World::new(r#"[{"text":"listo","usage":[10,2]}]"#);
+    let _vault = start_vault(&w, "jev-test-key-7474");
+    let o = w
+        .clio(&["run", "--harness", "pi", "haz algo"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let said = what_the_model_was_told(&w);
+    assert!(said.contains(IDENTITY_HEADING), "{said}");
+    assert!(!said.contains(PRESENTATION), "{said}");
+}
+
+// A person who closes without answering is asked again the next time.
+#[test]
+fn a_presentation_left_unanswered_is_asked_again() {
+    if can_run("present_again", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"text":"Hola, soy Clio","usage":[10,2]},{"text":"Hola otra vez","usage":[10,2]}]"#,
+    );
+    let _vault = start_vault(&w, "jev-test-key-7575");
+    let v = w.pty_with(
+        "present",
+        json!({"answer": "Hola, soy Clio"}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["opened", "spoke_first"]);
+    let v = w.pty_with("present", json!({"answer": "Hola otra vez"}), &[], &decoy());
+    ok(&v, &["opened", "spoke_first"]);
+    assert_eq!(presentations(&w), 2);
+}
+
+/// How many turns started with the presentation request (a request that ends in a tool result
+/// goes on with the same turn).
+fn presentations(w: &World) -> usize {
+    let log = std::fs::read_to_string(&w._provider.log).unwrap();
+    log.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["roles"].as_array().and_then(|r| r.last()) == Some(&json!("user")))
+        .filter(|e| {
+            e["last_user"]
+                .as_str()
+                .is_some_and(|t| t.contains(PRESENTATION))
+        })
+        .count()
 }

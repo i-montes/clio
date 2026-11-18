@@ -17,7 +17,7 @@ use crate::cli::tui::sanitize;
 use crate::cli::usage;
 
 pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str) -> Res<i32> {
-    let source = LocalSource::new(Arc::new(dirs));
+    let source = LocalSource::new(Arc::new(dirs)).one_shot();
     let opened = source.open(&Target::New { project: workspace })?;
     println!("run: {}", opened.id);
     let mut out = std::io::stdout();

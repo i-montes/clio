@@ -192,6 +192,13 @@ impl Recall for MemoryRecall {
         .unwrap_or_default()
     }
 
+    /// Something in `preferencias`. A memory that cannot be read says yes: Clio does not ask what
+    /// she could not keep.
+    fn presented(&self) -> bool {
+        self.with_link(|link| Some(!link.block_rows("preferencias").ok()?.is_empty()))
+            .unwrap_or(true)
+    }
+
     fn candidates(&self, query: &str, limit: usize) -> Vec<Candidate> {
         self.with_link(|link| {
             let (rows, abstained) = link.search_all(query, limit).ok()?;
@@ -260,6 +267,7 @@ pub fn closing_to_host(socket: &Path, session: &str, token: &str) -> bool {
 }
 
 /// Everything that goes in front of a message in this chat.
+#[allow(clippy::too_many_arguments)]
 pub fn preprompt(
     dirs: &Dirs,
     cfg: &JevCfg,
@@ -268,6 +276,7 @@ pub fn preprompt(
     session: &str,
     run_dir: &Path,
     project: Option<&str>,
+    presentation: bool,
 ) -> PrePrompt {
     let models = MemoryLink::model_dirs(&dirs.home);
     let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(&dirs.data, &models, project));
@@ -294,6 +303,7 @@ pub fn preprompt(
         Settings {
             memory: cfg.memory,
             tool_hints: cfg.tool_hints,
+            presentation,
         },
     )
 }

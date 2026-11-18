@@ -52,10 +52,16 @@ pub trait Recall: Send + Sync {
     /// What matches `query`, best first, at most `limit`; nothing when the memory says nothing is
     /// relevant.
     fn candidates(&self, query: &str, limit: usize) -> Vec<Candidate>;
+    /// Whether the memory knows who the person is (Clio has introduced herself).
+    fn presented(&self) -> bool {
+        true
+    }
 }
 
 /// What Clio asks after Pi compacted the conversation.
 pub const COMPACTED_ASK: &str = "la conversación se acaba de compactar: antes de responder, guarda el resumen de lo hecho hasta ahora con memory_session_summary y recupera el contexto con memory_context.";
+/// What Clio asks in the first message of a session while the memory does not know the person.
+pub const PRESENTATION_ASK: &str = "Es tu primera conversación con esta persona. Antes de cualquier otra cosa, preséntate en dos o tres líneas con lo que dice tu identidad. Luego hazle estas preguntas, una por una, esperando cada respuesta: 1) cómo se llama y cómo quiere que le hables; 2) a qué se dedica y qué tiene en esta máquina; 3) qué quiere que vigiles; 4) qué cuenta como importante para avisarle. Guarda cada respuesta con memory_block_edit: lo de la persona en «preferencias» y cada cosa a vigilar en «vigilancia», una por entrada. Si quiere cambiar cómo eres o cómo hablas, cambia «identidad» o «reglas». Si no quiere responder ahora, guarda en «preferencias» que prefirió no presentarse y no insistas. Al terminar, dile que puede cambiar todo esto cuando quiera, hablando contigo.";
 /// What Clio asks when the person closes the session.
 pub const CLOSING_ASK: &str = "la persona cerró esta sesión: guarda su resumen con memory_session_summary y no hagas nada más (no cambies archivos ni le respondas).";
 
@@ -65,6 +71,9 @@ pub struct Settings {
     pub memory: bool,
     /// Suggest tools.
     pub tool_hints: bool,
+    /// A conversation (the interface), not one instruction (`clio run`): Clio introduces herself
+    /// to a person the memory does not know.
+    pub presentation: bool,
 }
 
 /// The vault's scrubber as the brain sees it: an error means the text does not leave and is not
@@ -107,6 +116,8 @@ struct Inner {
     hooks: Hooks,
     settings: Settings,
     first: AtomicBool,
+    /// No message of this session has been prepared yet.
+    opening: AtomicBool,
     /// Ask for the session's summary (the person did not turn it off in `memory.session_summary`).
     summaries: AtomicBool,
     /// Pi compacted the conversation: the next message asks for the summary first.
@@ -145,6 +156,7 @@ impl PrePrompt {
             hooks,
             settings,
             first: AtomicBool::new(true),
+            opening: AtomicBool::new(true),
             summaries: AtomicBool::new(false),
             compacted: AtomicBool::new(false),
             shown: Mutex::new((HashSet::new(), 0)),
@@ -162,6 +174,7 @@ impl PrePrompt {
             Settings {
                 memory: false,
                 tool_hints: false,
+                presentation: false,
             },
         )
     }
@@ -234,11 +247,22 @@ impl PrePrompt {
         self.0.prepare(person_text, stamp, self.take_ask())
     }
 
+    /// Whether the next message is a session's first and asks Clio to introduce herself: the
+    /// interface then sends it on its own, with no words of the person.
+    pub fn presenting(&self) -> bool {
+        self.0.opening.load(Ordering::SeqCst)
+            && self.0.settings.presentation
+            && self.0.recall.as_ref().is_some_and(|r| !r.presented())
+    }
+
     fn take_ask(&self) -> Option<&'static str> {
-        self.0
-            .compacted
-            .swap(false, Ordering::SeqCst)
-            .then_some(COMPACTED_ASK)
+        let presenting = self.presenting();
+        self.0.opening.store(false, Ordering::SeqCst);
+        if self.0.compacted.swap(false, Ordering::SeqCst) {
+            Some(COMPACTED_ASK)
+        } else {
+            presenting.then_some(PRESENTATION_ASK)
+        }
     }
 }
 
@@ -484,9 +508,13 @@ mod tests {
         found: Mutex<Vec<Candidate>>,
         asked: Arc<Mutex<Vec<String>>>,
         slow: Duration,
+        presented: AtomicBool,
     }
 
     impl Recall for Memory {
+        fn presented(&self) -> bool {
+            self.presented.load(Ordering::SeqCst)
+        }
         fn fixed(&self) -> Vec<Candidate> {
             self.fixed.clone()
         }
@@ -523,6 +551,57 @@ mod tests {
             entry(2, "No borras nada sin permiso", "reglas"),
             entry(3, "Se llama Marta", "preferencias"),
         ]
+    }
+
+    fn presenting(presentation: bool, presented: bool) -> Rig {
+        let mut o = opts(false, &[], vec![]);
+        o.fixed = blocks();
+        o.presentation = presentation;
+        o.presented = presented;
+        rig(o)
+    }
+
+    #[test]
+    fn the_first_message_asks_for_the_presentation() {
+        let r = presenting(true, false);
+        assert!(r.pp.presenting());
+        // The interface sends it with no words of the person.
+        let p = r.pp.prepare("", STAMP);
+        assert!(
+            p.text.contains(&format!(
+                "pedido de Clio: {PRESENTATION_ASK}\n</clio-contexto>"
+            )),
+            "{}",
+            p.text
+        );
+        assert!(p.text.contains(IDENTITY), "with who she is: {}", p.text);
+        assert_eq!(envelope::strip(&p.text), "");
+        assert!(!r.pp.presenting());
+        assert!(!r.pp.prepare("hola", STAMP).text.contains("pedido de Clio"));
+    }
+
+    #[test]
+    fn it_stops_once_the_person_is_known() {
+        let r = presenting(true, true);
+        assert!(!r.pp.presenting());
+        assert!(!r.pp.prepare("hola", STAMP).text.contains("pedido de Clio"));
+    }
+
+    #[test]
+    fn a_one_shot_run_is_never_asked_to_present() {
+        let r = presenting(false, false);
+        assert!(!r.pp.presenting());
+        let p = r.pp.prepare("haz algo", STAMP);
+        assert!(!p.text.contains("pedido de Clio"), "{}", p.text);
+        assert!(p.text.contains(IDENTITY), "{}", p.text);
+    }
+
+    #[test]
+    fn the_presentation_request_is_the_one_in_the_plan() {
+        assert!(PRESENTATION_ASK.starts_with(
+            "Es tu primera conversación con esta persona. Antes de cualquier otra cosa"
+        ));
+        assert!(PRESENTATION_ASK.ends_with("hablando contigo."));
     }
 
     #[test]
@@ -601,6 +680,8 @@ mod tests {
         found: Vec<Candidate>,
         fail_from: u32,
         slow: Duration,
+        presentation: bool,
+        presented: bool,
     }
 
     fn opts(jev: bool, probs: &[(&'static str, f64)], found: Vec<Candidate>) -> Opts {
@@ -611,6 +692,8 @@ mod tests {
             found,
             fail_from: u32::MAX,
             slow: Duration::ZERO,
+            presentation: false,
+            presented: true,
         }
     }
 
@@ -638,6 +721,7 @@ mod tests {
             found: Mutex::new(o.found),
             asked: asked.clone(),
             slow: o.slow,
+            presented: AtomicBool::new(o.presented),
         });
         let (t, ct, lg) = (tainted.clone(), can_taint.clone(), logged.clone());
         let pp = PrePrompt::new(
@@ -655,6 +739,7 @@ mod tests {
             Settings {
                 memory: true,
                 tool_hints: true,
+                presentation: o.presentation,
             },
         );
         Rig {
@@ -843,6 +928,7 @@ mod tests {
             Settings {
                 memory: true,
                 tool_hints: true,
+                presentation: false,
             },
         );
         let p = pp.prepare("hola", STAMP);
@@ -985,6 +1071,7 @@ mod tests {
             Settings {
                 memory: false,
                 tool_hints: false,
+                presentation: false,
             },
         );
         assert_eq!(pre.closing_text(STAMP), None);

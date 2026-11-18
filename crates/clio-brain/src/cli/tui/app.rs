@@ -171,6 +171,8 @@ pub struct ChatInfo {
     pub workspace: String,
     pub history: Vec<serde_json::Value>,
     pub refresh: Option<Refresh>,
+    /// Clio speaks first.
+    pub presentation: bool,
 }
 
 impl From<&Opened> for ChatInfo {
@@ -180,6 +182,7 @@ impl From<&Opened> for ChatInfo {
             workspace: o.workspace.clone(),
             history: o.history.clone(),
             refresh: o.refresh.clone(),
+            presentation: o.presentation,
         }
     }
 }
@@ -670,13 +673,23 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 return vec![];
             }
             match result {
-                Ok(info) => app.chat.opened(
-                    info.id,
-                    info.workspace,
-                    &info.history,
-                    info.refresh,
-                    app.now_ms,
-                ),
+                Ok(info) => {
+                    app.chat.opened(
+                        info.id,
+                        info.workspace,
+                        &info.history,
+                        info.refresh,
+                        app.now_ms,
+                    );
+                    // Clio introduces herself: a turn with no words of the person, so nothing
+                    // of hers goes into the chat.
+                    if info.presentation {
+                        app.chat.running = true;
+                        return vec![Cmd::ChatSend {
+                            text: String::new(),
+                        }];
+                    }
+                }
                 Err(e) => {
                     app.chat.opening = false;
                     app.chat.failed = Some(e);

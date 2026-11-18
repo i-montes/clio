@@ -292,6 +292,18 @@ elif scenario == "summary":
     out["code"] = wait_exit(fd, pid, 60)
     out["procs_at_exit"] = [c for _, c in pi_procs()]
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "present":
+    # A new session where nobody types: Clio speaks first (cfg "answer"), then leave.
+    ok = wait_screen(fd, "nueva sesión")
+    send(fd, ENTER)
+    out["opened"] = ok
+    out["spoke_first"] = wait_screen(fd, cfg["answer"], 60) and wait_screen(fd, "listo", 30)
+    if not out["spoke_first"]:
+        out["screen"] = screen()
+    out["screen_after"] = screen()
+    send(fd, CTRL_C)
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "sigkill":
     out["opened"] = open_new_chat(fd)
     out["procs_while_open"] = len(pi_procs())

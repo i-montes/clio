@@ -102,6 +102,8 @@ pub struct Opened {
     /// Pi's messages so far (a reopened session has them).
     pub history: Vec<Value>,
     pub refresh: Option<Refresh>,
+    /// Clio speaks first: the interface starts the first turn itself, with no words of the person.
+    pub presentation: bool,
 }
 
 /// An open session. Every method may be called from any thread: `steer` comes while another
