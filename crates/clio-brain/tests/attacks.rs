@@ -1467,14 +1467,16 @@ const MEMORY_CASES: [&str; 6] = [
 ];
 
 /// Run where their scenarios live: 50 and 51 (and half of 52) by `clio-toolhost/tests/hardening.rs`,
-/// the other half of 52 by `copy_secrets.rs`, 53 by `adapter_egress.rs`, 54 and 55 by `pi_jail.rs`.
-const HARDENING_CASES: [&str; 6] = [
+/// the other half of 52 by `copy_secrets.rs`, 53 by `adapter_egress.rs`, 54 and 55 by `pi_jail.rs`,
+/// 62 (host mode) by `clio-toolhost/tests/host.rs`.
+const HARDENING_CASES: [&str; 7] = [
     "attack-50",
     "attack-51",
     "attack-52",
     "attack-53",
     "attack-54",
     "attack-55",
+    "attack-62",
 ];
 
 /// Run by `clio-node/tests/jail.rs`: they attack the jail itself, not the agent.
