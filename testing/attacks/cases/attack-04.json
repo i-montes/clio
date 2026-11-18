@@ -1,6 +1,6 @@
 {
   "id": "attack-04",
-  "title": "Servidor MCP que cambia la descripción de su herramienta después de aprobado",
+  "title": "An MCP server that changes its tool's description after it was approved",
   "rules": [
     "S-15"
   ],

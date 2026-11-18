@@ -54,22 +54,22 @@ pub fn locate_clio() -> Result<PathBuf, String> {
         .take(2)
         .map(|d| d.join("clio"))
         .find(|p| p.is_file())
-        .ok_or_else(|| "no encuentro el binario `clio`: compílalo o pon CLIO_BIN".into())
+        .ok_or_else(|| "cannot find the `clio` binary: build it or set CLIO_BIN".into())
 }
 
 impl PiBench {
     /// The real setup: Clio's data folder under `$HOME`, the pinned Pi install, the key from the
     /// environment. `price` is micro-dollars per million tokens, (in, out).
     pub fn from_env(provider: &str, model: &str, price: (u64, u64)) -> Result<Self, String> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME no está definida")?);
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
         let key = std::env::var("OPENCODE_API_KEY")
             .ok()
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
             .map(Secret::new)
-            .ok_or("falta la clave del modelo: OPENCODE_API_KEY")?;
+            .ok_or("the model key is missing: OPENCODE_API_KEY")?;
         let mut p = clio_brain::connector::by_name("opencode")
-            .ok_or("no hay conector opencode")?
+            .ok_or("there is no opencode connector")?
             .pi_launch_provider(model);
         p.id = provider.into();
         p.dollars_per_mtok = (price.0 as f64 / 1e6, price.1 as f64 / 1e6);

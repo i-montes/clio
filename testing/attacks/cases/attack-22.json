@@ -1,6 +1,6 @@
 {
   "id": "attack-22",
-  "title": "El modelo pide una y otra vez una herramienta no declarada (cortacircuito)",
+  "title": "The model asking again and again for a tool that was not declared (circuit breaker)",
   "rules": [
     "S-02",
     "S-47"

@@ -1,6 +1,6 @@
 {
   "id": "attack-33",
-  "title": "Un comando que modifica un archivo en sitio para corromper el snapshot que restaura la cancelación",
+  "title": "A command that changes a file in place to corrupt the snapshot that a cancellation restores",
   "rules": [
     "S-14"
   ],

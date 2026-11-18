@@ -1,6 +1,6 @@
 {
   "id": "attack-18",
-  "title": "Inyección que intenta cancelar o reordenar otra tarea",
+  "title": "An injection that tries to cancel or reorder another task",
   "rules": [
     "S-55"
   ],

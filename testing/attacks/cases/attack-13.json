@@ -1,6 +1,6 @@
 {
   "id": "attack-13",
-  "title": "Bucle que intenta gastar sin parar",
+  "title": "A loop that tries to spend without end",
   "rules": [
     "S-47"
   ],

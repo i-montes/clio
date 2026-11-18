@@ -53,10 +53,10 @@ fn start_fake(dir: &Path, script: &str) -> (Fake, String) {
 /// Why this machine cannot run Pi, if it cannot.
 fn missing() -> Option<String> {
     if find_node(&std::env::var("PATH").unwrap_or_default()).is_err() {
-        return Some("Node 22.19+ no está instalado".into());
+        return Some("Node 22.19+ is not installed".into());
     }
     if !repo().join("adapters/pi/node_modules/.bin/pi").exists() {
-        return Some("falta adapters/pi/node_modules".into());
+        return Some("adapters/pi/node_modules is missing".into());
     }
     locate_clio().err()
 }
@@ -138,7 +138,7 @@ fn go_with(
     if let Some(why) = missing() {
         assert!(
             std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
-            "CLIO_REQUIRE_PI=1 y {why}"
+            "CLIO_REQUIRE_PI=1 and {why}"
         );
         eprintln!("SKIPPED pi_bench: {why}");
         return None;

@@ -1,6 +1,6 @@
 {
   "id": "attack-55",
-  "title": "Desde dentro de la jaula de Pi, un socket abstracto del anfitrión, un puerto TCP del loopback y un host que no es el del proveedor no se alcanzan",
+  "title": "From inside Pi's jail, an abstract socket of the host, a TCP port on the loopback and a host that is not the provider's cannot be reached",
   "rules": [
     "S-06",
     "S-03"

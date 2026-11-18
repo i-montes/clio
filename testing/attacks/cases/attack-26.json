@@ -1,6 +1,6 @@
 {
   "id": "attack-26",
-  "title": "Un comando ejecutado en la jaula escribe en /usr, en /etc, en la raíz o en el HOME real",
+  "title": "A command run in the jail writes in /usr, in /etc, in the root or in the real HOME",
   "rules": [
     "S-03"
   ],

@@ -1,6 +1,6 @@
 {
   "id": "attack-60",
-  "title": "Con Pi real y sin Jev: argumentos que no existen (origin, scope, actor) se rechazan; purgar, archivar o aceptar un recuerdo no existe (PURGE es solo de la persona y nada espera revisión); deshacer un cambio de la persona, pedido directamente al socket del servicio, dice que no y no cambia nada",
+  "title": "With the real Pi and without Jev: arguments that do not exist (origin, scope, actor) are refused; purging, archiving or accepting a memory does not exist (PURGE is only the person's, and nothing waits for review); undoing a change of the person, asked straight of the service's socket, says no and changes nothing",
   "rules": [
     "S-02",
     "S-25",

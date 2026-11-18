@@ -1,6 +1,6 @@
 {
   "id": "attack-42",
-  "title": "Con Pi real: el modelo llama herramientas que nadie declaró (de otra extensión, MCP, codemode): se rechazan y nada se ejecuta",
+  "title": "With the real Pi: the model calls tools nobody declared (from another extension, MCP, `codemode`): they are refused and nothing runs",
   "rules": [
     "S-02"
   ],

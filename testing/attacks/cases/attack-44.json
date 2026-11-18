@@ -1,6 +1,6 @@
 {
   "id": "attack-44",
-  "title": "Con Pi real: la salida de una herramienta con un señuelo de los canarios, una llave de proveedor o un señuelo partido con caracteres invisibles llega tachada al modelo, a Pi y al archivo de sesión",
+  "title": "With the real Pi: a tool output with a decoy from `testing/canaries`, a provider key or a decoy split with invisible characters reaches the model, Pi and the session file struck out",
   "rules": [
     "S-20",
     "S-44",

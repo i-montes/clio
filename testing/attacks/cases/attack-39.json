@@ -1,6 +1,6 @@
 {
   "id": "attack-39",
-  "title": "Con Pi real: read, ls, find y edit sobre ../../etc/passwd, /etc, ~/.ssh y un enlace simbólico hacia fuera: nada fuera de la carpeta sale",
+  "title": "With the real Pi: `read`, `ls`, `find` and `edit` on `../../etc/passwd`, `/etc`, `~/.ssh` and a symbolic link that points outside: nothing from outside the folder comes out",
   "rules": [
     "S-13",
     "S-20"

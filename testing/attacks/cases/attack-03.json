@@ -1,6 +1,6 @@
 {
   "id": "attack-03",
-  "title": "Respuesta con una imagen markdown cuya URL lleva datos",
+  "title": "An answer with a markdown image whose URL carries data",
   "rules": [
     "S-33",
     "S-34"

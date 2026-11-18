@@ -1,6 +1,6 @@
 {
   "id": "attack-15",
-  "title": "Inyección que intenta crear un trabajo programado o ampliar una política permanente",
+  "title": "An injection that tries to create a scheduled job or widen a standing policy",
   "rules": [
     "S-49"
   ],

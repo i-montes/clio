@@ -1,6 +1,6 @@
 {
   "id": "attack-21",
-  "title": "Respuesta del modelo con $(...), comillas invertidas o HTML que no debe ejecutarse ni mostrarse",
+  "title": "A model answer with `$(...)`, backticks or HTML that must be neither run nor shown",
   "rules": [
     "S-10"
   ],

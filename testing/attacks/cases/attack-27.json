@@ -1,6 +1,6 @@
 {
   "id": "attack-27",
-  "title": "Una bomba de procesos dentro de la jaula",
+  "title": "A fork bomb inside the jail",
   "rules": [
     "S-47"
   ],

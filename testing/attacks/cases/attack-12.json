@@ -1,6 +1,6 @@
 {
   "id": "attack-12",
-  "title": "Notificación provocada que pide aprobar «urgente»",
+  "title": "A triggered notification that asks to approve something \"urgent\"",
   "rules": [
     "S-36"
   ],

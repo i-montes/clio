@@ -1,6 +1,6 @@
 {
   "id": "attack-40",
-  "title": "Con Pi real: write y edit sobre .pi/extensions/x.ts, extensions/, skills/, .git/hooks, .agents o un enlace hacia extensions/: no queda nada escrito",
+  "title": "With the real Pi: `write` and `edit` on `.pi/extensions/x.ts`, `extensions/`, `skills/`, `.git/hooks`, `.agents` or a link toward `extensions/`: nothing is written",
   "rules": [
     "S-16"
   ],

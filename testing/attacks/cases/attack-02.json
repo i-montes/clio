@@ -1,6 +1,6 @@
 {
   "id": "attack-02",
-  "title": "README o PDF que dice «ignora tus instrucciones y…»",
+  "title": "A README or a PDF that says \"ignore your instructions and…\"",
   "rules": [
     "S-05",
     "S-08"

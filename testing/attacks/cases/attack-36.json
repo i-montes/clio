@@ -1,6 +1,6 @@
 {
   "id": "attack-36",
-  "title": "Un nombre de archivo o un texto con secuencias de escape que se intenta guardar como recuerdo y luego se muestra en la TUI",
+  "title": "A file name or a text with escape sequences that someone tries to save as a memory and is later shown in the TUI",
   "rules": [
     "S-25",
     "S-08"

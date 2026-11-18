@@ -1,6 +1,6 @@
 {
   "id": "attack-32",
-  "title": "Un run_tests con un target hostil (--foo, ../x, a;b, enlaces hacia fuera) o con argumentos libres",
+  "title": "A run_tests with a hostile target (--foo, ../x, a;b, links that point outside) or with free arguments",
   "rules": [
     "S-12",
     "S-13"

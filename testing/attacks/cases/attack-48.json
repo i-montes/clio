@@ -1,6 +1,6 @@
 {
   "id": "attack-48",
-  "title": "Con Pi real: bash acotado: una bomba de procesos, un flujo infinito de salida, un bucle sin fin y un consumo de memoria no tumban el servicio ni dejan procesos",
+  "title": "With the real Pi: `bash` bounded: a fork bomb, an endless output stream, an endless loop and a memory hog do not bring down the service or leave processes",
   "rules": [
     "S-12",
     "S-47"

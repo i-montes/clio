@@ -1,6 +1,6 @@
 {
   "id": "attack-20",
-  "title": "Nombres de archivo con caracteres de control o marcadores falsos, y rutas con .. devueltas por una herramienta",
+  "title": "A file name with control characters or fake markers, and paths with `..` returned by a tool",
   "rules": [
     "S-05",
     "S-08",

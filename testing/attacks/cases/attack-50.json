@@ -1,6 +1,6 @@
 {
   "id": "attack-50",
-  "title": "Un FIFO dejado en la copia por un comando de la jaula no bloquea el servicio de herramientas (fs_read, fs_stat, snapshot)",
+  "title": "A FIFO left in the copy by a command in the jail does not block the tool service (`fs_read`, `fs_stat`, the snapshot)",
   "rules": [
     "S-13",
     "S-47"

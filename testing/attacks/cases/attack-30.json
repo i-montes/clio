@@ -1,6 +1,6 @@
 {
   "id": "attack-30",
-  "title": "Un comando en la jaula que intenta ver o matar procesos ajenos, entre ellos el que lo lanzó",
+  "title": "A command in the jail that tries to see or kill other processes, the one that launched it among them",
   "rules": [
     "S-03",
     "S-39"

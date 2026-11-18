@@ -1,6 +1,6 @@
 {
   "id": "attack-23",
-  "title": "URL con trucos que parece un dominio permitido y es otro (https://ok.com@evil.com/)",
+  "title": "A URL with tricks that looks like an allowed domain and is another (`https://ok.com@evil.com/`)",
   "rules": [
     "S-02",
     "S-06"

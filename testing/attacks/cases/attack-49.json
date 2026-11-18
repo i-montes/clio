@@ -1,6 +1,6 @@
 {
   "id": "attack-49",
-  "title": "Con Pi real: bash no puede escribir en .pi, extensions, skills, .claude, .git ni .agents, existan o no esas carpetas en la copia",
+  "title": "With the real Pi: `bash` cannot write in `.pi`, `extensions`, `skills`, `.claude`, `.git` or `.agents`, whether those folders exist in the copy or not",
   "rules": [
     "S-16"
   ],

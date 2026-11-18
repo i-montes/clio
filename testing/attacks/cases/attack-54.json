@@ -1,6 +1,6 @@
 {
   "id": "attack-54",
-  "title": "Un proceso lanzado como Pi (mismo usuario) no alcanza los sockets del vault",
+  "title": "A process launched as Pi (same user) cannot reach the vault's sockets",
   "rules": [
     "S-22",
     "S-03"

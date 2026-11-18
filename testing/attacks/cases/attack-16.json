@@ -1,6 +1,6 @@
 {
   "id": "attack-16",
-  "title": "Cambio propuesto por Clio que intenta fusionarse o desplegarse sin revisión",
+  "title": "A change proposed by Clio that tries to get merged or deployed without review",
   "rules": [
     "S-53"
   ],

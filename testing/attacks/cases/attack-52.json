@@ -1,6 +1,6 @@
 {
   "id": "attack-52",
-  "title": "Un archivo de credenciales (.npmrc, .netrc, id_ecdsa, *.p12...) no entra a la copia que lee el agente; un token dentro de otro archivo llega tachado con guía y no se puede reescribir ni aplicar",
+  "title": "A credentials file (`.npmrc`, `.netrc`, `id_ecdsa`, `*.p12`...) does not enter the copy the agent reads; a token inside another file arrives struck out, with a hint in its place, and that struck-out text cannot be written back into the copy or applied to the original",
   "rules": [
     "S-18",
     "S-44"

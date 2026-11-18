@@ -1,6 +1,6 @@
 {
   "id": "attack-47",
-  "title": "Con Pi real: treinta llamadas negadas seguidas abren el cortacircuito de la pasarela y una llamada legítima después ya no se ejecuta sola",
+  "title": "With the real Pi: thirty denied calls in a row open the gateway's circuit breaker and a legitimate call afterwards no longer runs by itself",
   "rules": [
     "S-02",
     "S-47"

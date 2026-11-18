@@ -1,6 +1,6 @@
 {
   "id": "attack-09",
-  "title": "Inyección que intenta bajar el nivel del triaje o cambiar el contrato",
+  "title": "An injection that tries to lower the triage level or change the contract",
   "rules": [
     "S-07"
   ],

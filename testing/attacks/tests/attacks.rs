@@ -56,10 +56,10 @@ fn an_active_case_that_gets_through_blocks_the_gate_and_pending_ones_are_listed_
 fn the_cases_match_the_battery_in_security_md() {
     let doc = security_md();
     let battery = doc
-        .split("### Batería de ataques")
+        .split("### Attack battery")
         .nth(1)
         .expect("section")
-        .split("### Si algo sale mal")
+        .split("### If something goes wrong")
         .next()
         .expect("end");
     let items = battery

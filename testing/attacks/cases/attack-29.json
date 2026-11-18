@@ -1,6 +1,6 @@
 {
   "id": "attack-29",
-  "title": "Un comando que inunda la salida estándar y de error",
+  "title": "A command that floods standard output and standard error",
   "rules": [
     "S-47"
   ],

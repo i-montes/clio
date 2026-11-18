@@ -1,6 +1,6 @@
 {
   "id": "attack-07",
-  "title": "Comandos con ;, $(...) y rutas con .. o enlaces simbólicos",
+  "title": "Commands with `;`, `$(...)` and paths with `..` or symbolic links",
   "rules": [
     "S-12",
     "S-13"

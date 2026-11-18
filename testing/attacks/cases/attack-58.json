@@ -1,6 +1,6 @@
 {
   "id": "attack-58",
-  "title": "Con Pi real: un valor del vault guardado dentro de un recuerdo llega tachado al modelo y no queda en el registro de hechos, en el de efectos ni en ningún archivo de la carpeta del run",
+  "title": "With the real Pi: a vault value saved inside a memory reaches the model struck out and stays neither in the facts log, the effects log nor any file of the run folder",
   "rules": [
     "S-18"
   ],

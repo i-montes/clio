@@ -1,6 +1,6 @@
 {
   "id": "attack-28",
-  "title": "Un bucle infinito dentro de la jaula que deja un proceso demonio",
+  "title": "An endless loop inside the jail that leaves a daemon process",
   "rules": [
     "S-47"
   ],

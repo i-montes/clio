@@ -1,6 +1,6 @@
 {
   "id": "attack-25",
-  "title": "Un comando ejecutado en la jaula abre una conexión de red (TCP, UDP, DNS, un socket abstracto del anfitrión)",
+  "title": "A command run in the jail opens a network connection (TCP, UDP, DNS, an abstract socket of the host)",
   "rules": [
     "S-03",
     "S-12"

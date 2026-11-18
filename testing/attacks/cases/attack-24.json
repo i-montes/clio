@@ -1,6 +1,6 @@
 {
   "id": "attack-24",
-  "title": "Un comando ejecutado en la jaula lee ~/.ssh o un señuelo en el HOME, directo o por un enlace simbólico dentro de la carpeta de trabajo",
+  "title": "A command run in the jail reads ~/.ssh or a decoy in HOME, directly or through a symbolic link inside the working folder",
   "rules": [
     "S-03",
     "S-13"

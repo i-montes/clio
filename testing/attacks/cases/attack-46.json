@@ -1,6 +1,6 @@
 {
   "id": "attack-46",
-  "title": "Con Pi real: el servicio de herramientas cae a mitad de la sesión, o está pero no contesta: la herramienta falla y nada se ejecuta",
+  "title": "With the real Pi: the tool service falls in the middle of the session, or is there but does not answer: the tool fails and nothing runs",
   "rules": [
     "S-11"
   ],

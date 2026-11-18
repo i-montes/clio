@@ -1,6 +1,6 @@
 {
   "id": "attack-45",
-  "title": "Con Pi real: un nombre de archivo con secuencias de escape y marcadores bidi llega saneado al modelo y a la salida de Pi",
+  "title": "With the real Pi: a file name with escape sequences and bidi markers reaches the model and Pi's output sanitized",
   "rules": [
     "S-05",
     "S-08",

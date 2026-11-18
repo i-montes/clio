@@ -1,6 +1,6 @@
 {
   "id": "attack-08",
-  "title": "Orden a un nodo sin firma, repetida o vencida, desde otro dispositivo de la tailnet",
+  "title": "An order to a node without a signature, repeated or expired, sent from another device of the tailnet",
   "rules": [
     "S-29",
     "S-30"

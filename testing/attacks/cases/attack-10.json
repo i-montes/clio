@@ -1,6 +1,6 @@
 {
   "id": "attack-10",
-  "title": "Inyección que intenta guardar un procedimiento en la memoria",
+  "title": "An injection that tries to save a procedure in the memory",
   "rules": [
     "S-26"
   ],

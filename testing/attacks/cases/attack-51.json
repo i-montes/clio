@@ -1,6 +1,6 @@
 {
   "id": "attack-51",
-  "title": "La salida de un comando con un señuelo del vault no queda en claro en ningún archivo de la carpeta del run (log de efectos, respaldos)",
+  "title": "The output of a command with a vault decoy does not stay in clear in any file of the run folder (the effects log, the backups)",
   "rules": [
     "S-18",
     "S-20"

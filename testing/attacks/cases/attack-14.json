@@ -1,6 +1,6 @@
 {
   "id": "attack-14",
-  "title": "Intento del agente de escribir una extensión de Pi o un skill",
+  "title": "An attempt by the agent to write a Pi extension or a skill",
   "rules": [
     "S-16"
   ],
