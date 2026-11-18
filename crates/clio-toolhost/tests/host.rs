@@ -1,7 +1,7 @@
 //! Host mode: the tools on the real machine (here, only temporary folders), never on Clio's own
 //! folders, with a copy before every change and a line in the log before and after every action.
 //! `exec` runs with the `Bwrap` launcher only (never `sudo`); where it cannot run, the tests that
-//! need it say `SKIPPED`.
+//! need it say `SKIPPED`. What the list sets aside waits for the person (`pending`).
 #![allow(clippy::unwrap_used)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clio_core::SystemClock;
-use clio_toolhost::ask::HostRules;
+use clio_toolhost::ask::{Class, HostRules};
+use clio_toolhost::pending::{self, State};
 use clio_toolhost::{
     BLOCK_TAINTED, Config, Found, HostCfg, JailMode, Judging, MemoryItem, MemoryPort,
     ProposalDraft, Proposed, Request, Response, ToolHost, host,
@@ -419,13 +420,208 @@ fn foreign_text_marks_the_session_and_home_does_not() {
             json!({"command": format!("cat {}", p(&e.r.join("inbox/carta.txt")))}),
         );
         assert!(x.ok && x.tainted, "{x:?}");
-        // A command does not see Clio's folders.
+        // A command that names Clio's folders is set aside; one that gets there around the
+        // list sees them empty.
         let x = call(
             &e,
             "s5",
             "exec",
             json!({"command": format!("ls -A {}", p(&e.config))}),
         );
+        aside_id(&x, "control");
+        let x = call(&e, "s5", "exec", json!({"command": "ls -A ../clio/config"}));
         assert!(x.ok && !x.content.contains("config.json"), "{x:?}");
     }
+}
+
+const DAY_MS: i64 = 24 * 3600 * 1000;
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The id in the exact answer of a set-aside action, checking the answer on the way.
+fn aside_id(r: &Response, class: &str) -> String {
+    assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
+    let id = r
+        .content
+        .strip_prefix("apartado ")
+        .and_then(|c| c.split_once(':'))
+        .unwrap()
+        .0
+        .to_owned();
+    assert_eq!(
+        r.content,
+        format!(
+            "apartado {id}: «{class}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final."
+        )
+    );
+    id
+}
+
+/// Writing over an existing backup is set aside (`borrar`).
+fn write_backup(e: &Env, name: &str, content: &str) -> Response {
+    let f = e.r.join("outside").join(name);
+    if !f.exists() {
+        std::fs::write(&f, "viejo").unwrap();
+    }
+    call(
+        e,
+        "s",
+        "fs_write",
+        json!({"path": p(&f), "content": content}),
+    )
+}
+
+#[test]
+fn a_listed_action_does_not_run_and_waits_and_the_task_goes_on() {
+    let e = env();
+    let r = write_backup(&e, "backup.sql", "nuevo");
+    let id = aside_id(&r, "borrar");
+    assert_eq!(
+        std::fs::read_to_string(e.r.join("outside/backup.sql")).unwrap(),
+        "viejo"
+    );
+    // The same action again in the session: the same pending, no new question.
+    assert_eq!(
+        aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar"),
+        id
+    );
+    let all = pending::list(&e.state);
+    assert_eq!(all.len(), 1);
+    let pd = &all[0];
+    assert!(pd.id == id && pd.class == Class::Borrar && pd.tool == "fs_write" && pd.ask);
+    assert!(pd.run == "r1" && pd.session == "s" && pd.state == State::Waiting);
+    assert_eq!(pd.what, p(&e.r.join("outside/backup.sql")));
+    assert_eq!(pd.expires_ms - pd.created_ms, DAY_MS);
+    let file = e.state.join(format!("pending/{id}.json"));
+    assert_eq!(
+        std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let last = actions(&e).pop().unwrap();
+    assert!(
+        last["outcome"] == "aside" && last["rule"] == "host/aside",
+        "{last}"
+    );
+    // The task goes on with something else.
+    assert!(
+        call(
+            &e,
+            "s",
+            "fs_write",
+            json!({"path": "otra.txt", "content": "x"})
+        )
+        .ok
+    );
+
+    if exec_ok(&e) {
+        std::fs::create_dir(e.home.join("proyecto")).unwrap();
+        let r = call(&e, "s", "exec", json!({"command": "rm -rf ~/proyecto"}));
+        let id = aside_id(&r, "borrar");
+        assert!(e.home.join("proyecto").exists());
+        let x = call(&e, "s", "exec", json!({"command": "echo sigo"}));
+        assert!(x.ok && x.content.contains("sigo"), "{x:?}");
+        // Approved: it runs once, in its own session's host.
+        let fresh = ToolHost::new(cfg(&e.r)).unwrap();
+        let done = fresh.approve(&id, now()).unwrap();
+        assert!(!e.home.join("proyecto").exists());
+        assert!(
+            matches!(
+                done.state,
+                State::Done {
+                    exit_code: Some(0),
+                    ..
+                }
+            ),
+            "{done:?}"
+        );
+        let lines = actions(&e);
+        let n = lines.len();
+        assert!(lines[n - 2]["outcome"] == "run" && lines[n - 1]["outcome"] == "done");
+        assert_eq!(lines[n - 1]["what"], "rm -rf ~/proyecto");
+    }
+}
+
+#[test]
+fn approve_runs_once_and_reject_expired_or_changed_never_run() {
+    let e = env();
+    let approver = ToolHost::new(cfg(&e.r)).unwrap();
+    let f = |n: &str| std::fs::read_to_string(e.r.join("outside").join(n)).unwrap();
+
+    let id = aside_id(&write_backup(&e, "a.bak", "nuevo"), "borrar");
+    let p1 = approver.approve(&id, now()).unwrap();
+    assert_eq!(f("a.bak"), "nuevo");
+    assert!(matches!(p1.state, State::Done { .. }), "{p1:?}");
+    // The copy before the change was made: undo gives the old content back.
+    let again = approver.approve(&id, now()).unwrap_err();
+    assert!(again.contains("ya se ejecutó"), "{again}");
+    assert!(
+        host::undo(&e.run)
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("a.bak"))
+    );
+    assert_eq!(f("a.bak"), "viejo");
+
+    let id = aside_id(&write_backup(&e, "b.dump", "nuevo"), "borrar");
+    assert_eq!(
+        pending::reject(&e.state, &id).unwrap().state,
+        State::Rejected
+    );
+    assert!(approver.approve(&id, now()).is_err());
+    assert!(pending::reject(&e.state, &id).is_err());
+    assert_eq!(f("b.dump"), "viejo");
+
+    let id = aside_id(&write_backup(&e, "c.sql", "nuevo"), "borrar");
+    let late = approver.approve(&id, now() + DAY_MS + 60_000).unwrap_err();
+    assert!(
+        late.starts_with("venció el ") && late.ends_with(": no se ejecutó"),
+        "{late}"
+    );
+    assert_eq!(f("c.sql"), "viejo");
+    let st = pending::list(&e.state);
+    assert_eq!(
+        st.iter().find(|p| p.id == id).unwrap().state,
+        State::Expired
+    );
+
+    // Someone changes what was set aside on disk: the hash no longer matches, it does not run.
+    let id = aside_id(&write_backup(&e, "d.sql", "nuevo"), "borrar");
+    let file = e.state.join(format!("pending/{id}.json"));
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["args"]["content"] = json!("otra cosa");
+    std::fs::write(&file, v.to_string()).unwrap();
+    assert!(approver.approve(&id, now()).is_err());
+    assert_eq!(f("d.sql"), "viejo");
+
+    assert!(approver.approve("../../x", now()).is_err());
+    assert!(approver.approve("nada", now()).is_err());
+}
+
+#[test]
+fn three_questions_a_day_then_the_summary_and_the_terminals_do_not_count() {
+    let e = env();
+    let ask = |n: &str| {
+        let id = aside_id(&write_backup(&e, &format!("{n}.bak"), "x"), "borrar");
+        let all = pending::list(&e.state);
+        (all.iter().find(|p| p.id == id).unwrap().ask, id)
+    };
+    let first: Vec<(bool, String)> = ["0", "1", "2", "3"].map(ask).into();
+    assert_eq!(
+        first.iter().map(|a| a.0).collect::<Vec<_>>(),
+        [true, true, true, false]
+    );
+    // One the person answered at the terminal gives its question back.
+    pending::answered_at_terminal(&e.state, &first[0].1).unwrap();
+    assert_eq!((ask("5").0, ask("6").0), (true, false));
+    // The next day the questions are back.
+    let q = e.state.join("questions.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&q).unwrap()).unwrap();
+    v["day"] = json!("2000-01-01");
+    std::fs::write(&q, v.to_string()).unwrap();
+    assert!(ask("7").0);
 }

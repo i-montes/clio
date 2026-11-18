@@ -28,6 +28,7 @@ pub mod cli;
 pub mod host;
 mod memory;
 mod ops;
+pub mod pending;
 mod sanitize;
 mod server;
 
@@ -722,6 +723,18 @@ impl ToolHost {
             self.counter.fetch_add(1, Ordering::SeqCst)
         );
         if let Some(h) = &self.host {
+            // The list, not the model, says what waits for the person.
+            let class = match req.tool.as_str() {
+                "exec" => map
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .and_then(|c| h.cfg.rules.classify_command(c)),
+                "fs_write" => real.as_deref().and_then(|r| h.cfg.rules.classify_write(r)),
+                _ => None,
+            };
+            if let Some(class) = class {
+                return self.aside(h, &req, class, real.as_deref());
+            }
             let (ok, content, data, external) =
                 self.host_run(h, &req, action_id, &out.rule, real.as_deref());
             return Response {
