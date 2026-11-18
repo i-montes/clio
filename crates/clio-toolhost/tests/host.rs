@@ -766,6 +766,79 @@ fn a_second_undo_says_there_is_nothing_left() {
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "de la persona");
 }
 
+// Undo writes the old content into the file in place and sets its mode only when it changed: on
+// a file of another owner (group-writable) a `chmod` fails, and `fs::copy` did it after emptying
+// the file. Without root no file of another owner can be made here, so the warning path is not
+// run; these are the two paths that can be.
+#[test]
+fn undo_puts_the_content_back_in_place_and_the_mode_only_when_it_changed() {
+    use std::os::unix::fs::MetadataExt;
+    let e = env();
+    let (same, moved) = (e.r.join("outside/same.txt"), e.r.join("outside/moved.txt"));
+    for f in [&same, &moved] {
+        std::fs::write(f, "antes").unwrap();
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            call(
+                &e,
+                "s",
+                "fs_write",
+                json!({"path": p(f), "content": "después"})
+            )
+            .ok
+        );
+    }
+    // Only the mode changes after Clio wrote it: the content is still Clio's, so undo goes on.
+    std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let inode = std::fs::metadata(&same).unwrap().ino();
+    let said = host::undo(&e.run).unwrap();
+    for f in [&same, &moved] {
+        assert_eq!(std::fs::read_to_string(f).unwrap(), "antes");
+        assert_eq!(
+            std::fs::metadata(f).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+    }
+    assert_eq!(std::fs::metadata(&same).unwrap().ino(), inode, "in place");
+    assert!(
+        said.iter()
+            .all(|l| l.starts_with("restaurado") && !l.contains("modo")),
+        "{said:?}"
+    );
+}
+
+// S-23: `pending/` and the copies' `backups/` an older version left open (0755) are closed again
+// when they are used, as the host state folder is.
+#[test]
+fn folders_an_older_version_left_open_are_closed_again() {
+    let e = env();
+    let (pending, backups) = (e.state.join("pending"), e.run.join("backups"));
+    for d in [&e.state, &pending, &backups] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let f = e.r.join("outside/o.txt");
+    std::fs::write(&f, "antes").unwrap();
+    assert!(
+        call(
+            &e,
+            "s",
+            "fs_write",
+            json!({"path": p(&f), "content": "después"})
+        )
+        .ok
+    );
+    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar");
+    for d in [&e.state, &pending, &backups] {
+        assert_eq!(
+            std::fs::metadata(d).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "{}",
+            d.display()
+        );
+    }
+}
+
 #[test]
 fn a_glob_never_walks_into_clios_folders() {
     let e = env();

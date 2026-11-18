@@ -33,7 +33,6 @@ mod sanitize;
 mod server;
 
 use std::collections::HashMap;
-use std::os::unix::fs::DirBuilderExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -351,11 +350,7 @@ impl ToolHost {
             tools,
             secret_bindings: vec![],
         })?;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&cfg.run_dir)
-            .map_err(|x| e(&x))?;
+        host::private_dir(&cfg.run_dir).map_err(|x| e(&x))?;
         let log = EffectLog::open(&cfg.run_dir.join("effects.jsonl")).map_err(|x| e(&x))?;
         let mut sandbox = Sandbox::new(&root, &cfg.scratch).map_err(|x| e(&x))?;
         // A program that runs in the folder can edit files in place: snapshots must be copies.

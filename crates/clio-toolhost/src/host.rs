@@ -120,10 +120,7 @@ impl Host {
         rule: &str,
         exit_code: Option<i64>,
     ) -> std::io::Result<()> {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.cfg.state)?;
+        private_dir(&self.cfg.state)?;
         let mut line = json!({
             "at_ms": now_ms(),
             "run": self.cfg.run,
@@ -144,6 +141,19 @@ impl Host {
             .open(self.cfg.state.join("actions.jsonl"))?
             .write_all(line.as_bytes())
     }
+}
+
+/// A folder of Clio's data, 0700 whatever the umask, and closed again if an older version left it
+/// open (S-23).
+pub(crate) fn private_dir(d: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(d)?;
+    if fs::metadata(d)?.permissions().mode() & 0o7777 != 0o700 {
+        fs::set_permissions(d, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// One line of `changes.jsonl`. `sha256` is what was written; `null` for a folder.
@@ -189,10 +199,7 @@ fn record_change(run_dir: &Path, path: &Path, content: Option<&[u8]>) -> std::io
         let (mut backup, mut mode) = (None, None);
         if let Ok(m) = fs::metadata(path) {
             let b = run_dir.join("backups").join(seq.to_string());
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(run_dir.join("backups"))?;
+            private_dir(&run_dir.join("backups"))?;
             fs::copy(path, &b)?;
             // `copy` keeps the original's mode; the backup is the person's, the mode is in `mode`.
             fs::set_permissions(&b, fs::Permissions::from_mode(0o600))?;
@@ -257,9 +264,12 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
             continue;
         }
         let done = match (&c.backup, c.mode) {
-            (Some(b), Some(mode)) => fs::copy(b, &c.path)
-                .and_then(|_| fs::set_permissions(&c.path, fs::Permissions::from_mode(mode)))
-                .map(|()| format!("restaurado {p}")),
+            (Some(b), Some(mode)) => restore(b, &c.path, mode).map(|warn| match warn {
+                None => format!("restaurado {p}"),
+                Some(e) => {
+                    format!("restaurado {p}, pero no se pudo devolverle el modo {mode:o}: {e}")
+                }
+            }),
             _ => fs::remove_file(&c.path).map(|()| format!("borrado {p}")),
         };
         said.push(done.unwrap_or_else(|e| format!("no se pudo deshacer {p}: {e}")));
@@ -267,6 +277,18 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
     fs::rename(&journal, run_dir.join("changes.undone.jsonl"))
         .map_err(|e| format!("changes.jsonl: {e}"))?;
     Ok(said)
+}
+
+/// Gives `path` the content of `backup` in place (no `chmod` before it: `fs::copy` truncates,
+/// then sets the mode, and on a file of another owner that `chmod` fails once it is empty), then
+/// its saved `mode` if it differs. A mode that cannot be set comes back as the warning; the
+/// content stays restored.
+fn restore(backup: &Path, path: &Path, mode: u32) -> std::io::Result<Option<std::io::Error>> {
+    fs::write(path, fs::read(backup)?)?;
+    if fs::metadata(path)?.permissions().mode() & 0o7777 == mode {
+        return Ok(None);
+    }
+    Ok(fs::set_permissions(path, fs::Permissions::from_mode(mode)).err())
 }
 
 impl ToolHost {
