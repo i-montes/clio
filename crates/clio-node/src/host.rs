@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::jail::{JailOutput, bwrap_version, find_in_trusted, run_command};
+use crate::jail::{JailOutput, Sink, bwrap_version, find_in_trusted, run_command};
 
 /// systemd's own default for services; without it `bash` falls back to a `PATH` ending in `.`.
 const PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -298,6 +298,26 @@ impl HostJail {
         job: &HostJob,
         cancel: &dyn Fn() -> bool,
     ) -> Result<JailOutput, String> {
+        self.run_inner(job, cancel, None)
+    }
+
+    /// `run_until`, and every piece of output also goes to `sink` as it comes (a background
+    /// job's file). No flood stop: the sink keeps its own capped record.
+    pub fn run_streaming(
+        &self,
+        job: &HostJob,
+        cancel: &dyn Fn() -> bool,
+        sink: Sink,
+    ) -> Result<JailOutput, String> {
+        self.run_inner(job, cancel, Some(&sink))
+    }
+
+    fn run_inner(
+        &self,
+        job: &HostJob,
+        cancel: &dyn Fn() -> bool,
+        sink: Option<&Sink>,
+    ) -> Result<JailOutput, String> {
         let unit = unit_name();
         let (program, args) = self.build(job, &unit)?;
         // Killing the `sudo` client does not stop the unit: systemd has to.
@@ -320,6 +340,7 @@ impl HostJail {
             self.kill.as_deref(),
             (!stop.is_empty()).then_some(&stop[..]),
             cancel,
+            sink,
         )
     }
 

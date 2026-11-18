@@ -262,3 +262,19 @@ fn host_json_cannot_make_a_command_a_secret() {
         .unwrap();
     assert!(err.contains("secret"), "{err}");
 }
+
+#[test]
+fn background_commands_exist_only_in_host_mode() {
+    let e = env();
+    for (tool, args) in [
+        ("job_output", json!({"id": "j1"})),
+        ("job_stop", json!({"id": "j1"})),
+        ("exec", json!({"command": "true", "background": true})),
+    ] {
+        let line =
+            json!({"id":"i","tool":tool,"args":args,"session":"s1","call_id":"c","tainted":false})
+                .to_string();
+        let r: Response = serde_json::from_str(&e.host.handle_line(&line)).unwrap();
+        assert!(!r.ok, "{tool}: {}", r.content);
+    }
+}

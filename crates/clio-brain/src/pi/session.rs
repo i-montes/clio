@@ -44,6 +44,8 @@ pub const GUARD_TOOLS: [&str; 22] = [
     "request_secret",
     "todo_write",
 ];
+/// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
+pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
 pub const PROMPT_NAME: &str = "clio-agent@20";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@20.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
@@ -394,6 +396,14 @@ mod tests {
             assert!(line.contains(&format!("\"{t}\"")), "{t}");
         }
         assert_eq!(line.matches('"').count(), GUARD_TOOLS.len() * 2);
+        let host = index
+            .lines()
+            .find(|l| l.contains("export const HOST_TOOL_NAMES"))
+            .unwrap();
+        for t in HOST_GUARD_TOOLS {
+            assert!(host.contains(&format!("\"{t}\"")), "{t}");
+        }
+        assert_eq!(host.matches('"').count(), HOST_GUARD_TOOLS.len() * 2);
     }
 
     #[test]

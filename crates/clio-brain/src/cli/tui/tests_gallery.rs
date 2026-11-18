@@ -222,6 +222,13 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         .map(String::from),
     );
     out.push(("lista de pasos", a));
+    let mut a = conversation(true);
+    a.host = true;
+    a.chat.jobs = 2;
+    a.chat.items.push(super::chat::Item::Note(
+        "2 background commands are still running; all stop when the session ends".into(),
+    ));
+    out.push(("comandos en segundo plano", a));
     for (name, typed, suspect) in [
         ("Clio pide un secreto, vacío", 0, false),
         ("Clio pide un secreto, con caracteres", 23, true),

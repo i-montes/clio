@@ -266,6 +266,17 @@ pub fn taint_session(socket: &Path, session: &str, suspect: bool) -> bool {
     false
 }
 
+/// Host mode: how many commands of `session` run in the background (0 when the host says none,
+/// or does not answer).
+pub fn jobs_running(socket: &Path, session: &str) -> usize {
+    let req =
+        json!({"id": "jobs", "tool": "jobs", "args": {}, "session": session, "call_id": "jobs"});
+    ask_host(socket, &req)
+        .filter(|r| r["ok"] == true)
+        .and_then(|r| r["data"]["running"].as_u64())
+        .map_or(0, |n| usize::try_from(n).unwrap_or(0))
+}
+
 /// Tells the tool host the person closed the session: its last turn may only save the summary.
 /// `false` if the host did not take it.
 pub fn closing_to_host(socket: &Path, session: &str, token: &str) -> bool {

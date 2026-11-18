@@ -27,10 +27,14 @@ fn tool_names(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// The `name: "phrase",` lines of `export const USE_WHEN`.
+/// The `name: "phrase",` lines of `export const USE_WHEN` (or of `HOST_USE_WHEN`).
 fn use_when(src: &str) -> Vec<(String, String)> {
+    use_when_of(src, "export const USE_WHEN")
+}
+
+fn use_when_of(src: &str, head: &str) -> Vec<(String, String)> {
     src.lines()
-        .skip_while(|l| !l.contains("export const USE_WHEN"))
+        .skip_while(|l| !l.contains(head))
         .skip(1)
         .take_while(|l| !l.starts_with('}'))
         .map(|l| {
@@ -54,14 +58,22 @@ fn every_tool_the_guard_registers_has_a_use_when_in_the_same_order() {
 fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
     let src = guard();
     assert!(
-        src.contains("catalog: TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] }))"),
+        src.contains("...TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),")
+            && src.contains("...(HOST ? HOST_TOOL_NAMES.map((name) => ({ name, use_when: HOST_USE_WHEN[name] })) : []),"),
         "the guard reports the catalog at the start of the session"
+    );
+    // Host mode adds the background command tools to it.
+    let host = use_when_of(&src, "export const HOST_USE_WHEN");
+    assert_eq!(
+        host.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["job_output", "job_stop"]
     );
     let catalog: Vec<_> = use_when(&src)
         .into_iter()
+        .chain(host)
         .map(|(name, use_when)| json!({"name": name, "use_when": use_when}))
         .collect();
     let hints = parse_catalog(&json!(catalog)).unwrap();
     let questions = tool_questions(&hints).unwrap();
-    assert_eq!(questions.len(), tool_names(&src).len());
+    assert_eq!(questions.len(), tool_names(&src).len() + 2);
 }

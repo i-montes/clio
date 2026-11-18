@@ -37,7 +37,7 @@ use clio_brain::pi::level::{Assessor, run_assessed_with};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
-    GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
+    GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
 };
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use serde_json::{Value, json};
@@ -262,7 +262,11 @@ impl SessionSource for LocalSource {
         // 3. Pi
         let launch = Launch {
             guard: Some(ensure_guard(&install)?),
-            guard_tools: GUARD_TOOLS.map(String::from).to_vec(),
+            guard_tools: GUARD_TOOLS
+                .iter()
+                .chain(HOST_GUARD_TOOLS.iter().filter(|_| host))
+                .map(|t| (*t).to_owned())
+                .collect(),
             extra_env: guard_env(&paths, &toolhost, host, self.presentation)?,
             provider: provider_of(d, &cfg),
             api_key: Some(key),
@@ -599,6 +603,7 @@ impl Session for ChatSession {
             masked,
             withheld: withheld(all),
             judge_silent: all.iter().any(|e| e["customType"] == "clio-guard.judge"),
+            jobs: jev::jobs_running(&self.toolhost.socket, &self.pi.session_id),
         })
     }
 

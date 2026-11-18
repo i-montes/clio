@@ -473,3 +473,32 @@ fn the_checklist_is_pinned_above_the_status_line_and_only_its_widget_is_read() {
     assert!(a.chat.todo.is_empty());
     assert!(!screen_text(&a, 90, 30).contains("read the config"));
 }
+
+#[test]
+fn a_turn_that_ends_with_jobs_running_says_so_quietly_and_the_status_line_counts_them() {
+    let settled = |jobs| {
+        Input::Bg(Bg::ChatSettled {
+            result: Err("x".into()),
+            refresh: Some(crate::cli::chat::Refresh {
+                stats: clio_brain::pi::rpc::SessionStats::default(),
+                tainted: false,
+                egress_denied: vec![],
+                masked: 0,
+                withheld: vec![],
+                judge_silent: false,
+                jobs,
+            }),
+        })
+    };
+    let (a, _) = feed(chat(), vec![settled(2)]);
+    assert_eq!(a.chat.jobs, 2);
+    let s = screen_text(&a, 100, 30);
+    assert!(s.contains("2 jobs"), "{s}");
+    assert!(s.contains("2 background commands are still running"), "{s}");
+    // None left: no mark, and no new note.
+    let notes = a.chat.items.len();
+    let (a, _) = feed(a, vec![settled(0)]);
+    let s = screen_text(&a, 100, 30);
+    assert!(!s.contains("jobs"), "{s}");
+    assert_eq!(a.chat.items.len(), notes + 1); // the error line only
+}

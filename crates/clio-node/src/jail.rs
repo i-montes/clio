@@ -147,6 +147,9 @@ pub(crate) fn bwrap_version(bwrap: &Path) -> Result<(u32, u32, u32), String> {
     Ok(version)
 }
 
+/// Where a command's output goes as it comes (a background job's file), besides its tail.
+pub type Sink = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// Keeps the last `cap` bytes of a stream and counts all of them.
 struct Tail {
     buf: Mutex<Vec<u8>>,
@@ -154,11 +157,21 @@ struct Tail {
     done: AtomicBool,
 }
 
-fn drain(mut r: impl Read, tail: &Tail, cap: usize, over: &AtomicBool, flood_at: usize) {
+fn drain(
+    mut r: impl Read,
+    tail: &Tail,
+    cap: usize,
+    over: &AtomicBool,
+    flood_at: usize,
+    sink: Option<&Sink>,
+) {
     let mut chunk = [0u8; 8192];
     while let Ok(n) = r.read(&mut chunk) {
         if n == 0 {
             break;
+        }
+        if let Some(s) = sink {
+            s(&chunk[..n]);
         }
         let total = tail.total.fetch_add(n, Ordering::SeqCst) + n;
         if total > flood_at {
@@ -410,6 +423,7 @@ impl Jail {
             self.kill.as_deref(),
             None,
             &|| false,
+            None,
         )
     }
 }
@@ -425,6 +439,7 @@ pub(crate) fn run_command(
     kill: Option<&Path>,
     stop: Option<&[String]>,
     cancel: &dyn Fn() -> bool,
+    sink: Option<&Sink>,
 ) -> Result<JailOutput, String> {
     let program = PathBuf::from(cmd.get_program());
     cmd.env_clear()
@@ -442,7 +457,12 @@ pub(crate) fn run_command(
         kill,
         stop,
     };
-    let flood_at = max_output.saturating_mul(8).max(1 << 20);
+    // A command with a sink keeps its own capped record of what it wrote: no flood to stop.
+    let flood_at = if sink.is_some() {
+        usize::MAX
+    } else {
+        max_output.saturating_mul(8).max(1 << 20)
+    };
     let over = Arc::new(AtomicBool::new(false));
     let mk = || {
         Arc::new(Tail {
@@ -470,10 +490,10 @@ pub(crate) fn run_command(
             se.clone(),
         ),
     ] {
-        let (over, cap) = (over.clone(), max_output);
+        let (over, cap, sink) = (over.clone(), max_output, sink.cloned());
         match pipe {
             Some(p) => {
-                std::thread::spawn(move || drain(p, &tail, cap, &over, flood_at));
+                std::thread::spawn(move || drain(p, &tail, cap, &over, flood_at, sink.as_ref()));
             }
             None => tail.done.store(true, Ordering::SeqCst),
         }

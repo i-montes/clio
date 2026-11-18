@@ -7,6 +7,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clio_core::SystemClock;
 use clio_toolhost::ask::{Class, HostRules};
@@ -1088,4 +1089,138 @@ fn stopping_the_service_stops_the_command_it_runs() {
     assert_eq!(procs_with(&m), 0);
     let log = std::fs::read_to_string(r.join("clio/data/host/actions.jsonl")).unwrap();
     assert!(log.lines().last().unwrap().contains("\"stopped\""), "{log}");
+}
+
+fn job_id(r: &Response) -> String {
+    assert!(r.ok, "{r:?}");
+    r.data["job"].as_str().unwrap().to_owned()
+}
+
+/// `job_output` until the job ended, everything it said put together.
+fn job_wait(e: &Env, session: &str, id: &str) -> (String, Value) {
+    let (mut all, end) = (
+        String::new(),
+        std::time::Instant::now() + Duration::from_secs(20),
+    );
+    loop {
+        let r = call(e, session, "job_output", json!({ "id": id }));
+        assert!(r.ok && r.external, "{r:?}");
+        all.push_str(&r.content);
+        if r.data["running"] == false && !r.content.contains("[more output") {
+            return (all, r.data);
+        }
+        assert!(std::time::Instant::now() < end, "{all}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_background_command_is_logged_cleaned_capped_per_session_and_stopped_with_the_service() {
+    let e = env();
+    // Not a command: refused the same in every mode where it does not apply.
+    let r = call(&e, "s", "job_output", json!({"id": "j9"}));
+    assert!(
+        !r.ok && r.content.contains("no background command"),
+        "{r:?}"
+    );
+    if !exec_ok(&e) {
+        return;
+    }
+    let id = job_id(&call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": format!("echo uno; sleep 0.3; echo {KEY}; exit 4"), "background": true}),
+    ));
+    let (out, data) = job_wait(&e, "s", &id);
+    assert!(out.contains("uno") && !out.contains(KEY), "{out}");
+    assert!(
+        out.contains("exit code 4") && data["exit_code"] == 4,
+        "{out}"
+    );
+    assert!(has_mask(&out), "{out}");
+    // Read once: nothing new the second time.
+    let again = call(&e, "s", "job_output", json!({ "id": id }));
+    assert!(!again.content.contains("uno"), "{again:?}");
+    // Another session does not see it.
+    let other = call(&e, "t", "job_output", json!({ "id": id }));
+    assert!(!other.ok, "{other:?}");
+    let file = e.run.join(format!("jobs/{id}.log"));
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let lines = actions(&e);
+    let outcomes: Vec<_> = lines.iter().map(|l| l["outcome"].clone()).collect();
+    assert_eq!(outcomes, ["start", "done"], "{lines:?}");
+    assert!(lines[1]["exit_code"] == 4 && !lines[0]["what"].as_str().unwrap().contains(KEY));
+
+    // What the list sets aside never starts.
+    std::fs::create_dir(e.home.join("proyecto")).unwrap();
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": "rm -rf ~/proyecto", "background": true}),
+    );
+    assert!(
+        r.data.get("job").is_none() && e.home.join("proyecto").exists(),
+        "{r:?}"
+    );
+
+    // Four at most; job_stop stops one, and the fifth may start then.
+    let long = json!({"command": "sleep 30", "background": true});
+    let ids: Vec<_> = (0..4)
+        .map(|_| job_id(&call(&e, "s", "exec", long.clone())))
+        .collect();
+    let fifth = call(&e, "s", "exec", long.clone());
+    assert!(!fifth.ok && fifth.content.contains("job_stop"), "{fifth:?}");
+    assert_eq!(call(&e, "s", "jobs", json!({})).data["running"], 4);
+    // Another session has its own four.
+    let theirs = job_id(&call(&e, "t", "exec", long.clone()));
+    let stop = call(&e, "s", "job_stop", json!({ "id": ids[0] }));
+    assert!(stop.ok, "{stop:?}");
+    let (out, _) = job_wait(&e, "s", &ids[0]);
+    assert!(out.contains("it was stopped"), "{out}");
+    let fifth = job_id(&call(&e, "s", "exec", long));
+    // The service stops: so does every job, each with its line.
+    let t0 = std::time::Instant::now();
+    e.host.stop(Duration::from_secs(10));
+    assert!(t0.elapsed() < Duration::from_secs(10));
+    for id in ids[1..].iter().chain([&fifth]) {
+        let (out, _) = job_wait(&e, "s", id);
+        assert!(out.contains("it was stopped"), "{out}");
+    }
+    assert!(job_wait(&e, "t", &theirs).0.contains("it was stopped"));
+    let stopped = actions(&e)
+        .iter()
+        .filter(|l| l["outcome"] == "stopped")
+        .count();
+    assert_eq!(stopped, 6);
+}
+
+#[test]
+fn the_oldest_output_of_a_background_command_is_dropped_with_a_note() {
+    let e = env();
+    if !exec_ok(&e) {
+        return;
+    }
+    // 6 MiB, past the 4 MiB the file keeps.
+    let id = job_id(&call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": "head -c 6291456 /dev/zero | tr '\\0' 'a'", "background": true}),
+    ));
+    let (out, data) = job_wait(&e, "s", &id);
+    assert!(
+        out.contains("bytes of older output were dropped"),
+        "{}",
+        &out[..200.min(out.len())]
+    );
+    assert_eq!(data["exit_code"], 0);
+    let kept = std::fs::metadata(e.run.join(format!("jobs/{id}.log")))
+        .unwrap()
+        .len();
+    assert!(kept <= 4 << 20, "{kept}");
 }

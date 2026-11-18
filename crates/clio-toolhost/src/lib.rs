@@ -26,6 +26,7 @@
 pub mod ask;
 pub mod cli;
 pub mod host;
+mod jobs;
 mod judge;
 mod memory;
 mod ops;
@@ -233,6 +234,8 @@ pub struct ToolHost {
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
     /// The service is stopping: a running command is stopped, and nothing new runs.
     stopping: std::sync::atomic::AtomicBool,
+    /// Host mode: the commands that run in the background.
+    jobs: jobs::Jobs,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -266,6 +269,7 @@ fn arg_specs(tool: &str, host: bool) -> Vec<ArgSpec> {
             a("command", ArgKind::Text, true),
             a("timeout", ArgKind::Int, false),
             a("network", ArgKind::Bool, false),
+            a("background", ArgKind::Bool, false),
         ],
         "exec" => vec![
             a("command", ArgKind::Text, true),
@@ -392,6 +396,7 @@ impl ToolHost {
             secrets: cfg.secrets,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
+            jobs: jobs::Jobs::default(),
         })
     }
 
@@ -421,10 +426,12 @@ impl ToolHost {
         let until = std::time::Instant::now() + grace;
         while std::time::Instant::now() < until {
             if self.busy.try_lock().is_ok() {
-                return;
+                break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        // Background commands too: none outlives the session.
+        self.stop_jobs(until.saturating_duration_since(std::time::Instant::now()));
     }
 
     pub fn telemetry(&self) -> Telemetry {
@@ -559,6 +566,10 @@ impl ToolHost {
     /// `handle`, but a host-mode command stops as soon as `cancel` says so (the caller went away:
     /// the person aborted, the session ended). Its log line then says `stopped`.
     pub fn handle_until(&self, mut req: Request, cancel: &dyn Fn() -> bool) -> Response {
+        // How many run in the background: a count for the chat, not worth waiting for a command.
+        if req.tool == "jobs" && valid_session(&req.session) {
+            return self.job_op(&req, &Map::new());
+        }
         let _one_at_a_time = lock(&self.busy);
         if req.tool == memory::OLD_SAVE {
             req.tool = "memory_save".into();
@@ -609,6 +620,9 @@ impl ToolHost {
         // Not a tool of the gateway's: nothing is run, and no value ever comes through here.
         if req.tool == "request_secret" {
             return self.request_secret(&req, &map, tainted);
+        }
+        if matches!(req.tool.as_str(), "job_output" | "job_stop" | "jobs") {
+            return self.job_op(&req, &map);
         }
         if map
             .get("content")
@@ -790,6 +804,9 @@ impl ToolHost {
                 if network || h.cfg.rules.reaches_out(command) {
                     return self.aside(h, &req, ask::Class::Enviar, Some(SUSPECT_REASON));
                 }
+            }
+            if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
+                return self.job_start(h, &req, out);
             }
             let (ok, content, data, external) = self
                 .host_run(h, &req, action_id, &out.rule, real.as_deref(), cancel)

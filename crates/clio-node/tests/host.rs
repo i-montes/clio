@@ -298,3 +298,45 @@ fn systemd_for_real_only_with_clio_test_sudo() {
     assert_eq!(h.launcher(), Launcher::Systemd);
     real(&h);
 }
+
+// A background job: its output reaches the sink as it comes, while it still runs, and a lot of
+// it does not stop it (the sink keeps its own capped record).
+#[test]
+fn a_streamed_command_hands_over_its_output_as_it_comes_and_is_not_cut_for_volume() {
+    let Some(h) = bwrap() else { return };
+    let d = tempfile::tempdir().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let s = seen.clone();
+    let sink: clio_node::Sink =
+        std::sync::Arc::new(move |b: &[u8]| s.lock().unwrap().extend_from_slice(b));
+    let mut j = job(
+        d.path(),
+        "echo first; head -c 3000000 /dev/zero | tr '\\0' x; echo; sleep 1; echo last",
+    );
+    j.max_output = 1024;
+    let watcher = {
+        let seen = seen.clone();
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(10) {
+                if seen.lock().unwrap().starts_with(b"first") {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        })
+    };
+    let out = h.run_streaming(&j, &|| false, sink).unwrap();
+    assert!(
+        watcher.join().unwrap(),
+        "the first line came before the end"
+    );
+    assert!(!out.flooded && out.exit_code == Some(0), "{out:?}");
+    let all = seen.lock().unwrap();
+    assert!(
+        all.len() > 3_000_000 && all.ends_with(b"last\n"),
+        "{}",
+        all.len()
+    );
+}

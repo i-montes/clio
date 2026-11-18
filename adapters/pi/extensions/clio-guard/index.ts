@@ -51,7 +51,14 @@ const WITHHELD = "clio-guard.withheld";
 const JUDGE = "clio-guard.judge";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write"] as const;
-const ALLOWED = new Set<string>(TOOL_NAMES);
+// Host mode only: the commands `bash` starts in the background (`background: true`).
+export const HOST_TOOL_NAMES = ["job_output", "job_stop"] as const;
+export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
+	job_output: "check what a command started in the background has printed so far, and whether it ended",
+	job_stop: "stop a command that runs in the background",
+};
+const ACTIVE: string[] = [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
+const ALLOWED = new Set<string>(ACTIVE);
 /**
  * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
  * tool, and a tool added to TOOL_NAMES without one does not compile. The catalog below reaches the
@@ -125,6 +132,13 @@ const oneLine = (s: unknown, max: number) =>
 const HOST_BASH_RULE =
 	"bash runs on the person's machine, in the home folder, with the time limit you give in `timeout` (none if you give none); it has no network unless you set `network: true`, which marks the session. Clio's own folders are not visible.";
 const NETWORK = { type: "boolean", description: "la orden necesita red; marca la sesión" };
+const BACKGROUND = {
+	type: "boolean",
+	description:
+		"Start it in the background and get a job id at once (a server, a long build, a watcher). Read what it prints with job_output; stop it with job_stop. At most 4 at a time; all stop when the session ends.",
+};
+const HOST_JOBS_RULE =
+	"For long work, start bash with `background: true` and check it with job_output now and then, not in a tight loop (do something else between checks, or give the command a `timeout` instead when you just wait). Stop what you no longer need with job_stop. Everything in the background stops when the session ends.";
 // Host mode: the model decides the time limit, and none means none.
 const HOST_TIMEOUT = {
 	type: "number",
@@ -308,11 +322,20 @@ export default function clioGuard(pi: ExtensionAPI) {
 	});
 	register({
 		...bash,
-		...(HOST ? { parameters: { ...bash.parameters, properties: { ...bash.parameters.properties, timeout: HOST_TIMEOUT, network: NETWORK } } } : {}),
-		promptGuidelines: rule(bash, `bash: ${HOST ? HOST_BASH_RULE : BASH_RULE} ${DATA_RULE}`),
-		execute: (id: string, params: any, signal: any, onUpdate: any, ctx: any) => {
-			// Pi's own bash does not know `network`: it goes to the host, not to Pi.
-			const { network, ...own } = params ?? {};
+		...(HOST
+			? { parameters: { ...bash.parameters, properties: { ...bash.parameters.properties, timeout: HOST_TIMEOUT, network: NETWORK, background: BACKGROUND } } }
+			: {}),
+		promptGuidelines: rule(bash, `bash: ${HOST ? `${HOST_BASH_RULE} ${HOST_JOBS_RULE}` : BASH_RULE} ${DATA_RULE}`),
+		execute: async (id: string, params: any, signal: any, onUpdate: any, ctx: any) => {
+			// Pi's own bash does not know `network` or `background`: they go to the host, not to Pi.
+			const { network, background, ...own } = params ?? {};
+			if (HOST && background === true) {
+				const args: Record<string, unknown> = { command: own.command, background: true };
+				if (network === true) args.network = true;
+				if (typeof own.timeout === "number" && own.timeout > 0) args.timeout = Math.ceil(own.timeout);
+				const res = await host("exec", args, id, signal);
+				return { content: [{ type: "text" as const, text: res.content }], details: {} };
+			}
 			return createBashToolDefinition(cwd, { operations: bashOps(id, HOST && network === true) }).execute(id, own, signal, onUpdate, ctx);
 		},
 	});
@@ -634,6 +657,34 @@ export default function clioGuard(pi: ExtensionAPI) {
 		},
 	});
 
+	// Host mode: what `bash` started in the background. The host keeps each job's output in the
+	// run folder (capped) and cleans it; what it returns is outside data like a command's.
+	if (HOST) {
+		const ID = { type: "string", pattern: "^j[0-9]{1,9}$", description: "The job id bash gave (for example j1)." };
+		const job = (op: string) => async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+			content: [{ type: "text" as const, text: (await host(op, { id: params?.id }, id, signal)).content }],
+			details: {},
+		});
+		register({
+			name: "job_output",
+			label: "job_output",
+			description:
+				"What a background command printed since you last asked, and whether it still runs (with its exit code once it ended). Each call gives only the new output.",
+			promptSnippet: "Read what a background command printed since the last check.",
+			promptGuidelines: [`job_output: not in a tight loop; ${DATA_RULE}`],
+			parameters: { type: "object", properties: { id: ID }, required: ["id"], additionalProperties: false },
+			execute: job("job_output"),
+		});
+		register({
+			name: "job_stop",
+			label: "job_stop",
+			description: "Stop a command that runs in the background.",
+			promptSnippet: "Stop a background command.",
+			parameters: { type: "object", properties: { id: ID }, required: ["id"], additionalProperties: false },
+			execute: job("job_stop"),
+		});
+	}
+
 	// A project can not decide what Pi loads (S-16): always "no".
 	pi.on("project_trust", () => ({ trusted: "no" as const }));
 
@@ -646,12 +697,15 @@ export default function clioGuard(pi: ExtensionAPI) {
 		state.tainted = ctx.sessionManager
 			.getEntries()
 			.some((e) => e.type === "custom" && e.customType === TAINT && (e.data as { tainted?: boolean } | undefined)?.tainted === true);
-		pi.setActiveTools([...TOOL_NAMES]);
+		pi.setActiveTools([...ACTIVE]);
 		// What the launcher checks at start: which tools are active and where each one comes from.
 		pi.appendEntry(TOOLS_ENTRY, {
 			active: pi.getActiveTools(),
 			all: pi.getAllTools().map((t) => ({ name: t.name, source: t.sourceInfo?.path ?? null })),
-			catalog: TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),
+			catalog: [
+				...TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),
+				...(HOST ? HOST_TOOL_NAMES.map((name) => ({ name, use_when: HOST_USE_WHEN[name] })) : []),
+			],
 			prompt: prompt.version,
 		});
 	});
@@ -680,7 +734,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		// Memory results come wrapped already; wrapping again would nest them and lose the source.
 		// `ask_person` answers with the person's own words and `request_secret` with the host's own
 		// line: cleaned, never wrapped as outside data.
-		const source = MEMORY_TOOLS.has(event.toolName) || OWN_TOOLS.has(event.toolName) ? undefined : event.toolName === "bash" ? "tool-result" : "file";
+		const source = MEMORY_TOOLS.has(event.toolName) || OWN_TOOLS.has(event.toolName) ? undefined : event.toolName === "bash" || event.toolName === "job_output" ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
 			if (v && typeof v === "object") {

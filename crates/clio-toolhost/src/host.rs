@@ -35,14 +35,14 @@ pub struct HostCfg {
 pub(crate) struct Host {
     pub(crate) cfg: HostCfg,
     /// Only when the launcher passed its self-test: otherwise there is no `exec`.
-    jail: Option<HostJail>,
+    pub(crate) jail: Option<HostJail>,
 }
 
 pub(crate) const CONTROL: &str = "eso es de Clio: solo la persona lo toca";
 /// Tools that change something: they are logged, and set aside when the list says so.
 pub(crate) const LOGGED: [&str; 3] = ["exec", "fs_write", "fs_mkdir"];
 /// The longest time limit a command may ask for; without one it has none.
-const MAX_TIMEOUT_SECS: u64 = 3600;
+pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
 
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -120,27 +120,53 @@ impl Host {
         rule: &str,
         exit_code: Option<i64>,
     ) -> std::io::Result<()> {
-        private_dir(&self.cfg.state)?;
-        let mut line = json!({
-            "at_ms": now_ms(),
-            "run": self.cfg.run,
-            "session": session,
-            "tool": tool,
-            "what": what,
-            "network": network,
-            "outcome": outcome,
-            "rule": rule,
-            "exit_code": exit_code,
-        })
-        .to_string();
-        line.push('\n');
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(self.cfg.state.join("actions.jsonl"))?
-            .write_all(line.as_bytes())
+        log_line(
+            &self.cfg.state,
+            &self.cfg.run,
+            session,
+            tool,
+            what,
+            network,
+            outcome,
+            rule,
+            exit_code,
+        )
     }
+}
+
+/// `Host::log` without the host: a background command writes its last line from its own thread.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn log_line(
+    state: &Path,
+    run: &str,
+    session: &str,
+    tool: &str,
+    what: &str,
+    network: bool,
+    outcome: &str,
+    rule: &str,
+    exit_code: Option<i64>,
+) -> std::io::Result<()> {
+    private_dir(state)?;
+    let mut line = json!({
+        "at_ms": now_ms(),
+        "run": run,
+        "session": session,
+        "tool": tool,
+        "what": what,
+        "network": network,
+        "outcome": outcome,
+        "rule": rule,
+        "exit_code": exit_code,
+    })
+    .to_string();
+    line.push('\n');
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(state.join("actions.jsonl"))?
+        .write_all(line.as_bytes())
 }
 
 /// A folder of Clio's data, 0700 whatever the umask, and closed again if an older version left it

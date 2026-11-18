@@ -99,6 +99,8 @@ pub struct Refresh {
     pub withheld: Vec<Withheld>,
     /// The judge is on and did not answer at least once in this session.
     pub judge_silent: bool,
+    /// Host mode: commands of this session still running in the background.
+    pub jobs: usize,
 }
 
 /// A tool result the judge withheld from the model (the guard's `clio-guard.withheld` entry).

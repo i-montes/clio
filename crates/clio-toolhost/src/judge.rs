@@ -85,7 +85,7 @@ pub(crate) fn one_line(s: &str) -> String {
 /// The model's tool for a tool host operation.
 pub(crate) fn tool_of(op: &str) -> &'static str {
     match op {
-        "exec" => "bash",
+        "exec" | "job_output" => "bash",
         "fs_list" => "ls",
         "fs_glob" => "find",
         _ => "read",

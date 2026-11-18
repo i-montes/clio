@@ -1167,6 +1167,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             if let Some(r) = refresh {
                 app.chat.refresh(&r);
+                if r.jobs > 0 {
+                    let n = r.jobs;
+                    let (s, verb) = if n == 1 { ("", "is") } else { ("s", "are") };
+                    app.chat.items.push(super::chat::Item::Note(format!(
+                        "{n} background command{s} {verb} still running; all stop when the session ends"
+                    )));
+                }
             }
             // The list beside the chat: a new session shows up, a title changes.
             if app.pi {

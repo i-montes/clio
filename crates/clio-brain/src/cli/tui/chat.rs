@@ -187,6 +187,9 @@ pub struct Chat {
     pub compacting: bool,
     /// The model's checklist (`todo_write`), pinned above the status line.
     pub todo: Vec<super::todo::Item>,
+    /// Host mode: commands running in the background, as of the last turn's end.
+    // shortcut: counted when a turn ends, so one that ends between turns still shows; poll if that misleads.
+    pub jobs: usize,
     streamed: bool,
     /// The text items as the last draw rendered them, by their place in the whole conversation
     /// (`dropped` + index), with the fingerprint of what went into them: parsing a long
@@ -239,6 +242,7 @@ impl Chat {
             customs: vec![],
             compacting: false,
             todo: vec![],
+            jobs: 0,
             streamed: false,
             rendered: RefCell::default(),
             dropped: 0,
@@ -351,6 +355,7 @@ impl Chat {
         self.egress(&r.egress_denied);
         self.masked(r.masked);
         self.judged(&r.withheld, r.judge_silent);
+        self.jobs = r.jobs;
     }
 
     /// The judge withheld outside text from the model, or did not answer: say it quietly, with
@@ -1198,6 +1203,13 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
             ),
             t.dim(),
         ));
+    }
+    if c.jobs > 0 {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        let s = if c.jobs == 1 { "" } else { "s" };
+        spans.push(Span::styled(format!("{} job{s}", c.jobs), t.accent_line()));
     }
     if let Some(msg) = &app.flash {
         if spans.len() > 1 {
