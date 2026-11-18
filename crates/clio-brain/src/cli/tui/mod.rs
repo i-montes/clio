@@ -640,7 +640,10 @@ impl Ctx {
                         let asks: Vec<(String, String)> = session
                             .new_pending()
                             .into_iter()
-                            .map(|p| (p.id, format!("«{}» {}", p.class, p.what)))
+                            .map(|p| {
+                                let what = super::pending::what(&p);
+                                (p.id, format!("«{}» {what}", p.class))
+                            })
                             .collect();
                         if !asks.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));

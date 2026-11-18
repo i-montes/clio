@@ -187,3 +187,42 @@ fn a_rejected_action_never_runs() {
         out(&o)
     );
 }
+
+/// Rewrites the saved pending `id` with `f`.
+fn edit(w: &World, id: &str, f: impl FnOnce(&mut Value)) {
+    let file = w.data.join(format!("host/pending/{id}.json"));
+    let mut v: Value = serde_json::from_str(&read(&file)).unwrap();
+    f(&mut v);
+    std::fs::write(&file, v.to_string()).unwrap();
+}
+
+#[test]
+fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_builds_anything() {
+    let w = world();
+    std::fs::write(w.home.join("backup.sql"), "viejo").unwrap();
+    let id = w.set_aside("backup.sql");
+    edit(&w, &id, |v| v["what"] = json!("inofensivo.txt"));
+    let o = w.clio(&["pending"]);
+    assert!(
+        out(&o).contains("backup.sql") && !out(&o).contains("inofensivo"),
+        "{}",
+        out(&o)
+    );
+
+    // Past its time, in a session whose folder is gone: not listed, and approving it says so
+    // before any folder is made or launcher looked for.
+    edit(&w, &id, |v| {
+        v["expires_ms"] = json!(1);
+        v["run"] = json!("20261117-130000-ffff");
+    });
+    let o = w.clio(&["pending"]);
+    assert!(out(&o).contains("no hay nada esperando"), "{}", out(&o));
+    let o = w.clio(&["approve", &id]);
+    assert!(
+        !o.status.success() && out(&o).contains("venció el"),
+        "{}",
+        out(&o)
+    );
+    assert!(!w.data.join("runs/20261117-130000-ffff").exists());
+    assert_eq!(read(&w.home.join("backup.sql")), "viejo");
+}

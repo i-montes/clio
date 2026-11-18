@@ -274,6 +274,10 @@ fn valid_session(s: &str) -> bool {
 impl ToolHost {
     pub fn new(cfg: Config) -> Result<Self, String> {
         let e = |x: &dyn std::fmt::Display| x.to_string();
+        // The sandbox takes `/` for host mode; a copy-mode working folder never is.
+        if cfg.host.is_none() && cfg.work.canonicalize().is_ok_and(|w| w.parent().is_none()) {
+            return Err("the working folder cannot be / outside host mode".into());
+        }
         let (host, exec_status) = match cfg.host {
             Some(h) => {
                 let (h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
@@ -733,10 +737,11 @@ impl ToolHost {
                 _ => None,
             };
             if let Some(class) = class {
-                return self.aside(h, &req, class, real.as_deref());
+                return self.aside(h, &req, class);
             }
-            let (ok, content, data, external) =
-                self.host_run(h, &req, action_id, &out.rule, real.as_deref());
+            let (ok, content, data, external) = self
+                .host_run(h, &req, action_id, &out.rule, real.as_deref())
+                .unwrap_or_else(|e| (false, e, Value::Null, false));
             return Response {
                 id: req.id,
                 ok,

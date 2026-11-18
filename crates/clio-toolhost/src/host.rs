@@ -264,7 +264,8 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
 impl ToolHost {
     /// An action already allowed (by the gateway, or by the person): logged before and after,
     /// copied before it changes a file, run, and the session marked by what it read. `path` is
-    /// absolute and `real` its checked real location. Returns `(ok, content, data, external)`.
+    /// absolute and `real` its checked real location. Returns `(ok, content, data, external)`, or
+    /// `Err` with the answer when it did not run because its line before could not be logged.
     pub(crate) fn host_run(
         &self,
         h: &Host,
@@ -272,7 +273,7 @@ impl ToolHost {
         action_id: String,
         rule: &str,
         real: Option<&Path>,
-    ) -> (bool, String, Value, bool) {
+    ) -> Result<(bool, String, Value, bool), String> {
         let tool = req.tool.as_str();
         let args = req.args.as_object().cloned().unwrap_or_default();
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
@@ -283,12 +284,9 @@ impl ToolHost {
             None => command.to_owned(),
         });
         if logged && let Err(e) = h.log(&req.session, tool, &what, network, "run", rule, None) {
-            return (
-                false,
-                format!("[toolhost] {tool} was not run: the action log cannot be written ({e})"),
-                Value::Null,
-                false,
-            );
+            return Err(format!(
+                "[toolhost] {tool} was not run: the action log cannot be written ({e})"
+            ));
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
             self.host_effect(h, tool, &args, real, action_id)
@@ -314,13 +312,13 @@ impl ToolHost {
             "exec" => h.cfg.rules.reads_foreign(command),
             _ => false,
         };
-        if tool == "exec" && network {
+        if tool == "exec" && (network || h.cfg.rules.reaches_out(command)) {
             self.mark(&req.session, "web");
         }
         if foreign {
             self.mark(&req.session, "foreign");
         }
-        (ok, content, data, external)
+        Ok((ok, content, data, external))
     }
 
     fn host_effect(

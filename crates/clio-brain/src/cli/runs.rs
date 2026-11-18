@@ -409,9 +409,8 @@ const KEEP_MS: i64 = 14 * 24 * 3600 * 1000;
 /// applied or has no differences, a host session with no action waiting for the person. Best
 /// effort: what cannot be checked or removed stays, and is said in what this returns.
 pub fn clean_old(dirs: &Dirs, now: i64) -> Vec<String> {
-    let waiting: Vec<String> = clio_toolhost::pending::list(&dirs.data.join("host"))
+    let waiting: Vec<String> = super::pending::waiting(dirs)
         .into_iter()
-        .filter(|p| p.state == clio_toolhost::pending::State::Waiting)
         .map(|p| p.run)
         .collect();
     let mut failed = Vec::new();
@@ -420,9 +419,11 @@ pub fn clean_old(dirs: &Dirs, now: i64) -> Vec<String> {
             path: dirs.runs.join(&id),
             id,
         };
-        // Its newest top-level file: a reopened session writes its log there.
-        let last = std::fs::read_dir(&run.path)
-            .into_iter()
+        // Its newest top-level file (a reopened session writes its log there), or in `toolhost/`
+        // (a host session in use appends to `changes.jsonl` and adds `backups/N`).
+        let last = [run.path.clone(), run.path.join("toolhost")]
+            .iter()
+            .flat_map(std::fs::read_dir)
             .flatten()
             .flatten()
             .filter_map(|e| e.metadata().ok()?.modified().ok())
@@ -1373,21 +1374,42 @@ mod tests {
             run: waiting_id.into_owned(),
             session: "s".into(),
             created_ms: 0,
-            expires_ms: 1,
+            expires_ms: i64::MAX,
             ask: true,
             state: State::Waiting,
         };
         std::fs::create_dir_all(data.join("host/pending")).unwrap();
         write_json(&data.join("host/pending/abcd1234.json"), &p).unwrap();
-        for r in [&applied, &same, &unapplied, &host_free, &host_waiting] {
+        // One whose pending is past its time: nothing waits there any more.
+        let host_expired = dirs.runs.join(prepare_host(&dirs, "z").unwrap());
+        let expired = Pending {
+            id: "dcba4321".into(),
+            run: host_expired.file_name().unwrap().to_string_lossy().into(),
+            expires_ms: 1,
+            ..p
+        };
+        write_json(&data.join("host/pending/dcba4321.json"), &expired).unwrap();
+        // One still in use: only what is inside `toolhost/` is new.
+        let host_in_use = dirs.runs.join(prepare_host(&dirs, "w").unwrap());
+        std::fs::create_dir_all(host_in_use.join("toolhost/backups")).unwrap();
+        std::fs::write(host_in_use.join("toolhost/changes.jsonl"), "{}").unwrap();
+        for r in [
+            &applied,
+            &same,
+            &unapplied,
+            &host_free,
+            &host_waiting,
+            &host_expired,
+            &host_in_use,
+        ] {
             age(r, 15);
         }
         age(&recent, 13);
         assert!(clean_old(&dirs, now_ms()).is_empty());
-        for gone in [&applied, &same, &host_free] {
+        for gone in [&applied, &same, &host_free, &host_expired] {
             assert!(!gone.exists(), "{} was kept", gone.display());
         }
-        for kept in [&unapplied, &recent, &host_waiting] {
+        for kept in [&unapplied, &recent, &host_waiting, &host_in_use] {
             assert!(kept.exists(), "{} was removed", kept.display());
         }
     }

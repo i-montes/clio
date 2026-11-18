@@ -9,6 +9,7 @@ use clio_brain::pi::launch::valid_id;
 use clio_toolhost::ask::HostRules;
 use clio_toolhost::pending::{self, Pending, State};
 use clio_toolhost::{Config, HostCfg, JailMode, ToolHost};
+use clio_vault::Scrubber;
 use serde_json::Value;
 
 use super::home::Dirs;
@@ -20,12 +21,19 @@ pub fn state(dirs: &Dirs) -> PathBuf {
     dirs.data.join("host")
 }
 
-/// What waits for the person, oldest first.
+/// What waits for the person, oldest first: one past its time does not wait any more.
 pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
+    let now = now_ms();
     pending::list(&state(dirs))
         .into_iter()
-        .filter(|p| p.state == State::Waiting)
+        .filter(|p| p.state == State::Waiting && now < p.expires_ms)
         .collect()
+}
+
+/// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
+/// out. Never the stored `what`.
+pub fn what(p: &Pending) -> String {
+    Scrubber::default().scrub(pending::shown(p))
 }
 
 /// One line for the person: id, class, what, since when, until when, and whether it was asked.
@@ -34,7 +42,7 @@ pub fn line(p: &Pending, now: i64) -> String {
         "{}  «{}»  {}  · desde {} UTC · {} {} UTC{}",
         p.id,
         p.class,
-        sanitize::line(&p.what),
+        sanitize::line(&what(p)),
         stamp(p.created_ms),
         if now >= p.expires_ms {
             "venció"
@@ -104,6 +112,7 @@ fn host_for(dirs: &Dirs, run: &str) -> Res<ToolHost> {
 
 /// What an approved action did: what it was, its exit code, the tail of its output.
 pub fn outcome(p: &Pending) -> String {
+    let what = what(p);
     match &p.state {
         State::Done {
             exit_code,
@@ -112,23 +121,21 @@ pub fn outcome(p: &Pending) -> String {
             let code = exit_code.map_or_else(String::new, |c| format!(" (salida {c})"));
             let tail = output_tail.trim();
             if tail.is_empty() {
-                format!("{}{code}", p.what)
+                format!("{what}{code}")
             } else {
-                format!("{}{code}\n{tail}", p.what)
+                format!("{what}{code}\n{tail}")
             }
         }
-        _ => p.what.clone(),
+        _ => what,
     }
 }
 
 /// Runs `id` as it was set aside. The person answered: it does not count as one of the day's
 /// questions.
 pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
-    let run = pending::list(&state(dirs))
-        .into_iter()
-        .find(|p| p.id == id)
-        .map(|p| p.run)
-        .ok_or_else(|| format!("no hay ningún pendiente {id}"))?;
+    // Before the toolhost is built (folders, the launcher's self-test): one that does not wait
+    // stops here.
+    let run = pending::check(&state(dirs), id, now_ms())?.run;
     let done = host_for(dirs, &run)?.approve(id, now_ms())?;
     let _ = pending::answered_at_terminal(&state(dirs), id);
     Ok(done)
@@ -153,7 +160,7 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     println!(
         "rechazado {}: {} no se ejecuta",
         p.id,
-        sanitize::line(&p.what)
+        sanitize::line(&what(&p))
     );
     Ok(())
 }

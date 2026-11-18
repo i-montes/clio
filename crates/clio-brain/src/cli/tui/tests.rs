@@ -1514,10 +1514,11 @@ fn short_id_never_panics_on_a_non_ascii_name() {
     assert_eq!(short_id("20261031-181646-5a67"), "1031-1816-5a67");
 }
 
-// Host mode: at the end of a turn, each action the session set aside is one question, `[s/N]`;
-// `s` runs it, anything else rejects it, and the next one comes.
+// Host mode: at the end of a turn, each action the session set aside is one question; `s` and then
+// Enter runs it, `n` or Esc rejects it, and the next one comes. The question opens while the
+// person may be typing: a lone `s`, Enter or any other key decides nothing.
 #[test]
-fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_runs_it() {
+fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     let asks = vec![
         ("a1".to_owned(), "«borrar» rm -r datos".to_owned()),
         ("b2".to_owned(), "«enviar» git push".to_owned()),
@@ -1528,10 +1529,28 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_runs_it() {
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
     let screen = screen_text(&a, 90, 30);
     assert!(
-        screen.contains("¿Lo ejecuto? [s/N]") && screen.contains("rm -r datos"),
+        screen.contains("¿Lo ejecuto?")
+            && screen.contains("s y Enter")
+            && screen.contains("n o Esc")
+            && screen.contains("rm -r datos"),
         "{screen}"
     );
-    let (a, cmds) = feed(a, vec![ch('s')]);
+    // Typing on: nothing is answered, and an `s` followed by another key is undone.
+    let (a, cmds) = feed(
+        a,
+        vec![
+            ch('h'),
+            key(KeyCode::Enter),
+            ch('s'),
+            ch('o'),
+            key(KeyCode::Enter),
+            ch('s'),
+            ch('s'),
+        ],
+    );
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert_eq!(a.confirm.as_ref().unwrap().id, "a1");
+    let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
         vec![Cmd::ChatAnswer {
@@ -1540,7 +1559,7 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_runs_it() {
         }]
     );
     assert_eq!(a.confirm.as_ref().unwrap().id, "b2");
-    let (a, cmds) = feed(a, vec![ch('n')]);
+    let (a, cmds) = feed(a, vec![ch('s'), key(KeyCode::Esc)]);
     assert_eq!(
         cmds,
         vec![Cmd::ChatAnswer {

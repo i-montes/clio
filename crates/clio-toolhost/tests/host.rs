@@ -175,6 +175,10 @@ fn absolute_paths_read_and_write_in_host_mode_and_not_without() {
     // `network` is not an argument of the copy mode's `exec`.
     let x = call_copy("exec", json!({"command": "true", "network": true}));
     assert!(!x.ok, "{x:?}");
+    // Only host mode works on `/`.
+    let mut c = Config::new(Path::new("/"), &e.r.join("scratch2"), &e.r.join("root-run"));
+    c.jail = JailMode::Off;
+    assert!(ToolHost::new(c).is_err());
 }
 
 #[test]
@@ -413,6 +417,9 @@ fn foreign_text_marks_the_session_and_home_does_not() {
         );
         assert!(x.ok && x.tainted, "{x:?}");
         assert_eq!(actions(&e).last().unwrap()["network"], true);
+        // A program that reaches a daemon's socket or another machine marks without asking.
+        let x = call(&e, "s6", "exec", json!({"command": "rsync --version"}));
+        assert!(x.tainted, "{x:?}");
         let x = call(
             &e,
             "s4",
@@ -597,6 +604,50 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     std::fs::write(&file, v.to_string()).unwrap();
     assert!(approver.approve(&id, now()).is_err());
     assert_eq!(f("d.sql"), "viejo");
+
+    // What is shown comes from the arguments: a stored `what` that says something else stops it.
+    let id = aside_id(&write_backup(&e, "e.sql", "nuevo"), "borrar");
+    let file = e.state.join(format!("pending/{id}.json"));
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["what"] = json!("/tmp/inofensivo.txt");
+    std::fs::write(&file, v.to_string()).unwrap();
+    let pd = pending::list(&e.state)
+        .into_iter()
+        .find(|p| p.id == id)
+        .unwrap();
+    assert_eq!(pending::shown(&pd), p(&e.r.join("outside/e.sql")));
+    assert_eq!(
+        approver.approve(&id, now()).unwrap_err(),
+        format!("{id} cambió después de apartarse: no se ejecuta")
+    );
+    assert_eq!(f("e.sql"), "viejo");
+
+    // The log's line before cannot be written: it did not run, so it still waits and can be
+    // approved again once the log is back.
+    let id = aside_id(&write_backup(&e, "f.sql", "nuevo"), "borrar");
+    let log = e.state.join("actions.jsonl");
+    std::fs::rename(&log, e.state.join("actions.old")).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    assert!(approver.approve(&id, now()).is_err());
+    assert_eq!(f("f.sql"), "viejo");
+    let waits = |id: &str| {
+        pending::list(&e.state)
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .state
+            == State::Waiting
+    };
+    assert!(waits(&id));
+    std::fs::remove_dir(&log).unwrap();
+    approver.approve(&id, now()).unwrap();
+    assert_eq!(f("f.sql"), "nuevo");
+
+    // An approval already took it: a racing reject does not flip it.
+    let id = aside_id(&write_backup(&e, "g.sql", "nuevo"), "borrar");
+    std::fs::write(e.state.join(format!("pending/{id}.ran")), "").unwrap();
+    assert!(pending::reject(&e.state, &id).is_err());
+    assert!(waits(&id));
 
     assert!(approver.approve("../../x", now()).is_err());
     assert!(approver.approve("nada", now()).is_err());

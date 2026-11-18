@@ -243,6 +243,8 @@ pub struct Confirm {
     pub names: Vec<String>,
     /// A warning to read before answering.
     pub note: Option<String>,
+    /// An action set aside: `s` was typed, and Enter now runs it.
+    pub armed: bool,
 }
 
 impl Confirm {
@@ -254,6 +256,7 @@ impl Confirm {
             workspace,
             names: vec![],
             note: None,
+            armed: false,
         }
     }
 }
@@ -512,15 +515,28 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
     }
 }
 
-/// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead.
+/// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead. An action set aside, which
+/// is asked when a turn ends while the person may be typing, takes `s` and then Enter; `n` or Esc
+/// rejects it, and any other key only undoes a typed `s`.
 fn answer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
-    let Some(c) = app.confirm.take() else {
+    let Some(mut c) = app.confirm.take() else {
         return vec![];
     };
     // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
-    let yes = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
-    // [s/N] on an action set aside: anything but yes is a no.
+    let yes_key = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
+    let yes = if c.action == Action::Approve {
+        let no = k.code == KeyCode::Esc || (plain && matches!(k.code, KeyCode::Char('n' | 'N')));
+        let enter = plain && k.code == KeyCode::Enter;
+        if !(no || enter && c.armed) {
+            c.armed = yes_key;
+            app.confirm = Some(c);
+            return vec![];
+        }
+        !no
+    } else {
+        yes_key
+    };
     if !yes && c.action != Action::Approve {
         app.flash = Some("cancelado: no se cambió nada".into());
         return vec![];
@@ -970,7 +986,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ),
             Action::Archive => format!("Archivar el recuerdo m{} (ya no se recordará)", c.id),
             Action::DeleteSession => "Borrar la sesión (no se puede deshacer); se va:".to_owned(),
-            Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto? [s/N]", c.id),
+            Action::Approve => format!("Clio apartó {}. ¿Lo ejecuto?", c.id),
         };
         let mut lines = vec![
             Line::from(Span::styled(verb, t.bold())),
@@ -988,20 +1004,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         if let Some(n) = &c.note {
             lines.push(Line::from(Span::styled(clean(n), t.warn())));
         }
-        let (yes, no) = if c.action == Action::Approve {
-            (("s", " sí, ejecutarlo      "), " no (se rechaza)")
+        let answers = if c.action == Action::Approve {
+            vec![
+                Span::styled(if c.armed { "Enter" } else { "s y Enter" }, t.key()),
+                Span::raw(" sí, ejecutarlo      "),
+                Span::styled("n o Esc", t.key()),
+                Span::raw(" no (se rechaza)"),
+            ]
         } else {
-            (("y", " sí, continuar      "), " cancela")
-        };
-        lines.extend([
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(yes.0, t.key()),
-                Span::raw(yes.1),
+            vec![
+                Span::styled("y", t.key()),
+                Span::raw(" sí, continuar      "),
                 Span::styled("cualquier otra tecla", t.key()),
-                Span::raw(no),
-            ]),
-        ]);
+                Span::raw(" cancela"),
+            ]
+        };
+        lines.extend([Line::from(""), Line::from(answers)]);
         dialog(f, area, t, " Confirmar ", lines, t.warn());
     } else if let Some(n) = &app.notice {
         let mut lines: Vec<Line> = sanitize::multiline(n)

@@ -33,7 +33,8 @@ pub struct Pending {
     pub args: Value,
     /// Over tool and canonical args: an action changed on disk does not run.
     pub hash: String,
-    /// The command or the path, scrubbed, for showing.
+    /// The command or the path, scrubbed, as it was set aside: for the log. What is shown and
+    /// approved is `shown`, from `args`; `approve` refuses when the two no longer agree.
     pub what: String,
     pub run: String,
     pub session: String,
@@ -70,6 +71,27 @@ pub(crate) fn aside_text(p: &Pending) -> String {
         "apartado {}: «{}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.",
         p.id, p.class
     )
+}
+
+/// What `p` does, its command or its path, read from its arguments every time it is shown or
+/// approved: never from the stored `what`, which a rewritten file could make say something else.
+pub fn shown(p: &Pending) -> &str {
+    p.args
+        .get("command")
+        .or_else(|| p.args.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// Takes `id` for one answer: an approval and a rejection racing each other, even from two
+/// processes, cannot both have it.
+fn claim(state: &Path, id: &str) -> std::io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir(state).join(format!("{id}.ran")))
+        .map(drop)
 }
 
 fn hash_of(tool: &str, args: &Value) -> String {
@@ -156,11 +178,29 @@ fn not_waiting(p: &Pending) -> String {
     }
 }
 
+/// `id` as saved, if it still waits and has not expired at `now_ms` (one past its time is marked
+/// `Expired` here). Nothing is run.
+pub fn check(state: &Path, id: &str, now_ms: i64) -> Result<Pending, String> {
+    let mut p = load(state, id)?;
+    if p.state != State::Waiting {
+        return Err(not_waiting(&p));
+    }
+    if now_ms >= p.expires_ms {
+        p.state = State::Expired;
+        save(state, &p)?;
+        let when = local(p.expires_ms, "%Y-%m-%d %H:%M")
+            .unwrap_or_else(|| format!("{} (ms)", p.expires_ms));
+        return Err(format!("venció el {when}: no se ejecutó"));
+    }
+    Ok(p)
+}
+
 pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     let mut p = load(state, id)?;
     if p.state != State::Waiting {
         return Err(not_waiting(&p));
     }
+    claim(state, id).map_err(|_| format!("{id} ya se respondió"))?;
     p.state = State::Rejected;
     save(state, &p)?;
     Ok(p)
@@ -234,25 +274,15 @@ fn tail(s: &str) -> String {
 
 impl ToolHost {
     /// Sets the action aside instead of running it, logs it, and gives the model the exact answer.
-    pub(crate) fn aside(
-        &self,
-        h: &Host,
-        req: &Request,
-        class: Class,
-        real: Option<&Path>,
-    ) -> Response {
-        let what = match real {
-            Some(r) => r.to_string_lossy().into_owned(),
-            None => req.args["command"].as_str().unwrap_or("").to_owned(),
-        };
+    pub(crate) fn aside(&self, h: &Host, req: &Request, class: Class) -> Response {
         let now = now_ms();
-        let draft = Pending {
+        let mut draft = Pending {
             id: String::new(),
             class,
             tool: req.tool.clone(),
             args: req.args.clone(),
             hash: String::new(),
-            what: self.clean(&what),
+            what: String::new(),
             run: h.cfg.run.clone(),
             session: req.session.clone(),
             created_ms: now,
@@ -260,6 +290,7 @@ impl ToolHost {
             ask: false,
             state: State::Waiting,
         };
+        draft.what = self.clean(shown(&draft));
         let network = req.args["network"].as_bool() == Some(true);
         let (content, rule) = match set_aside(&h.cfg.state, draft, h.cfg.rules.questions_per_day())
         {
@@ -312,21 +343,11 @@ impl ToolHost {
             .ok_or("este servicio no está en modo anfitrión")?;
         let _one_at_a_time = lock(&self.busy);
         let state = &h.cfg.state;
-        let mut p = load(state, id)?;
+        let mut p = check(state, id, now_ms)?;
         if p.run != h.cfg.run {
             return Err(format!("{id} es de otra sesión ({})", p.run));
         }
-        if p.state != State::Waiting {
-            return Err(not_waiting(&p));
-        }
-        if now_ms >= p.expires_ms {
-            p.state = State::Expired;
-            save(state, &p)?;
-            let when = local(p.expires_ms, "%Y-%m-%d %H:%M")
-                .unwrap_or_else(|| format!("{} (ms)", p.expires_ms));
-            return Err(format!("venció el {when}: no se ejecutó"));
-        }
-        if hash_of(&p.tool, &p.args) != p.hash {
+        if hash_of(&p.tool, &p.args) != p.hash || self.clean(shown(&p)) != p.what {
             return Err(format!("{id} cambió después de apartarse: no se ejecuta"));
         }
         if p.tool == "exec" {
@@ -338,12 +359,7 @@ impl ToolHost {
             None => None,
         };
         // Claimed before it runs: a second approval, even from another process, finds it.
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(dir(state).join(format!("{id}.ran")))
-            .map_err(|_| format!("{id} ya se ejecutó"))?;
+        claim(state, id).map_err(|_| format!("{id} ya se ejecutó"))?;
         let req = Request {
             id: id.into(),
             tool: p.tool.clone(),
@@ -352,13 +368,17 @@ impl ToolHost {
             call_id: "approve".into(),
             tainted: false,
         };
-        let (_, content, data, _) = self.host_run(
+        let ran = self.host_run(
             h,
             &req,
             format!("approve:{id}"),
             "host/approved",
             real.as_deref(),
         );
+        // It did not run (its line before could not be logged): it still waits.
+        let (_, content, data, _) = ran.inspect_err(|_| {
+            let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
+        })?;
         p.state = State::Done {
             exit_code: data.get("exit_code").and_then(Value::as_i64),
             output_tail: tail(&content),
