@@ -88,7 +88,7 @@ const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the p
 /// own words only enter from a clean session (S-05).
 pub const BLOCK_TAINTED: &str = "this session read content from outside: identity and what is watched are only changed in a clean session. Open a new session and ask for it there.";
 
-/// Changes a session may make through forget, pin, revert and consolidate (S-47, S-65).
+/// Changes a session may make in an hour through forget, pin, revert and consolidate (S-47, S-65).
 pub(crate) const MAX_CHANGES: u32 = 10;
 const NO_CHANGES: &str =
     "this memory cannot make that change: the person can do it with `clio memory`";
@@ -116,11 +116,11 @@ pub const CATEGORIES: [&str; 9] = [
 const MAX_AROUND: usize = 5;
 /// A memory read in full (`memory_get`) may be this long; a search shows a preview.
 const MAX_FULL_LINE_CHARS: usize = 1600;
-/// Proposals a TAINTED session may make (S-47, S-61): what it read may be hostile, and what it
-/// proposes is the model's own words after reading it.
+/// Proposals a TAINTED session may make in an hour (S-47, S-61): what it read may be hostile, and
+/// what it proposes is the model's own words after reading it.
 pub(crate) const MAX_PROPOSALS: u32 = 5;
-/// Proposals a session that has read nothing hostile may make. The memory's own quota per hour is
-/// the real rate limit; this only stops a loop that proposes without end.
+/// Proposals in an hour of a session that has read nothing hostile. The memory's own quota per hour
+/// is the real rate limit; this only stops a loop that proposes without end.
 pub(crate) const MAX_PROPOSALS_CLEAN: u32 = 30;
 
 const MAX_QUERY_CHARS: usize = 200;
@@ -636,9 +636,36 @@ fn cut(s: &str, max: usize) -> String {
 struct Budget {
     calls: u32,
     bytes: u64,
+    /// The saves and the changes: when each was counted (ms), for the rolling hour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    at: Vec<i64>,
 }
 
+/// The saves and changes count over this rolling window, not the session's whole life: a
+/// conversation that never ends would otherwise run out for good. Not reset by a compaction: Pi
+/// reports those, and Pi is inside the jail.
+const BUDGET_WINDOW_MS: i64 = 60 * 60 * 1000;
+
 impl Budget {
+    /// How many calls counted in the hour before `now`. A file of an older version has only the
+    /// count: its calls are taken as made now, the strict reading.
+    fn in_hour(&mut self, now: i64) -> u32 {
+        let old = usize::try_from(self.calls)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.at.len());
+        self.at.extend(std::iter::repeat_n(now, old));
+        self.at
+            .retain(|t| now.saturating_sub(*t) < BUDGET_WINDOW_MS);
+        self.calls = u32::try_from(self.at.len()).unwrap_or(u32::MAX);
+        self.calls
+    }
+
+    /// One more call, made at `now`.
+    fn count(&mut self, now: i64) {
+        self.at.push(now);
+        self.calls = self.calls.saturating_add(1);
+    }
+
     /// No file is a fresh budget; a file that cannot be read or understood is an error, never a
     /// fresh budget.
     fn load(path: &Path) -> Result<Self, String> {
@@ -665,6 +692,18 @@ impl Budget {
         f.sync_all().map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())
     }
+}
+
+/// The refusal once the hour's saves are made.
+fn saves_spent(cap: u32) -> String {
+    format!("this session made its memory saves for this hour ({cap} an hour): try again later")
+}
+
+/// The refusal once the hour's changes are made.
+fn changes_spent() -> String {
+    format!(
+        "this session made its memory changes for this hour ({MAX_CHANGES} an hour); the person can use `clio memory`"
+    )
 }
 
 /// What one call leaves in `memory.jsonl`. No text of the query or of a memory, ever.
@@ -821,13 +860,13 @@ impl ToolHost {
             Ok(b) => b,
             Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
         };
-        if budget.calls >= MAX_CHANGES {
-            return self.budget_denied(
-                req,
-                &format!("this session asked for its memory changes ({MAX_CHANGES}); the person can use `clio memory`"),
-            );
+        let now = self.clock.now_ms();
+        if budget.in_hour(now) >= MAX_CHANGES {
+            // Kept even so: an older file's count starts its hour now, not at every call.
+            let _ = budget.save(&path);
+            return self.budget_denied(req, &changes_spent());
         }
-        budget.calls += 1;
+        budget.count(now);
         if let Err(why) = budget.save(&path) {
             return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
         }
@@ -891,20 +930,20 @@ impl ToolHost {
             Ok(a) => a,
             Err(why) => return self.memory_failed(req, out, &why),
         };
-        // A merge forgets memories: it is also one of the session's ten changes (S-65).
+        // A merge forgets memories: it is also one of the hour's ten changes (S-65).
         if req.tool == "memory_consolidate" {
             let path = self.run_dir.join("memory-changes.json");
             let mut changes = match Budget::load(&path) {
                 Ok(b) => b,
                 Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
             };
-            if changes.calls >= MAX_CHANGES {
-                return self.budget_denied(
-                    req,
-                    &format!("this session asked for its memory changes ({MAX_CHANGES}); the person can use `clio memory`"),
-                );
+            let now = self.clock.now_ms();
+            if changes.in_hour(now) >= MAX_CHANGES {
+                // Kept even so: an older file's count starts its hour now, not at every call.
+                let _ = changes.save(&path);
+                return self.budget_denied(req, &changes_spent());
             }
-            changes.calls += 1;
+            changes.count(now);
             if let Err(why) = changes.save(&path) {
                 return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
             }
@@ -919,10 +958,13 @@ impl ToolHost {
         } else {
             MAX_PROPOSALS_CLEAN
         };
-        if budget.calls >= cap {
-            return self.budget_denied(req, &format!("this session made its memory saves ({cap})"));
+        let now = self.clock.now_ms();
+        if budget.in_hour(now) >= cap {
+            // Kept even so: an older file's count starts its hour now, not at every call.
+            let _ = budget.save(&path);
+            return self.budget_denied(req, &saves_spent(cap));
         }
-        budget.calls += 1;
+        budget.count(now);
         if let Err(why) = budget.save(&path) {
             return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
         }
@@ -1137,13 +1179,13 @@ impl ToolHost {
             Ok(b) => b,
             Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
         };
-        if budget.calls >= MAX_PROPOSALS_CLEAN {
-            return self.budget_denied(
-                req,
-                &format!("this session made its memory saves ({MAX_PROPOSALS_CLEAN})"),
-            );
+        let now = self.clock.now_ms();
+        if budget.in_hour(now) >= MAX_PROPOSALS_CLEAN {
+            // Kept even so: an older file's count starts its hour now, not at every call.
+            let _ = budget.save(&path);
+            return self.budget_denied(req, &saves_spent(MAX_PROPOSALS_CLEAN));
         }
-        budget.calls += 1;
+        budget.count(now);
         if let Err(why) = budget.save(&path) {
             return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
         }

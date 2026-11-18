@@ -1056,6 +1056,47 @@ fn a_tainted_session_makes_five_proposals_a_clean_one_thirty_and_failed_ones_cou
     assert!(denied_by_budget(&propose(&e, "clean", "p30", "semantic")));
 }
 
+// S-47, S-61, S-65: in a conversation that never ends the caps count over a rolling hour, by the
+// tool host's clock: a save or a change older than an hour no longer counts. A count written by an
+// older version (no times) is taken as made now.
+#[test]
+fn the_saves_and_changes_count_over_a_rolling_hour() {
+    let clock = Arc::new(clio_core::FixedClock::new(1_000_000_000));
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env_with(Some(&port), |c| c.clock = clock.clone());
+    assert!(call(&e, "s1", "taint", json!({})).tainted);
+    for n in 0..5 {
+        assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok, "{n}");
+    }
+    let r = propose(&e, "s1", "p5", "semantic");
+    assert!(denied_by_budget(&r) && r.content.contains("hour"), "{r:?}");
+    for _ in 0..10 {
+        assert!(change(&e, "s1", "memory_pin", 7).ok);
+    }
+    let r = change(&e, "s1", "memory_pin", 7);
+    assert!(denied_by_budget(&r) && r.content.contains("hour"), "{r:?}");
+    // Still inside the hour: refused.
+    clock.advance(59 * 60 * 1000);
+    assert!(denied_by_budget(&propose(&e, "s1", "p6", "semantic")));
+    // Past it: the five saves and the ten changes are back, and the mark stays.
+    clock.advance(2 * 60 * 1000);
+    assert!(propose(&e, "s1", "p7", "semantic").ok);
+    assert!(change(&e, "s1", "memory_pin", 7).ok);
+    assert!(e.host.is_tainted("s1"));
+    // An older file has only the count: its saves count from now.
+    std::fs::write(
+        run_dir(&e).join("memory-proposals.json"),
+        r#"{"calls":5,"bytes":0}"#,
+    )
+    .unwrap();
+    assert!(denied_by_budget(&propose(&e, "s1", "p8", "semantic")));
+    clock.advance(59 * 60 * 1000);
+    assert!(denied_by_budget(&propose(&e, "s1", "p9", "semantic")));
+    clock.advance(2 * 60 * 1000);
+    let r = propose(&e, "s1", "p10", "semantic");
+    assert!(r.ok, "{r:?}");
+}
+
 // S-47, S-61
 #[test]
 fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
@@ -1572,7 +1613,7 @@ fn a_closed_session_only_saves_its_summary() {
 // ---- memory_pin and relations (stage 4) ----
 
 // S-65: pinning is one of the agent's changes: the answer is in fixed words and it counts among
-// the session's ten changes.
+// the hour's ten changes.
 #[test]
 fn a_pin_reaches_the_port_and_counts_as_a_change() {
     let port = FakePort::new(vec![], Mode::Items);
@@ -1720,7 +1761,7 @@ fn memory_propose_still_saves_and_memory_promote_is_not_declared() {
     assert!(port.changes.lock().unwrap().is_empty());
 }
 
-// A merge is also one of the session's ten changes.
+// A merge is also one of the hour's ten changes.
 #[test]
 fn a_merge_counts_among_the_ten_changes() {
     let port = FakePort::new(vec![], Mode::Items);

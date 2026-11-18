@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use clio_core::{Level, SystemClock};
+use clio_core::{Clock, Level, SystemClock};
 use clio_gateway::{
     ActionRequest, ArgKind, ArgSpec, Budget, Decision, Egress, Gateway, Outcome, Rules,
     SessionInfo, Source, Telemetry, ToolDecl, wrap_untrusted,
@@ -173,6 +173,8 @@ pub struct Config {
     pub host: Option<HostCfg>,
     /// Where `request_secret` keeps what it asks the person. `None`: nobody can be asked.
     pub secrets: Option<pending::SecretCfg>,
+    /// The time the memory's hourly saves and changes are counted by (S-47).
+    pub clock: Arc<dyn Clock>,
 }
 
 impl Config {
@@ -189,6 +191,7 @@ impl Config {
             said_token: None,
             host: None,
             secrets: None,
+            clock: Arc::new(SystemClock),
         }
     }
 }
@@ -230,6 +233,7 @@ pub struct ToolHost {
     run_dir: PathBuf,
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,
+    clock: Arc<dyn Clock>,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
     /// The service is stopping: a running command is stopped, and nothing new runs.
@@ -394,6 +398,7 @@ impl ToolHost {
             run_dir: cfg.run_dir,
             host,
             secrets: cfg.secrets,
+            clock: cfg.clock,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),
