@@ -6,7 +6,7 @@
 //!   session, with the interface, or with the process.
 //! - [`RemoteSource`]: the same protocol over `ssh <host> clio serve-rpc` stdio. A placeholder:
 //!   the trait exists, it lists nothing (a row nobody can open is noise), and opening says
-//!   `remoto: pendiente`.
+//!   `remote: pending`.
 //! - [`run`]: `clio run --harness pi`, a whole prompt without a terminal.
 
 pub mod local;
@@ -46,13 +46,13 @@ pub fn resolve(flag: Option<&str>, dirs: &Dirs) -> Res<Harness> {
             Ok(()) => Harness::Pi,
             Err(why) => {
                 eprintln!(
-                    "aviso: Pi no está disponible ({why}); uso el bucle propio de Clio, que no corre en la jaula de Pi. `--harness builtin` silencia este aviso."
+                    "warning: Pi is not available ({why}); using Clio's own loop, which does not run in Pi's jail. `--harness builtin` silences this warning."
                 );
                 Harness::Builtin
             }
         }),
         None => Ok(Harness::Builtin),
-        Some(other) => Err(format!("--harness: {other:?} no es válido (pi o builtin)")),
+        Some(other) => Err(format!("--harness: {other:?} is not valid (pi or builtin)")),
     }
 }
 
@@ -64,7 +64,7 @@ pub enum RowKind {
     Remote,
 }
 
-/// One line of the selector (the "nueva sesión" line belongs to the screen, not to a source).
+/// One line of the selector (the "new session" line belongs to the screen, not to a source).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub kind: RowKind,
@@ -155,7 +155,7 @@ pub trait Session: Send + Sync {
     /// The person's answer at the terminal to one of `new_pending`: yes runs it (its result goes
     /// to the model with the next message), no rejects it. Says what happened.
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
-        Err(format!("{id} no es de esta sesión"))
+        Err(format!("{id} is not of this session"))
     }
     /// The person's answer to a secret the model asked for (`request_secret`): the value goes to
     /// the vault, `None` declines it. What the model is told with the next message.
@@ -173,7 +173,7 @@ pub trait Session: Send + Sync {
     /// One of Pi's commands (`set_model`, `compact`...) for the chat's slash commands, sent only
     /// while no turn runs; Pi's `data`, or why not.
     fn command(&self, kind: &str, _fields: Value) -> Result<Value, String> {
-        Err(format!("{kind}: no disponible en esta sesión"))
+        Err(format!("{kind}: not available in this session"))
     }
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
@@ -189,7 +189,7 @@ pub trait SessionSource: Send + Sync {
 /// no row, since none could be opened.
 pub struct RemoteSource;
 
-const REMOTE_PENDING: &str = "remoto: pendiente (ssh <host> clio serve-rpc todavía no existe)";
+const REMOTE_PENDING: &str = "remote: pending (ssh <host> clio serve-rpc does not exist yet)";
 
 impl SessionSource for RemoteSource {
     fn list(&self) -> Vec<Row> {
@@ -222,6 +222,6 @@ mod tests {
         let e = r.open(&Target::Existing {
             reference: "x".into(),
         });
-        assert!(e.err().unwrap().contains("remoto: pendiente"));
+        assert!(e.err().unwrap().contains("remote: pending"));
     }
 }

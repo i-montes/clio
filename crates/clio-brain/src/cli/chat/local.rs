@@ -147,7 +147,7 @@ impl SessionSource for LocalSource {
                 last_ms: Some(s.last_activity_ms),
                 reference: s.path.display().to_string(),
                 unavailable: (!self.is_ours(s)).then(|| {
-                    "no es una copia de trabajo de Clio (otra herramienta la creó): aquí no se abre"
+                    "not a working copy of Clio's (another tool made it): it does not open here"
                         .to_owned()
                 }),
             })
@@ -169,7 +169,7 @@ impl SessionSource for LocalSource {
         let (id, session, host) = match target {
             Target::New { .. } if self.mode.unwrap_or(cfg.mode) == Mode::Host => {
                 clean_old_runs(d);
-                let id = runs::prepare_host(d, "sesión de Pi")?;
+                let id = runs::prepare_host(d, "Pi session")?;
                 (id.clone(), SessionTarget::New { id: Some(id) }, true)
             }
             Target::New { project } => {
@@ -180,7 +180,7 @@ impl SessionSource for LocalSource {
                         workspace: project.clone(),
                         max_steps: None,
                         allow_broad: false,
-                        instruction: "sesión de Pi".into(),
+                        instruction: "Pi session".into(),
                         adapter_key: false,
                     },
                 )?;
@@ -193,9 +193,11 @@ impl SessionSource for LocalSource {
                     .sessions
                     .iter()
                     .find(|s| s.path.display().to_string() == *reference)
-                    .ok_or("esa sesión ya no está en la carpeta de sesiones de Pi")?;
+                    .ok_or("that session is no longer in Pi's sessions folder")?;
                 if !self.is_ours(s) {
-                    return Err("la sesión no es una copia de trabajo de Clio: no se abre".into());
+                    return Err(
+                        "the session is not a working copy of Clio's: it does not open".into(),
+                    );
                 }
                 (
                     s.id.clone(),
@@ -540,7 +542,7 @@ impl Session for ChatSession {
                         .iter()
                         .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
             })
-            .ok_or_else(|| format!("{id} no es de esta sesión"))?;
+            .ok_or_else(|| format!("{id} is not of this session"))?;
         if pending::waiting(&h.dirs)
             .iter()
             .any(|p| p.id == id && clio_toolhost::pending::secret_of(p).is_some())
@@ -549,7 +551,7 @@ impl Session for ChatSession {
         }
         if !yes {
             pending::reject(&h.dirs, id)?;
-            return Ok(format!("rechazado {id}: no se ejecuta"));
+            return Ok(format!("rejected {id}: it is not run"));
         }
         let p = pending::approve(&h.dirs, id)?;
         let what = pending::outcome(&p);
@@ -561,13 +563,13 @@ impl Session for ChatSession {
             clio_toolhost::pending::shown(&p),
         )
         .unwrap_or_else(|| (what.clone(), false));
-        locked(&h.approved).push(format!("la persona aprobó {id}: {shown}"));
+        locked(&h.approved).push(format!("the person approved {id}: {shown}"));
         Ok(if flagged {
             format!(
-                "aprobado {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
+                "approved {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
             )
         } else {
-            format!("aprobado {id}: {what}")
+            format!("approved {id}: {what}")
         })
     }
 
@@ -669,10 +671,10 @@ impl Session for ChatSession {
         // Never beside a turn: both would read Pi's events, and a turn's model must not change
         // under it.
         let Ok(_idle) = self.busy.try_lock() else {
-            return Err("el agente está trabajando: espera a que termine el turno".into());
+            return Err("the agent is working: wait for the turn to end".into());
         };
         if self.down.lock().map_or(true, |d| *d) {
-            return Err("la sesión ya se cerró".into());
+            return Err("the session is already closed".into());
         }
         let r = if kind == "compact" {
             self.pi

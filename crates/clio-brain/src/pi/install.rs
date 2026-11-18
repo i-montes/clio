@@ -21,13 +21,13 @@ pub const MIN_NODE: (u32, u32, u32) = (22, 19, 0);
 /// The pinned Pi version. It must be exact (`1.4.0`, never `^1.4.0`, `latest` or a range).
 pub fn pinned_version() -> Result<String, PiError> {
     let v: serde_json::Value = serde_json::from_str(PACKAGE_JSON)
-        .map_err(|e| PiError::Io(format!("package.json incrustado inválido: {e}")))?;
+        .map_err(|e| PiError::Io(format!("the embedded package.json is not valid: {e}")))?;
     let ver = v["dependencies"][PI_PACKAGE]
         .as_str()
-        .ok_or_else(|| PiError::Io(format!("package.json no fija {PI_PACKAGE}")))?;
+        .ok_or_else(|| PiError::Io(format!("package.json does not pin {PI_PACKAGE}")))?;
     if parse_node_version(ver).is_none() || ver.starts_with('v') {
         return Err(PiError::Io(format!(
-            "la versión de Pi debe ser exacta (x.y.z), no {ver:?}"
+            "the Pi version must be exact (x.y.z), not {ver:?}"
         )));
     }
     Ok(ver.to_owned())
@@ -70,24 +70,24 @@ pub(crate) fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
 pub fn find_node(path_var: &str) -> Result<NodeInfo, PiError> {
     let path = find_in_path("node", path_var).ok_or_else(|| {
         PiError::Node(
-            "no encontré Node en el PATH. Pi lo necesita (22.19 o más): instálalo (por ejemplo con tu gestor de paquetes o mise) y vuelve a intentar".into(),
+            "could not find Node on the PATH. Pi needs it (22.19 or newer): install it (for example with your package manager or mise) and try again".into(),
         )
     })?;
     let out = Command::new(&path)
         .arg("--version")
         .output()
-        .map_err(|e| PiError::Node(format!("no pude ejecutar {}: {e}", path.display())))?;
+        .map_err(|e| PiError::Node(format!("could not run {}: {e}", path.display())))?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let version = parse_node_version(&raw).ok_or_else(|| {
         PiError::Node(format!(
-            "{} --version dio algo inesperado: {}",
+            "{} --version gave something unexpected: {}",
             path.display(),
             text::line(&raw, 40)
         ))
     })?;
     if version < MIN_NODE {
         return Err(PiError::Node(format!(
-            "Node {}.{}.{} es muy viejo: Pi necesita 22.19 o más. Actualiza Node (mise, nvm o tu gestor de paquetes)",
+            "Node {}.{}.{} is too old: Pi needs 22.19 or newer. Update Node (mise, nvm or your package manager)",
             version.0, version.1, version.2
         )));
     }
@@ -117,19 +117,19 @@ pub fn locate(paths: &PiPaths) -> Result<PiInstall, PiError> {
     let version = pinned_version()?;
     let dir = paths.install_dir(&version);
     let bin = dir.join("node_modules/.bin/pi");
-    let hint = "ejecuta `clio init` (o `clio pi install`)";
+    let hint = "run `clio init` (or `clio pi install`)";
     if !std::fs::metadata(&bin).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
         return Err(PiError::NotInstalled(format!(
-            "Pi {version} no está instalado en {}: {hint}",
+            "Pi {version} is not installed in {}: {hint}",
             dir.display()
         )));
     }
     match installed_version(&dir) {
         Some(v) if v == version => Ok(PiInstall { version, dir, bin }),
         other => Err(PiError::NotInstalled(format!(
-            "en {} hay Pi {} y Clio fija {version}: borra esa carpeta y {hint}",
+            "{} has Pi {} and Clio pins {version}: delete that folder and {hint}",
             dir.display(),
-            other.as_deref().unwrap_or("desconocido")
+            other.as_deref().unwrap_or("unknown")
         ))),
     }
 }
@@ -196,7 +196,7 @@ pub fn install(paths: &PiPaths, path_var: &str) -> Result<PiInstall, PiError> {
     }
     let node = find_node(path_var)?;
     let npm = find_in_path("npm", path_var).ok_or_else(|| {
-        PiError::Node("no encontré npm junto a Node: instala npm y vuelve a intentar".into())
+        PiError::Node("could not find npm next to Node: install npm and try again".into())
     })?;
     let version = pinned_version()?;
     paths.ensure()?;
@@ -239,7 +239,7 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| PiError::Spawn(format!("no pude ejecutar npm: {e}")))?;
+        .map_err(|e| PiError::Spawn(format!("could not run npm: {e}")))?;
     let mut stderr = child.stderr.take();
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -256,7 +256,7 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(PiError::Timeout {
-                    what: "npm ci (descarga unos 400 MB; revisa la red)".into(),
+                    what: "npm ci (downloads about 400 MB; check the network)".into(),
                     secs: NPM_CI_SECS,
                 });
             }
@@ -269,7 +269,7 @@ fn run_npm_ci(npm: &Path, node: &NodeInfo, cwd: &Path) -> Result<(), PiError> {
         Ok(())
     } else {
         Err(PiError::NotInstalled(format!(
-            "`npm ci` falló ({status}); descarga unos 400 MB (Claude Code): revisa la red y vuelve a intentar. {}",
+            "`npm ci` failed ({status}); it downloads about 400 MB (Claude Code): check the network and try again. {}",
             text::block(&err, 600)
         )))
     }
@@ -303,7 +303,7 @@ mod tests {
         };
         let e = locate(&paths).unwrap_err().to_string();
         assert!(
-            e.contains("no está instalado") && e.contains("clio init"),
+            e.contains("is not installed") && e.contains("clio init"),
             "{e}"
         );
         let dir = paths.install_dir(&pinned_version().unwrap());
@@ -326,7 +326,7 @@ mod tests {
             locate(&paths)
                 .unwrap_err()
                 .to_string()
-                .contains("hay Pi 0.0.1")
+                .contains("has Pi 0.0.1")
         );
     }
 

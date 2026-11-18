@@ -1,4 +1,4 @@
-//! `clio run --harness pi "instrucción"`: one prompt on a new session, no terminal. The same
+//! `clio run --harness pi "instruction"`: one prompt on a new session, no terminal. The same
 //! session code as the interface (a copy of the project, the toolhost, Pi with the guard); the
 //! text streams to stdout, one line per tool, and the run is a normal run folder, so
 //! `clio diff|apply|undo <id>` work on what Pi changed.
@@ -49,7 +49,7 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
                 println!(
                     "  [{}] {}{}",
                     sanitize::line(name),
-                    if *is_error { "falló" } else { "ok" },
+                    if *is_error { "failed" } else { "ok" },
                     duration_ms.map_or_else(String::new, |m| format!(" ({})", usage::ms_label(m)))
                 );
             }
@@ -81,20 +81,20 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
     opened.session.shutdown();
     let r = r.map_err(|e| e.to_string())?;
     if let Some(a) = &r.assessment {
-        println!("pedido juzgado como {}", a.notice());
+        println!("request judged as {}", a.notice());
     }
     if let Some(notice) = r.stop_notice() {
         println!("{notice}");
     }
     if let Some(f) = refresh {
         println!(
-            "uso: ↑{} ↓{} tok · {} · {} herramientas{}",
+            "usage: ↑{} ↓{} tok · {} · {} tools{}",
             usage::tokens(f.stats.usage.input),
             usage::tokens(f.stats.usage.output),
             usage::usd((f.stats.usage.cost * 1e6).round() as u64),
             r.tool_calls,
             if f.tainted {
-                " · leyó contenido externo"
+                " · read outside content"
             } else {
                 ""
             }
@@ -103,11 +103,11 @@ pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>
     if opened.host {
         print!("{}", aside_report(&aside, crate::cli::now_ms()));
         println!(
-            "siguiente: clio actions --run {0} · deshacer: clio undo {0}",
+            "next: clio actions --run {0} · undo: clio undo {0}",
             opened.id
         );
     } else {
-        println!("siguiente: clio diff {}", opened.id);
+        println!("next: clio diff {}", opened.id);
     }
     Ok(exit_code(&r))
 }
@@ -118,13 +118,13 @@ fn aside_report(aside: &[Pending], now: i64) -> String {
         return String::new();
     }
     let mut out = format!(
-        "apartó {} acción(es) que esperan tu visto bueno:\n",
+        "set aside {} action(s) waiting for your approval:\n",
         aside.len()
     );
     for p in aside {
         out.push_str(&format!("  {}\n", pending::line(p, now)));
     }
-    out.push_str("clio approve <id> lo ejecuta · clio reject <id> lo descarta\n");
+    out.push_str("clio approve <id> runs it · clio reject <id> drops it\n");
     out
 }
 

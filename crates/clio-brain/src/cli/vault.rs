@@ -34,7 +34,7 @@ fn vault_bin_from(env: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Res<
             Ok(p)
         } else {
             Err(format!(
-                "CLIO_VAULT_BIN debe ser la ruta absoluta de un archivo ({})",
+                "CLIO_VAULT_BIN must be the absolute path of a file ({})",
                 p.display()
             ))
         };
@@ -42,7 +42,7 @@ fn vault_bin_from(env: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Res<
     exe.and_then(|e| e.parent().map(|d| d.join("clio-vault")))
         .filter(|p| p.is_file())
         .ok_or_else(|| {
-            "no encuentro `clio-vault` junto a `clio`: instala los dos juntos (`just install`); no lo busco en el PATH, porque recibe tu frase maestra".into()
+            "cannot find `clio-vault` next to `clio`: install both together (`just install`); it is not searched in the PATH, because it receives your master passphrase".into()
         })
 }
 
@@ -100,7 +100,7 @@ fn key_from(env: Option<String>, dirs: &Dirs, c: &Connector) -> Res<Secret> {
     }
     let not_running = || {
         format!(
-            "el baúl no está corriendo: clio vault start (y luego clio connect {} si aún no guardaste la llave)",
+            "the vault is not running: clio vault start (and then clio connect {} if you have not stored the key yet)",
             c.name
         )
     };
@@ -113,12 +113,15 @@ fn key_from(env: Option<String>, dirs: &Dirs, c: &Connector) -> Res<Secret> {
         .resolve(c.secret, "model", c.domain, "")
         .map(|v| Secret::new(v.expose()))
         .map_err(|e| match e {
-            VaultError::Locked => "el baúl está cerrado: clio vault start".to_owned(),
+            VaultError::Locked => "the vault is locked: clio vault start".to_owned(),
             VaultError::NotFound
             | VaultError::Denied(_)
             | VaultError::Revoked
             | VaultError::Expired => {
-                format!("falta la llave de {0} en el baúl: clio connect {0}", c.name)
+                format!(
+                    "the key for {0} is not in the vault: clio connect {0}",
+                    c.name
+                )
             }
             _ => not_running(),
         })
@@ -155,10 +158,12 @@ fn start(dirs: &Dirs) -> Res<()> {
     let p = paths(dirs)?;
     mkdir_private(&p.dir)?;
     if let Some(pid) = running(&p) {
-        // Running but locked (a mistyped passphrase, a `lock`): open it here, so every "el baúl
-        // está cerrado: clio vault start" is an answer.
+        // Running but locked (a mistyped passphrase, a `lock`): unlock it here, so every "the vault
+        // is locked: clio vault start" is an answer.
         if locked(&p) != Some(true) {
-            return Err(format!("el baúl ya está corriendo (pid {pid}) y abierto"));
+            return Err(format!(
+                "the vault is already running (pid {pid}) and unlocked"
+            ));
         }
         let pass = read_secret("vault passphrase")?;
         call(
@@ -170,7 +175,7 @@ fn start(dirs: &Dirs) -> Res<()> {
             Some(&pass),
         )
         .map_err(|_| {
-            "no se pudo abrir el baúl (¿frase equivocada?): clio vault start".to_owned()
+            "could not unlock the vault (wrong passphrase?): clio vault start".to_owned()
         })?;
         println!("vault running (pid {pid}), unlocked");
         return Ok(());
@@ -232,7 +237,9 @@ fn start(dirs: &Dirs) -> Res<()> {
         &["--sock".into(), s(&p.person), "unlock".into()],
         Some(&pass),
     )
-    .map_err(|_| abort("no se pudo abrir el baúl (¿frase equivocada?): clio vault start".into()))?;
+    .map_err(|_| {
+        abort("could not unlock the vault (wrong passphrase?): clio vault start".into())
+    })?;
     println!("vault running (pid {}), unlocked", child.id());
     Ok(())
 }
@@ -324,7 +331,7 @@ pub fn store_requested(dirs: &Dirs, name: &str, dest: &str, value: &SecretValue)
 
 /// Ok only if the vault is running AND unlocked; the error says which of the two it is.
 pub fn unlocked(dirs: &Dirs) -> Res<()> {
-    let not_running = || "el baúl no está corriendo: clio vault start".to_owned();
+    let not_running = || "the vault is not running: clio vault start".to_owned();
     let p = paths(dirs).map_err(|_| not_running())?;
     if running(&p).is_none() {
         return Err(not_running());
@@ -332,7 +339,7 @@ pub fn unlocked(dirs: &Dirs) -> Res<()> {
     match locked(&p) {
         None => Err(not_running()),
         Some(false) => Ok(()),
-        Some(true) => Err("el baúl está cerrado: clio vault start".into()),
+        Some(true) => Err("the vault is locked: clio vault start".into()),
     }
 }
 
@@ -449,7 +456,7 @@ mod tests {
         );
         let (_d, exe) = exe_dir_with(false);
         let err = vault_bin_from(None, Some(exe)).unwrap_err();
-        assert!(err.contains("PATH") && err.contains("junto a"), "{err}");
+        assert!(err.contains("PATH") && err.contains("next to"), "{err}");
         assert!(vault_bin_from(None, None).is_err());
     }
 

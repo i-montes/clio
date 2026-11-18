@@ -29,7 +29,7 @@ pub fn shared(data: &Path, local: Arc<EmbedModel>) -> Arc<EmbedModel> {
         local,
         Box::new(move || {
             if !may_connect(&request(&data, None, &serde_json::json!({"op": "status"}))) {
-                return Err("el demonio es de una versión anterior".into());
+                return Err("the daemon is from an earlier version".into());
             }
             let launch = Launch {
                 exe: exe.clone(),
@@ -149,7 +149,7 @@ mod tests {
         fn embed(&self, texts: &[&str]) -> clio_memory::Result<Vec<Vec<f32>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.fails {
-                return Err(clio_memory::Error::Embedding("caído".into()));
+                return Err(clio_memory::Error::Embedding("down".into()));
             }
             Ok(texts.iter().map(|_| vec![self.value; 2]).collect())
         }
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn without_the_daemon_clio_uses_its_own_model() {
-        let (m, _) = model(Err("no hay demonio".into()));
+        let (m, _) = model(Err("no daemon".into()));
         assert_eq!(first_value(&m), 1.0);
     }
 
@@ -238,7 +238,7 @@ mod tests {
         assert!(!may_connect(&status("0.0.1")));
         assert!(may_connect(&status(LIBRARY)));
         assert!(may_connect(&status("999.0.0")));
-        assert!(may_connect(&Err("no hay demonio en /x/daemon.sock".into())));
+        assert!(may_connect(&Err("no daemon at /x/daemon.sock".into())));
     }
 
     /// The library's version, written here because clio-memory does not export it: moving the pin

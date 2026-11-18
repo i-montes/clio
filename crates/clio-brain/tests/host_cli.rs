@@ -69,7 +69,7 @@ impl World {
         let r = self.host.handle(Request {
             id: "i".into(),
             tool: "fs_write".into(),
-            args: json!({"path": path, "content": "nuevo"}),
+            args: json!({"path": path, "content": "new"}),
             session: "20261117-120000-abcd".into(),
             call_id: "c".into(),
             tainted: false,
@@ -99,9 +99,9 @@ fn read(p: &Path) -> String {
 fn pending_approve_actions_and_undo_on_a_host_session() {
     let w = world();
     let backup = w.home.join("backup.sql");
-    std::fs::write(&backup, "viejo").unwrap();
+    std::fs::write(&backup, "old").unwrap();
     let id = w.set_aside("backup.sql");
-    assert_eq!(read(&backup), "viejo", "a set-aside write ran");
+    assert_eq!(read(&backup), "old", "a set-aside write ran");
 
     let o = w.clio(&["pending"]);
     assert!(o.status.success() && out(&o).contains(&id), "{}", out(&o));
@@ -113,8 +113,8 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
 
     let o = w.clio(&["approve", &id]);
     assert!(o.status.success(), "{}", out(&o));
-    assert!(out(&o).contains(&format!("aprobado {id}")), "{}", out(&o));
-    assert_eq!(read(&backup), "nuevo");
+    assert!(out(&o).contains(&format!("approved {id}")), "{}", out(&o));
+    assert_eq!(read(&backup), "new");
     // Answered at the terminal: it is not one of the day's questions any more.
     let q = read(&w.data.join("host/questions.json"));
     assert!(!q.contains(&id), "{q}");
@@ -125,7 +125,11 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
         out(&o)
     );
     let o = w.clio(&["pending"]);
-    assert!(out(&o).contains("no hay nada esperando"), "{}", out(&o));
+    assert!(
+        out(&o).contains("nothing is waiting for your approval"),
+        "{}",
+        out(&o)
+    );
 
     let o = w.clio(&["actions", "--run", "20261117-120000-abcd"]);
     let text = out(&o);
@@ -133,7 +137,7 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
     for word in ["aside", "run", "done", "fs_write"] {
         assert!(text.contains(word), "{word}: {text}");
     }
-    let o = w.clio(&["actions", "--json", "--run", "otra"]);
+    let o = w.clio(&["actions", "--json", "--run", "other"]);
     assert_eq!(
         serde_json::from_slice::<Value>(&o.stdout).unwrap(),
         json!([])
@@ -146,10 +150,10 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
         "{}",
         out(&o)
     );
-    assert_eq!(read(&backup), "viejo");
+    assert_eq!(read(&backup), "old");
     let o = w.clio(&["undo", "20261117-120000-abcd"]);
     assert!(
-        o.status.success() && out(&o).contains("no queda nada que deshacer"),
+        o.status.success() && out(&o).contains("nothing is left to undo"),
         "{}",
         out(&o)
     );
@@ -158,12 +162,12 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
 #[test]
 fn a_rejected_action_never_runs() {
     let w = world();
-    let f = w.home.join("datos.bak");
-    std::fs::write(&f, "viejo").unwrap();
-    let id = w.set_aside("datos.bak");
+    let f = w.home.join("data.bak");
+    std::fs::write(&f, "old").unwrap();
+    let id = w.set_aside("data.bak");
     let o = w.clio(&["reject", &id]);
     assert!(
-        o.status.success() && out(&o).contains(&format!("rechazado {id}")),
+        o.status.success() && out(&o).contains(&format!("rejected {id}")),
         "{}",
         out(&o)
     );
@@ -173,8 +177,8 @@ fn a_rejected_action_never_runs() {
         "{}",
         out(&o)
     );
-    assert_eq!(read(&f), "viejo");
-    let o = w.clio(&["approve", "nada"]);
+    assert_eq!(read(&f), "old");
+    let o = w.clio(&["approve", "nothing"]);
     assert!(
         !o.status.success() && out(&o).contains("no pending item"),
         "{}",
@@ -199,12 +203,12 @@ fn edit(w: &World, id: &str, f: impl FnOnce(&mut Value)) {
 #[test]
 fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_builds_anything() {
     let w = world();
-    std::fs::write(w.home.join("backup.sql"), "viejo").unwrap();
+    std::fs::write(w.home.join("backup.sql"), "old").unwrap();
     let id = w.set_aside("backup.sql");
-    edit(&w, &id, |v| v["what"] = json!("inofensivo.txt"));
+    edit(&w, &id, |v| v["what"] = json!("harmless.txt"));
     let o = w.clio(&["pending"]);
     assert!(
-        out(&o).contains("backup.sql") && !out(&o).contains("inofensivo"),
+        out(&o).contains("backup.sql") && !out(&o).contains("harmless"),
         "{}",
         out(&o)
     );
@@ -216,7 +220,11 @@ fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_b
         v["run"] = json!("20261117-130000-ffff");
     });
     let o = w.clio(&["pending"]);
-    assert!(out(&o).contains("no hay nada esperando"), "{}", out(&o));
+    assert!(
+        out(&o).contains("nothing is waiting for your approval"),
+        "{}",
+        out(&o)
+    );
     let o = w.clio(&["approve", &id]);
     assert!(
         !o.status.success() && out(&o).contains("expired on"),
@@ -224,5 +232,5 @@ fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_b
         out(&o)
     );
     assert!(!w.data.join("runs/20261117-130000-ffff").exists());
-    assert_eq!(read(&w.home.join("backup.sql")), "viejo");
+    assert_eq!(read(&w.home.join("backup.sql")), "old");
 }

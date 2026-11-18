@@ -25,14 +25,14 @@ impl Status {
     pub fn summary(&self) -> String {
         match self {
             Self::Ready { bwrap, test } => format!(
-                "jaula activa (bwrap {bwrap}, {} pruebas de escape detenidas): el agente puede correr pruebas",
+                "jail active (bwrap {bwrap}, {} escape tests stopped): the agent can run tests",
                 test.checks.len()
             ),
             Self::Unavailable(why) => {
-                format!("jaula no disponible ({why}): el agente no puede ejecutar nada")
+                format!("jail not available ({why}): the agent cannot run anything")
             }
             Self::Failed { test, .. } => format!(
-                "la jaula FALLÓ su autoprueba ({}): run_tests desactivada",
+                "the jail FAILED its self-test ({}): run_tests is off",
                 failed_names(test)
             ),
         }
@@ -51,7 +51,7 @@ fn failed_names(t: &SelfTest) -> String {
 /// Detects, probes and self-tests the jail. `CLIO_JAIL=off` switches the tool off.
 pub fn check_fresh() -> Status {
     if std::env::var("CLIO_JAIL").is_ok_and(|v| v == "off") {
-        return Status::Unavailable("apagada con CLIO_JAIL=off".into());
+        return Status::Unavailable("switched off with CLIO_JAIL=off".into());
     }
     let jail = match Jail::detect().and_then(|j| j.probe().map(|()| j)) {
         Ok(j) => j,
@@ -71,23 +71,25 @@ pub fn status() -> &'static Status {
     S.get_or_init(check_fresh)
 }
 
-/// What each check of the self-test proves, in Spanish.
+/// What each check of the self-test proves, in plain words.
 pub fn describe(c: &SelfCheck) -> &'static str {
     match c.name.as_str() {
-        "sees_only_work" => "solo ve /work y el sistema de solo lectura",
-        "home_decoy_unreadable" => "no puede leer un archivo señuelo de tu HOME",
-        "home_folder_invisible" => "tu carpeta personal no existe dentro",
-        "runtime_dir_invisible" => "los sockets de Clio (XDG_RUNTIME_DIR) no existen dentro",
-        "network_tcp" => "no puede conectar a un puerto TCP local del anfitrión",
-        "network_abstract_socket" => "no alcanza un socket abstracto del anfitrión",
-        "write_usr" => "no puede escribir en /usr",
-        "write_etc" => "no puede escribir en /etc",
-        "write_root" => "no puede escribir en la raíz",
-        "write_real_home" => "no puede escribir en tu HOME real",
-        "host_processes_hidden" => "no ve los procesos del anfitrión",
-        "kill_host_parent" => "no puede matar a un proceso del anfitrión",
-        "environment_clean" => "no hereda tus variables de entorno (claves, SSH_AUTH_SOCK)",
-        "no_nested_user_namespace" => "no puede crear otros espacios de nombres",
-        _ => "comprobación de la jaula",
+        "sees_only_work" => "it sees only /work and the read-only system",
+        "home_decoy_unreadable" => "it cannot read a decoy file from your HOME",
+        "home_folder_invisible" => "your home folder does not exist inside",
+        "runtime_dir_invisible" => "Clio's sockets (XDG_RUNTIME_DIR) do not exist inside",
+        "network_tcp" => "it cannot connect to a local TCP port of the host",
+        "network_abstract_socket" => "it cannot reach an abstract socket of the host",
+        "write_usr" => "it cannot write to /usr",
+        "write_etc" => "it cannot write to /etc",
+        "write_root" => "it cannot write to the root",
+        "write_real_home" => "it cannot write to your real HOME",
+        "host_processes_hidden" => "it does not see the host's processes",
+        "kill_host_parent" => "it cannot kill a process of the host",
+        "environment_clean" => {
+            "it does not inherit your environment variables (keys, SSH_AUTH_SOCK)"
+        }
+        "no_nested_user_namespace" => "it cannot create other namespaces",
+        _ => "a jail check",
     }
 }

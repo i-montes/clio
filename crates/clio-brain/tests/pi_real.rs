@@ -399,27 +399,27 @@ fn claude_key() -> Result<Secret, String> {
     let sock = std::env::var_os("XDG_RUNTIME_DIR")
         .map(|d| Path::new(&d).join("clio/vault-gateway.sock"))
         .filter(|s| s.exists())
-        .ok_or("el baúl no está corriendo: clio vault start")?;
+        .ok_or("the vault is not running: clio vault start")?;
     VaultClient::new(&sock)
         .with_timeout(std::time::Duration::from_secs(2))
         .resolve(c.secret, "model", c.domain, "")
         .map(|v| Secret::new(v.expose()))
         .map_err(|e| match e {
-            VaultError::Locked => "el baúl está cerrado: clio vault start".to_owned(),
+            VaultError::Locked => "the vault is locked: clio vault start".to_owned(),
             VaultError::NotFound
             | VaultError::Denied(_)
             | VaultError::Revoked
             | VaultError::Expired => {
-                "falta la llave de claude en el baúl: clio connect claude".to_owned()
+                "the claude key is missing from the vault: clio connect claude".to_owned()
             }
-            _ => "el baúl no responde: clio vault start".to_owned(),
+            _ => "the vault does not answer: clio vault start".to_owned(),
         })
 }
 
 /// The model of the real `config.json` (`$HOME/.config/clio/`, as `clio` reads it), which must
 /// name the `claude` connector.
 fn claude_model_from_config() -> Result<String, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME no está definida")?;
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let p = Path::new(&home).join(".config/clio/config.json");
     let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     let v: serde_json::Value =
@@ -427,7 +427,7 @@ fn claude_model_from_config() -> Result<String, String> {
     let provider = v["model"]["provider"].as_str().unwrap_or_default();
     if provider != "claude" {
         return Err(format!(
-            "el conector activo es {provider:?}, no \"claude\": clio connect claude"
+            "the active connector is {provider:?}, not \"claude\": clio connect claude"
         ));
     }
     Ok(v["model"]["model"]
@@ -444,23 +444,23 @@ fn claude_model_from_config() -> Result<String, String> {
 /// once through the adapter for single calls and once through a Pi session (`claude-bridge`). `cargo test -p clio-brain --test pi_real
 /// claude_subscription_answers -- --ignored --nocapture`
 #[test]
-#[ignore = "llama a Anthropic con tu suscripción; necesita el baúl abierto y clio connect claude"]
+#[ignore = "calls Anthropic with your subscription; needs the vault open and clio connect claude"]
 fn claude_subscription_answers() {
     use clio_brain::agent::{CommandModel, Model, Msg};
 
     // Checked first, so a missing Node does not cost a paid call.
     let node = need("claude_subscription_answers", true).expect(
-        "hacen falta Node y adapters/pi/node_modules (cd adapters/pi && npm ci --ignore-scripts)",
+        "Node and adapters/pi/node_modules are needed (cd adapters/pi && npm ci --ignore-scripts)",
     );
     // Everything that can be missing is checked before the first paid call.
     let pi_dir = pi_support::repo().join("adapters/pi");
     let c = clio_brain::connector::by_name("claude").unwrap();
     assert!(
         pi_dir.join(c.pi_extension.unwrap()).is_file(),
-        "falta el puente pi-claude-agent-sdk: clio pi install (o npm ci --ignore-scripts en adapters/pi)"
+        "the pi-claude-agent-sdk bridge is missing: clio pi install (or npm ci --ignore-scripts in adapters/pi)"
     );
     let claude_bin = clio_brain::pi::install::claude_code_bin(&pi_dir)
-        .expect("falta Claude Code dentro de adapters/pi/node_modules: clio pi install");
+        .expect("Claude Code is missing inside adapters/pi/node_modules: clio pi install");
     let model = claude_model_from_config().unwrap_or_else(|e| panic!("{e}"));
     let key = claude_key().unwrap_or_else(|e| panic!("{e}"));
     // Never print the key, whatever an error says.
@@ -483,14 +483,14 @@ fn claude_subscription_answers() {
             role: "user".into(),
             content: "Responde solo: ok".into(),
         }])
-        .unwrap_or_else(|e| panic!("el adaptador falló: {}", hide(e)));
+        .unwrap_or_else(|e| panic!("the adapter failed: {}", hide(e)));
     println!(
-        "adaptador: {:?} ({} in, {} out)",
+        "adapter: {:?} ({} in, {} out)",
         r.text, r.input_tokens, r.output_tokens
     );
     assert!(
         r.text.to_lowercase().contains("ok"),
-        "respuesta inesperada: {:?}",
+        "unexpected answer: {:?}",
         r.text
     );
     assert!(r.output_tokens > 0);
@@ -500,19 +500,20 @@ fn claude_subscription_answers() {
     let mut launch = rig.launch("", None);
     launch.provider = c.pi_launch_provider(&model);
     launch.api_key = Some(key.clone());
-    let mut p = start(&launch).unwrap_or_else(|e| panic!("Pi no arrancó: {}", hide(e.to_string())));
+    let mut p =
+        start(&launch).unwrap_or_else(|e| panic!("Pi did not start: {}", hide(e.to_string())));
     // A short answer: a stuck turn fails in two minutes instead of the default hour.
     p.client.timeouts.run = std::time::Duration::from_secs(120);
     p.client.timeouts.silence = std::time::Duration::from_secs(60);
     let (r, _) = run(&p, "Responde solo: ok");
-    let r = r.unwrap_or_else(|e| panic!("el turno de Pi falló: {}", hide(e.to_string())));
+    let r = r.unwrap_or_else(|e| panic!("the Pi turn failed: {}", hide(e.to_string())));
     println!(
         "pi: {:?} ({} in, {} out)",
         r.text, r.usage.input, r.usage.output
     );
     assert!(
         r.text.to_lowercase().contains("ok"),
-        "respuesta inesperada: {:?}",
+        "unexpected answer: {:?}",
         r.text
     );
     assert!(r.usage.output > 0);

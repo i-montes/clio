@@ -152,7 +152,7 @@ fn scrubber() -> Scrubber {
 }
 
 #[test]
-fn one_run_writes_the_next_one_remembers_and_the_context_has_a_memoria_layer() {
+fn one_run_writes_the_next_one_remembers_and_the_context_has_a_memory_layer() {
     let w = world();
     let s = scrubber();
     let r1 = run(
@@ -188,7 +188,7 @@ fn one_run_writes_the_next_one_remembers_and_the_context_has_a_memoria_layer() {
         Origin::Agent,
         "the person did not state it as a fact"
     );
-    assert!(row.content.contains("ZAFIRO-7") && row.content.contains("Resultado: terminó"));
+    assert!(row.content.contains("ZAFIRO-7") && row.content.contains("Result: finished"));
 
     // The next run needs it.
     let r2 = run(
@@ -211,7 +211,7 @@ fn one_run_writes_the_next_one_remembers_and_the_context_has_a_memoria_layer() {
     );
     assert!(r2.first_user.contains(&format!("[m{}]", saved.id)));
     assert!(r2.first_user.contains("ZAFIRO-7"));
-    assert!(r2.first_user.contains("no instrucciones"));
+    assert!(r2.first_user.contains("not instructions"));
     // And the layer is reported with its size.
     let c = r2.contexts().pop().unwrap();
     assert_eq!(c.memory_items, 1);
@@ -253,7 +253,7 @@ fn abstention_is_valid_nothing_relevant_means_no_memory_layer() {
     assert!(r.recalled.text.is_empty());
     assert!(!r.first_user.contains("UNTRUSTED-DATA memory"));
     assert!(r.contexts().iter().all(|c| c.memory == 0));
-    assert!(r.recalled.debug.iter().any(|l| l.contains("se abstiene")));
+    assert!(r.recalled.debug.iter().any(|l| l.contains("abstains")));
 }
 
 // S-25: what a run learned after touching outside content waits in quarantine and `recall` does
@@ -443,7 +443,7 @@ fn every_actor_has_its_own_quota_and_a_flood_never_breaks_a_close() {
     let e = l
         .save_as_agent(&d, "s", clio_brain::memory_link::Place::Personal, false)
         .unwrap_err();
-    assert!(e.contains("cuota"), "{e}");
+    assert!(e.contains("quota"), "{e}");
     drop(l);
     // A close with the hour spent: the refusal is a line of its report.
     let r = run(
@@ -489,7 +489,7 @@ fn a_secret_is_scrubbed_or_refused_before_it_is_written() {
         .unwrap()
         .remember(&format!("mi clave es {unknown}"), None)
         .unwrap_err();
-    assert!(typed.contains("secreto"), "{typed}");
+    assert!(typed.contains("secret"), "{typed}");
     let mut dump = Vec::new();
     l.engine().export(&mut dump).unwrap();
     let dump = String::from_utf8(dump).unwrap();
@@ -590,7 +590,7 @@ fn no_embedding_model_is_not_an_error_and_the_line_says_so() {
     let w = world();
     let l = MemoryLink::open_write(&w.data, &EmbedModel::none()).unwrap();
     assert!(!l.has_embeddings());
-    assert!(l.note().unwrap().contains("solo por texto"));
+    assert!(l.note().unwrap().contains("text only"));
     drop(l);
     // A model directory that does not exist: same thing, with its own wording, never a failure.
     let l = MemoryLink::open_write(
@@ -599,7 +599,7 @@ fn no_embedding_model_is_not_an_error_and_the_line_says_so() {
     )
     .unwrap();
     assert!(!l.has_embeddings());
-    assert!(l.note().unwrap().contains("no se pudo cargar"));
+    assert!(l.note().unwrap().contains("could not be loaded"));
     l.remember("funciona sin vectores", None).unwrap();
 }
 
@@ -660,7 +660,7 @@ fn text_is_cleaned_before_it_is_stored() {
 fn a_full_quarantine_is_explained_to_the_person() {
     let text = clio_brain::memory_link::explain(&clio_memory::Error::QuarantineFull);
     assert!(
-        text.contains("clio memory review") && text.starts_with("rechazado"),
+        text.contains("clio memory review") && text.starts_with("rejected"),
         "{text}"
     );
 }

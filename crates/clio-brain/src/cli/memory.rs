@@ -15,50 +15,50 @@ use super::home::Dirs;
 use super::tui::sanitize;
 use super::ui::{self, Style, clip};
 
-pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local/share/clio/memory.db)
+pub const USAGE: &str = "clio memory: what Clio remembers (all local, ~/.local/share/clio/memory.db)
 
-  clio memory search <consulta> [--json]      busca entre lo activo (la cuarentena no sale aquí)
-  clio memory list [--pending] [--json]       recientes; --pending: cuarentena y procedimientos por aprobar
-  clio memory show <id> [--json]              un recuerdo completo, con de dónde salió
-  clio memory remember \"texto\" [--block identidad|reglas|preferencias|vigilancia]
-                                              un hecho tuyo (origen: persona), activo al instante
-  clio memory identity [--json]               los recuerdos primordiales: quién es Clio, cómo trabaja,
-                                              quién eres tú y lo que vigila (se cambian hablando con ella)
-  clio memory promote <id> [--yes]            aprueba un recuerdo pendiente (solo tú; pregunta antes)
-  clio memory archive <id> [--yes]            lo archiva: ya no se recuerda (pregunta antes)
-  clio memory purge <id> [--reason \"motivo\"] [--yes]
-                                              borra el contenido PARA SIEMPRE (texto, vector, historial);
-                                              deja una lápida sin contenido. No se puede deshacer
-  clio memory review [--json]                 la cuarentena, lo olvidado (igual que list --pending)
-  clio memory history <id> [--json]           cada cambio que tocó un recuerdo (sus versiones)
-  clio memory revert <cambio> [--yes]         deshace un cambio (su número sale en history)
-  clio memory context [--json]                lo que recibe una sesión que empieza en esta carpeta
-  clio memory conflicts [--json]              recuerdos que Jev juzgó que se contradicen
-  clio memory import <archivo>                trae una exportación a una memoria vacía
-  clio memory project [set <nombre>]          el proyecto de esta carpeta y de dónde sale; set lo fija (.clio-project)
-  clio memory setup <agente>                  cómo conectar claude-code, cursor, codex, gemini u opencode por MCP
-  clio memory setup sleep [--remove]          instala (o quita) el sueño nocturno: un timer que corre
-                                              `clio memory sleep` cada media hora de 23:00 a 05:30
-  clio memory update                          instala la última versión de clio-memory (el binario
-                                              que usan los otros agentes) y pone al día su skill; la
-                                              memoria de Clio sube cuando Clio se recompila
+  clio memory search <query> [--json]         search the active ones (quarantine does not show here)
+  clio memory list [--pending] [--json]       recent ones; --pending: quarantine and procedures awaiting approval
+  clio memory show <id> [--json]              one whole memory, with where it came from
+  clio memory remember \"text\" [--block identidad|reglas|preferencias|vigilancia]
+                                              a fact of yours (origin: persona), active at once
+  clio memory identity [--json]               the primordial memories: who Clio is, how it works,
+                                              who you are and what it watches (changed by talking to it)
+  clio memory promote <id> [--yes]            approve a pending memory (only you; it asks first)
+  clio memory archive <id> [--yes]            archive it: it is no longer remembered (it asks first)
+  clio memory purge <id> [--reason \"reason\"] [--yes]
+                                              deletes the content FOR GOOD (text, vector, history);
+                                              leaves a tombstone with no content. It cannot be undone
+  clio memory review [--json]                 quarantine, what was forgotten (same as list --pending)
+  clio memory history <id> [--json]           every change that touched a memory (its versions)
+  clio memory revert <change> [--yes]         undoes a change (its number comes from history)
+  clio memory context [--json]                what a session that starts in this folder receives
+  clio memory conflicts [--json]              memories Jev judged to contradict each other
+  clio memory import <file>                   brings an export into an empty memory
+  clio memory project [set <name>]            this folder's project and where it comes from; set fixes it (.clio-project)
+  clio memory setup <agent>                   how to connect claude-code, cursor, codex, gemini or opencode over MCP
+  clio memory setup sleep [--remove]          installs (or removes) the night sleep: a timer that runs
+                                              `clio memory sleep` every half hour from 23:00 to 05:30
+  clio memory update                          installs the latest clio-memory (the binary
+                                              the other agents use) and updates its skill; Clio's own
+                                              memory goes up when Clio is rebuilt
   clio memory sleep [--now] [--dry-run] [--report] [--json]
-                                              una noche de sueño: chequea y copia, cuarentena de
-                                              secretos y ataques, une repetidos y casi iguales (con tu
-                                              modelo), purga lo descartado hace tiempo. Solo si nadie
-                                              usó la memoria en 30 min y no durmió en 20 h (--now se
-                                              salta ambas esperas; --dry-run solo mira)
-  clio memory projects [--json]               cada sitio (personal, lecciones, cada proyecto) y lo que tiene
-  clio memory projects merge <de> <en>        mueve todo un proyecto a otro (unir o renombrar; deshacible)
-  clio memory projects archive <proyecto>     archiva todo un proyecto (no lo borra)
-  clio memory review-due [--json]             lo que pasó su plazo de revisión (decisiones, configuración…)
-  clio memory reviewed <id>                   lo miraste y sigue siendo cierto: el plazo vuelve a empezar
-  clio memory timeline <id> [--json]          lo que se guardó antes y después, en la misma sesión
-  clio memory pin|unpin <id>                  fija un recuerdo (sale primero en el contexto) o lo suelta
-  clio memory feedback <id> useful|wrong      «wrong» solo lo manda a revisión; nunca borra
-  clio memory export [archivo]                JSON Lines (sin cifrar); sin archivo, a la salida estándar
-  clio memory stats [--json]                  conteos y tamaño
-  clio memory mcp                             servidor MCP para otros agentes (leer y proponer; nada más)";
+                                              one night of sleep: checks and copies, quarantines
+                                              secrets and attacks, merges repeated and near-equal ones (with your
+                                              model), purges what was discarded long ago. Only if nobody
+                                              used the memory in 30 min and it did not sleep in 20 h (--now skips
+                                              both waits; --dry-run only looks)
+  clio memory projects [--json]               every place (personal, lessons, each project) and what it holds
+  clio memory projects merge <from> <into>    moves a whole project to another (merge or rename; undoable)
+  clio memory projects archive <project>      archives a whole project (does not delete it)
+  clio memory review-due [--json]             what is past its review date (decisions, configuration...)
+  clio memory reviewed <id>                   you looked at it and it is still true: the date starts again
+  clio memory timeline <id> [--json]          what was saved before and after, in the same session
+  clio memory pin|unpin <id>                  pins a memory (it comes first in the context) or lets it go
+  clio memory feedback <id> useful|wrong      «wrong» only sends it to review; it never deletes
+  clio memory export [file]                   JSON Lines (unencrypted); without a file, to standard output
+  clio memory stats [--json]                  counts and size
+  clio memory mcp                             MCP server for other agents (read and propose; nothing else)";
 
 const SETUP_AGENTS: [&str; 5] = ["claude-code", "cursor", "codex", "gemini", "opencode"];
 
@@ -68,25 +68,25 @@ fn setup_text(agent: &str) -> Res<String> {
     let json =
         r#"{ "mcpServers": { "clio-memory": { "command": "clio", "args": ["memory", "mcp"] } } }"#;
     Ok(match agent {
-        "claude-code" => "Ejecuta:\n  claude mcp add clio-memory -- clio memory mcp".into(),
-        "cursor" => format!("Añade a ~/.cursor/mcp.json (o .cursor/mcp.json del proyecto):\n  {json}"),
-        "gemini" => format!("Añade a ~/.gemini/settings.json:\n  {json}"),
-        "codex" => "Añade a ~/.codex/config.toml:\n  [mcp_servers.clio-memory]\n  command = \"clio\"\n  args = [\"memory\", \"mcp\"]".into(),
-        "opencode" => "Añade a opencode.json:\n  { \"mcp\": { \"clio-memory\": { \"type\": \"local\", \"command\": [\"clio\", \"memory\", \"mcp\"] } } }".into(),
+        "claude-code" => "Run:\n  claude mcp add clio-memory -- clio memory mcp".into(),
+        "cursor" => format!("Add to ~/.cursor/mcp.json (or the project's .cursor/mcp.json):\n  {json}"),
+        "gemini" => format!("Add to ~/.gemini/settings.json:\n  {json}"),
+        "codex" => "Add to ~/.codex/config.toml:\n  [mcp_servers.clio-memory]\n  command = \"clio\"\n  args = [\"memory\", \"mcp\"]".into(),
+        "opencode" => "Add to opencode.json:\n  { \"mcp\": { \"clio-memory\": { \"type\": \"local\", \"command\": [\"clio\", \"memory\", \"mcp\"] } } }".into(),
         other => {
             return Err(format!(
-                "no conozco {other:?}: {}. Cualquier agente con MCP sirve con el comando `clio memory mcp` por la entrada estándar",
+                "I do not know {other:?}: {}. Any agent with MCP works with the command `clio memory mcp` over standard input",
                 SETUP_AGENTS.join(", ")
             ));
         }
-    } + "\nEl agente arranca el servidor en la carpeta del proyecto: lee y propone ahí (nada más).")
+    } + "\nThe agent starts the server in the project folder: it reads and proposes there (nothing else).")
 }
 
 fn id_of(s: &str) -> Res<MemoryId> {
     s.trim_start_matches('m')
         .parse::<i64>()
         .map(MemoryId)
-        .map_err(|_| format!("{s:?} no es un id de recuerdo (por ejemplo 12 o m12)"))
+        .map_err(|_| format!("{s:?} is not a memory id (for example 12 or m12)"))
 }
 
 fn open_read(dirs: &Dirs, model: bool) -> Res<Option<MemoryLink>> {
@@ -155,14 +155,14 @@ fn print_rows(st: Style, rows: &[MemoryRow], empty: &str) {
 /// What each of the person's blocks is for, in a line.
 fn block_about(name: &str) -> &'static str {
     match name {
-        "identidad" => "quién es Clio y cómo habla",
-        "reglas" => "cómo trabaja y sus límites",
-        "preferencias" => "quién eres tú",
-        _ => "lo que vigila, una cosa por entrada",
+        "identidad" => "who Clio is and how it speaks",
+        "reglas" => "how it works and its limits",
+        "preferencias" => "who you are",
+        _ => "what it watches, one thing per entry",
     }
 }
 
-const NONE_YET: &str = "todavía no hay memoria: se crea con `clio init` o con el primer run";
+const NONE_YET: &str = "there is no memory yet: it is created by `clio init` or by the first run";
 
 pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
     let st = Style::stdout();
@@ -199,7 +199,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 .unwrap_or(10);
             let query = args.rest()?.join(" ");
             if query.trim().is_empty() {
-                return Err("falta la consulta: clio memory search \"qué buscar\"".into());
+                return Err("missing the query: clio memory search \"what to look for\"".into());
             }
             let Some(link) = open_read(dirs, true)? else {
                 println!("{NONE_YET}");
@@ -213,7 +213,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 print_rows(
                     st,
                     &rows,
-                    "nada relevante (Clio prefiere no inventar un recuerdo)",
+                    "nothing relevant (Clio prefers not to invent a memory)",
                 );
                 if let Some(n) = link.note() {
                     println!("{}", st.dim(&n));
@@ -241,9 +241,9 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     st,
                     &rows,
                     if pending {
-                        "nada pendiente de revisar"
+                        "nothing pending review"
                     } else {
-                        "todavía no hay recuerdos activos"
+                        "there are no active memories yet"
                     },
                 );
             }
@@ -275,7 +275,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 for (name, rows) in &blocks {
                     println!("{} {}", st.bold(name), st.dim(block_about(name)));
                     if rows.is_empty() {
-                        println!("  {}", st.dim("(vacío)"));
+                        println!("  {}", st.dim("(empty)"));
                     }
                     for (n, r) in rows.iter().enumerate() {
                         println!(
@@ -293,7 +293,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let json = args.flag("--json");
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err("falta el id: clio memory show <id>".into());
+                return Err("missing the id: clio memory show <id>".into());
             };
             let Some(link) = open_read(dirs, false)? else {
                 println!("{NONE_YET}");
@@ -306,10 +306,10 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                         &json!({"id": format!("m{}", mid.0), "state": "purged", "purged_at": t.at, "reason": sanitize::line(&t.reason)}),
                     )?;
                 } else {
-                    println!("m{} fue purgado: el contenido ya no existe", mid.0);
+                    println!("m{} was purged: the content no longer exists", mid.0);
                     println!(
                         "{}",
-                        st.dim(&format!("motivo: {}", sanitize::line(&t.reason)))
+                        st.dim(&format!("reason: {}", sanitize::line(&t.reason)))
                     );
                 }
                 return Ok(0);
@@ -320,47 +320,47 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             } else {
                 let label = |l: &str| st.bold(&ui::pad(l, 10));
                 println!("{}m{}", label("id:"), m.id.0);
-                println!("{}{}", label("estado:"), state_label(m.state));
-                println!("{}{}", label("tipo:"), kind_label(m.kind));
+                println!("{}{}", label("state:"), state_label(m.state));
+                println!("{}{}", label("type:"), kind_label(m.kind));
                 println!(
-                    "{}{} (la escribió: {})",
-                    label("origen:"),
+                    "{}{} (written by: {})",
+                    label("origin:"),
                     origin_label(m.origin),
                     sanitize::line(&link.actor_name(m.actor))
                 );
                 if let Some(s) = &m.source {
-                    println!("{}{}", label("fuente:"), sanitize::line(s));
+                    println!("{}{}", label("source:"), sanitize::line(s));
                 }
                 println!(
                     "{}{}",
-                    label("sitio:"),
+                    label("place:"),
                     sanitize::line(&link.place_label(&m))
                 );
                 if let Some(t) = &m.title {
-                    println!("{}{}", label("título:"), sanitize::line(t));
+                    println!("{}{}", label("title:"), sanitize::line(t));
                 }
                 if let Some(c) = m.category {
-                    println!("{}{}", label("categoría:"), c.label());
+                    println!("{}{}", label("category:"), c.label());
                 }
                 if link.is_pinned(&m) {
-                    println!("{}sí (sale primero en el contexto)", label("fijado:"));
+                    println!("{}yes (it comes first in the context)", label("pinned:"));
                 }
                 if link.is_due(&m) {
                     println!(
                         "{}{}",
-                        label("revisar:"),
-                        st.yellow("pasó su plazo de revisión: ¿sigue siendo cierto? (clio memory reviewed)")
+                        label("review:"),
+                        st.yellow("past its review date: is it still true? (clio memory reviewed)")
                     );
                 }
                 for n in link.relation_notes(&m) {
-                    println!("{}{}", label("relación:"), sanitize::line(&n));
+                    println!("{}{}", label("relation:"), sanitize::line(&n));
                 }
                 if m.state == State::Quarantine {
                     println!(
                         "{}{}",
-                        label("aviso:"),
+                        label("warning:"),
                         st.yellow(
-                            "en cuarentena (olvidado): no se recuerda; vuelve con promote o revert"
+                            "in quarantine (forgotten): it is not remembered; it comes back with promote or revert"
                         )
                     );
                 }
@@ -377,30 +377,30 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let text = args.rest()?.join(" ");
             if text.trim().is_empty() {
                 return Err(
-                    "falta el texto: clio memory remember \"lo que quieres que recuerde\"".into(),
+                    "missing the text: clio memory remember \"what you want remembered\"".into(),
                 );
             }
             let link = open_write(dirs)?;
             let id = link.remember(&text, block.as_deref())?;
-            println!("recordado: m{} (origen: persona, activo)", id.0);
+            println!("remembered: m{} (origin: persona, active)", id.0);
         }
         "promote" | "archive" => {
             let yes = args.flag("--yes");
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err(format!("falta el id: clio memory {sub} <id>"));
+                return Err(format!("missing the id: clio memory {sub} <id>"));
             };
             let id = id_of(id)?;
             let link = open_write(dirs)?;
             let m = link.get(id)?;
             let (verb, q) = if sub == "promote" {
-                ("aprobado", "¿Aprobar")
+                ("approved", "Approve")
             } else {
-                ("archivado", "¿Archivar")
+                ("archived", "Archive")
             };
             println!("{}", row_line(st, &m, ui::width()));
             if !yes && !confirm(&format!("{q} m{}?", id.0)) {
-                println!("no se cambió nada");
+                println!("nothing was changed");
                 return Ok(0);
             }
             if sub == "promote" {
@@ -422,19 +422,19 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                             println!("{}", st.yellow(&sanitize::line(&n)));
                         }
                     }
-                    None => println!("ninguno: lo que se guarde aquí va a lo personal"),
+                    None => println!("none: what is saved here goes to the personal place"),
                 },
                 [set, name] if set == "set" => {
                     let n = clio_brain::project::normal(name);
                     if n.is_empty() {
-                        return Err(format!("{name:?} no sirve como nombre de proyecto"));
+                        return Err(format!("{name:?} is no good as a project name"));
                     }
                     let file = cwd.join(clio_brain::project::PROJECT_FILE);
                     std::fs::write(&file, format!("{n}\n"))
                         .map_err(|e| format!("{}: {e}", file.display()))?;
-                    println!("proyecto de esta carpeta: {n} (en {})", file.display());
+                    println!("this folder's project: {n} (in {})", file.display());
                 }
-                _ => return Err("uso: clio memory project [set <nombre>]".into()),
+                _ => return Err("usage: clio memory project [set <name>]".into()),
             }
         }
         // How to plug another agent into the memory (MCP): printed, never written for it.
@@ -445,11 +445,11 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 return super::sleep::setup(dirs, remove);
             }
             if remove {
-                return Err("--remove va con: clio memory setup sleep".into());
+                return Err("--remove goes with: clio memory setup sleep".into());
             }
             let [agent] = rest.as_slice() else {
                 return Err(format!(
-                    "uso: clio memory setup <agente>  ({})",
+                    "usage: clio memory setup <agent>  ({})",
                     SETUP_AGENTS.join(", ")
                 ));
             };
@@ -468,7 +468,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 let v: Vec<Value> = rows.iter().map(|m| row_json(&link, m)).collect();
                 print_json(&Value::Array(v))?;
             } else {
-                print_rows(st, &rows, "nada pendiente de revisar");
+                print_rows(st, &rows, "nothing pending review");
             }
         }
         // The versions of a memory: every change that touched it, with who and when.
@@ -476,7 +476,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let json = args.flag("--json");
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err("falta el id: clio memory history <id>".into());
+                return Err("missing the id: clio memory history <id>".into());
             };
             let Some(link) = open_read(dirs, false)? else {
                 println!("{NONE_YET}");
@@ -490,16 +490,16 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     .collect();
                 print_json(&Value::Array(v))?;
             } else if ops.is_empty() {
-                println!("sin cambios registrados");
+                println!("no changes recorded");
             } else {
                 for o in ops {
                     println!(
-                        "cambio {:<6} {:<10} {}{}",
+                        "change {:<6} {:<10} {}{}",
                         o.id.0,
                         format!("{:?}", o.kind).to_lowercase(),
                         sanitize::line(&link.actor_name(o.actor)),
                         o.reverts
-                            .map_or(String::new(), |r| format!(" (deshace {})", r.0))
+                            .map_or(String::new(), |r| format!(" (undoes {})", r.0))
                     );
                 }
             }
@@ -509,20 +509,17 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let yes = args.flag("--yes");
             let rest = args.rest()?;
             let [op] = rest.as_slice() else {
-                return Err("falta el cambio: clio memory revert <cambio> (míralo con clio memory history ID)".into());
+                return Err("missing the change: clio memory revert <change> (see it with clio memory history ID)".into());
             };
             let op: i64 = op
                 .parse()
-                .map_err(|_| format!("{op:?} no es un número de cambio"))?;
-            if !yes && !confirm(&format!("¿Deshacer el cambio {op}?")) {
-                println!("no se cambió nada");
+                .map_err(|_| format!("{op:?} is not a change number"))?;
+            if !yes && !confirm(&format!("Undo change {op}?")) {
+                println!("nothing was changed");
                 return Ok(0);
             }
             let done = open_write(dirs)?.revert(clio_memory::OpId(op))?;
-            println!(
-                "deshecho: el cambio {op} (lo registra el cambio {})",
-                done.0
-            );
+            println!("undone: change {op} (recorded as change {})", done.0);
         }
         // What the memory gives a session started in this folder (the summary, pinned, recent).
         "context" => {
@@ -539,7 +536,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     .collect();
                 print_json(&Value::Array(v))?;
             } else if items.is_empty() {
-                println!("nada todavía");
+                println!("nothing yet");
             } else {
                 for i in items {
                     let head = match &i.title {
@@ -572,11 +569,11 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     .collect();
                 print_json(&Value::Array(v))?;
             } else if pairs.is_empty() {
-                println!("ninguna contradicción anotada");
+                println!("no contradiction noted");
             } else {
                 for (a, b) in pairs {
                     println!("{}", row_line(st, &a, ui::width()));
-                    println!("  contradice a");
+                    println!("  contradicts");
                     println!("{}\n", row_line(st, &b, ui::width()));
                 }
             }
@@ -585,12 +582,12 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
         "import" => {
             let rest = args.rest()?;
             let [file] = rest.as_slice() else {
-                return Err("uso: clio memory import <archivo> (solo en una memoria vacía)".into());
+                return Err("usage: clio memory import <file> (only into an empty memory)".into());
             };
             let db = MemoryLink::db_path(&dirs.data);
             if db.exists() {
                 return Err(format!(
-                    "ya hay una memoria en {}: la importación solo va a una vacía (muévela antes)",
+                    "there is already a memory at {}: an import only goes into an empty one (move it first)",
                     db.display()
                 ));
             }
@@ -606,7 +603,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 .map_err(|e| format!("{file}: {e}"));
             drop(engine);
             match s {
-                Ok(s) => println!("importado: {} operaciones", s.operations),
+                Ok(s) => println!("imported: {} operations", s.operations),
                 Err(why) => {
                     // Nothing came in (it is one transaction): no half memory is left behind.
                     let _ = std::fs::remove_file(&db);
@@ -621,32 +618,32 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             match rest.as_slice() {
                 [] => {}
                 [verb, from, into] if verb == "merge" => {
-                    if !yes && !confirm(&format!("¿Mover todo lo del proyecto {from} a {into}?")) {
-                        println!("no se cambió nada");
+                    if !yes && !confirm(&format!("Move everything of project {from} to {into}?")) {
+                        println!("nothing was changed");
                         return Ok(0);
                     }
                     let n = open_write(dirs)?.merge_projects(from, into)?;
                     println!(
-                        "movidos {n} recuerdos de {} a {} (cada uno se deshace con clio memory revert; míralo en history)",
+                        "moved {n} memories from {} to {} (each one is undone with clio memory revert; see it in history)",
                         sanitize::line(from),
                         sanitize::line(into)
                     );
                     return Ok(0);
                 }
                 [verb, name] if verb == "archive" => {
-                    if !yes && !confirm(&format!("¿Archivar todo lo del proyecto {name}?")) {
-                        println!("no se cambió nada");
+                    if !yes && !confirm(&format!("Archive everything of project {name}?")) {
+                        println!("nothing was changed");
                         return Ok(0);
                     }
                     let n = open_write(dirs)?.archive_project(name)?;
                     println!(
-                        "archivados {n} recuerdos de {} (no se borran)",
+                        "archived {n} memories of {} (they are not deleted)",
                         sanitize::line(name)
                     );
                     return Ok(0);
                 }
                 _ => {
-                    return Err("uso: clio memory projects [--json] | merge <de> <en> [--yes] | archive <proyecto> [--yes]".into());
+                    return Err("usage: clio memory projects [--json] | merge <from> <into> [--yes] | archive <project> [--yes]".into());
                 }
             }
             let Some(link) = open_read(dirs, false)? else {
@@ -663,7 +660,7 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             } else {
                 for (l, a, q, r) in places {
                     println!(
-                        "{} {a} activos · {q} en cuarentena · {r} archivados",
+                        "{} {a} active · {q} in quarantine · {r} archived",
                         st.bold(&ui::pad(&sanitize::line(&l), 28))
                     );
                 }
@@ -681,23 +678,23 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 let v: Vec<Value> = due.iter().map(|m| row_json(&link, m)).collect();
                 print_json(&Value::Array(v))?;
             } else {
-                print_rows(st, &due, "nada pasó su plazo de revisión");
+                print_rows(st, &due, "nothing is past its review date");
             }
         }
         "reviewed" => {
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err("falta el id: clio memory reviewed <id>".into());
+                return Err("missing the id: clio memory reviewed <id>".into());
             };
             let id = id_of(id)?;
             open_write(dirs)?.reviewed(id)?;
-            println!("revisado: m{} (su plazo vuelve a empezar)", id.0);
+            println!("reviewed: m{} (its date starts again)", id.0);
         }
         "timeline" => {
             let json = args.flag("--json");
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err("falta el id: clio memory timeline <id>".into());
+                return Err("missing the id: clio memory timeline <id>".into());
             };
             let Some(link) = open_read(dirs, false)? else {
                 println!("{NONE_YET}");
@@ -708,41 +705,41 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                 let v: Vec<Value> = rows.iter().map(|m| row_json(&link, m)).collect();
                 print_json(&Value::Array(v))?;
             } else {
-                print_rows(st, &rows, "nada alrededor");
+                print_rows(st, &rows, "nothing around it");
             }
         }
         // Pinned: first in the context of its place. Undoes what the model pinned when asked.
         "pin" | "unpin" => {
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err(format!("falta el id: clio memory {sub} <id>"));
+                return Err(format!("missing the id: clio memory {sub} <id>"));
             };
             let id = id_of(id)?;
             let link = open_write(dirs)?;
             link.get(id)?;
             if sub == "pin" {
                 link.pin(id)?;
-                println!("fijado: m{}", id.0);
+                println!("pinned: m{}", id.0);
             } else {
                 link.unpin(id)?;
-                println!("ya no está fijado: m{}", id.0);
+                println!("no longer pinned: m{}", id.0);
             }
         }
         "feedback" => {
             let rest = args.rest()?;
             let [id, word] = rest.as_slice() else {
-                return Err("uso: clio memory feedback <id> useful|wrong".into());
+                return Err("usage: clio memory feedback <id> useful|wrong".into());
             };
             let signal = match word.as_str() {
                 "useful" | "util" | "útil" => Signal::Useful,
                 "wrong" | "mal" | "equivocado" => Signal::Wrong,
-                _ => return Err("la señal es `useful` o `wrong`".into()),
+                _ => return Err("the signal is `useful` or `wrong`".into()),
             };
             let id = id_of(id)?;
             let link = open_write(dirs)?;
             link.feedback(id, signal)?;
             println!(
-                "anotado {} para m{} (nunca borra ni cambia el recuerdo; tres «wrong» lo mandan a revisión)",
+                "noted {} for m{} (it never deletes or changes the memory; three «wrong» send it to review)",
                 word, id.0
             );
         }
@@ -763,12 +760,12 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                         .export_to_file(std::path::Path::new(file))
                         .map_err(|e| format!("{file}: {e}"))?;
                     println!(
-                        "exportado a {} ({} operaciones; sin cifrar, 0600)",
+                        "exported to {} ({} operations; unencrypted, 0600)",
                         sanitize::line(file),
                         s.operations
                     );
                 }
-                _ => return Err("uso: clio memory export [archivo]".into()),
+                _ => return Err("usage: clio memory export [file]".into()),
             }
         }
         "stats" => {
@@ -788,17 +785,17 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     "file_bytes": s.file_bytes, "embedding_model_on_disk": model,
                 }))?;
             } else {
-                println!("activos {active} · en cuarentena {quarantine} · archivados {archived}");
+                println!("active {active} · in quarantine {quarantine} · archived {archived}");
                 println!(
-                    "operaciones {} · vectores {} · archivo {} bytes",
+                    "operations {} · vectors {} · file {} bytes",
                     s.operations, s.vectors, s.file_bytes
                 );
                 println!(
                     "{}",
                     st.dim(if model {
-                        "modelo de embeddings: presente (búsqueda por texto y por significado)"
+                        "embedding model: present (search by text and by meaning)"
                     } else {
-                        "sin modelo de embeddings: la memoria busca solo por texto"
+                        "no embedding model: the memory searches by text only"
                     })
                 );
             }
@@ -807,10 +804,10 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             let yes = args.flag("--yes");
             let reason = args
                 .value("--reason")?
-                .unwrap_or_else(|| "pedido por la persona".into());
+                .unwrap_or_else(|| "asked by the person".into());
             let rest = args.rest()?;
             let [id] = rest.as_slice() else {
-                return Err("falta el id: clio memory purge <id> [--reason \"motivo\"]".into());
+                return Err("missing the id: clio memory purge <id> [--reason \"reason\"]".into());
             };
             let id = id_of(id)?;
             let link = open_write(dirs)?;
@@ -818,23 +815,23 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
             println!("{}", row_line(st, &m, ui::width()));
             println!(
                 "{}",
-                st.dim("Borra el contenido en todas partes (texto, índice, historial y vector) y no se puede deshacer.\nLos respaldos y exportaciones que ya hiciste conservan el texto. El motivo queda en claro: no pongas ahí lo borrado.")
+                st.dim("It deletes the content everywhere (text, index, history and vector) and cannot be undone.\nBackups and exports you already made keep the text. The reason stays in the clear: do not put what was deleted in it.")
             );
-            if !yes && !confirm(&format!("¿Purgar m{} para siempre?", id.0)) {
-                println!("no se cambió nada");
+            if !yes && !confirm(&format!("Purge m{} for good?", id.0)) {
+                println!("nothing was changed");
                 return Ok(0);
             }
             let out = link.purge(id, &reason)?;
-            println!("purgado: m{} (operación {})", id.0, out.op.0);
+            println!("purged: m{} (operation {})", id.0, out.op.0);
             if !out.wal_truncated {
                 println!(
                     "{}",
-                    st.dim("aviso: un lector impidió vaciar el registro de escritura; copias viejas pueden quedar en el archivo -wal hasta el próximo checkpoint")
+                    st.dim("warning: a reader kept the write-ahead log from being emptied; old copies may stay in the -wal file until the next checkpoint")
                 );
             }
         }
         other => {
-            eprintln!("clio memory: subcomando desconocido {other:?}\n\n{USAGE}");
+            eprintln!("clio memory: unknown subcommand {other:?}\n\n{USAGE}");
             return Ok(2);
         }
     }

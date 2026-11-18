@@ -36,7 +36,7 @@ pub fn plan(dirs: &Dirs, sessions_dir: &Path, s: &SessionInfo) -> Res<Plan> {
         .zip(sessions_dir.canonicalize().ok())
         .is_some_and(|(p, d)| p == d);
     if !meta.is_file() || !inside || s.path.extension().is_none_or(|x| x != "jsonl") {
-        return Err("solo se borran archivos de sesión de la carpeta de sesiones de Pi".into());
+        return Err("only session files in Pi's sessions folder are deleted".into());
     }
     let run = clio_copy(dirs, s);
     let unapplied = run.as_ref().map_or(Some(0), unapplied_changes);
@@ -131,13 +131,13 @@ pub fn delete(p: &Plan) -> Res<()> {
 /// One line for the person about what a plan removes.
 pub fn describe(p: &Plan) -> String {
     match (&p.run, p.unapplied) {
-        (None, _) => "solo la conversación".into(),
-        (Some(_), Some(0)) => "la conversación y su copia de trabajo".into(),
+        (None, _) => "the conversation only".into(),
+        (Some(_), Some(0)) => "the conversation and its working copy".into(),
         (Some(_), Some(n)) => format!(
-            "la conversación y su copia de trabajo, con {n} archivo(s) cambiados SIN APLICAR a tu carpeta"
+            "the conversation and its working copy, with {n} changed file(s) NOT APPLIED to your folder"
         ),
         (Some(_), None) => {
-            "la conversación y su copia de trabajo (no se pudo saber si tiene cambios sin aplicar)"
+            "the conversation and its working copy (it could not be told whether it has changes not applied)"
                 .into()
         }
     }
@@ -207,7 +207,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.unapplied, Some(1), "a new file in the copy, not applied");
-        assert!(describe(&p).contains("SIN APLICAR"));
+        assert!(describe(&p).contains("NOT APPLIED"));
         assert_eq!(p.claude, [projects.join(&slug)]);
         delete(&p).unwrap();
         assert!(!ours.exists() && !dirs.runs.join("r1").exists());
@@ -224,7 +224,7 @@ mod tests {
         )
         .unwrap();
         assert!(p.run.is_none() && p.claude.is_empty());
-        assert_eq!(describe(&p), "solo la conversación");
+        assert_eq!(describe(&p), "the conversation only");
         delete(&p).unwrap();
         assert!(!theirs.exists() && elsewhere.exists());
     }

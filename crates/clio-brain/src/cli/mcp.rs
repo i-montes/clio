@@ -262,7 +262,7 @@ fn call(
         .cloned()
         .unwrap_or_else(|| json!({}));
     if name == PROJECT_TOOL {
-        return tool_result(id, project.unwrap_or("(ninguno: lo personal)"), false);
+        return tool_result(id, project.unwrap_or("(none: the personal ones)"), false);
     }
     // The old name of `memory_save`, for one version.
     let name = if name == "memory_propose" {

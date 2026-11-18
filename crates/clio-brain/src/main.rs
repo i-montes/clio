@@ -9,39 +9,39 @@ use cli::chat;
 use cli::home::{Dirs, Mode};
 use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pending, pi, runs, tui, vault};
 
-const USAGE: &str = "clio: un agente personal que trabaja en tu máquina (o en una copia de tu proyecto)
+const USAGE: &str = "clio: a personal agent that works on your machine (or on a copy of your project)
 
   clio [--debug] [--harness pi|builtin] [--host|--copy]
-                                              abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
-                                              con Pi instalado abre las sesiones junto al chat (CLIO_HARNESS=builtin lo apaga);
-                                              --host: las herramientas actúan en la máquina real (de fábrica), --copy: en una copia
-                                              (mandan sobre \"mode\" de config.json)
-  clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
-  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instrucción\"
-                                              --workspace DIR: en una copia de DIR (no va con --host)
-  clio diff <id>                              qué cambió el agente, contra el original
-  clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
-  clio undo <id> [--force]                    devuelve el original a como estaba antes de apply;
-                                              en una sesión anfitrión, deshace los archivos que cambió
-  clio pending [--json]                       lo que espera tu visto bueno (modo anfitrión)
-  clio approve <id> | clio reject <id>        lo ejecuta tal cual se apartó, o lo descarta
-  clio actions [--run <id>] [--json]          el registro de lo que Clio ejecutó y cambió en la máquina
+                                              opens the interface (in a terminal); --debug or CLIO_DEBUG=1: debug mode;
+                                              with Pi installed it opens the sessions next to the chat (CLIO_HARNESS=builtin turns that off);
+                                              --host: the tools act on the real machine (the default), --copy: on a copy
+                                              (they override \"mode\" in config.json)
+  clio init                                   creates ~/.config/clio, ~/.local/share/clio and the runtime folder
+  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instruction\"
+                                              --workspace DIR: on a copy of DIR (does not go with --host)
+  clio diff <id>                              what the agent changed, against the original
+  clio apply <id> [--force]                   puts the changes into the original (asks first)
+  clio undo <id> [--force]                    returns the original to how it was before apply;
+                                              in a host session, undoes the files it changed
+  clio pending [--json]                       what waits for your approval (host mode)
+  clio approve <id> | clio reject <id>        runs it exactly as it was set aside, or drops it
+  clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
-                                              elige el modelo (opencode, tu suscripción de Claude o la API de Anthropic) y guarda su llave en el baúl
+                                              picks the model (opencode, your Claude subscription or the Anthropic API) and keeps its key in the vault
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
-                                              lo que Clio recuerda (clio memory --help)
-  clio doctor [--json]                        revisa permisos, clave, sockets y el equipo
-  clio --version                              la versión
-  clio pi doctor|install|sessions [--json]    Pi (el arnés del agente): estado, instalación, sesiones
+                                              what Clio remembers (clio memory --help)
+  clio doctor [--json]                        checks permissions, key, sockets and the machine
+  clio --version                              the version
+  clio pi doctor|install|sessions [--json]    Pi (the agent's harness): status, installation, sessions
 
-Sin color: NO_COLOR=1 o TERM=dumb. Debug: --debug, CLIO_DEBUG=1 o Ctrl-D en la interfaz. Más: docs/uso-local.md";
+No color: NO_COLOR=1 or TERM=dumb. Debug: --debug, CLIO_DEBUG=1 or Ctrl-D in the interface. More: docs/uso-local.md";
 
 fn pending_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;
     if rest.len() != 1 {
-        return Err("falta el id de lo apartado (mira `clio pending`)".into());
+        return Err("missing the id of what was set aside (see `clio pending`)".into());
     }
     Ok(rest.remove(0))
 }
@@ -49,7 +49,7 @@ fn pending_arg(args: Args) -> Res<String> {
 fn id_arg(args: Args) -> Res<String> {
     let mut rest = args.rest()?;
     if rest.len() != 1 {
-        return Err("falta el id del run (mira `clio runs`)".into());
+        return Err("missing the run id (see `clio runs`)".into());
     }
     Ok(rest.remove(0))
 }
@@ -63,7 +63,7 @@ fn harness_for(flag: Option<&str>, mode: Option<Mode>, dirs: &Dirs) -> Res<chat:
         None => home::Config::load(dirs).is_ok_and(|c| c.mode == Mode::Host),
     };
     if host && h == chat::Harness::Builtin {
-        return Err("el modo anfitrión necesita Pi (clio pi install), o usa --copy".into());
+        return Err("host mode needs Pi (clio pi install), or use --copy".into());
     }
     Ok(h)
 }
@@ -80,7 +80,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         let harness = args.value("--harness")?;
         let mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
         if !args.rest()?.is_empty() {
-            return Err("--debug, --harness, --host y --copy van solos (abren la interfaz) o después de un comando: clio run --debug \"...\"".into());
+            return Err("--debug, --harness, --host and --copy go alone (they open the interface) or after a command: clio run --debug \"...\"".into());
         }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let dirs = Dirs::from_env()?;
@@ -123,7 +123,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "toolhost"
             | "pi-net"
     ) {
-        eprintln!("clio: comando desconocido {cmd:?}\n\n{USAGE}");
+        eprintln!("clio: unknown command {cmd:?}\n\n{USAGE}");
         return Ok(2);
     }
     // Internal: the tool host of a Pi session, started by `clio` from its own executable.
@@ -173,14 +173,16 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             // A folder named is a request for a copy of it: host mode has no folder.
             if asked.is_some() {
                 if mode == Some(Mode::Host) {
-                    return Err("--workspace es una copia de esa carpeta: no va con --host".into());
+                    return Err(
+                        "--workspace is a copy of that folder: it does not go with --host".into(),
+                    );
                 }
                 mode = Some(Mode::Copy);
             }
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(
-                    "falta la instrucción: clio run [--workspace DIR] \"qué hacer\"".into(),
+                    "missing the instruction: clio run [--workspace DIR] \"what to do\"".into(),
                 );
             }
             if harness_for(harness.as_deref(), mode, &dirs)? == chat::Harness::Pi {
@@ -269,18 +271,18 @@ mod tests {
     // S-36 (second audit, finding 2): an error that names a file never carries terminal control.
     #[test]
     fn an_error_with_a_hostile_file_name_reaches_the_terminal_without_escapes() {
-        let hostile = "no se pudo leer a\u{1b}]52;c;ZXZpbA==\u{7}\u{1b}[2J.txt: permiso denegado";
+        let hostile = "could not read a\u{1b}]52;c;ZXZpbA==\u{7}\u{1b}[2J.txt: permission denied";
         let shown = error_line(hostile);
         assert!(
             !shown.chars().any(|c| c.is_control() && c != '\n'),
             "{shown:?}"
         );
-        assert!(shown.starts_with("clio: no se pudo leer a"), "{shown:?}");
-        assert!(shown.ends_with("permiso denegado"), "{shown:?}");
+        assert!(shown.starts_with("clio: could not read a"), "{shown:?}");
+        assert!(shown.ends_with("permission denied"), "{shown:?}");
         // A plain error is untouched, and a second line stays a second line.
         assert_eq!(
-            error_line("falta el id\ncon ayuda"),
-            "clio: falta el id\ncon ayuda"
+            error_line("missing the id\nwith help"),
+            "clio: missing the id\nwith help"
         );
     }
 
@@ -368,7 +370,7 @@ mod tests {
             let verdict = judge.relation(new, old);
             let (name, sure) = match verdict {
                 Some((r, sure)) => (r.label().to_owned(), sure),
-                None => ("ninguna".to_owned(), 0.0),
+                None => ("none".to_owned(), 0.0),
             };
             let truth = gold.get(&(*a.min(b), *a.max(b)));
             let e = said.entry(name.clone()).or_default();
@@ -378,20 +380,20 @@ mod tests {
                 let f = found.entry(t.clone()).or_default();
                 f.0 += 1;
                 f.1 += u32::from(*t == name);
-                println!("m{a}–m{b}: marcado {t}, Jev {name} {sure:.2}");
-            } else if name != "ninguna" {
-                println!("m{a}–m{b}: sin marcar, Jev {name} {sure:.2}");
+                println!("m{a}–m{b}: marked {t}, Jev {name} {sure:.2}");
+            } else if name != "none" {
+                println!("m{a}–m{b}: unmarked, Jev {name} {sure:.2}");
             }
         }
-        println!("\n{} candidatos", cands.len());
-        println!("Jev dice | veces | aciertos (precisión)");
+        println!("\n{} candidates", cands.len());
+        println!("Jev says | times | hits (precision)");
         for (k, (n, ok)) in &said {
             println!(
                 "{k} | {n} | {ok} ({:.0} %)",
                 100.0 * f64::from(*ok) / f64::from(*n)
             );
         }
-        println!("\nmarcado | entre candidatos | Jev lo dice (cobertura)");
+        println!("\nmarked | among candidates | Jev says it (coverage)");
         for (k, (n, ok)) in &found {
             println!(
                 "{k} | {n} | {ok} ({:.0} %)",

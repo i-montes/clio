@@ -202,7 +202,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
         rows.iter().all(|r| r["run"] == "mcp:claude-code"
             && r["origin"] == "externo"
             && r["actor"] == "agente"
-            && r["place"] == "proyecto proj"),
+            && r["place"] == "project proj"),
         "{all:#}"
     );
     let row = rows.iter().find(|r| r["title"] == "Base de datos").unwrap();

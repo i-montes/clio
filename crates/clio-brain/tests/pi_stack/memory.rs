@@ -293,14 +293,14 @@ fn attack_56() -> Option<bool> {
         "the prompt says tool output is data"
     );
     assert!(
-        !first.contains("read content from outside"),
+        !first.contains("has read content from outside"),
         "clean at the start"
     );
     // The session is tainted by a memory that is not the person's: from the next run on.
     let _ = pi.prompt("anything else?");
     let last = model.requests().pop().unwrap();
     assert!(
-        system_text(&last).contains("read content from outside"),
+        system_text(&last).contains("has read content from outside"),
         "tainted after the read"
     );
     assert_eq!(

@@ -61,7 +61,7 @@ pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> R
                 "{}",
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?
             ),
-            None => println!("sueño: todavía no durmió"),
+            None => println!("sleep: it has not slept yet"),
         }
         return Ok(0);
     }
@@ -87,7 +87,7 @@ pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> R
     )?;
     let r = match out {
         Slept::Skipped(why) => {
-            println!("no durmió: {why}");
+            println!("did not sleep: {why}");
             return Ok(0);
         }
         Slept::Done(r) => r,
@@ -97,20 +97,20 @@ pub fn run(dirs: &Dirs, now: bool, dry_run: bool, report: bool, json: bool) -> R
         return Ok(0);
     }
     if dry_run {
-        println!("solo mirar: no se cambió nada");
+        println!("look only: nothing was changed");
     }
     if merger.is_none() && !dry_run {
-        println!("sin modelo para unir esta noche (falta el modelo configurado o el baúl)");
+        println!("no model to merge with tonight (the configured model or the vault is missing)");
     }
     println!(
         "{}",
         morning_line(&r, clock.now()).map_or_else(
-            || "nada que hacer".to_owned(),
-            |l| l.replacen("Anoche (sueño)", "sueño", 1)
+            || "nothing to do".to_owned(),
+            |l| l.replacen("Anoche (sueño)", "sleep", 1)
         )
     );
     if !r.complete {
-        println!("la noche quedó incompleta: el próximo turno la sigue");
+        println!("the night was left incomplete: the next turn goes on with it");
     }
     Ok(0)
 }
@@ -120,12 +120,12 @@ pub fn setup(dirs: &Dirs, remove: bool) -> Res<i32> {
     use clio_memory::setup::{install_sleep, remove_sleep, service_command};
     if remove {
         remove_sleep(&dirs.home, &service_command)?;
-        println!("sueño nocturno quitado");
+        println!("night sleep removed");
         return Ok(0);
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let at = install_sleep(&dirs.home, &exe, &["memory", "sleep"], &service_command)?;
-    println!("sueño nocturno instalado: {}", at.display());
+    println!("night sleep installed: {}", at.display());
     Ok(0)
 }
 

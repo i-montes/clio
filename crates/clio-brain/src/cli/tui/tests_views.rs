@@ -55,7 +55,7 @@ pub(super) fn context(call: u32) -> ContextReport {
     }
 }
 
-/// Two calls: 12,4k in, 3,1k out, free; the context at 31 % of a 128k window.
+/// Two calls: 12.4k in, 3.1k out, free; the context at 31 % of a 128k window.
 pub(super) fn usage_with_context() -> RunUsage {
     let mut u = RunUsage::new(128_000, true, LIMITS);
     u.calls = vec![
@@ -174,7 +174,7 @@ fn the_status_bar_has_the_four_data_on_every_screen_with_a_run() {
         let t = screen_text(&a, 120, 30);
         let bar = last_line(&t);
         let short = |s: &str| s.replace(" pasos", "p").replace(" s/10 min", "s/10m");
-        for want in ["↑12,4k", "↓3,1k", "$0", &short(steps), &short(secs), "31"] {
+        for want in ["↑12.4k", "↓3.1k", "$0", &short(steps), &short(secs), "31"] {
             assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
         }
         assert!(
@@ -185,7 +185,7 @@ fn the_status_bar_has_the_four_data_on_every_screen_with_a_run() {
         assert_eq!(usage.contains("ext"), tainted, "{name}: {bar:?}");
         let t = screen_text(&a, 80, 24);
         let bar = last_line(&t);
-        for want in ["↑12,4k", "↓3,1k", "$0", &short(steps), &short(secs), "31%"] {
+        for want in ["↑12.4k", "↓3.1k", "$0", &short(steps), &short(secs), "31%"] {
             assert!(bar.contains(want), "{name}: {want:?} not in {bar:?}");
         }
         assert_eq!(bar.contains(" ext"), tainted, "{name}: {bar:?}");
@@ -199,7 +199,7 @@ fn the_status_bar_abbreviates_without_cutting_at_the_minimum_size() {
     let t = screen_text(&live_app(), 60, 16);
     assert_fits(&t, 60, 16);
     let bar = last_line(&t);
-    for want in ["↑12,4k", "↓3,1k", "$0", "8/40", "21s", "31%", "ext"] {
+    for want in ["↑12.4k", "↓3.1k", "$0", "8/40", "21s", "31%", "ext"] {
         assert!(bar.contains(want), "{want:?} not in {bar:?}");
     }
     // Wide, with the session tainted, it shows everything with more words.
@@ -262,10 +262,10 @@ fn c_opens_the_context_in_layers_and_esc_goes_back() {
     for want in [
         "contexto ",
         "31 %",
-        "39,7k de 128k tokens (aprox.)",
+        "39.7k de 128k tokens (aprox.)",
         "prompt de sistema",
         "clio-agent@3",
-        "1,2k",
+        "1.2k",
         "0,9 %",
         "objetivo / contrato",
         "tu pedido",
@@ -273,12 +273,12 @@ fn c_opens_the_context_in_layers_and_esc_goes_back() {
         "descripciones",
         "conversación",
         "7 turnos",
-        "3,1k",
+        "3.1k",
         "externo",
         "2 lecturas",
         "dates.py",
         "big.json",
-        "32,9k",
+        "32.9k",
         "salidas de herramientas",
         "cuatro caracteres por token",
     ] {
@@ -361,7 +361,7 @@ fn a_run_without_saved_context_says_so() {
     let (a, _) = feed(a, vec![ch('U')]);
     let t = screen_text(&a, 80, 24);
     assert!(
-        t.contains("no guardó el uso por paso") && t.contains("↑12,4k"),
+        t.contains("no guardó el uso por paso") && t.contains("↑12.4k"),
         "{t}"
     );
 }
@@ -496,7 +496,7 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
     let t = screen_text(&a, 80, 24);
     assert_fits(&t, 80, 24);
     for want in [
-        "uso ↑12,4k ↓3,1k tokens · $0",
+        "uso ↑12.4k ↓3.1k tokens · $0",
         "paso",
         "entrada",
         "salida",
@@ -511,14 +511,14 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
         .lines()
         .find(|l| l.trim_start().starts_with("1 "))
         .unwrap();
-    for want in ["10k", "2k", "$0", "1,2 s", "12k"] {
+    for want in ["10k", "2k", "$0", "1.2 s", "12k"] {
         assert!(row1.contains(want), "{want:?} in {row1:?}");
     }
     let row2 = t
         .lines()
         .find(|l| l.trim_start().starts_with("2 "))
         .unwrap();
-    for want in ["2,4k", "1,1k", "2,1 s", "15,5k"] {
+    for want in ["2.4k", "1.1k", "2.1 s", "15.5k"] {
         assert!(row2.contains(want), "{want:?} in {row2:?}");
     }
     for want in [
@@ -527,7 +527,7 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
         "tiempo",
         "21 s de 10 min",
         "costo",
-        "$0 de $0,10",
+        "$0 de $0.10",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
@@ -535,7 +535,7 @@ fn u_shows_a_compact_table_per_step_with_running_totals_and_the_limits() {
     let t = screen_text(&a, 60, 16);
     assert_fits(&t, 60, 16);
     assert!(
-        t.contains("acum.$") && t.contains("acum.tok") && t.contains("15,5k"),
+        t.contains("acum.$") && t.contains("acum.tok") && t.contains("15.5k"),
         "{t}"
     );
 }
@@ -551,24 +551,24 @@ fn usage_costs_are_exact_and_accumulate_as_integers() {
     let (a, _) = feed(a, vec![ch('U')]);
     let t = screen_text(&a, 120, 30);
     for want in [
-        "$0,0015",
-        "$0,0025",
-        "$0,000001",
-        "$0,004",
-        "$0,004001",
-        "uso ↑3k ↓300 tokens · $0,004001",
+        "$0.0015",
+        "$0.0025",
+        "$0.000001",
+        "$0.004",
+        "$0.004001",
+        "uso ↑3k ↓300 tokens · $0.004001",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
     // The limit line uses the same exact money.
-    assert!(t.contains("$0,004001 de $0,10"), "{t}");
+    assert!(t.contains("$0.004001 de $0.10"), "{t}");
 }
 
 #[test]
 fn a_free_model_shows_a_plain_zero() {
     let (a, _) = feed(live_app(), vec![ch('U')]);
     let t = screen_text(&a, 80, 24);
-    assert!(!t.contains("$0,00") && !t.contains("$0.0"), "{t}");
+    assert!(!t.contains("$0.00") && !t.contains("$0.0"), "{t}");
 }
 
 // ------------------------------------------------------------ the debug view
@@ -589,8 +589,8 @@ fn tab_opens_the_debug_view_only_while_debug_is_on() {
         "llamada 2",
         "contexto",
         "tok aprox.",
-        "sistema 1,2k (clio-agent@3)",
-        "modelo 1,2 s",
+        "sistema 1.2k (clio-agent@3)",
+        "modelo 1.2 s",
         "entrada 10k",
         "salida 2k",
         "petición",
@@ -601,7 +601,7 @@ fn tab_opens_the_debug_view_only_while_debug_is_on() {
         "pasarela #1 write_file",
         "negado · regla S-16 · 3 ms",
         "razón: the path is protected (S-16)",
-        "externo: big.json 32,9k",
+        "externo: big.json 32.9k",
     ] {
         assert!(t.contains(want), "{want:?}\n{t}");
     }
@@ -658,7 +658,7 @@ fn the_debug_view_shows_protocol_errors_and_retries() {
     });
     let (a, _) = feed(a, vec![ctrl('d'), key(KeyCode::Tab)]);
     let t = screen_text(&a, 120, 30);
-    assert!(t.contains("2 reintentos") && t.contains("65,0 s"), "{t}");
+    assert!(t.contains("2 reintentos") && t.contains("65.0 s"), "{t}");
     assert!(
         t.contains("error de protocolo: no valid JSON object found"),
         "{t}"

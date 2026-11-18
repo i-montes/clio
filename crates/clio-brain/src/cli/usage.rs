@@ -228,7 +228,7 @@ pub fn window_in(catalog: &str, provider: &str, model: &str) -> (u64, bool) {
 
 // ---------------------------------------------------------------- text
 
-/// `842`, `12,4k`, `128k`, `1,2M`: short, with a decimal comma.
+/// `842`, `12.4k`, `128k`, `1.2M`: short, with a decimal point.
 pub fn tokens(n: u64) -> String {
     if n < 1_000 {
         return n.to_string();
@@ -245,22 +245,22 @@ pub fn tokens(n: u64) -> String {
     if frac == 0 || (unit == 'k' && whole >= 100) {
         format!("{whole}{unit}")
     } else {
-        format!("{whole},{frac}{unit}")
+        format!("{whole}.{frac}{unit}")
     }
 }
 
-/// Dollars with the precision the amount needs: `$0` for nothing, `$0,0015` for a fraction of a
-/// cent, `$0,12` from one cent up. Input is integer micro-USD.
+/// Dollars with the precision the amount needs: `$0` for nothing, `$0.0015` for a fraction of a
+/// cent, `$0.12` from one cent up. Input is integer micro-USD.
 pub fn usd(micro: u64) -> String {
     if micro == 0 {
         return "$0".into();
     }
     if micro >= 10_000 {
         let cents = micro.saturating_add(5_000) / 10_000;
-        return format!("${},{:02}", cents / 100, cents % 100);
+        return format!("${}.{:02}", cents / 100, cents % 100);
     }
     let digits = format!("{micro:06}");
-    format!("$0,{}", digits.trim_end_matches('0'))
+    format!("$0.{}", digits.trim_end_matches('0'))
 }
 
 /// `21 s`, `2 min 5 s`, `10 min`.
@@ -281,9 +281,9 @@ pub fn duration_short(secs: u64) -> String {
     }
 }
 
-/// Milliseconds as seconds with one decimal and a comma: `2,1 s`.
+/// Milliseconds as seconds with one decimal: `2.1 s`.
 pub fn ms_label(ms: u64) -> String {
-    format!("{},{} s", ms / 1000, (ms % 1000) / 100)
+    format!("{}.{} s", ms / 1000, (ms % 1000) / 100)
 }
 
 #[cfg(test)]
@@ -298,25 +298,25 @@ mod tests {
         assert!(!super::usd(u64::MAX).is_empty());
         assert!(super::usd(u64::MAX).starts_with('$'));
         assert_eq!(super::tokens(999), "999");
-        assert_eq!(super::usd(15), "$0,000015");
+        assert_eq!(super::usd(15), "$0.000015");
     }
 
     use super::*;
 
     #[test]
-    fn tokens_are_short_with_a_decimal_comma() {
+    fn tokens_are_short_with_a_decimal_point() {
         for (n, s) in [
             (0, "0"),
             (842, "842"),
             (999, "999"),
             (1_000, "1k"),
-            (3_100, "3,1k"),
-            (12_400, "12,4k"),
-            (99_949, "99,9k"),
+            (3_100, "3.1k"),
+            (12_400, "12.4k"),
+            (99_949, "99.9k"),
             (128_000, "128k"),
             (999_949, "999k"),
             (999_950, "1M"),
-            (1_200_000, "1,2M"),
+            (1_200_000, "1.2M"),
         ] {
             assert_eq!(tokens(n), s, "{n}");
         }
@@ -326,14 +326,14 @@ mod tests {
     fn dollars_have_the_precision_the_amount_needs() {
         for (m, s) in [
             (0, "$0"),
-            (1, "$0,000001"),
-            (1_500, "$0,0015"),
-            (9_999, "$0,009999"),
-            (10_000, "$0,01"),
-            (123_456, "$0,12"),
-            (1_000_000, "$1,00"),
-            (1_234_567, "$1,23"),
-            (100_000, "$0,10"),
+            (1, "$0.000001"),
+            (1_500, "$0.0015"),
+            (9_999, "$0.009999"),
+            (10_000, "$0.01"),
+            (123_456, "$0.12"),
+            (1_000_000, "$1.00"),
+            (1_234_567, "$1.23"),
+            (100_000, "$0.10"),
         ] {
             assert_eq!(usd(m), s, "{m}");
         }
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(duration(600), "10 min");
         assert_eq!(duration(125), "2 min 5 s");
         assert_eq!(duration_short(125), "2m5s");
-        assert_eq!(ms_label(2_150), "2,1 s");
+        assert_eq!(ms_label(2_150), "2.1 s");
         assert_eq!(percent(31, 100), 31);
         assert_eq!(percent(1, 0), 0);
         assert_eq!(percent(u64::MAX, 1), u64::MAX);

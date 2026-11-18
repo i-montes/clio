@@ -36,7 +36,7 @@ fn doctor_flags_a_key_shaped_value_in_what_clio_wrote_and_never_prints_it() {
     let (ok, out) = doctor(&e);
     assert!(!ok, "{out}");
     assert!(
-        out.contains("effects.jsonl") && out.contains("forma de llave"),
+        out.contains("effects.jsonl") && out.contains("shaped like a key"),
         "{out}"
     );
     assert!(!out.contains(TOKEN) && !out.contains("ghp_"), "{out}");
@@ -68,7 +68,10 @@ fn doctor_does_not_look_inside_the_copy_of_the_project_nor_the_saved_originals()
     }
     let (ok, out) = doctor(&e);
     assert!(ok, "{out}");
-    assert!(out.contains("revisados"), "the check says it ran: {out}");
+    assert!(
+        out.contains("files checked"),
+        "the check says it ran: {out}"
+    );
 }
 
 #[test]
@@ -77,7 +80,7 @@ fn doctor_says_what_pis_jail_is_on_this_machine() {
     let (_, out) = doctor(&e);
     let line = out
         .lines()
-        .find(|l| l.contains("jaula de Pi"))
+        .find(|l| l.contains("Pi jail"))
         .unwrap_or_default();
     // Linux with bwrap: ready. Linux without it: Pi will not start, and doctor says so (FAIL).
     // Elsewhere: a warning. Never silent.
@@ -136,7 +139,7 @@ fn serve_vault(e: &Env, unlocked: bool) {
 
 fn vault_line(out: &str) -> String {
     out.lines()
-        .find(|l| l.contains("baúl:"))
+        .find(|l| l.contains("vault:"))
         .unwrap_or_default()
         .to_owned()
 }
@@ -199,14 +202,14 @@ fn doctor_warns_when_the_vault_is_locked_and_when_it_is_not_running() {
     // Not running, but there is a vault file: its values were not checked.
     let (_, out) = doctor(&e);
     assert!(
-        vault_line(&out).starts_with("WARN") && vault_line(&out).contains("no está corriendo"),
+        vault_line(&out).starts_with("WARN") && vault_line(&out).contains("not running"),
         "{out}"
     );
     // Running and locked.
     serve_vault(&e, false);
     let (_, out) = doctor(&e);
     assert!(
-        vault_line(&out).starts_with("WARN") && vault_line(&out).contains("bloqueado"),
+        vault_line(&out).starts_with("WARN") && vault_line(&out).contains("locked"),
         "{out}"
     );
 }
@@ -217,7 +220,7 @@ fn doctor_does_not_complain_when_there_is_no_vault() {
     let e = Env::new();
     let (_, out) = doctor(&e);
     assert!(
-        vault_line(&out).starts_with("PASS") && vault_line(&out).contains("no hay"),
+        vault_line(&out).starts_with("PASS") && vault_line(&out).contains("there is none"),
         "{out}"
     );
 }

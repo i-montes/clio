@@ -82,21 +82,21 @@ pub fn label(p: &Pending) -> String {
 /// One line for the person: id, class, what, since when, until when, and whether it was asked.
 pub fn line(p: &Pending, now: i64) -> String {
     format!(
-        "{}  {}  {}  · desde {} UTC · {} {} UTC{}",
+        "{}  {}  {}  · since {} UTC · {} {} UTC{}",
         p.id,
         label(p),
         sanitize::line(&what(p)),
         stamp(p.created_ms),
         if now >= p.expires_ms {
-            "venció"
+            "expired"
         } else {
-            "vence"
+            "expires"
         },
         stamp(p.expires_ms),
         if p.ask {
             ""
         } else {
-            " · sin preguntar (va al resumen del día)"
+            " · not asked (goes to the day's summary)"
         }
     )
 }
@@ -111,14 +111,14 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
         return Ok(());
     }
     if list.is_empty() {
-        println!("no hay nada esperando tu visto bueno");
+        println!("nothing is waiting for your approval");
         return Ok(());
     }
     let now = now_ms();
     for p in &list {
         println!("{}", line(p, now));
     }
-    println!("\nclio approve <id> lo ejecuta · clio reject <id> lo descarta");
+    println!("\nclio approve <id> runs it · clio reject <id> drops it");
     Ok(())
 }
 
@@ -126,7 +126,7 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
 /// rules), with nothing of the session's own: an approval does not mark the running session.
 fn host_for(dirs: &Dirs, run: &str) -> Res<ToolHost> {
     if !valid_id(run) {
-        return Err(format!("la sesión {run:?} no es válida"));
+        return Err(format!("the session {run:?} is not valid"));
     }
     let dir = dirs.runs.join(run);
     let scratch = dir.join("scratch");
@@ -161,7 +161,7 @@ pub fn outcome(p: &Pending) -> String {
             exit_code,
             output_tail,
         } => {
-            let code = exit_code.map_or_else(String::new, |c| format!(" (salida {c})"));
+            let code = exit_code.map_or_else(String::new, |c| format!(" (exit {c})"));
             let tail = output_tail.trim();
             if tail.is_empty() {
                 format!("{what}{code}")
@@ -209,7 +209,7 @@ pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
         return Ok(());
     }
     let p = approve(dirs, id)?;
-    println!("aprobado {}: {}", p.id, sanitize::multiline(&outcome(&p)));
+    println!("approved {}: {}", p.id, sanitize::multiline(&outcome(&p)));
     Ok(())
 }
 
@@ -221,7 +221,7 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
         return Ok(());
     }
     println!(
-        "rechazado {}: {} no se ejecuta",
+        "rejected {}: {} is not run",
         p.id,
         sanitize::line(&what(&p))
     );
@@ -249,7 +249,7 @@ pub fn action_line(v: &Value, with_run: bool) -> String {
     let s = |v: &Value| sanitize::line(v.as_str().unwrap_or(""));
     let code = v["exit_code"]
         .as_i64()
-        .map_or_else(String::new, |c| format!(" (salida {c})"));
+        .map_or_else(String::new, |c| format!(" (exit {c})"));
     let run = if with_run {
         format!("  {}", s(&v["run"]))
     } else {
@@ -261,12 +261,16 @@ pub fn action_line(v: &Value, with_run: bool) -> String {
         s(&v["tool"]),
         s(&v["outcome"]),
         s(&v["what"]),
-        if v["network"] == true { " · red" } else { "" }
+        if v["network"] == true {
+            " · network"
+        } else {
+            ""
+        }
     )
 }
 
 /// The local clock's offset from UTC, in seconds: read from the same local stamp the chat sends
-/// in `<clio-contexto>` (UTC when the system cannot say).
+/// in `<clio-context>` (UTC when the system cannot say).
 pub fn local_offset() -> i64 {
     let s = clio_brain::pi::envelope::stamp_now();
     let tz = s.get(s.len().saturating_sub(6)..).unwrap_or("");
@@ -285,7 +289,7 @@ pub fn action_cells(v: &Value, offset: i64) -> [String; 4] {
     let t = (v["at_ms"].as_i64().unwrap_or(0).div_euclid(1000) + offset).rem_euclid(86_400);
     let code = v["exit_code"]
         .as_i64()
-        .map_or_else(String::new, |c| format!(" (salida {c})"));
+        .map_or_else(String::new, |c| format!(" (exit {c})"));
     [
         format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60),
         s(&v["tool"]),
@@ -293,7 +297,11 @@ pub fn action_cells(v: &Value, offset: i64) -> [String; 4] {
         format!(
             "{}{code}{}",
             s(&v["what"]),
-            if v["network"] == true { " · red" } else { "" }
+            if v["network"] == true {
+                " · network"
+            } else {
+                ""
+            }
         ),
     ]
 }
@@ -309,7 +317,7 @@ pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
         return Ok(());
     }
     if lines.is_empty() {
-        println!("no hay acciones registradas");
+        println!("no actions recorded");
     }
     for v in &lines {
         println!("{}", action_line(v, true));

@@ -529,7 +529,7 @@ impl RunSummary {
     /// What to tell the person when a budget cap cut the run (S-47).
     pub fn stop_notice(&self) -> Option<String> {
         self.stopped
-            .map(|s| format!("se detuvo la tarea: {}", s.reason()))
+            .map(|s| format!("the task was stopped: {}", s.reason()))
     }
 }
 
@@ -604,7 +604,7 @@ impl RpcClient {
             .process_group(0);
         let child = cmd
             .spawn()
-            .map_err(|e| PiError::Spawn(format!("no pude iniciar Pi: {e}")))?;
+            .map_err(|e| PiError::Spawn(format!("could not start Pi: {e}")))?;
         Self::from_child(child)
     }
 
@@ -612,7 +612,7 @@ impl RpcClient {
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            return Err(PiError::Spawn("Pi sin pipes".into()));
+            return Err(PiError::Spawn("Pi has no pipes".into()));
         };
         let pid = child.id();
         let stdin = start_writer(stdin);
@@ -705,7 +705,7 @@ impl RpcClient {
         enqueue(&self.stdin, line).map_err(|full| {
             if full {
                 PiError::Timeout {
-                    what: "Pi no lee su entrada".into(),
+                    what: "Pi does not read its input".into(),
                     secs: 0,
                 }
             } else {
@@ -741,7 +741,7 @@ impl RpcClient {
             Ok(r) if r.success => Ok(r.data),
             Ok(r) => Err(PiError::Command {
                 command: kind.to_owned(),
-                message: text::line(r.error.as_deref().unwrap_or("sin detalle"), 300),
+                message: text::line(r.error.as_deref().unwrap_or("no detail"), 300),
             }),
             Err(RecvTimeoutError::Timeout) => {
                 self.forget(&id);
@@ -802,7 +802,7 @@ impl RpcClient {
                 drop(guard);
                 self.kill();
                 return Err(PiError::Verification(format!(
-                    "las herramientas activas ({}) no son exactamente las de la guardia ({})",
+                    "the active tools ({}) are not exactly the guard's ({})",
                     text::line(&got.join(", "), 120),
                     text::line(&want.join(", "), 120)
                 )));
@@ -827,7 +827,7 @@ impl RpcClient {
         drop(guard);
         self.kill();
         Err(PiError::Verification(format!(
-            "herramientas fuera de la lista permitida: {}",
+            "tools outside the allowed list: {}",
             text::line(&bad.join(", "), 200)
         )))
     }
@@ -1016,9 +1016,9 @@ impl RpcClient {
                 && (outside > self.timeouts.run || last.elapsed() > self.timeouts.silence)
             {
                 let (what, secs) = if outside > self.timeouts.run {
-                    ("la corrida completa", self.timeouts.run.as_secs())
+                    ("the whole run", self.timeouts.run.as_secs())
                 } else {
-                    ("silencio sin eventos", self.timeouts.silence.as_secs())
+                    ("silence with no events", self.timeouts.silence.as_secs())
                 };
                 let _ = self.abort();
                 return Err(PiError::Timeout {
@@ -1111,7 +1111,7 @@ fn reader(
         if buf.last() != Some(&b'\n') {
             if buf.len() > MAX_LINE {
                 let _ = events.send(Event::Garbage(
-                    "registro demasiado largo, se cerró la conexión".into(),
+                    "line too long, the connection was closed".into(),
                 ));
             }
             if buf.len() > MAX_LINE {

@@ -242,7 +242,7 @@ fn reading_commands_never_create_the_file() {
         vec!["memory", "export"],
     ] {
         let out = e.clio(&args);
-        assert!(out.contains("todavía no hay memoria"), "{args:?}: {out}");
+        assert!(out.contains("there is no memory yet"), "{args:?}: {out}");
     }
     assert!(!e.home().join(".local").exists(), "nothing was created");
 }
@@ -253,11 +253,11 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
     assert!(e.clio(&["memory"]).contains("clio memory search"));
     assert!(
         e.clio(&["memory", "list"])
-            .contains("todavía no hay recuerdos activos")
+            .contains("there are no active memories yet")
     );
     assert!(
         e.clio(&["memory", "list", "--pending"])
-            .contains("nada pendiente")
+            .contains("nothing pending")
     );
 
     // remember: origin persona, active at once; optionally in a fixed block.
@@ -265,7 +265,7 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
         "memory", "remember", "Mi", "proyecto", "usa", "Rust", "y", "SQLite",
     ]);
     assert!(
-        out.contains("m1") && out.contains("origen: persona"),
+        out.contains("m1") && out.contains("origin: persona"),
         "{out}"
     );
     e.clio(&[
@@ -284,13 +284,13 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
 
     let list = e.clio(&["memory", "list"]);
     assert!(
-        list.contains("m1") && list.contains("persona") && list.contains("semántico"),
+        list.contains("m1") && list.contains("persona") && list.contains("semantic"),
         "{list}"
     );
     let j: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
     assert_eq!(j.as_array().unwrap().len(), 2);
     assert_eq!(j[1]["origin"], "persona");
-    assert_eq!(j[1]["state"], "activo");
+    assert_eq!(j[1]["state"], "active");
     assert_eq!(j[1]["actor"], "persona");
 
     // search: what is relevant, and "nothing relevant" is a clean answer, not an error.
@@ -306,7 +306,7 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
     assert_eq!(s["abstained"], false);
     assert_eq!(s["results"][0]["id"], 1);
     let none = e.clio(&["memory", "search", "receta de arepas con queso"]);
-    assert!(none.contains("nada relevante"), "{none}");
+    assert!(none.contains("nothing relevant"), "{none}");
     let none: Value =
         serde_json::from_str(&e.clio(&["memory", "search", "--json", "receta de arepas"])).unwrap();
     assert_eq!(none["abstained"], true);
@@ -328,11 +328,11 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
     // feedback: useful and wrong are noted; nothing is deleted or changed.
     assert!(
         e.clio(&["memory", "feedback", "1", "useful"])
-            .contains("anotado")
+            .contains("noted")
     );
     assert!(
         e.clio(&["memory", "feedback", "m1", "wrong"])
-            .contains("nunca borra")
+            .contains("never deletes")
     );
     assert_eq!(
         e.try_clio(&["memory", "feedback", "1", "meh"])
@@ -343,14 +343,14 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
     let j: Value = serde_json::from_str(&e.clio(&["memory", "show", "1", "--json"])).unwrap();
     assert_eq!(j["content"], "Mi proyecto usa Rust y SQLite");
     assert_eq!(
-        j["state"], "activo",
+        j["state"], "active",
         "one wrong signal does not even flag it"
     );
 
     // stats and export.
     let st = e.clio(&["memory", "stats"]);
     assert!(
-        st.contains("activos 2") && st.contains("sin modelo de embeddings"),
+        st.contains("active 2") && st.contains("no embedding model"),
         "{st}"
     );
     let sj: Value = serde_json::from_str(&e.clio(&["memory", "stats", "--json"])).unwrap();
@@ -380,7 +380,7 @@ fn every_subcommand_works_and_speaks_json_where_it_should() {
     let p = e.try_clio(&["memory", "purge"]);
     assert_eq!(p.status.code(), Some(1));
     assert!(
-        text(&p.stderr).contains("falta el id"),
+        text(&p.stderr).contains("missing the id"),
         "{}",
         text(&p.stderr)
     );
@@ -398,35 +398,35 @@ fn a_run_that_read_files_leaves_its_record_active_marked_external_and_archive_as
     assert_eq!(summary["tainted"], true);
     assert_eq!(summary["memory"]["pending"], 0, "{summary}");
     assert!(
-        panel.contains("memoria: 1 guardado(s), 0 en cuarentena"),
+        panel.contains("memory: 1 saved, 0 in quarantine"),
         "{panel}"
     );
     let active = e.clio(&["memory", "list"]);
     assert!(
-        active.contains("m1") && active.contains("episódico") && active.contains("externo"),
+        active.contains("m1") && active.contains("episodic") && active.contains("externo"),
         "{active}"
     );
     assert!(
         e.clio(&["memory", "list", "--pending"])
-            .contains("nada pendiente")
+            .contains("nothing pending")
     );
 
     // The question is asked; no answer, "n" or an empty stdin changes nothing.
     assert!(
         e.clio(&["memory", "archive", "1"])
-            .contains("no se cambió nada")
+            .contains("nothing was changed")
     );
     assert!(
         e.clio_with_stdin(&["memory", "archive", "1"], "n\n")
-            .contains("no se cambió nada")
+            .contains("nothing was changed")
     );
     assert!(
         e.clio(&["memory", "archive", "1", "--yes"])
-            .contains("archivado: m1")
+            .contains("archived: m1")
     );
     assert!(
         e.clio(&["memory", "list"])
-            .contains("todavía no hay recuerdos activos")
+            .contains("there are no active memories yet")
     );
     assert_eq!(
         e.try_clio(&["memory", "promote", "77", "--yes"])
@@ -451,7 +451,7 @@ fn the_second_run_gets_what_the_first_learned_as_data_with_its_layer() {
     assert_eq!(s1["memory"]["saved"].as_array().unwrap().len(), 1);
     assert_eq!(s1["memory"]["pending"], 0);
     assert!(
-        panel1.contains("memoria: 1 guardado(s), 0 en cuarentena"),
+        panel1.contains("memory: 1 saved, 0 in quarantine"),
         "{panel1}"
     );
     assert!(
@@ -470,7 +470,7 @@ fn the_second_run_gets_what_the_first_learned_as_data_with_its_layer() {
         "{req}"
     );
     assert!(req.contains(&format!("[m{id}]")));
-    assert!(panel2.contains("memoria:"), "{panel2}");
+    assert!(panel2.contains("memory:"), "{panel2}");
     // The layer is in the run's usage, with a size.
     let usage: Value =
         serde_json::from_str(&std::fs::read_to_string(e.run_dir(&s2).join("usage.json")).unwrap())
@@ -485,13 +485,13 @@ fn the_second_run_gets_what_the_first_learned_as_data_with_its_layer() {
         .collect();
     let mem: Vec<&Value> = kinds.iter().filter(|v| v["kind"] == "memory").collect();
     assert_eq!(mem.len(), 2, "recalled + proposed at the close: {log}");
-    assert!(mem[0]["title"].as_str().unwrap().contains("recordó 1"));
-    assert!(mem[0]["lines"][0].as_str().unwrap().contains("puntaje"));
+    assert!(mem[0]["title"].as_str().unwrap().contains("recalled 1"));
+    assert!(mem[0]["lines"][0].as_str().unwrap().contains("score"));
     assert!(
         mem[1]["title"]
             .as_str()
             .unwrap()
-            .contains("al cerrar propuso guardar")
+            .contains("at close it proposed to save")
     );
     assert!(
         kinds
@@ -536,7 +536,7 @@ fn a_decoy_in_what_a_run_wants_to_remember_is_nowhere_in_the_home() {
     }
     // And the proposals did happen: crossed out, active.
     let active = e.clio(&["memory", "list"]);
-    assert!(active.contains("procedimental"), "{active}");
+    assert!(active.contains("procedural"), "{active}");
     for l in e.clio(&["memory", "list", "--json"]).lines() {
         c.assert_clean("list", l);
     }
@@ -607,7 +607,7 @@ fn memory_purge_asks_first_deletes_for_good_and_leaves_only_a_tombstone() {
     // Without an answer, or with "n", nothing is deleted.
     assert!(
         e.clio_with_stdin(&["memory", "purge", "1"], "n\n")
-            .contains("no se cambió nada")
+            .contains("nothing was changed")
     );
     assert!(
         e.clio(&["memory", "show", "1"])
@@ -615,11 +615,11 @@ fn memory_purge_asks_first_deletes_for_good_and_leaves_only_a_tombstone() {
     );
 
     let out = e.clio_with_stdin(&["memory", "purge", "1", "--reason", "ya no vale"], "s\n");
-    assert!(out.contains("purgado: m1"), "{out}");
+    assert!(out.contains("purged: m1"), "{out}");
 
     // The tombstone is all that is left.
     let shown = e.clio(&["memory", "show", "1"]);
-    assert!(shown.contains("fue purgado"), "{shown}");
+    assert!(shown.contains("was purged"), "{shown}");
     assert!(shown.contains("ya no vale"), "{shown}");
     assert!(!shown.contains("gamma-ultra-7731"), "{shown}");
     assert!(
@@ -662,11 +662,11 @@ fn the_person_pins_and_unpins_a_memory() {
         .unwrap();
         link.engine().pinned(link.scope()).unwrap().len()
     };
-    assert!(e.clio(&["memory", "pin", "m1"]).contains("fijado: m1"));
+    assert!(e.clio(&["memory", "pin", "m1"]).contains("pinned: m1"));
     assert_eq!(pinned(&e), 1);
     assert!(
         e.clio(&["memory", "unpin", "1"])
-            .contains("ya no está fijado: m1")
+            .contains("no longer pinned: m1")
     );
     assert_eq!(pinned(&e), 0);
     assert!(!e.try_clio(&["memory", "pin"]).status.success());
@@ -738,8 +738,8 @@ fn projects_review_due_reviewed_and_timeline() {
         projects,
         json!([
             {"place": "personal", "active": 2, "quarantine": 0, "archived": 0},
-            {"place": "lecciones", "active": 0, "quarantine": 0, "archived": 0},
-            {"place": "proyecto alfa", "active": 3, "quarantine": 0, "archived": 0},
+            {"place": "lessons", "active": 0, "quarantine": 0, "archived": 0},
+            {"place": "project alfa", "active": 3, "quarantine": 0, "archived": 0},
         ]),
         "{projects:#}"
     );
@@ -748,7 +748,7 @@ fn projects_review_due_reviewed_and_timeline() {
     assert_eq!(due[0]["id"], json!(old.0));
     assert!(
         e.clio(&["memory", "show", &old.0.to_string()])
-            .contains("revisar:")
+            .contains("review:")
     );
     e.clio(&["memory", "reviewed", &old.0.to_string()]);
     let due: Value = serde_json::from_str(&e.clio(&["memory", "review-due", "--json"])).unwrap();
@@ -764,7 +764,7 @@ fn projects_review_due_reviewed_and_timeline() {
     assert_eq!(ids, [a, b], "the session, not the place");
     let shown: Value =
         serde_json::from_str(&e.clio(&["memory", "show", &a.to_string(), "--json"])).unwrap();
-    assert_eq!(shown["place"], "proyecto alfa");
+    assert_eq!(shown["place"], "project alfa");
     assert_eq!(shown["category"], "decision");
     assert_eq!(shown["pinned"], false);
     // The doctor counts them and says what waits for the person.
@@ -779,7 +779,7 @@ fn projects_review_due_reviewed_and_timeline() {
     assert!(
         lines
             .iter()
-            .any(|l| l == "memoria: 5 recuerdos activos; 1 proyecto, lo personal y las lecciones"),
+            .any(|l| l == "memory: 5 active memories; 1 project, the personal ones and the lessons"),
         "{lines:#?}"
     );
 }
@@ -853,7 +853,7 @@ fn the_doctor_does_not_upgrade_an_old_memory_file() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|c| c["message"].as_str().unwrap().contains("esquema anterior")),
+            .any(|c| c["message"].as_str().unwrap().contains("earlier schema")),
         "{doc:#}"
     );
     let v: i64 = rusqlite::Connection::open(&path)
@@ -937,7 +937,7 @@ fn review_history_revert_context_conflicts_and_import() {
     let data = e.home().join(".local/share/clio");
     e.clio(&["memory", "remember", "El proyecto usa PostgreSQL 15"]);
     e.clio(&["memory", "remember", "El proyecto usa PostgreSQL 16"]);
-    assert!(e.clio(&["memory", "review"]).contains("nada pendiente"));
+    assert!(e.clio(&["memory", "review"]).contains("nothing pending"));
     let h: Value = serde_json::from_str(&e.clio(&["memory", "history", "1", "--json"])).unwrap();
     assert_eq!(h.as_array().unwrap().len(), 1, "{h:#}");
     let first_change = h[0]["change"].as_i64().unwrap();
@@ -974,18 +974,21 @@ fn review_history_revert_context_conflicts_and_import() {
         active.as_array().unwrap().iter().all(|r| r["id"] != 1),
         "{active:#}"
     );
-    assert!(e.clio(&["memory", "conflicts"]).contains("ninguna"));
+    assert!(
+        e.clio(&["memory", "conflicts"])
+            .contains("no contradiction")
+    );
     // Export, then bring it into an empty memory elsewhere; never over an existing one.
     let file = e.tmp.path().join("mem.jsonl");
     e.clio(&["memory", "export", &file.display().to_string()]);
     let o = e.try_clio(&["memory", "import", &file.display().to_string()]);
-    assert!(!o.status.success() && text(&o.stderr).contains("ya hay una memoria"));
+    assert!(!o.status.success() && text(&o.stderr).contains("there is already a memory"));
     let other = Env::new(false);
     std::fs::create_dir_all(other.home().join(".local/share/clio")).unwrap();
     assert!(
         other
             .clio(&["memory", "import", &file.display().to_string()])
-            .contains("importado")
+            .contains("imported")
     );
     assert!(other.clio(&["--version"]).starts_with("clio "));
     let back: Value = serde_json::from_str(&other.clio(&["memory", "list", "--json"])).unwrap();
@@ -1025,14 +1028,14 @@ fn the_person_merges_renames_and_archives_projects() {
     .forget_as_agent(clio_memory::MemoryId(b))
     .unwrap();
     let out = e.clio(&["memory", "projects", "merge", "alfa", "Alfa Web", "--yes"]);
-    assert!(out.contains("movidos 2"), "{out}");
+    assert!(out.contains("moved 2"), "{out}");
     let places: Value = serde_json::from_str(&e.clio(&["memory", "projects", "--json"])).unwrap();
     let count = |name: &str| -> (u64, u64) {
         let p = places
             .as_array()
             .unwrap()
             .iter()
-            .find(|p| p["place"] == format!("proyecto {name}"))
+            .find(|p| p["place"] == format!("project {name}"))
             .unwrap_or_else(|| panic!("{places:#}"));
         (
             p["active"].as_u64().unwrap(),
@@ -1049,11 +1052,11 @@ fn the_person_merges_renames_and_archives_projects() {
     e.clio(&["memory", "revert", &last["change"].to_string(), "--yes"]);
     let shown: Value =
         serde_json::from_str(&e.clio(&["memory", "show", &a.to_string(), "--json"])).unwrap();
-    assert_eq!(shown["place"], "proyecto alfa");
+    assert_eq!(shown["place"], "project alfa");
     // Archiving a whole project: nothing is erased.
     assert!(
         e.clio(&["memory", "projects", "archive", "alfa-web", "--yes"])
-            .contains("archivados 1")
+            .contains("archived 1")
     );
     let shown: Value =
         serde_json::from_str(&e.clio(&["memory", "list", "--pending", "--json"])).unwrap();
@@ -1098,12 +1101,12 @@ fn identity_prints_the_blocks_in_order() {
         "{out}"
     );
     assert!(at("1. [m3] No borras nada sin permiso") > names[1], "{out}");
-    let empty = at("(vacío)");
+    let empty = at("(empty)");
     assert!(names[2] < empty && empty < names[3], "{out}");
     assert!(at("el correo del banco") > names[3], "{out}");
     assert_eq!(std::fs::read(e.db()).unwrap(), before, "it only reads");
-    assert!(out.contains("quién es Clio y cómo habla"), "{out}");
-    assert!(out.contains("lo que vigila"), "{out}");
+    assert!(out.contains("who Clio is and how it speaks"), "{out}");
+    assert!(out.contains("what it watches"), "{out}");
     assert!(out.contains("(persona)"), "the origin of each entry: {out}");
 }
 
@@ -1111,7 +1114,7 @@ fn identity_prints_the_blocks_in_order() {
 fn identity_without_a_memory_says_so() {
     let e = Env::new(false);
     let out = e.clio(&["memory", "identity"]);
-    assert!(out.contains("todavía no hay memoria"), "{out}");
+    assert!(out.contains("there is no memory yet"), "{out}");
 }
 
 #[test]
@@ -1129,7 +1132,7 @@ fn identity_as_json_has_the_four_blocks() {
         j[0]["entries"][1],
         json!({"id": 2, "text": "Hablas claro", "origin": "persona"})
     );
-    assert_eq!(j[0]["about"], "quién es Clio y cómo habla");
+    assert_eq!(j[0]["about"], "who Clio is and how it speaks");
     assert_eq!(j[2]["entries"], json!([]));
     assert_eq!(j[3]["entries"][0]["text"], "el correo del banco");
 }

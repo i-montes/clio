@@ -56,7 +56,7 @@ struct Applied {
 /// Why a path may never be written, or `None` if it is fine to consider.
 fn hard_refusal(rel: &str) -> Option<String> {
     if !plain_rel(rel) {
-        return Some("no es una ruta relativa simple".into());
+        return Some("not a plain relative path".into());
     }
     let comps: Vec<&str> = rel.split('/').collect();
     // The names are lowercase: compared without case (a case-insensitive disk loads `.Git` too).
@@ -68,19 +68,19 @@ fn hard_refusal(rel: &str) -> Option<String> {
             .iter()
             .any(|c| PROTECTED_PATHS.contains(&c.as_str()) && c.starts_with('.'))
     {
-        return Some("ruta protegida".into());
+        return Some("protected path".into());
     }
     // It names the folder's project for the memory: the person sets it, never a run.
     if lower.iter().any(|c| c == clio_brain::project::PROJECT_FILE) {
         return Some(
-            "nombra el proyecto de la memoria: lo fija la persona (clio memory project set)".into(),
+            "names the memory's project: the person sets it (clio memory project set)".into(),
         );
     }
     if comps.iter().any(|c| SKIP_DIRS.contains(c)) {
-        return Some("carpeta que la copia deja fuera (se genera sola)".into());
+        return Some("a folder the copy leaves out (it generates itself)".into());
     }
     if comps.iter().any(|c| is_secret_name(c)) {
-        return Some("parece un secreto".into());
+        return Some("it looks like a secret".into());
     }
     None
 }
@@ -92,7 +92,7 @@ pub(super) fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
         cur.push(c);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                return Err("hay un enlace simbólico en el camino".into());
+                return Err("there is a symbolic link on the way".into());
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
@@ -105,7 +105,7 @@ pub(super) fn symlink_check(ws: &Path, rel: &str) -> Result<(), String> {
     }
     match existing.canonicalize() {
         Ok(c) if c.starts_with(ws) => Ok(()),
-        _ => Err("sale de la carpeta del proyecto".into()),
+        _ => Err("it leaves the project folder".into()),
     }
 }
 
@@ -116,7 +116,7 @@ fn hash_of(p: &Path) -> Option<String> {
 fn workspace(meta_ws: &str) -> Res<PathBuf> {
     Path::new(meta_ws)
         .canonicalize()
-        .map_err(|e| format!("la carpeta original {meta_ws}: {e}"))
+        .map_err(|e| format!("the original folder {meta_ws}: {e}"))
 }
 
 pub(super) fn confirm(q: &str) -> bool {
@@ -125,7 +125,7 @@ pub(super) fn confirm(q: &str) -> bool {
     if std::io::stdin().is_terminal() {
         let _ = rustix::termios::tcflush(std::io::stdin(), rustix::termios::QueueSelector::IFlush);
     }
-    print!("{q} [s/N] ");
+    print!("{q} [y/N] ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();
     std::io::stdin().lock().read_line(&mut s).is_ok()
@@ -154,14 +154,14 @@ pub struct Plan {
 }
 
 /// The message `plan` gives when there is nothing to apply.
-pub const NO_CHANGES: &str = "no tiene cambios; no hay nada que aplicar";
+pub const NO_CHANGES: &str = "has no changes; there is nothing to apply";
 
 /// All the checks of `apply`, before anything is written. An error means nothing was touched.
 pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
     let run = runs::resolve(dirs, id)?;
     if run.path.join("applied.json").exists() {
         return Err(format!(
-            "el run {} ya está aplicado; primero `clio undo {}`",
+            "run {} is already applied; `clio undo {}` first",
             run.id, run.id
         ));
     }
@@ -169,7 +169,7 @@ pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
     let ws = workspace(&meta.workspace)?;
     let ch = work::changes(&run.sandbox(), &manifest)?;
     if ch.is_empty() {
-        return Err(format!("el run {} {NO_CHANGES}", run.id));
+        return Err(format!("run {} {NO_CHANGES}", run.id));
     }
 
     // Preflight everything before touching anything.
@@ -193,7 +193,7 @@ pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
             match work::read_regular(&run.sandbox().join(&c.rel)) {
                 Ok(b) => Some(b),
                 Err(e) => {
-                    refused.push(format!("{rel}: no se pudo leer la copia: {e}"));
+                    refused.push(format!("{rel}: could not read the copy: {e}"));
                     continue;
                 }
             }
@@ -205,7 +205,7 @@ pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
             .is_some_and(|b| has_mask(&String::from_utf8_lossy(b)))
         {
             refused.push(format!(
-                "{rel}: trae un valor tachado (el agente no vio el valor real); no se aplica"
+                "{rel}: carries a redacted value (the agent did not see the real value); not applied"
             ));
             continue;
         }
@@ -213,36 +213,36 @@ pub fn plan(dirs: &Dirs, id: &str, force: bool) -> Res<Plan> {
             reviewed.insert(c.rel.clone(), sha_hex(b));
         }
         if !fully_shown(orig.as_deref(), new.as_deref()) {
-            unshown.push(format!(
-                "{rel}: binario o demasiado grande para mostrarlo línea a línea"
-            ));
+            unshown.push(format!("{rel}: binary or too big to show line by line"));
         }
         match (c.kind, &now) {
-            (Kind::Created, Some(_)) => conflicts.push(format!("{rel}: ya existe en el original")),
+            (Kind::Created, Some(_)) => {
+                conflicts.push(format!("{rel}: already exists in the original"))
+            }
             (Kind::Modified | Kind::Deleted, None) => {
-                conflicts.push(format!("{rel}: ya no existe en el original"));
+                conflicts.push(format!("{rel}: no longer exists in the original"));
             }
             (Kind::Modified | Kind::Deleted, Some(h)) if manifest.get(&c.rel) != Some(h) => {
-                conflicts.push(format!("{rel}: cambió en el original desde la copia"));
+                conflicts.push(format!("{rel}: changed in the original since the copy"));
             }
             _ => {}
         }
     }
     if !refused.is_empty() {
         return Err(format!(
-            "rechazado, no se aplicó nada:\n  {}",
+            "refused, nothing was applied:\n  {}",
             refused.join("\n  ")
         ));
     }
     if !conflicts.is_empty() && !force {
         return Err(format!(
-            "el original cambió, no se aplicó nada (--force lo pisa, con respaldo):\n  {}",
+            "the original changed, nothing was applied (--force overwrites it, with a backup):\n  {}",
             conflicts.join("\n  ")
         ));
     }
     if !unshown.is_empty() && !force {
         return Err(format!(
-            "no se pueden mostrar completos, no se aplicó nada. Ábrelos a mano en {} y, si están bien, repite con --force:\n  {}",
+            "they cannot be shown in full, nothing was applied. Open them by hand in {} and, if they are fine, repeat with --force:\n  {}",
             sanitize::line(&run.sandbox().display().to_string()),
             unshown.join("\n  ")
         ));
@@ -264,10 +264,10 @@ pub fn commit(p: &Plan) -> Res<usize> {
     for c in p.changes.iter().filter(|c| c.kind != Kind::Deleted) {
         let rel = sanitize::line(&c.rel);
         let bytes = work::read_regular(&p.run.sandbox().join(&c.rel))
-            .map_err(|e| format!("{rel}: no se pudo leer la copia: {e}"))?;
+            .map_err(|e| format!("{rel}: could not read the copy: {e}"))?;
         if p.reviewed.get(&c.rel) != Some(&sha_hex(&bytes)) {
             return Err(format!(
-                "{rel}: la copia cambió después de revisarla; no se aplicó nada, revisa de nuevo"
+                "{rel}: the copy changed after it was reviewed; nothing was applied, review again"
             ));
         }
         contents.insert(c.rel.clone(), bytes);
@@ -298,17 +298,17 @@ pub fn apply(dirs: &Dirs, id: &str, force: bool, yes: bool) -> Res<()> {
     runs::print_diff(st, &p.ws, &p.run, &p.manifest, &p.changes);
     if !yes
         && !confirm(&format!(
-            "¿Aplicar {} archivo(s) en {}?",
+            "Apply {} file(s) in {}?",
             p.changes.len(),
             sanitize::line(&p.ws.display().to_string())
         ))
     {
-        println!("no se aplicó");
+        println!("not applied");
         return Ok(());
     }
     let n = commit(&p)?;
     println!(
-        "{} {n} archivo(s) aplicados; para deshacer: clio undo {}",
+        "{} {n} file(s) applied; to undo: clio undo {}",
         st.green(if st.unicode { "✓" } else { "ok:" }),
         p.run.id
     );
@@ -347,11 +347,9 @@ fn write_all(
         }
         let bytes = match c.kind {
             Kind::Deleted => None,
-            Kind::Modified | Kind::Created => Some(
-                contents
-                    .get(&c.rel)
-                    .ok_or_else(|| format!("{}: falta lo revisado", sanitize::line(&c.rel)))?,
-            ),
+            Kind::Modified | Kind::Created => Some(contents.get(&c.rel).ok_or_else(|| {
+                format!("{}: the reviewed copy is missing", sanitize::line(&c.rel))
+            })?),
         };
         // Journal first: from here until the write is done, this file may be in any state.
         done.entries.push(Entry {
@@ -409,7 +407,7 @@ fn undo_problems(ws: &Path, done: &Applied, force: bool) -> Vec<String> {
         if let Some(why) = hard_refusal(&e.path).or_else(|| symlink_check(ws, &e.path).err()) {
             problems.push(format!("{rel}: {why}"));
         } else if e.complete && hash_of(&ws.join(&e.path)) != e.after && !force {
-            problems.push(format!("{rel}: cambió después de `apply`"));
+            problems.push(format!("{rel}: changed after `apply`"));
         }
     }
     problems
@@ -421,7 +419,7 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
     let ap = run.path.join("applied.json");
     if !ap.exists() {
         return Err(format!(
-            "el run {} no tiene nada aplicado (o ya se deshizo)",
+            "run {} has nothing applied (or it was already undone)",
             run.id
         ));
     }
@@ -430,7 +428,7 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
     let problems = undo_problems(&ws, &done, force);
     if !problems.is_empty() {
         return Err(format!(
-            "no se deshizo (--force pisa lo que cambió después de apply):\n  {}",
+            "not undone (--force overwrites what changed after apply):\n  {}",
             problems.join("\n  ")
         ));
     }
@@ -439,7 +437,7 @@ pub fn undo_run(dirs: &Dirs, id: &str, force: bool) -> Res<BTreeMap<String, usiz
         match &e.before {
             Some(_) => {
                 let bytes = std::fs::read(run.path.join("backup").join(&e.path))
-                    .map_err(|x| format!("respaldo de {}: {x}", sanitize::line(&e.path)))?;
+                    .map_err(|x| format!("backup of {}: {x}", sanitize::line(&e.path)))?;
                 std::fs::write(&target, bytes).map_err(|x| io_err(&target, &x))?;
             }
             None => {
@@ -483,7 +481,7 @@ pub fn undo_lines(dirs: &Dirs, id: &str, force: bool) -> Res<(bool, Vec<String>)
         if said.is_empty() {
             return Ok((
                 false,
-                vec![format!("no queda nada que deshacer en {}", run.id)],
+                vec![format!("nothing is left to undo in {}", run.id)],
             ));
         }
         return Ok((
@@ -497,19 +495,16 @@ pub fn undo_lines(dirs: &Dirs, id: &str, force: bool) -> Res<(bool, Vec<String>)
     let total: usize = n.values().sum();
     let word = |k: &str, w: &str| n.get(k).map(|c| format!("{c} {w}"));
     let parts: Vec<String> = [
-        word("modified", "restaurados"),
-        word("created", "eliminados"),
-        word("deleted", "recuperados"),
+        word("modified", "restored"),
+        word("created", "removed"),
+        word("deleted", "recovered"),
     ]
     .into_iter()
     .flatten()
     .collect();
     Ok((
         true,
-        vec![format!(
-            "deshecho: {total} archivo(s) ({})",
-            parts.join(", ")
-        )],
+        vec![format!("undone: {total} file(s) ({})", parts.join(", "))],
     ))
 }
 

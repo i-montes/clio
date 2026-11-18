@@ -4,6 +4,7 @@
 
 use crate::common::fake_model::{FakeModel, Turn};
 use crate::common::*;
+use clio_brain::pi::session::PROMPT_NAME;
 use serde_json::json;
 
 fn one_call_model() -> FakeModel {
@@ -70,7 +71,7 @@ fn broken_prompt(label: &str, name: &str, body: &str) {
     // Two layers refuse, and either is the fail-closed answer: with the jail, `bwrap` cannot mount
     // a prompt that is not there and Pi does not start at all (the message names the file); without
     // it (macOS), Pi starts and the guard refuses to load.
-    let by_the_jail = err.contains("Pi no arranca") && err.contains(name);
+    let by_the_jail = err.contains("Pi does not start") && err.contains(name);
     let by_the_guard = err.contains("clio-guard") && err.contains("Failed to load extension");
     assert!(by_the_jail || by_the_guard, "{label}: {err:?}");
     assert!(
@@ -82,14 +83,14 @@ fn broken_prompt(label: &str, name: &str, body: &str) {
 
 #[test]
 fn a_missing_prompt_file_fails_closed_with_a_clear_error() {
-    broken_prompt("missing", "clio-agent@20.md", "");
+    broken_prompt("missing", &format!("{PROMPT_NAME}.md"), "");
 }
 
 #[test]
 fn a_prompt_with_the_wrong_version_line_fails_closed() {
     broken_prompt(
         "wrong version line",
-        "clio-agent@20.md",
+        &format!("{PROMPT_NAME}.md"),
         "version: 3\n\nYou are Clio.\n",
     );
 }

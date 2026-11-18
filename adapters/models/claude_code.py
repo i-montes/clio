@@ -114,7 +114,7 @@ try:
 except subprocess.TimeoutExpired:
     fail(f"Claude Code did not answer within {TIMEOUT} s")
 except OSError as e:
-    fail(f"no pude ejecutar Claude Code: {type(e).__name__}")
+    fail(f"could not run Claude Code: {type(e).__name__}")
 finally:
     if proc is not None:
         try:

@@ -68,23 +68,22 @@ pub type Res<T> = Result<T, String>;
 
 /// What the engine's guard of the fixed blocks says (`Error::HeldByBlock`).
 pub const HELD_BY_BLOCK: &str =
-    "ese recuerdo está en un bloque fijo de la persona: solo ella lo cambia";
+    "that memory is in a fixed block of the person: only they change it";
 
 /// A refusal in the words of a person.
 pub fn explain(e: &Error) -> String {
     match e {
-        Error::SecretDetected => "rechazado: parece una clave o un secreto".into(),
-        Error::QuotaExceeded => "rechazado: cuota de propuestas agotada para este actor".into(),
-        Error::TooLong => "rechazado: demasiado largo".into(),
+        Error::SecretDetected => "rejected: it looks like a key or a secret".into(),
+        Error::QuotaExceeded => "rejected: the proposal quota for this actor is used up".into(),
+        Error::TooLong => "rejected: too long".into(),
         Error::QuarantineFull => {
-            "rechazado: hay demasiados recuerdos de este actor en cuarentena (`clio memory review`)"
-                .into()
+            "rejected: this actor has too many memories in quarantine (`clio memory review`)".into()
         }
-        Error::EmptyContent => "rechazado: vacío".into(),
-        Error::WriterLocked => "otro proceso está escribiendo la memoria; reintenta".into(),
-        Error::NotAllowed => "no permitido para este actor".into(),
-        Error::InvalidState => "el recuerdo no está en un estado que lo permita".into(),
-        Error::NotFound => "no existe ese recuerdo".into(),
+        Error::EmptyContent => "rejected: empty".into(),
+        Error::WriterLocked => "another process is writing the memory; try again".into(),
+        Error::NotAllowed => "not allowed for this actor".into(),
+        Error::InvalidState => "the memory is not in a state that allows it".into(),
+        Error::NotFound => "that memory does not exist".into(),
         Error::HeldByBlock => HELD_BY_BLOCK.into(),
         other => other.to_string(),
     }
@@ -182,12 +181,9 @@ impl CloseReport {
             .iter()
             .filter(|s| s.state == State::Active)
             .count();
-        let mut s = format!(
-            "memoria: {active} guardado(s), {} en cuarentena",
-            self.pending()
-        );
+        let mut s = format!("memory: {active} saved, {} in quarantine", self.pending());
         if !self.rejected.is_empty() || self.dropped > 0 {
-            s += &format!(", {} rechazado(s)", self.rejected.len() + self.dropped);
+            s += &format!(", {} rejected", self.rejected.len() + self.dropped);
         }
         s
     }
@@ -202,12 +198,12 @@ impl CloseReport {
         v.extend(self.rejected.iter().cloned());
         if self.dropped > 0 {
             v.push(format!(
-                "{} propuesta(s) del modelo ignoradas por pasar del tope",
+                "{} proposal(s) from the model ignored for going over the limit",
                 self.dropped
             ));
         }
         if v.is_empty() {
-            v.push("no se propuso guardar nada".into());
+            v.push("nothing was proposed to save".into());
         }
         v
     }
@@ -248,9 +244,9 @@ pub enum Place {
 impl Place {
     pub fn label(self) -> &'static str {
         match self {
-            Place::Project => "proyecto",
+            Place::Project => "project",
             Place::Personal => "personal",
-            Place::Lessons => "leccion",
+            Place::Lessons => "lesson",
         }
     }
 
@@ -524,9 +520,9 @@ impl MemoryLink {
             return None;
         }
         Some(if self.embed_error.is_some() {
-            "sin modelo de embeddings (no se pudo cargar): la memoria busca solo por texto".into()
+            "no embedding model (it could not be loaded): memory searches by text only".into()
         } else {
-            "sin modelo de embeddings: la memoria busca solo por texto".into()
+            "no embedding model: memory searches by text only".into()
         })
     }
 
@@ -534,7 +530,7 @@ impl MemoryLink {
         if self.writable {
             Ok(())
         } else {
-            Err("la memoria está abierta solo para leer".into())
+            Err("the memory is open for reading only".into())
         }
     }
 
@@ -557,11 +553,11 @@ impl MemoryLink {
                 out.abstained = r.abstained;
                 if r.abstained {
                     out.debug
-                        .push("nada relevante para este pedido (se abstiene)".into());
+                        .push("nothing relevant for this request (abstains)".into());
                 }
                 for h in &r.hits {
                     out.debug.push(format!(
-                        "m{} puntaje {:.4} (texto {}, vector {}, confianza {:.2}): {}",
+                        "m{} score {:.4} (text {}, vector {}, confidence {:.2}): {}",
                         h.memory.id.0,
                         h.score,
                         h.text.map_or("-".into(), |t| format!("{t:.2}")),
@@ -571,9 +567,7 @@ impl MemoryLink {
                     ));
                 }
             }
-            Err(e) => out
-                .debug
-                .push(format!("no se pudo recordar: {}", explain(&e))),
+            Err(e) => out.debug.push(format!("could not recall: {}", explain(&e))),
         }
         let opts = ContextOpts {
             query: Some(query),
@@ -618,7 +612,7 @@ impl MemoryLink {
             Ok(_) => {}
             Err(e) => out
                 .debug
-                .push(format!("no se pudo armar el contexto: {}", explain(&e))),
+                .push(format!("could not build the context: {}", explain(&e))),
         }
         out
     }
@@ -633,28 +627,28 @@ impl MemoryLink {
             return rep;
         }
         let text = |t: &str, max: usize| clip(&clean_text(&scrubber.scrub(t)), max);
-        let mut episode = format!("Pedido: {}.", text(&f.instruction, 220));
+        let mut episode = format!("Request: {}.", text(&f.instruction, 220));
         if f.files.is_empty() {
-            episode += " No cambió archivos.";
+            episode += " No files changed.";
         } else {
             let names: Vec<String> = f.files.iter().take(5).map(|n| text(n, 60)).collect();
             episode += &format!(
-                " Cambió {} archivo(s): {}{}.",
+                " Changed {} file(s): {}{}.",
                 f.files.len(),
                 names.join(", "),
                 if f.files.len() > 5 { ", …" } else { "" }
             );
         }
         episode += &format!(
-            " Resultado: {}.",
+            " Result: {}.",
             if f.finished {
-                "terminó".to_owned()
+                "finished".to_owned()
             } else {
                 text(&f.ending, 40)
             }
         );
         if let Some(m) = f.final_message.as_deref().filter(|m| !m.trim().is_empty()) {
-            episode += &format!(" Dijo: {}", text(m, 240));
+            episode += &format!(" Said: {}", text(m, 240));
         }
         // Active either way; the origin says whether the run read outside content.
         let origin = if f.tainted {
@@ -698,7 +692,7 @@ impl MemoryLink {
             && let Err(e) = self.engine.embed_pending(64)
         {
             rep.rejected
-                .push(format!("no se calcularon los vectores: {}", explain(&e)));
+                .push(format!("the vectors were not computed: {}", explain(&e)));
         }
         rep
     }
@@ -771,7 +765,7 @@ impl MemoryLink {
         self.need_write()?;
         let place = self
             .place_of(beside.scope)
-            .ok_or("esa memoria no es de este lugar")?;
+            .ok_or("that memory is not from this place")?;
         let mut p = self.agent_proposal(draft, session, place, tainted);
         p.scope = beside.scope;
         self.engine.propose(p).map_err(|e| explain(&e))
@@ -791,7 +785,7 @@ impl MemoryLink {
         let row = self.get(old)?;
         let place = self
             .place_of(row.scope)
-            .ok_or("esa memoria no es de este lugar")?;
+            .ok_or("that memory is not from this place")?;
         let mut p = self.agent_proposal(draft, session, place, tainted);
         // In the old one's own scope (another project's, too) and of its kind.
         p.scope = row.scope;
@@ -878,7 +872,7 @@ impl MemoryLink {
         self.need_write()?;
         let done = self.engine.operation(op).map_err(|e| explain(&e))?;
         if done.actor != self.actors.agente || self.place_of(done.scope).is_none() {
-            return Err("ese cambio no lo hizo el agente: no se puede deshacer por aquí".into());
+            return Err("the agent did not make that change: it cannot be undone from here".into());
         }
         self.engine
             .revert(op, self.actors.agente)
@@ -891,7 +885,7 @@ impl MemoryLink {
         self.need_write()?;
         self.get(id)?; // only a memory of this link's places
         self.engine
-            .forget(id, self.actors.agente, "olvidado por el agente")
+            .forget(id, self.actors.agente, "forgotten by the agent")
             .map_err(|e| explain(&e))
     }
 
@@ -984,7 +978,7 @@ impl MemoryLink {
     fn block_named(&self, name: &str) -> Res<Option<clio_memory::Block>> {
         if !BLOCK_NAMES.contains(&name) {
             return Err(format!(
-                "no hay un bloque «{name}»: identidad, reglas, preferencias o vigilancia"
+                "there is no block '{name}': identidad, reglas, preferencias or vigilancia"
             ));
         }
         Ok(self
@@ -1010,12 +1004,12 @@ impl MemoryLink {
         let chars = text.chars().count();
         if chars > BLOCK_ENTRY_CHARS {
             return Err(format!(
-                "no cabe: una entrada admite {BLOCK_ENTRY_CHARS} caracteres y esta tiene {chars}"
+                "does not fit: an entry takes {BLOCK_ENTRY_CHARS} characters and this one has {chars}"
             ));
         }
         let cap = block_cap(name);
         if at.is_none() && rows.len() >= cap {
-            return Err(format!("no cabe: el bloque «{name}» admite {cap} entradas"));
+            return Err(format!("does not fit: block '{name}' takes {cap} entries"));
         }
         if name != "vigilancia" {
             let total: usize = rows
@@ -1027,7 +1021,7 @@ impl MemoryLink {
                 + chars;
             if total > BLOCK_SENT_CHARS {
                 return Err(format!(
-                    "no cabe: el bloque «{name}» admite {BLOCK_SENT_CHARS} caracteres en total y quedaría en {total}"
+                    "does not fit: block '{name}' takes {BLOCK_SENT_CHARS} characters in all and would reach {total}"
                 ));
             }
         }
@@ -1038,7 +1032,7 @@ impl MemoryLink {
     fn block_place(name: &str, rows: &[MemoryRow], id: MemoryId) -> Res<usize> {
         rows.iter()
             .position(|r| r.id == id)
-            .ok_or_else(|| format!("no hay un recuerdo m{} en el bloque «{name}»", id.0))
+            .ok_or_else(|| format!("there is no memory m{} in block '{name}'", id.0))
     }
 
     fn block_store(&self, name: &str, ids: &[MemoryId]) -> Res<()> {
@@ -1079,21 +1073,21 @@ impl MemoryLink {
         let row = self.engine.get(id).map_err(|e| explain(&e))?;
         if row.origin != Origin::User {
             return Err(format!(
-                "ese texto ya está en la memoria como m{}, que no dijo la persona: escríbelo de otra forma",
+                "that text is already in the memory as m{}, which the person did not say: write it another way",
                 id.0
             ));
         }
         for other in BLOCK_NAMES.into_iter().filter(|b| *b != name) {
             if self.block_rows(other)?.iter().any(|r| r.id == id) {
                 return Err(format!(
-                    "ese texto ya está en el bloque «{other}» (m{})",
+                    "that text is already in block '{other}' (m{})",
                     id.0
                 ));
             }
         }
         match (at, rows.iter().position(|r| r.id == id)) {
             (Some(at), Some(p)) if p != at => Err(format!(
-                "ese texto ya es otra entrada del bloque «{name}» (m{})",
+                "that text is already another entry of block '{name}' (m{})",
                 id.0
             )),
             _ => Ok(()),
@@ -1141,7 +1135,11 @@ impl MemoryLink {
         ids.remove(at);
         self.block_store(name, &ids)?;
         self.engine
-            .forget(id, self.actors.persona, "la persona lo sacó de su bloque")
+            .forget(
+                id,
+                self.actors.persona,
+                "the person took it out of their block",
+            )
             .map(|_| ())
             .map_err(|e| explain(&e))
     }
@@ -1215,11 +1213,11 @@ impl MemoryLink {
                 }
                 let n = other.0;
                 Some(match (r.relation, mine) {
-                    (Relation::ConflictsWith, _) => format!("contradice a m{n}"),
-                    (Relation::Compatible, _) => format!("compatible con m{n}"),
-                    (Relation::Related, _) => format!("relacionada con m{n}"),
-                    (Relation::Scoped, true) => format!("caso concreto de m{n}"),
-                    (Relation::Scoped, false) => format!("m{n} es un caso concreto"),
+                    (Relation::ConflictsWith, _) => format!("contradicts m{n}"),
+                    (Relation::Compatible, _) => format!("compatible with m{n}"),
+                    (Relation::Related, _) => format!("related to m{n}"),
+                    (Relation::Scoped, true) => format!("a specific case of m{n}"),
+                    (Relation::Scoped, false) => format!("m{n} is a specific case"),
                     (Relation::NotConflict, _) => return None,
                 })
             })
@@ -1250,7 +1248,7 @@ impl MemoryLink {
         if self.place_of(row.scope).is_some() {
             Ok(row)
         } else {
-            Err("no existe ese recuerdo".into())
+            Err("that memory does not exist".into())
         }
     }
 
@@ -1297,7 +1295,7 @@ impl MemoryLink {
             .map(|scope| {
                 let (order, label) = match self.place_of(scope) {
                     Some(Place::Personal) => (0, "personal".to_owned()),
-                    Some(Place::Lessons) => (1, "lecciones".to_owned()),
+                    Some(Place::Lessons) => (1, "lessons".to_owned()),
                     _ => (2, self.project_label(scope)),
                 };
                 let s = st.scopes.iter().find(|s| s.scope == scope);
@@ -1318,13 +1316,13 @@ impl MemoryLink {
             .collect())
     }
 
-    /// `proyecto X` for a project's scope (the session's own, or another in the person's view).
+    /// `project X` for a project's scope (the session's own, or another in the person's view).
     fn project_label(&self, scope: ScopeId) -> String {
         match self.others.iter().find(|(id, _)| *id == scope) {
-            Some((_, name)) => format!("proyecto {name}"),
+            Some((_, name)) => format!("project {name}"),
             None => match self.project_name() {
-                Some(p) => format!("proyecto {p}"),
-                None => "proyecto".into(),
+                Some(p) => format!("project {p}"),
+                None => "project".into(),
             },
         }
     }
@@ -1356,7 +1354,7 @@ impl MemoryLink {
         self.need_write()?;
         let (from, into) = (crate::project::normal(from), crate::project::normal(into));
         if from.is_empty() || into.is_empty() || from == into {
-            return Err("hacen falta dos proyectos distintos".into());
+            return Err("two different projects are needed".into());
         }
         let scopes = self.engine.scopes().map_err(|e| explain(&e))?;
         let find = |n: &str| {
@@ -1365,7 +1363,7 @@ impl MemoryLink {
                 .find(|s| s.name == format!("{PROJECT_PREFIX}{n}"))
                 .map(|s| s.id)
         };
-        let src = find(&from).ok_or_else(|| format!("no hay un proyecto {from}"))?;
+        let src = find(&from).ok_or_else(|| format!("there is no project {from}"))?;
         let dst = match find(&into) {
             Some(id) => id,
             None => self
@@ -1392,7 +1390,7 @@ impl MemoryLink {
             .map_err(|e| explain(&e))?
             .into_iter()
             .find(|s| s.name == format!("{PROJECT_PREFIX}{name}"))
-            .ok_or_else(|| format!("no hay un proyecto {name}"))?
+            .ok_or_else(|| format!("there is no project {name}"))?
             .id;
         let mut n = 0;
         for state in [State::Active, State::Quarantine] {
@@ -1421,7 +1419,7 @@ impl MemoryLink {
         self.need_write()?;
         let done = self.engine.operation(op).map_err(|e| explain(&e))?;
         if self.place_of(done.scope).is_none() {
-            return Err("ese cambio no es de esta memoria".into());
+            return Err("that change is not from this memory".into());
         }
         self.engine
             .revert(op, self.actors.persona)
@@ -1462,7 +1460,7 @@ impl MemoryLink {
     /// The memories around `id` in its session (or its place), as this view can read them.
     pub fn timeline(&self, id: MemoryId, before: usize, after: usize) -> Res<Vec<MemoryRow>> {
         if self.get(id)?.state != State::Active {
-            return Err("solo los recuerdos activos tienen línea de tiempo".into());
+            return Err("only active memories have a timeline".into());
         }
         Ok(self
             .engine
@@ -1546,17 +1544,17 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
-    /// A label for where a memory lives, for the model: `proyecto`, `personal`, `lección de X`.
+    /// A label for where a memory lives, for the model: `project`, `personal`, `lesson from X`.
     pub fn place_label(&self, row: &MemoryRow) -> String {
         match self.place_of(row.scope) {
             Some(Place::Project) => match self.others.iter().find(|(id, _)| *id == row.scope) {
-                Some((_, name)) => format!("proyecto {name}"),
-                None => "proyecto".into(),
+                Some((_, name)) => format!("project {name}"),
+                None => "project".into(),
             },
             Some(Place::Personal) => "personal".into(),
             Some(Place::Lessons) => match Self::learned_in(row) {
-                Some(p) => format!("lección de {p}"),
-                None => "lección".into(),
+                Some(p) => format!("lesson from {p}"),
+                None => "lesson".into(),
             },
             None => String::new(),
         }
@@ -1631,22 +1629,22 @@ fn strip_tag<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
         .filter(|b| !b.is_empty())
 }
 
-/// The Spanish word for a kind.
+/// The word for a kind.
 pub fn kind_label(k: MemoryType) -> &'static str {
     match k {
-        MemoryType::Working => "trabajo",
-        MemoryType::Episodic => "episódico",
-        MemoryType::Semantic => "semántico",
-        MemoryType::Procedural => "procedimental",
+        MemoryType::Working => "working",
+        MemoryType::Episodic => "episodic",
+        MemoryType::Semantic => "semantic",
+        MemoryType::Procedural => "procedural",
     }
 }
 
 pub fn state_label(s: State) -> &'static str {
     match s {
-        State::Active => "activo",
-        State::Quarantine => "cuarentena",
-        State::Archived => "archivado",
-        State::Replaced => "reemplazado",
+        State::Active => "active",
+        State::Quarantine => "quarantine",
+        State::Archived => "archived",
+        State::Replaced => "replaced",
     }
 }
 

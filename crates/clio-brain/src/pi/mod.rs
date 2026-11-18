@@ -67,17 +67,15 @@ impl fmt::Display for PiError {
         match self {
             Self::Node(m) | Self::NotInstalled(m) | Self::Io(m) | Self::Spawn(m) => f.write_str(m),
             Self::Timeout { what, secs } => {
-                write!(f, "Pi no respondió a tiempo ({what}, {secs} s)")
+                write!(f, "Pi did not answer in time ({what}, {secs} s)")
             }
-            Self::Exited { stderr } if stderr.is_empty() => {
-                f.write_str("Pi terminó inesperadamente")
-            }
-            Self::Exited { stderr } => write!(f, "Pi terminó inesperadamente: {stderr}"),
-            Self::Command { command, message } => write!(f, "Pi rechazó `{command}`: {message}"),
-            Self::Protocol(m) => write!(f, "protocolo de Pi roto: {m}"),
-            Self::Verification(m) => write!(f, "Pi no cumple lo pedido, se detuvo: {m}"),
+            Self::Exited { stderr } if stderr.is_empty() => f.write_str("Pi ended unexpectedly"),
+            Self::Exited { stderr } => write!(f, "Pi ended unexpectedly: {stderr}"),
+            Self::Command { command, message } => write!(f, "Pi rejected `{command}`: {message}"),
+            Self::Protocol(m) => write!(f, "broken Pi protocol: {m}"),
+            Self::Verification(m) => write!(f, "Pi did not meet the request, stopped: {m}"),
             Self::Cancelled => f.write_str("cancelado"),
-            Self::Budget(m) => write!(f, "se agotó el presupuesto de la tarea: {m}"),
+            Self::Budget(m) => write!(f, "the task budget ran out: {m}"),
         }
     }
 }

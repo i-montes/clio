@@ -35,9 +35,9 @@ pub fn need(test: &str, need_pi: bool) -> Option<NodeInfo> {
         return Some(n.clone());
     }
     let why = if node.is_none() {
-        "Node 22.19+ no está instalado"
+        "Node 22.19+ is not installed"
     } else {
-        "falta adapters/pi/node_modules (cd adapters/pi && npm ci --ignore-scripts)"
+        "adapters/pi/node_modules is missing (cd adapters/pi && npm ci --ignore-scripts)"
     };
     assert!(
         std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),

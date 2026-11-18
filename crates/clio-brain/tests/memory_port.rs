@@ -176,7 +176,7 @@ fn search_finds_only_active_memories_and_labels_origins() {
         assert!(found.items.iter().all(|i| i.id != hidden), "{hidden}");
     }
     let person = found.items.iter().find(|i| i.id == ids.person).unwrap();
-    assert_eq!(person.kind, "semántico");
+    assert_eq!(person.kind, "semantic");
     assert!(person.text.contains(WORD));
     // A nonsense query is an answer, not an error; and the abstention is the memory's.
     let nothing = port(&w).search("zzqqxx", 5).unwrap();
@@ -186,7 +186,7 @@ fn search_finds_only_active_memories_and_labels_origins() {
         found
             .note
             .as_deref()
-            .is_some_and(|n| n.contains("solo texto"))
+            .is_some_and(|n| n.contains("text only"))
     );
 }
 
@@ -205,7 +205,7 @@ fn get_gives_one_error_for_missing_quarantined_archived_and_foreign() {
     // The active ones do come back, with a date and the Spanish word for the kind.
     let item = p.get(ids.person).unwrap();
     assert_eq!((item.id, item.origin), (ids.person, Origin::Person));
-    assert_eq!(item.kind, "semántico");
+    assert_eq!(item.kind, "semantic");
     let b = item.date.as_bytes();
     assert!(
         item.date.len() == 10 && b[4] == b'-' && b[7] == b'-' && item.date.starts_with("20"),
@@ -245,7 +245,7 @@ fn a_missing_empty_or_corrupt_file_is_a_short_error_and_recovers() {
         }
     };
     // No file at all.
-    assert!(p.search(WORD, 5).unwrap_err().contains("todavía"));
+    assert!(p.search(WORD, 5).unwrap_err().contains("yet"));
     check("missing");
     // Empty, then garbage.
     std::fs::create_dir_all(&w.data).unwrap();
@@ -430,10 +430,10 @@ fn the_real_service_serves_the_memory_only_when_it_was_given_one() {
         assert_eq!(r["ok"], true, "{r}");
         let text = r["content"].as_str().unwrap();
         assert!(
-            text.contains(&format!("[m{}] semántico · persona", ids.person)),
+            text.contains(&format!("[m{}] semantic · persona", ids.person)),
             "{text}"
         );
-        assert!(text.contains("solo texto"), "{text}");
+        assert!(text.contains("text only"), "{text}");
         assert!(!text.contains(&format!("[m{}]", ids.quarantine)), "{text}");
         let g = h.call("memory_get", json!({ "id": ids.agent }));
         assert_eq!(g["ok"], true, "{g}");
@@ -443,7 +443,7 @@ fn the_real_service_serves_the_memory_only_when_it_was_given_one() {
             e["content"]
                 .as_str()
                 .unwrap()
-                .contains("no existe o no se puede leer"),
+                .contains("does not exist or cannot be read"),
             "{e}"
         );
     }
@@ -462,7 +462,7 @@ fn the_real_service_serves_the_memory_only_when_it_was_given_one() {
         );
         let r = h.call("memory_search", json!({ "query": WORD }));
         assert_eq!(r["ok"], true, "{r}");
-        assert!(r["content"].as_str().unwrap().contains("solo texto"), "{r}");
+        assert!(r["content"].as_str().unwrap().contains("text only"), "{r}");
     }
     // Without `--memory-data` the operation is refused, as with the loose binary.
     let mut h = Host::start(&w, &[]);
@@ -585,7 +585,7 @@ fn the_engines_quota_and_secret_check_still_apply_with_fixed_messages() {
     let why = p
         .propose_id(marker, ProposalKind::Semantic, "s")
         .unwrap_err();
-    assert!(why.contains("cuota"), "{why}");
+    assert!(why.contains("quota"), "{why}");
     assert!(!why.contains(marker), "{why}");
 
     let w = world();
@@ -617,7 +617,7 @@ use clio_brain::memory_judge::MemoryJudge;
 use clio_jev::{Config as JevConfig, Jev, Transport};
 use clio_toolhost::{Judging, Saved};
 
-/// A Jev that answers the guard (`inseguro`, `se_puede_guardar`, `categoria`), the place and the
+/// A Jev that answers the guard (`unsafe`, `can_store`, `category`), the place and the
 /// relation; `down` fails every call.
 #[derive(Clone)]
 struct Scripted {
@@ -636,7 +636,7 @@ impl Default for Scripted {
         Self {
             unsafe_: 0.0,
             storable: 1.0,
-            category: ("ninguna", 0.9),
+            category: ("none", 0.9),
             relation_kind: "conflicts_with",
             relation: 0.0,
             down: false,
@@ -651,24 +651,24 @@ impl Transport for Scripted {
         }
         let q = body["questions"].as_object().unwrap();
         let mut answers = serde_json::Map::new();
-        if q.contains_key("inseguro") {
+        if q.contains_key("unsafe") {
             let (choice, confidence) = self.category;
             answers.insert(
-                "inseguro".into(),
+                "unsafe".into(),
                 json!({"type": "noul", "noul": self.unsafe_}),
             );
             answers.insert(
-                "se_puede_guardar".into(),
+                "can_store".into(),
                 json!({"type": "noul", "noul": self.storable}),
             );
             answers.insert(
-                "categoria".into(),
+                "category".into(),
                 json!({"type": "choice", "choice": choice, "confidence": confidence}),
             );
         }
-        if q.contains_key("relacion") {
+        if q.contains_key("relation") {
             answers.insert(
-                "relacion".into(),
+                "relation".into(),
                 json!({"type": "choice", "choice": self.relation_kind, "confidence": self.relation}),
             );
         }
@@ -759,7 +759,7 @@ fn every_save_and_update_is_active_and_marked_by_the_taint() {
     assert_eq!(state_of(&w, fixed.id), State::Active);
 }
 
-// S-64: a clear «no» from Jev writes nothing and the agent hears why, in fixed words; the update
+// S-64: a clear "no" from Jev writes nothing and the agent hears why, in fixed words; the update
 // it refuses leaves the old memory as it was.
 #[test]
 fn a_jev_that_refuses_writes_nothing_and_the_agent_hears_why() {
@@ -783,7 +783,7 @@ fn a_jev_that_refuses_writes_nothing_and_the_agent_hears_why() {
     )
     .unwrap_err();
     assert!(
-        e.contains("Clio no lo guardó: parece un intento de manipular"),
+        e.contains("Clio did not save it: it looks like an attempt to manipulate"),
         "{e}"
     );
     let e = MemoryPort::update(
@@ -794,7 +794,7 @@ fn a_jev_that_refuses_writes_nothing_and_the_agent_hears_why() {
         &judging(false),
     )
     .unwrap_err();
-    assert!(e.contains("Clio no lo guardó"), "{e}");
+    assert!(e.contains("Clio did not save it"), "{e}");
     let junk = judged_port(
         &w,
         Scripted {
@@ -803,10 +803,7 @@ fn a_jev_that_refuses_writes_nothing_and_the_agent_hears_why() {
         },
     );
     let e = ask(&junk, "ok", ProposalKind::Semantic).unwrap_err();
-    assert!(
-        e.contains("no parece algo que valga la pena recordar"),
-        "{e}"
-    );
+    assert!(e.contains("it does not look worth remembering"), "{e}");
     assert_eq!(open(&w).list(State::Active).unwrap().len(), before);
     assert_eq!(state_of(&w, mine), State::Active);
 }
@@ -895,7 +892,7 @@ fn the_agent_undoes_only_its_own_changes() {
     assert_eq!(state_of(&w, mine.0), State::Active);
 }
 
-const HELD: &str = "ese recuerdo está en un bloque fijo de la persona: solo ella lo cambia";
+const HELD: &str = "that memory is in a fixed block of the person: only they change it";
 
 // The agent forgets a person's memory and reverts that; the person then makes the same text an
 // entry of a block; undoing the revert would quarantine the entry: the engine refuses it.
@@ -1093,7 +1090,7 @@ fn memories_go_to_their_place_and_every_session_reads_them_all() {
         seen("healthcheck"),
         [(
             "Compose sin healthcheck".to_owned(),
-            "lección de alfa".to_owned()
+            "lesson from alfa".to_owned()
         )]
     );
     assert_eq!(
@@ -1105,18 +1102,15 @@ fn memories_go_to_their_place_and_every_session_reads_them_all() {
         seen("postgres"),
         [(
             "Base de datos de alfa".to_owned(),
-            "proyecto alfa".to_owned()
+            "project alfa".to_owned()
         )]
     );
     let own = alfa.search("postgres", 8).unwrap();
-    assert_eq!(own.items[0].place, "proyecto");
+    assert_eq!(own.items[0].place, "project");
     assert_eq!(own.items[0].category.as_deref(), Some("decision"));
     // And read by id; with no project at all, too.
-    assert_eq!(beta.get(own.items[0].id).unwrap().place, "proyecto alfa");
-    assert_eq!(
-        port(&w).get(own.items[0].id).unwrap().place,
-        "proyecto alfa"
-    );
+    assert_eq!(beta.get(own.items[0].id).unwrap().place, "project alfa");
+    assert_eq!(port(&w).get(own.items[0].id).unwrap().place, "project alfa");
 }
 
 // With Jev, it says where a memory goes (a lesson the rule would have kept in the project).
@@ -1127,7 +1121,7 @@ fn jev_chooses_the_place_when_there_is_a_project() {
         fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
             let q = body["questions"].as_object().unwrap();
             let name = q.keys().next().unwrap().clone();
-            let choice = if name == "lugar" { self.0 } else { "add" };
+            let choice = if name == "place" { self.0 } else { "add" };
             Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
                 "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
         }
@@ -1135,7 +1129,7 @@ fn jev_chooses_the_place_when_there_is_a_project() {
     let w = world();
     let jev = Arc::new(Jev::new(
         JevConfig::default(),
-        Box::new(Place("leccion")),
+        Box::new(Place("lesson")),
         Box::new(|| Ok("KEY".into())),
         Arc::new(clio_core::SystemClock),
     ));
@@ -1233,7 +1227,7 @@ fn the_person_sees_and_controls_what_was_saved_in_any_project() {
     assert!(open(&w).get(id).is_ok(), "the memory is global");
     let person = open(&w).for_person();
     let row = person.get(id).unwrap();
-    assert_eq!(person.place_label(&row), "proyecto alfa");
+    assert_eq!(person.place_label(&row), "project alfa");
     let (found, _) = person.search("Postgres", 5).unwrap();
     assert_eq!(found.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
     assert_eq!(person.counts().unwrap().0, 1);
@@ -1250,7 +1244,7 @@ fn a_read_before_the_place_exists_does_not_hide_what_is_saved_in_it_later() {
         fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
             let q = body["questions"].as_object().unwrap();
             let name = q.keys().next().unwrap().clone();
-            let choice = if name == "lugar" { "proyecto" } else { "add" };
+            let choice = if name == "place" { "project" } else { "add" };
             Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
                 "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
         }
@@ -1276,7 +1270,7 @@ fn a_read_before_the_place_exists_does_not_hide_what_is_saved_in_it_later() {
     )
     .unwrap();
     assert_eq!(d.saved, Saved::Active);
-    assert_eq!(beta.get(d.id).unwrap().place, "proyecto");
+    assert_eq!(beta.get(d.id).unwrap().place, "project");
     assert_eq!(beta.search("compose", 3).unwrap().items[0].id, d.id);
     assert_eq!(beta.context().unwrap()[0].id, d.id);
 }
@@ -1291,7 +1285,7 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
             let q = body["questions"].as_object().unwrap();
             let name = q.keys().next().unwrap().clone();
             self.0.lock().unwrap().push(name.clone());
-            let choice = if name == "lugar" { "leccion" } else { "add" };
+            let choice = if name == "place" { "lesson" } else { "add" };
             Ok(json!({"model": "jev-t", "usage": {"input_tokens": 1},
                 "answers": {name: {"type": "choice", "choice": choice, "confidence": 0.95}}}))
         }
@@ -1315,7 +1309,7 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
     let d = MemoryPort::propose(&alfa, &summary, "sesion-9", &Judging::default()).unwrap();
     assert_eq!(d.saved, Saved::Active);
     assert!(
-        !asked.lock().unwrap().iter().any(|q| q == "lugar"),
+        !asked.lock().unwrap().iter().any(|q| q == "place"),
         "{:?}",
         asked.lock().unwrap()
     );
@@ -1328,7 +1322,7 @@ fn a_session_summary_is_the_projects_episode_and_starts_the_context() {
     assert_eq!(row.category, None);
     let title = row.title.clone().unwrap();
     assert!(
-        title.starts_with("Sesión 20") && title.len() == "Sesión 2026-11-04".len(),
+        title.starts_with("Session 20") && title.len() == "Session 2026-11-04".len(),
         "{title}"
     );
     assert_eq!(
@@ -1377,8 +1371,8 @@ fn a_new_memory_next_to_one_it_does_not_replace_is_related_by_jev() {
         (d.id, old.id, clio_memory::Relation::ConflictsWith, "jev")
     );
     let notes = |id: i64| p.get(id).unwrap().notes;
-    assert_eq!(notes(d.id), [format!("contradice a m{}", old.id)]);
-    assert_eq!(notes(old.id), [format!("contradice a m{}", d.id)]);
+    assert_eq!(notes(d.id), [format!("contradicts m{}", old.id)]);
+    assert_eq!(notes(old.id), [format!("contradicts m{}", d.id)]);
     open(&w).archive(clio_memory::MemoryId(old.id)).unwrap();
     assert!(notes(d.id).is_empty());
 }
@@ -1464,11 +1458,11 @@ fn a_relation_with_another_projects_memory_is_named_with_it() {
     // The memory is global: the other project's memory is readable, so the note names it.
     assert_eq!(
         beta.get(b.id).unwrap().notes,
-        [format!("contradice a m{}", a.id)]
+        [format!("contradicts m{}", a.id)]
     );
     assert_eq!(
         alfa.get(a.id).unwrap().notes,
-        [format!("contradice a m{}", b.id)]
+        [format!("contradicts m{}", b.id)]
     );
 }
 
@@ -1480,7 +1474,7 @@ fn no_neighbor_or_an_unsure_jev_notes_no_relation() {
         fn call(&self, _k: &str, body: &Value, _t: Duration) -> Result<Value, String> {
             let q = body["questions"].as_object().unwrap();
             let name = q.keys().next().unwrap().clone();
-            let (choice, sure) = if name == "relacion" {
+            let (choice, sure) = if name == "relation" {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 ("conflicts_with", 0.6)
             } else {
@@ -1600,7 +1594,7 @@ fn what_is_past_its_review_cycle_says_so_and_comes_up_in_the_context() {
     let notes = |q: &str| alfa.search(q, 3).unwrap().items[0].notes.clone();
     assert_eq!(
         notes("puerto 8080")[0],
-        "revisar: pasó su plazo, puede estar desfasado"
+        "revisar: its review date has passed, it may be out of date"
     );
     assert!(notes("TLS").is_empty(), "a preference keeps");
     assert!(alfa.context().unwrap().iter().any(|i| i.id == old.0));
@@ -1652,7 +1646,7 @@ fn an_update_replaces_one_memory_and_keeps_what_was_left_out() {
         )
         .unwrap();
     assert_eq!(u.saved, Saved::Replaced);
-    assert_eq!(p.get(u.id).unwrap().kind, "procedimental");
+    assert_eq!(p.get(u.id).unwrap().kind, "procedural");
     // Another project's memory is corrected in its own project (the memory is global).
     let alfa = in_project(&w, "alfa");
     let theirs = MemoryPort::propose(
@@ -1671,7 +1665,7 @@ fn an_update_replaces_one_memory_and_keeps_what_was_left_out() {
             &judging(false),
         )
         .unwrap();
-    assert_eq!(beta.get(fixed.id).unwrap().place, "proyecto alfa");
+    assert_eq!(beta.get(fixed.id).unwrap().place, "project alfa");
     assert!(
         beta.update(
             999_999,
@@ -1725,7 +1719,7 @@ fn a_merge_stays_in_one_place_and_only_with_what_the_session_can_read() {
     );
     let merged = draft("Qué: mezcla", ProposalKind::Semantic);
     let r = alfa.consolidate(&[here.id, mine.0], &merged, "s", &judging);
-    assert_eq!(r.unwrap_err(), "solo se unen memorias del mismo sitio");
+    assert_eq!(r.unwrap_err(), "only memories of the same place are merged");
     assert!(
         alfa.consolidate(&[here.id, 999_999], &merged, "s", &judging)
             .is_err()
@@ -1788,10 +1782,10 @@ fn jev_guards_a_session_summary_too() {
         kind: ProposalKind::Session,
     };
     let e = MemoryPort::propose(&unsafe_, &summary, "s", &judging(true)).unwrap_err();
-    assert!(e.contains("Clio no lo guardó"), "{e}");
+    assert!(e.contains("Clio did not save it"), "{e}");
 }
 
-// A merge joins memories of one scope (one project, not just «a project») and stays there; two
+// A merge joins memories of one scope (one project, not just "a project") and stays there; two
 // projects are never mixed.
 #[test]
 fn a_merge_stays_in_the_memories_own_project_and_never_mixes_two() {
@@ -1812,7 +1806,7 @@ fn a_merge_stays_in_the_memories_own_project_and_never_mixes_two() {
         nowhere
             .consolidate(&[a1, b1], &merged, "s", &judging(false))
             .unwrap_err(),
-        "solo se unen memorias del mismo sitio"
+        "only memories of the same place are merged"
     );
     let m = nowhere
         .consolidate(
@@ -1822,7 +1816,7 @@ fn a_merge_stays_in_the_memories_own_project_and_never_mixes_two() {
             &judging(false),
         )
         .unwrap();
-    assert_eq!(nowhere.get(m.id).unwrap().place, "proyecto alfa");
+    assert_eq!(nowhere.get(m.id).unwrap().place, "project alfa");
 }
 
 // The other form of the same bug: a session in project beta merging two of alfa's memories saved
@@ -1849,7 +1843,7 @@ fn a_merge_from_another_project_lands_in_the_memories_project() {
             &judging(false),
         )
         .unwrap();
-    assert_eq!(beta.get(m.id).unwrap().place, "proyecto alfa");
+    assert_eq!(beta.get(m.id).unwrap().place, "project alfa");
 }
 
 /// A tiny stand-in model: a few hashed buckets, enough to give every text a vector.
@@ -2070,7 +2064,7 @@ fn removing_takes_it_out_and_forgets_it() {
 fn an_unknown_block_is_refused() {
     let w = world();
     let link = open(&w);
-    let want = "no hay un bloque «nada»: identidad, reglas, preferencias o vigilancia";
+    let want = "there is no block 'nada': identidad, reglas, preferencias or vigilancia";
     assert_eq!(link.block_add("nada", "x").unwrap_err(), want);
     assert_eq!(link.block_rows("nada").unwrap_err(), want);
     assert!(
@@ -2103,7 +2097,7 @@ fn a_block_that_would_not_fit_is_refused() {
     link.block_add("identidad", &"b".repeat(400)).unwrap();
     assert_eq!(
         link.block_add("identidad", &"c".repeat(200)).unwrap_err(),
-        "no cabe: el bloque «identidad» admite 1500 caracteres en total y quedaría en 1600"
+        "does not fit: block 'identidad' takes 1500 characters in all and would reach 1600"
     );
     assert_eq!(link.block_rows("identidad").unwrap().len(), 2);
     assert_eq!(
@@ -2213,7 +2207,7 @@ fn the_real_port_edits_and_reads_a_block() {
 
 // ---------------------------------------------------------------- fix wave: blocks are the person's
 
-const IN_A_BLOCK: &str = "ese recuerdo está en un bloque de la persona: se cambia con memory_block_edit, en una sesión limpia";
+const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, in a clean session";
 
 #[test]
 fn the_agents_ordinary_tools_cannot_change_a_block_entry() {
@@ -2297,7 +2291,7 @@ fn a_text_the_agent_already_wrote_does_not_enter_a_block_as_the_persons() {
     let err = link
         .block_add("vigilancia", "vigila el disco lleno")
         .unwrap_err();
-    assert!(err.contains("no dijo la persona"), "{err}");
+    assert!(err.contains("the person did not say"), "{err}");
     assert!(texts(&link, "vigilancia").is_empty());
     let row = link.get(clio_memory::MemoryId(agents)).unwrap();
     assert_eq!((row.origin, row.state), (MOrigin::Agent, State::Active));
@@ -2316,7 +2310,7 @@ fn a_text_of_another_block_is_refused() {
     let link = open(&w);
     link.block_add("identidad", "Eres Clio").unwrap();
     let err = link.block_add("reglas", "Eres Clio").unwrap_err();
-    assert!(err.contains("«identidad»"), "{err}");
+    assert!(err.contains("'identidad'"), "{err}");
     assert!(texts(&link, "reglas").is_empty());
     // And a replace that would make two entries of one.
     let other = link.block_add("identidad", "Hablas claro").unwrap();

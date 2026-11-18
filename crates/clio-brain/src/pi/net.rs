@@ -47,11 +47,11 @@ static PROXIES: AtomicU32 = AtomicU32::new(0);
 pub fn allow_of(url: &str) -> Result<String, String> {
     let bad = |why: &str| {
         Err(format!(
-            "la URL del proveedor no es un destino válido ({why})"
+            "the provider URL is not a valid destination ({why})"
         ))
     };
     let Some((scheme, rest)) = url.split_once("://") else {
-        return bad("falta el esquema");
+        return bad("the scheme is missing");
     };
     let default = match scheme.to_ascii_lowercase().as_str() {
         "https" => 443,
@@ -68,7 +68,7 @@ pub fn allow_of(url: &str) -> Result<String, String> {
     let (host, port) = match auth.rsplit_once(':') {
         Some((h, p)) => match p.parse::<u16>() {
             Ok(p) if p > 0 => (h, p),
-            _ => return bad("puerto inválido"),
+            _ => return bad("invalid port"),
         },
         None => (auth, default),
     };
@@ -79,7 +79,7 @@ pub fn allow_of(url: &str) -> Result<String, String> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
     if !valid {
-        return bad("host inválido");
+        return bad("invalid host");
     }
     Ok(format!("{}:{port}", host.to_ascii_lowercase()))
 }
@@ -105,7 +105,7 @@ impl EgressProxy {
         let sock = dir.join("proxy.sock");
         if sock.as_os_str().len() > MAX_SOCKET_PATH {
             return Err(format!(
-                "la ruta del socket del proxy ({}) es demasiado larga para un socket Unix",
+                "the proxy socket path ({}) is too long for a Unix socket",
                 sock.display()
             ));
         }
@@ -273,7 +273,7 @@ fn handle(mut c: UnixStream, allow: &str, log: &Mutex<Vec<String>>) {
     }
     // Only a tunnel. A plain request would make the proxy fetch for Pi, and read what it gets.
     if method != "CONNECT" {
-        remember(log, format!("{method} (no es CONNECT)"));
+        remember(log, format!("{method} (not CONNECT)"));
         return refuse(&mut c, "405 Method Not Allowed");
     }
     if target.to_ascii_lowercase() != allow {
@@ -344,7 +344,7 @@ pub fn forward_main(args: Vec<String>) -> Result<i32, String> {
         return Err("pi-net: faltan --listen y --upstream".into());
     };
     let Some((program, rest)) = cmd.split_first() else {
-        return Err("pi-net: falta el comando después de --".into());
+        return Err("pi-net: the command after -- is missing".into());
     };
     let listener = TcpListener::bind(&listen).map_err(|e| format!("pi-net: {listen}: {e}"))?;
     let upstream = PathBuf::from(upstream);
@@ -397,24 +397,24 @@ fn probe_main(args: &[String]) -> Result<i32, String> {
     let mut check = |name: &str, got_out: bool| {
         if got_out {
             bad += 1;
-            println!("pi-net: {name}: ALCANZABLE desde dentro de la jaula");
+            println!("pi-net: {name}: REACHABLE from inside the jail");
         }
     };
     let timeout = Duration::from_secs(3);
     let internet = std::net::SocketAddr::from(([1, 1, 1, 1], 443));
     check(
-        "internet directo",
+        "direct internet",
         TcpStream::connect_timeout(&internet, timeout).is_ok(),
     );
     if let Some(p) = tcp {
         let lo = std::net::SocketAddr::from(([127, 0, 0, 1], p));
         check(
-            "loopback del anfitrión",
+            "the host loopback",
             TcpStream::connect_timeout(&lo, timeout).is_ok(),
         );
     }
     if let Some(name) = &abstract_name {
-        check("socket abstracto del anfitrión", abstract_reachable(name));
+        check("the host abstract socket", abstract_reachable(name));
     }
     if let Some(target) = denied {
         let refused = TcpStream::connect(FORWARD_ADDR)
@@ -433,7 +433,7 @@ fn probe_main(args: &[String]) -> Result<i32, String> {
                 Some(String::from_utf8_lossy(&line).contains(" 403 "))
             })
             .unwrap_or(false);
-        check("el proxy deja pasar un destino ajeno", !refused);
+        check("the proxy lets a foreign destination through", !refused);
     }
     Ok(i32::from(bad > 0))
 }

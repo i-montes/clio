@@ -203,7 +203,7 @@ mod tests {
         let s = text(&line(t, &snap(false), 120));
         assert_eq!(
             s,
-            "↑12,4k ↓3,1k tok · $0 · 8/40 pasos · 21 s/10 min   contexto ▕███░░░░░░░▏ 31 %"
+            "↑12.4k ↓3.1k tok · $0 · 8/40 pasos · 21 s/10 min   contexto ▕███░░░░░░░▏ 31 %"
         );
         assert!(text(&line(t, &snap(true), 120)).ends_with("   externo"));
     }
@@ -220,7 +220,7 @@ mod tests {
                 for w in [60usize, 61, 70, 79, 80, 90, 100, 120, 200] {
                     let s = text(&line(t, &snap(tainted), w));
                     assert!(s.chars().count() <= w, "{w}: {s:?}");
-                    assert!(s.contains("12,4k") && s.contains("3,1k"), "{w}: {s:?}");
+                    assert!(s.contains("12.4k") && s.contains("3.1k"), "{w}: {s:?}");
                     assert!(s.contains('$'), "{w}: {s:?}");
                     assert!(s.contains("8/40"), "{w}: {s:?}");
                     assert!(s.contains("21"), "{w}: {s:?}");

@@ -66,26 +66,24 @@ pub struct Scan {
 pub fn validate(ws: &Path, dirs: &Dirs) -> Res<PathBuf> {
     let ws = ws
         .canonicalize()
-        .map_err(|e| format!("carpeta {}: {e}", ws.display()))?;
+        .map_err(|e| format!("folder {}: {e}", ws.display()))?;
     if !ws.is_dir() {
-        return Err(format!("{} no es una carpeta", ws.display()));
+        return Err(format!("{} is not a folder", ws.display()));
     }
     let home = dirs
         .home
         .canonicalize()
         .unwrap_or_else(|_| dirs.home.clone());
     if ws == Path::new("/") {
-        return Err("rechazo usar / como carpeta de trabajo".into());
+        return Err("refusing to use / as the working folder".into());
     }
     if ws == home {
-        return Err(
-            "rechazo usar toda tu carpeta personal como proyecto; elige un proyecto".into(),
-        );
+        return Err("refusing to use your whole home folder as a project; pick a project".into());
     }
     for own in [&dirs.config, &dirs.data] {
         let own = own.canonicalize().unwrap_or_else(|_| own.clone());
         if own.starts_with(&ws) || ws.starts_with(&own) {
-            return Err("la carpeta se cruza con las carpetas propias de Clio".into());
+            return Err("the folder overlaps Clio's own folders".into());
         }
     }
     Ok(ws)
@@ -126,7 +124,7 @@ pub fn scan(root: &Path, max_files: u64, max_bytes: u64) -> Res<Scan> {
                 s.files.push(r);
                 if s.files.len() as u64 > lim.0 || s.bytes > lim.1 {
                     return Err(format!(
-                        "la carpeta es más grande que {} archivos / {} MB; elige una más pequeña o usa --allow-broad",
+                        "the folder is bigger than {} files / {} MB; pick a smaller one or use --allow-broad",
                         lim.0,
                         lim.1 / (1024 * 1024)
                     ));
@@ -250,14 +248,11 @@ pub(crate) fn read_regular_capped(p: &Path, max: u64) -> std::io::Result<Vec<u8>
         || (open.dev(), open.ino()) != (path.dev(), path.ino())
     {
         return Err(std::io::Error::other(
-            "no es un archivo normal (enlace o cambió)",
+            "not a regular file (a link, or it changed)",
         ));
     }
-    let too_big = || {
-        std::io::Error::other(format!(
-            "demasiado grande para revisarlo aquí (más de {max} bytes)"
-        ))
-    };
+    let too_big =
+        || std::io::Error::other(format!("too big to check here (more than {max} bytes)"));
     if open.len() > max {
         return Err(too_big());
     }
@@ -393,7 +388,7 @@ mod tests {
         std::fs::write(&big, vec![b'x'; 100]).unwrap();
         assert!(read_regular_capped(&big, 100).is_ok());
         let e = read_regular_capped(&big, 99).unwrap_err().to_string();
-        assert!(e.contains("demasiado grande"), "{e}");
+        assert!(e.contains("too big"), "{e}");
     }
 
     #[test]

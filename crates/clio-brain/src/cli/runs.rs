@@ -84,10 +84,10 @@ pub fn resolve(dirs: &Dirs, id: &str) -> Res<Run> {
             path: dirs.runs.join(n),
         }),
         _ if hits.len() > 1 => Err(format!(
-            "{id:?} coincide con {} runs; da más del id",
+            "{id:?} matches {} runs; give more of the id",
             hits.len()
         )),
-        _ => Err(format!("no hay un run {id:?} (mira `clio runs`)")),
+        _ => Err(format!("there is no run {id:?} (see `clio runs`)")),
     }
 }
 
@@ -177,21 +177,21 @@ impl RunSummary {
     }
 }
 
-/// Spanish words for an `Ending` in its `Debug` form.
+/// Plain words for an `Ending` in its `Debug` form.
 pub fn ending_label(ending: &str) -> String {
     match ending {
-        "Final" => "terminó".into(),
-        "Cancelled" => "cancelado".into(),
-        "NeedsApproval" => "necesita tu aprobación".into(),
+        "Final" => "finished".into(),
+        "Cancelled" => "cancelled".into(),
+        "NeedsApproval" => "needs your approval".into(),
         e if e.starts_with("Stopped(") => match e {
-            "Stopped(Steps)" => "detenido: límite de pasos".into(),
-            "Stopped(Time)" => "detenido: límite de tiempo".into(),
-            "Stopped(Cost)" | "Stopped(DayCost)" => "detenido: límite de costo".into(),
-            "Stopped(Repeats)" => "detenido: repetía la misma acción".into(),
-            "Stopped(Retries)" => "detenido: demasiados reintentos".into(),
-            other => format!("detenido ({other})"),
+            "Stopped(Steps)" => "stopped: step limit".into(),
+            "Stopped(Time)" => "stopped: time limit".into(),
+            "Stopped(Cost)" | "Stopped(DayCost)" => "stopped: cost limit".into(),
+            "Stopped(Repeats)" => "stopped: it repeated the same action".into(),
+            "Stopped(Retries)" => "stopped: too many retries".into(),
+            other => format!("stopped ({other})"),
         },
-        e if e.starts_with("ModelError") => "falló el modelo".into(),
+        e if e.starts_with("ModelError") => "the model failed".into(),
         other => other.to_lowercase(),
     }
 }
@@ -224,13 +224,13 @@ impl Status {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Applied => "aplicado",
-            Self::Undone => "deshecho",
-            Self::Pending => "pendiente de revisar",
-            Self::NoChanges => "sin cambios",
-            Self::Failed => "fallido",
-            Self::Cancelled => "cancelado",
-            Self::Incomplete => "incompleto",
+            Self::Applied => "applied",
+            Self::Undone => "undone",
+            Self::Pending => "pending review",
+            Self::NoChanges => "no changes",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Incomplete => "incomplete",
         }
     }
 
@@ -366,7 +366,7 @@ fn unique_id(started: i64, taken: &dyn Fn(&str) -> bool) -> Res<String> {
             return Ok(id);
         }
     }
-    Err("no encontré un id libre para el run; inténtalo de nuevo".into())
+    Err("could not find a free id for the run; try again".into())
 }
 
 fn random_u16() -> u16 {
@@ -440,7 +440,7 @@ pub fn clean_old(dirs: &Dirs, now: i64) -> Vec<String> {
             super::sessions::unapplied_changes(&run) == Some(0)
         };
         if done && let Err(e) = std::fs::remove_dir_all(&run.path) {
-            failed.push(format!("no pude borrar {}: {e}", run.path.display()));
+            failed.push(format!("could not delete {}: {e}", run.path.display()));
         }
     }
     failed
@@ -469,7 +469,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
         .model
         .command
         .first()
-        .ok_or("config: model.command está vacío (revisa ~/.config/clio/config.json)")?
+        .ok_or("config: model.command is empty (check ~/.config/clio/config.json)")?
         .clone();
     let started = now_ms();
     let id = unique_id(started, &|c| dirs.runs.join(c).exists())?;
@@ -583,7 +583,7 @@ pub fn execute(
             let mut lines = r.debug.clone();
             lines.extend(link.note());
             agent.observer.event(&Event::Memory {
-                title: format!("recordó {} recuerdo(s)", r.items),
+                title: format!("recalled {} memory(ies)", r.items),
                 lines,
             });
             if r.items > 0 {
@@ -595,7 +595,7 @@ pub fn execute(
         }
         Ok(None) => {}
         Err(e) => agent.observer.event(&Event::Memory {
-            title: "la memoria no se pudo abrir".into(),
+            title: "the memory could not be opened".into(),
             lines: vec![p.scrubber.scrub(&e)],
         }),
     }
@@ -659,12 +659,12 @@ pub fn execute(
             run_memory.line = rep.line();
             run_memory.note = run_memory.note.or_else(|| link.note());
             agent.observer.event(&Event::Memory {
-                title: "al cerrar propuso guardar".into(),
+                title: "at close it proposed to save".into(),
                 lines: rep.debug_lines(),
             });
         }
         Err(e) => {
-            run_memory.line = format!("memoria: no se guardó nada ({})", p.scrubber.scrub(&e));
+            run_memory.line = format!("memory: nothing was saved ({})", p.scrubber.scrub(&e));
             run_memory.rejected.push(run_memory.line.clone());
         }
     }
@@ -755,12 +755,12 @@ impl Observer for Progress {
                 self.step = *n;
                 return;
             }
-            Event::Started { level } => format!("nivel de la tarea: {level:?}"),
+            Event::Started { level } => format!("task level: {level:?}"),
             Event::ProtocolError { reason } => format!(
-                "el modelo contestó algo que no es una acción ({})",
+                "the model answered something that is not an action ({})",
                 clip(self.st, &sanitize::line(reason), 60)
             ),
-            Event::Final => "el modelo dice que terminó".to_owned(),
+            Event::Final => "the model says it is done".to_owned(),
             Event::Context(_)
             | Event::Usage(_)
             | Event::Exchange(_)
@@ -778,13 +778,13 @@ impl Observer for Progress {
                 ..
             } => {
                 let mark = match (outcome, ran) {
-                    (Outcome::Deny, _) => self.st.red("negado"),
-                    (_, false) => self.st.yellow("pedido, sin ejecutar"),
-                    (Outcome::Ask, true) => self.st.yellow("pedido y aprobado"),
-                    _ => self.st.green("permitido"),
+                    (Outcome::Deny, _) => self.st.red("denied"),
+                    (_, false) => self.st.yellow("asked, not run"),
+                    (Outcome::Ask, true) => self.st.yellow("asked and approved"),
+                    _ => self.st.green("allowed"),
                 };
                 let size = if *ran {
-                    format!("  {result_chars} car.")
+                    format!("  {result_chars} chars")
                 } else {
                     String::new()
                 };
@@ -806,12 +806,12 @@ pub fn run(dirs: &Dirs, o: &RunOpts, debug: bool) -> Res<i32> {
     let p = prepare(dirs, o)?;
     if debug {
         eprintln!(
-            "[debug] depuración activa: el detalle va a stderr y a {}",
+            "[debug] debug on: the detail goes to stderr and to {}",
             p.path.join("debug.log").display()
         );
     }
     println!(
-        "{} {}: {} archivos copiados de {}",
+        "{} {}: {} files copied from {}",
         st.bold("run"),
         st.cyan(&p.id),
         p.scan.files.len(),
@@ -825,28 +825,28 @@ pub fn run(dirs: &Dirs, o: &RunOpts, debug: bool) -> Res<i32> {
     };
     if !p.scan.secrets.is_empty() {
         println!(
-            "  {} NO se copió, parece un secreto: {}",
+            "  {} NOT copied, it looks like a secret: {}",
             st.mark(ui::Level::Warn),
             list(&p.scan.secrets)
         );
     }
     if !p.scan.skipped_dirs.is_empty() {
         println!(
-            "  {} no se copió (carpetas pesadas o internas): {}",
+            "  {} not copied (heavy or internal folders): {}",
             st.dim(st.bullet()),
             list(&p.scan.skipped_dirs)
         );
     }
     if !p.scan.symlinks.is_empty() {
         println!(
-            "  {} no se copió (enlaces simbólicos): {}",
+            "  {} not copied (symbolic links): {}",
             st.dim(st.bullet()),
             list(&p.scan.symlinks)
         );
     }
     println!("  {} {}", st.dim(st.bullet()), p.jail_note);
     println!(
-        "trabajando en la copia (puede tardar unos minutos; hasta {} pasos o {} s)...",
+        "working on the copy (it can take a few minutes; up to {} steps or {} s)...",
         p.max_steps, p.max_seconds
     );
     let progress = Progress {
@@ -873,8 +873,8 @@ fn print_panel(st: Style, s: &RunSummary) {
     let label = |l: &str| st.bold(&pad(l, 10));
     println!("{}{}", label("run:"), st.cyan(&s.id));
     println!(
-        "{}{}   pasos: {}   tiempo: {:.1}s   fin: {}",
-        label("nivel:"),
+        "{}{}   steps: {}   time: {:.1}s   end: {}",
+        label("level:"),
         s.level,
         s.steps,
         s.elapsed_ms as f64 / 1000.0,
@@ -888,8 +888,8 @@ fn print_panel(st: Style, s: &RunSummary) {
         }
     );
     println!(
-        "{}{} modificados, {} creados, {} borrados",
-        label("cambios:"),
+        "{}{} modified, {} created, {} deleted",
+        label("changes:"),
         s.modified.len(),
         s.created.len(),
         s.deleted.len()
@@ -900,14 +900,14 @@ fn print_panel(st: Style, s: &RunSummary) {
     if s.tainted {
         println!(
             "{}{}",
-            label("nota:"),
-            st.yellow("externo: leyó archivos del proyecto; revisa el diff con cuidado")
+            label("note:"),
+            st.yellow("external: it read files from the project; check the diff carefully")
         );
     }
     let msg = match &s.final_message {
         Some(m) => sanitize::multiline(m),
         None => format!(
-            "(sin mensaje final) {}",
+            "(no final message) {}",
             sanitize::line(&s.pending.join("; "))
         ),
     };
@@ -917,7 +917,7 @@ fn print_panel(st: Style, s: &RunSummary) {
         println!(
             "{}{l}",
             if i == 0 {
-                label("agente:")
+                label("agent:")
             } else {
                 " ".repeat(10)
             }
@@ -927,13 +927,13 @@ fn print_panel(st: Style, s: &RunSummary) {
         println!(
             "{}{}",
             " ".repeat(10),
-            st.dim(&format!("{} (más en `clio show {}`)", st.ellipsis(), s.id))
+            st.dim(&format!("{} (more in `clio show {}`)", st.ellipsis(), s.id))
         );
     }
     if let Some(m) = s.memory.as_ref().filter(|m| !m.line.is_empty()) {
         println!(
             "{}{}",
-            label("memoria:"),
+            label("memory:"),
             st.dim(&format!(
                 "{}{}",
                 sanitize::line(&m.line),
@@ -946,12 +946,12 @@ fn print_panel(st: Style, s: &RunSummary) {
     println!();
     if s.files() > 0 {
         println!(
-            "El original NO se tocó. Revisa:  {}   y luego  {}",
+            "The original was NOT touched. Check:  {}   and then  {}",
             st.bold(&format!("clio diff {}", s.id)),
             st.bold(&format!("clio apply {}", s.id))
         );
     } else {
-        println!("El original NO se tocó. No hay cambios que aplicar.");
+        println!("The original was NOT touched. There are no changes to apply.");
     }
 }
 
@@ -966,14 +966,14 @@ pub fn diff_text(ws: &Path, run: &Run, manifest: &BTreeMap<String, String>, c: &
         if let Some(rel) = checked
             && let Err(why) = super::apply::symlink_check(ws, rel)
         {
-            out += &format!("# no se lee {}: {why}\n", c.rel);
+            out += &format!("# cannot read {}: {why}\n", c.rel);
             return None;
         }
         match work::read_regular(&path) {
             Ok(b) => Some(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
-                out += &format!("# no se lee {}: {e}\n", c.rel);
+                out += &format!("# cannot read {}: {e}\n", c.rel);
                 None
             }
         }
@@ -983,10 +983,7 @@ pub fn diff_text(ws: &Path, run: &Run, manifest: &BTreeMap<String, String>, c: &
     if let (Some(o), Some(h)) = (&orig, manifest.get(&c.rel))
         && super::sha_hex(o) != *h
     {
-        out += &format!(
-            "# OJO: {} cambió en el original después de la copia\n",
-            c.rel
-        );
+        out += &format!("# NOTE: {} changed in the original after the copy\n", c.rel);
     }
     out + &file_diff(&c.rel, orig.as_deref(), new.as_deref())
 }
@@ -1026,7 +1023,7 @@ pub fn diff(dirs: &Dirs, id: &str) -> Res<()> {
     let (meta, manifest) = (run.meta()?, run.manifest()?);
     let ch = work::changes(&run.sandbox(), &manifest)?;
     if ch.is_empty() {
-        println!("el run {} no tiene cambios", run.id);
+        println!("run {} has no changes", run.id);
         return Ok(());
     }
     print_diff(st, Path::new(&meta.workspace), &run, &manifest, &ch);
@@ -1045,7 +1042,7 @@ pub fn list(dirs: &Dirs, all: bool, json: bool) -> Res<()> {
         return Ok(());
     }
     if rows.is_empty() {
-        println!("todavía no hay runs. Empieza con: clio run \"qué hacer\"");
+        println!("no runs yet. Start with: clio run \"what to do\"");
         return Ok(());
     }
     let sw = 20;
@@ -1057,9 +1054,9 @@ pub fn list(dirs: &Dirs, all: bool, json: bool) -> Res<()> {
         st.bold(&format!(
             "{}  {}  {}  {}",
             pad("RUN", 20),
-            pad("ESTADO", sw),
-            "ARCHIVOS",
-            "INSTRUCCIÓN"
+            pad("STATUS", sw),
+            "FILES",
+            "INSTRUCTION"
         ))
     );
     for r in &rows {
@@ -1097,39 +1094,39 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
     println!("{}{}", label("run:"), st.cyan(&run.id));
     println!(
         "{}{}",
-        label("estado:"),
+        label("status:"),
         info.status.paint(st, info.status.label())
     );
-    println!("{}{}", label("carpeta:"), sanitize::line(&info.workspace));
+    println!("{}{}", label("folder:"), sanitize::line(&info.workspace));
     println!(
         "{}{}",
-        label("instrucción:"),
+        label("instruction:"),
         sanitize::line(&info.instruction)
     );
     match &info.summary {
         Some(s) => {
             println!(
-                "{}{}   pasos: {}   tiempo: {:.1}s   fin: {}",
-                label("nivel:"),
+                "{}{}   steps: {}   time: {:.1}s   end: {}",
+                label("level:"),
                 s.level,
                 s.steps,
                 s.elapsed_ms as f64 / 1000.0,
                 ending_label(&s.ending)
             );
             println!(
-                "{}{} denegadas, {} errores de protocolo, {} tokens de entrada, {} de salida",
-                label("modelo:"),
+                "{}{} denied, {} protocol errors, {} input tokens, {} output",
+                label("model:"),
                 s.denied,
                 s.protocol_errors,
                 s.input_tokens,
                 s.output_tokens
             );
-            println!("{}", label("cambios:"));
+            println!("{}", label("changes:"));
             for (c, p) in s.changed() {
                 println!("  {c} {}", sanitize::line(p));
             }
             if let Some(m) = &s.final_message {
-                println!("{}", label("agente:"));
+                println!("{}", label("agent:"));
                 for l in ui::wrap(&sanitize::multiline(m), w.saturating_sub(2)) {
                     println!("  {l}");
                 }
@@ -1137,17 +1134,17 @@ pub fn show(dirs: &Dirs, id: &str, json: bool) -> Res<()> {
             if !s.pending.is_empty() {
                 println!(
                     "{}{}",
-                    label("pendiente:"),
+                    label("pending:"),
                     sanitize::line(&s.pending.join("; "))
                 );
             }
         }
-        None => println!("(sin resumen: el run no llegó a terminar)"),
+        None => println!("(no summary: the run did not finish)"),
     }
     if let Some(n) = report.as_ref().and_then(|r| r["next_step"].as_str()) {
-        println!("{}{}", label("siguiente:"), sanitize::line(n));
+        println!("{}{}", label("next:"), sanitize::line(n));
     }
-    println!("{}{}", label("carpeta del run:"), run.path.display());
+    println!("{}{}", label("run folder:"), run.path.display());
     Ok(())
 }
 

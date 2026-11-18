@@ -28,7 +28,7 @@ pub fn checks(dirs: &Dirs) -> Vec<(Level, String, Option<String>)> {
         Ok(n) => out.push((
             Level::Pass,
             format!(
-                "Node {}.{}.{} para Pi ({})",
+                "Node {}.{}.{} for Pi ({})",
                 n.version.0,
                 n.version.1,
                 n.version.2,
@@ -39,7 +39,7 @@ pub fn checks(dirs: &Dirs) -> Vec<(Level, String, Option<String>)> {
         Err(e) => out.push((
             Level::Warn,
             e.to_string(),
-            Some("Pi (el arnés del agente) necesita Node 22.19 o más.".into()),
+            Some("Pi (the agent harness) needs Node 22.19 or newer.".into()),
         )),
     }
     let p = paths(dirs);
@@ -50,21 +50,23 @@ pub fn checks(dirs: &Dirs) -> Vec<(Level, String, Option<String>)> {
             match (installed_version(&dir), install::locate(&p)) {
                 (_, Ok(i)) => out.push((
                     Level::Pass,
-                    format!("Pi {} instalado en {}", i.version, i.dir.display()),
+                    format!("Pi {} installed in {}", i.version, i.dir.display()),
                     None,
                 )),
                 (Some(v), Err(_)) if v != want => out.push((
                     Level::Fail,
-                    format!("en {} hay Pi {v} y Clio fija {want}", dir.display()),
+                    format!("{} holds Pi {v} and Clio pins {want}", dir.display()),
                     Some(format!(
-                        "Borra {} y ejecuta `clio pi install`.",
+                        "Delete {} and run `clio pi install`.",
                         dir.display()
                     )),
                 )),
                 (_, Err(e)) => out.push((
                     Level::Warn,
                     e.to_string(),
-                    Some("Ejecuta `clio init` o `clio pi install` (necesita red una vez).".into()),
+                    Some(
+                        "Run `clio init` or `clio pi install` (it needs the network once).".into(),
+                    ),
                 )),
             }
         }
@@ -75,19 +77,16 @@ pub fn checks(dirs: &Dirs) -> Vec<(Level, String, Option<String>)> {
         out.push((
             Level::Fail,
             format!(
-                "el directorio de Pi de Clio ({}) coincide con {}",
+                "Clio's Pi directory ({}) is the same as {}",
                 ours.display(),
                 theirs.display()
             ),
-            Some("Clio no debe tocar el ~/.pi de la persona (lo usa su propio Pi).".into()),
+            Some("Clio must not touch the person's ~/.pi (their own Pi uses it).".into()),
         ));
     } else {
         out.push((
             Level::Pass,
-            format!(
-                "el directorio de Pi de Clio ({}) no es ~/.pi",
-                ours.display()
-            ),
+            format!("Clio's Pi directory ({}) is not ~/.pi", ours.display()),
             None,
         ));
     }
@@ -99,7 +98,7 @@ pub fn init_lines(dirs: &Dirs) {
     let st = Style::stdout();
     if std::env::var_os("CLIO_SKIP_PI_INSTALL").is_some() {
         println!(
-            "{}  Pi: instalación omitida (CLIO_SKIP_PI_INSTALL)",
+            "{}  Pi: install skipped (CLIO_SKIP_PI_INSTALL)",
             st.mark(Level::Warn)
         );
         return;
@@ -116,14 +115,14 @@ pub fn init_lines(dirs: &Dirs) {
             st.mark(Level::Pass),
             i.version,
             if already {
-                "ya estaba en"
+                "was already in"
             } else {
-                "instalado en"
+                "installed in"
             },
             i.dir.display()
         ),
         Err(e) => println!(
-            "{}  Pi no se instaló: {}\n      {} reintenta con `clio pi install`",
+            "{}  Pi was not installed: {}\n      {} try again with `clio pi install`",
             st.mark(Level::Warn),
             sanitize::line(&e.to_string()),
             st.arrow()
@@ -138,12 +137,12 @@ fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i
     let list = list_sessions(&dir);
     let chosen: Vec<_> = if all {
         if !names.is_empty() {
-            return Err("o nombras sesiones o usas --all, no las dos cosas".into());
+            return Err("either name sessions or use --all, not both".into());
         }
         list.sessions.iter().collect()
     } else {
         if names.is_empty() {
-            return Err("falta qué borrar: clio pi sessions rm <id>… (o --all)".into());
+            return Err("nothing to delete is named: clio pi sessions rm <id>… (or --all)".into());
         }
         let mut v = Vec::new();
         for n in names {
@@ -153,12 +152,12 @@ fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i
                         .file_name()
                         .is_some_and(|f| f.to_string_lossy() == *n)
             });
-            v.push(hit.ok_or_else(|| format!("no hay una sesión {}", sanitize::line(n)))?);
+            v.push(hit.ok_or_else(|| format!("there is no session {}", sanitize::line(n)))?);
         }
         v
     };
     if chosen.is_empty() {
-        println!("no hay sesiones de Pi");
+        println!("there are no Pi sessions");
         return Ok(0);
     }
     let plans: Vec<_> = chosen
@@ -175,20 +174,20 @@ fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i
     let risky = plans.iter().filter(|p| p.unapplied != Some(0)).count();
     let question = if risky > 0 {
         format!(
-            "¿Borrar {} sesión(es)? {risky} tienen cambios sin aplicar que se perderán",
+            "Delete {} session(s)? {risky} have changes not applied that will be lost",
             plans.len()
         )
     } else {
-        format!("¿Borrar {} sesión(es)?", plans.len())
+        format!("Delete {} session(s)?", plans.len())
     };
     if !yes && !super::apply::confirm(&question) {
-        println!("no se borró nada");
+        println!("nothing was deleted");
         return Ok(0);
     }
     for p in &plans {
         super::sessions::delete(p)?;
     }
-    println!("borradas {} sesión(es)", plans.len());
+    println!("deleted {} session(s)", plans.len());
     Ok(0)
 }
 
@@ -232,7 +231,7 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
             args.rest()?;
             let p = paths(dirs);
             let i = install::install(&p, &path_var()).map_err(|e| e.to_string())?;
-            println!("Pi {} instalado en {}", i.version, i.dir.display());
+            println!("Pi {} installed in {}", i.version, i.dir.display());
             Ok(0)
         }
         "sessions" => {
@@ -243,7 +242,9 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
                 return remove_sessions(dirs, &rest[1..], all, yes);
             }
             if !rest.is_empty() || all {
-                return Err("uso: clio pi sessions [--json] | rm <id>… | rm --all [--yes]".into());
+                return Err(
+                    "usage: clio pi sessions [--json] | rm <id>… | rm --all [--yes]".into(),
+                );
             }
             let l = list_sessions(&paths(dirs).sessions_dir());
             if json {
@@ -262,7 +263,7 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
                         .unwrap_or_default()
                 );
             } else if l.sessions.is_empty() {
-                println!("no hay sesiones de Pi todavía");
+                println!("there are no Pi sessions yet");
             } else {
                 for s in &l.sessions {
                     println!(
@@ -276,12 +277,12 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
                 }
             }
             for w in &l.warnings {
-                eprintln!("aviso: {w}");
+                eprintln!("warning: {w}");
             }
             Ok(0)
         }
-        _ => {
-            Err("uso: clio pi doctor [--json] | clio pi install | clio pi sessions [--json]".into())
-        }
+        _ => Err(
+            "usage: clio pi doctor [--json] | clio pi install | clio pi sessions [--json]".into(),
+        ),
     }
 }

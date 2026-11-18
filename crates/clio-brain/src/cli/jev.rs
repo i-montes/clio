@@ -266,7 +266,7 @@ pub fn taint_session(socket: &Path, session: &str, suspect: bool) -> bool {
             return true;
         }
     }
-    eprintln!("clio: no se pudo marcar la sesión como contaminada: no se muestra memoria ajena");
+    eprintln!("clio: could not mark the session as tainted: memory from others is not shown");
     false
 }
 
@@ -327,7 +327,7 @@ pub fn preprompt(
     // a value only the vault knows cannot be struck out without it.
     let scrub: Scrub = Arc::new(move |t| match &vault {
         Some(v) => v.scrub(t).map_err(|e| e.to_string()),
-        None => Err("sin baúl".into()),
+        None => Err("no vault".into()),
     });
     let (socket, id) = (toolhost.socket.clone(), session.to_owned());
     let log_file = run_dir.join("memory-inject.jsonl");

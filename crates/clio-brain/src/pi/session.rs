@@ -46,16 +46,16 @@ pub const GUARD_TOOLS: [&str; 22] = [
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
 pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
-pub const PROMPT_NAME: &str = "clio-agent@20";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@20.md");
+pub const PROMPT_NAME: &str = "clio-agent@21";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@21.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@4";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@4.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@5";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@5.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -85,7 +85,7 @@ fn random_token() -> Result<String, String> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
-        .map_err(|e| format!("no pude hacer una clave aleatoria: {e}"))?;
+        .map_err(|e| format!("could not make a random key: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -245,7 +245,7 @@ impl Toolhost {
         let socket = sock_dir.join("toolhost.sock");
         if socket.as_os_str().len() > 100 {
             return Err(format!(
-                "la ruta del socket ({}) es demasiado larga para un socket Unix: usa un XDG_RUNTIME_DIR más corto",
+                "the socket path ({}) is too long for a Unix socket: use a shorter XDG_RUNTIME_DIR",
                 socket.display()
             ));
         }
@@ -318,11 +318,11 @@ impl Toolhost {
             .stdout(Stdio::piped())
             .stderr(Stdio::from(logf))
             .spawn()
-            .map_err(|e| format!("no pude iniciar clio toolhost: {e}"))?;
+            .map_err(|e| format!("could not start clio toolhost: {e}"))?;
         let stdin = child.stdin.take();
         let Some(stdout) = child.stdout.take() else {
             let _ = child.kill();
-            return Err("clio toolhost sin salida".into());
+            return Err("clio toolhost has no output".into());
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -341,13 +341,13 @@ impl Toolhost {
         // On any failure `this` drops here and stops the process.
         let line = rx.recv_timeout(TOOLHOST_READY).map_err(|_| {
             format!(
-                "clio toolhost no dijo READY a tiempo (mira {})",
+                "clio toolhost did not say READY in time (see {})",
                 log.display()
             )
         })?;
         if line.strip_prefix("READY ").map(|s| Path::new(s.trim())) != Some(&this.socket) {
             return Err(format!(
-                "clio toolhost arrancó mal (mira {})",
+                "clio toolhost started badly (see {})",
                 log.display()
             ));
         }
@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_one_the_guard_checks() {
-        // The model once took «Jev» (the judge) for the person's name: the judge is not named to it.
+        // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 20\n"));
+        assert!(PROMPT.starts_with("version: 21\n"));
     }
 }

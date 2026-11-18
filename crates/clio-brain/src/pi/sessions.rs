@@ -146,17 +146,17 @@ pub fn read_session(path: &Path) -> Result<SessionInfo, String> {
     let mut r = std::io::BufReader::new(&mut f);
     let mut buf = Vec::new();
     let header = match read_record(&mut r, &mut buf) {
-        None => return Err("archivo vacío".into()),
-        Some(None) => return Err("la cabecera no es JSON válido".into()),
+        None => return Err("empty file".into()),
+        Some(None) => return Err("the header is not valid JSON".into()),
         Some(Some(h)) => h,
     };
     if header["type"] != "session" {
-        return Err("no empieza con una cabecera de sesión".into());
+        return Err("it does not start with a session header".into());
     }
     let id = header["id"]
         .as_str()
         .filter(|i| !i.is_empty())
-        .ok_or("la cabecera no trae id")?;
+        .ok_or("the header has no id")?;
     let cwd_raw = header["cwd"].as_str().unwrap_or("");
     let cwd_path = (cwd_raw.starts_with('/') && !cwd_raw.chars().any(char::is_control))
         .then(|| PathBuf::from(cwd_raw));
@@ -242,7 +242,7 @@ pub fn read_session(path: &Path) -> Result<SessionInfo, String> {
     let title = name
         .clone()
         .or(first_user)
-        .unwrap_or_else(|| "(sin mensajes)".to_owned());
+        .unwrap_or_else(|| "(no messages)".to_owned());
     Ok(SessionInfo {
         id: text::line(id, 64),
         path: path.to_path_buf(),
@@ -286,7 +286,7 @@ pub fn list_sessions(dir: &Path) -> SessionList {
         match read_session(&p) {
             Ok(s) => out.sessions.push(s),
             Err(why) => out.warnings.push(format!(
-                "se ignora {}: {}",
+                "ignored {}: {}",
                 text::line(
                     &p.file_name()
                         .map(|n| n.to_string_lossy().into_owned())

@@ -68,7 +68,7 @@ fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
             if md & 0o077 != 0 {
                 o.say(
                     Level::Fail,
-                    format!("{} tiene modo {md:o}, debe ser 700 (S-23)", p.display()),
+                    format!("{} has mode {md:o}, it must be 700 (S-23)", p.display()),
                     Some(format!("chmod 700 {}", p.display())),
                 );
             }
@@ -78,7 +78,7 @@ fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
         } else if md & 0o077 != 0 {
             o.say(
                 Level::Fail,
-                format!("{} tiene modo {md:o}, debe ser 600 (S-23)", p.display()),
+                format!("{} has mode {md:o}, it must be 600 (S-23)", p.display()),
                 Some(format!("chmod 600 {}", p.display())),
             );
         }
@@ -195,9 +195,7 @@ fn data_audit(o: &mut Report, data: &Path) {
     if hits.is_empty() {
         o.say(
             Level::Pass,
-            format!(
-                "nada con forma de llave en lo que Clio escribió ({read} archivos revisados, S-18)"
-            ),
+            format!("nothing shaped like a key in what Clio wrote ({read} files checked, S-18)"),
             None,
         );
     } else {
@@ -210,22 +208,20 @@ fn data_audit(o: &mut Report, data: &Path) {
         o.say(
             Level::Fail,
             format!(
-                "{} archivo(s) de Clio tienen algo con forma de llave (S-18): {}{}",
+                "{} file(s) of Clio hold something shaped like a key (S-18): {}{}",
                 hits.len(),
                 list.join(", "),
-                if more > 0 { format!(" y {more} más") } else { String::new() }
+                if more > 0 { format!(" and {more} more") } else { String::new() }
             ),
             Some(
-                "Dentro de ~/.local/share/clio. Si es el log de efectos de un run de una versión anterior, borra ese archivo; si no, borra el run (`clio runs`).".into(),
+                "Inside ~/.local/share/clio. If it is the effects log of a run from an earlier version, delete that file; if not, delete the run (`clio runs`).".into(),
             ),
         );
     }
     if unread > 0 {
         o.say(
             Level::Warn,
-            format!(
-                "{unread} archivo(s) de Clio no se pudieron revisar (muy grandes o sin permiso)"
-            ),
+            format!("{unread} file(s) of Clio could not be checked (too big or no permission)"),
             None,
         );
     }
@@ -239,9 +235,9 @@ fn jail_lines(o: &mut Report) {
         Status::Unavailable(why) => {
             o.say(
                 Level::Warn,
-                format!("jaula: run_tests desactivada, {why}"),
+                format!("jail: run_tests is off, {why}"),
                 Some(
-                    "Hace falta Linux, bubblewrap (bwrap), prlimit (util-linux), python3 y espacios de nombres de usuario sin privilegios; ver docs/uso-local.md.".into(),
+                    "It needs Linux, bubblewrap (bwrap), prlimit (util-linux), python3 and unprivileged user namespaces; see docs/uso-local.md.".into(),
                 ),
             );
             o.jail = Some(json!({"available": false, "reason": why, "checks": []}));
@@ -251,26 +247,26 @@ fn jail_lines(o: &mut Report) {
     };
     o.say(
         Level::Pass,
-        format!("jaula: bwrap {bwrap} arranca con espacios de nombres sin privilegios"),
+        format!("jail: bwrap {bwrap} starts with unprivileged namespaces"),
         None,
     );
     for c in &test.checks {
         if c.passed {
-            o.say(Level::Pass, format!("jaula: {}", describe(c)), None);
+            o.say(Level::Pass, format!("jail: {}", describe(c)), None);
         } else {
             o.say(
                 Level::Fail,
-                format!("jaula: FALLÓ, {} ({})", describe(c), c.detail),
-                Some("run_tests queda desactivada hasta que esto pase; no uses la jaula.".into()),
+                format!("jail: FAILED, {} ({})", describe(c), c.detail),
+                Some("run_tests stays off until this passes; do not use the jail.".into()),
             );
         }
     }
     o.say(
         if st.ready() { Level::Pass } else { Level::Fail },
         if st.ready() {
-            "jaula: autoprueba completa, run_tests disponible para el agente".into()
+            "jail: self-test complete, run_tests is available to the agent".into()
         } else {
-            "jaula: la autoprueba falló, run_tests NO se ofrece al agente".into()
+            "jail: the self-test failed, run_tests is NOT offered to the agent".into()
         },
         None,
     );
@@ -290,13 +286,13 @@ fn bridge_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
         if lacks_bridge(dirs, c) {
             o.say(
                 Level::Warn,
-                format!("conector {name}: falta el puente de Claude o su Claude Code: clio pi install"),
-                Some("El chat y las llamadas sueltas pasan por Claude Code, que trae el puente (pi-claude-agent-sdk).".into()),
+                format!("connector {name}: the Claude bridge or its Claude Code is missing: clio pi install"),
+                Some("The chat and the single calls go through Claude Code, which brings the bridge (pi-claude-agent-sdk).".into()),
             );
         } else {
             o.say(
                 Level::Pass,
-                format!("conector {name}: el puente y Claude Code están en el Pi instalado"),
+                format!("connector {name}: the bridge and Claude Code are in the installed Pi"),
                 None,
             );
         }
@@ -310,41 +306,41 @@ fn connector_report(o: &mut Report, dirs: &Dirs, c: &Connector) {
     if std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty()) {
         o.say(
             Level::Pass,
-            format!("conector {name}: la llave viene de {}", c.key_env),
+            format!("connector {name}: the key comes from {}", c.key_env),
             None,
         );
         return;
     }
     use clio_vault::VaultError as E;
     let ready = super::vault::gateway_socket(dirs)
-        .map_err(|_| "el baúl no está corriendo".to_owned())
+        .map_err(|_| "the vault is not running".to_owned())
         .and_then(|s| {
             VaultClient::new(&s)
                 .with_timeout(std::time::Duration::from_secs(2))
                 .check(c.secret, "model", Some(c.domain), "")
                 .map_err(|e| match e {
-                    E::Locked => "el baúl está cerrado".to_owned(),
-                    E::NotFound => "no está en el baúl".to_owned(),
-                    E::Denied(_) => format!("el baúl no la deja ir a {}", c.domain),
-                    E::Revoked => "está revocada".to_owned(),
-                    E::Expired => "caducó".to_owned(),
-                    _ => "el baúl no está corriendo".to_owned(),
+                    E::Locked => "the vault is locked".to_owned(),
+                    E::NotFound => "it is not in the vault".to_owned(),
+                    E::Denied(_) => format!("the vault does not let it go to {}", c.domain),
+                    E::Revoked => "it is revoked".to_owned(),
+                    E::Expired => "it has expired".to_owned(),
+                    _ => "the vault is not running".to_owned(),
                 })
         });
     match ready {
         Ok(()) => o.say(
             Level::Pass,
             format!(
-                "conector {name}: la llave está en el baúl y solo puede ir a {}",
+                "connector {name}: the key is in the vault and can only go to {}",
                 c.domain
             ),
             None,
         ),
         Err(why) => o.say(
             Level::Warn,
-            format!("conector {name}: la llave no se puede usar ({why}): clio connect {name}"),
+            format!("connector {name}: the key cannot be used ({why}): clio connect {name}"),
             Some(format!(
-                "Abre el baúl (`clio vault start`) y ejecuta `clio connect {name}`."
+                "Start the vault (`clio vault start`) and run `clio connect {name}`."
             )),
         ),
     }
@@ -360,20 +356,23 @@ fn old_key_file(o: &mut Report, dirs: &Dirs) {
         o.say(
             Level::Warn,
             format!(
-                "queda una llave en {} y ya está en el baúl: rm {}",
+                "a key is left in {} and it is already in the vault: rm {}",
                 file.display(),
                 file.display()
             ),
-            Some("Clio ya no lee ese archivo y el baúl ya tiene la llave: bórralo.".into()),
+            Some(
+                "Clio no longer reads that file and the vault already has the key: delete it."
+                    .into(),
+            ),
         );
     } else if file.exists() {
         o.say(
             Level::Warn,
             format!(
-                "queda una llave en {}: clio connect opencode la pasa al baúl",
+                "a key is left in {}: clio connect opencode moves it into the vault",
                 file.display()
             ),
-            Some("Clio ya no lee ese archivo. Pásala al baúl con `clio connect opencode`.".into()),
+            Some("Clio no longer reads that file. Move the key into the vault with `clio connect opencode`.".into()),
         );
     }
 }
@@ -384,7 +383,7 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
     if !jev.enabled {
         o.say(
             Level::Pass,
-            "Jev: apagado (es opcional: todo funciona sin él)".into(),
+            "Jev: off (it is optional: everything works without it)".into(),
             None,
         );
         return;
@@ -396,8 +395,8 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
     {
         o.say(
             Level::Warn,
-            "Jev: está encendido pero falta python3 para el adaptador; se sigue sin él".into(),
-            Some("Instala python3 o apaga Jev (`\"jev\": {\"enabled\": false}` en la configuración).".into()),
+            "Jev: it is on but python3 is missing for the adapter; going on without it".into(),
+            Some("Install python3 or turn Jev off (`\"jev\": {\"enabled\": false}` in the configuration).".into()),
         );
         return;
     }
@@ -410,17 +409,17 @@ fn jev_report(o: &mut Report, dirs: &Dirs, jev: &super::home::JevCfg) {
     match ready {
         Some(Ok(())) => o.say(
             Level::Pass,
-            format!("Jev: encendido; la clave está en el baúl y puede usarse solo hacia {domain}"),
+            format!("Jev: on; the key is in the vault and can only be used toward {domain}"),
             None,
         ),
         Some(Err(why)) => o.say(
             Level::Warn,
-            format!("Jev: está encendido pero no se puede usar la clave ({})", sanitize::line(&why)),
-            Some(format!("Con el baúl en marcha y desbloqueado: `clio vault put {secret} --dest jev:{domain}`. Mientras tanto Clio sigue sin Jev.")),
+            format!("Jev: it is on but the key cannot be used ({})", sanitize::line(&why)),
+            Some(format!("With the vault running and unlocked: `clio vault put {secret} --dest jev:{domain}`. Until then Clio goes on without Jev.")),
         ),
         None => o.say(
             Level::Warn,
-            "Jev: está encendido pero no hay carpeta de ejecución para hablar con el baúl".into(),
+            "Jev: it is on but there is no runtime folder to talk to the vault".into(),
             None,
         ),
     }
@@ -443,7 +442,8 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
     {
         o.say(
             Level::Pass,
-            "memoria: guardada con el esquema anterior; se actualiza sola la próxima vez que Clio la use".into(),
+            "memory: stored with the earlier schema; it updates itself the next time Clio uses it"
+                .into(),
             None,
         );
         return;
@@ -451,17 +451,14 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
     let link = match MemoryLink::open_read(&dirs.data, &EmbedModel::none()) {
         Ok(Some(l)) => l.for_person(),
         Ok(None) => {
-            o.say(Level::Pass, "memoria: todavía no existe".into(), None);
+            o.say(Level::Pass, "memory: it does not exist yet".into(), None);
             return;
         }
         Err(e) => {
             o.say(
                 Level::Warn,
-                format!("memoria: no se puede abrir ({})", sanitize::line(&e)),
-                Some(
-                    "Si otro proceso la está actualizando, vuelve a intentarlo en un momento."
-                        .into(),
-                ),
+                format!("memory: it cannot be opened ({})", sanitize::line(&e)),
+                Some("If another process is updating it, try again in a moment.".into()),
             );
             return;
         }
@@ -470,14 +467,11 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
     let active: u64 = places.iter().map(|p| p.1).sum();
     let pending = link.pending().map(|v| v.len()).unwrap_or(0);
     let due = link.review_due().map(|v| v.len()).unwrap_or(0);
-    let projects = places
-        .iter()
-        .filter(|p| p.0.starts_with("proyecto"))
-        .count();
+    let projects = places.iter().filter(|p| p.0.starts_with("project")).count();
     o.say(
         Level::Pass,
         format!(
-            "memoria: {active} recuerdos activos; {projects} proyecto{}, lo personal y las lecciones",
+            "memory: {active} active memories; {projects} project{}, the personal ones and the lessons",
             if projects == 1 { "" } else { "s" }
         ),
         None,
@@ -485,17 +479,20 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
     if pending > 0 {
         o.say(
             Level::Warn,
-            format!("memoria: {pending} esperan tu revisión"),
-            Some("`clio memory list --pending`, y `clio memory promote ID` o `archive ID`.".into()),
+            format!("memory: {pending} wait for your review"),
+            Some(
+                "`clio memory list --pending`, then `clio memory promote ID` or `archive ID`."
+                    .into(),
+            ),
         );
     }
     sleep_report(o, &dirs.data, &dirs.home, now_secs());
     if due > 0 {
         o.say(
             Level::Warn,
-            format!("memoria: {due} pasaron su plazo de revisión (siguen activos)"),
+            format!("memory: {due} are past their review date (they stay active)"),
             Some(
-                "`clio memory review-due`; si siguen siendo ciertos, `clio memory reviewed ID`."
+                "`clio memory review-due`; if they are still true, `clio memory reviewed ID`."
                     .into(),
             ),
         );
@@ -504,41 +501,41 @@ fn memory_report(o: &mut Report, dirs: &Dirs) {
 
 /// When the memory last slept, whether the night was complete, and what it warned about.
 fn sleep_report(o: &mut Report, data: &Path, home: &Path, now: i64) {
-    let setup = "`clio memory setup sleep` instala el timer que la hace dormir de noche.";
+    let setup = "`clio memory setup sleep` installs the timer that makes it sleep at night.";
     let Some(r) = clio_memory::sleep::last_report(data) else {
         // A timer is there (this one or clio-memory's): it only has not run yet.
         if clio_memory::setup::sleep_present(home) {
             o.say(
                 Level::Pass,
-                "sueño: todavía no durmió (el timer ya está instalado)".into(),
+                "sleep: it has not slept yet (the timer is already installed)".into(),
                 None,
             );
             return;
         }
         o.say(
             Level::Warn,
-            "sueño: la memoria todavía no durmió".into(),
+            "sleep: the memory has not slept yet".into(),
             Some(setup.into()),
         );
         return;
     };
     let days = (now - r.ended) / 86_400;
     let msg = format!(
-        "sueño: última noche {} ({})",
+        "sleep: last night {} ({})",
         clio_memory::sleep::night_of(r.started),
-        if r.complete { "completa" } else { "incompleta" }
+        if r.complete { "complete" } else { "incomplete" }
     );
     if !r.alarms.is_empty() {
         o.say(
             Level::Warn,
-            format!("{msg}; alarmas: {}", sanitize::line(&r.alarms.join("; "))),
-            Some("`clio memory sleep --report` muestra el informe.".into()),
+            format!("{msg}; alarms: {}", sanitize::line(&r.alarms.join("; "))),
+            Some("`clio memory sleep --report` shows the report.".into()),
         );
     } else if days > 3 {
         o.say(
             Level::Warn,
-            format!("{msg}, hace {days} días"),
-            Some(format!("¿Está el timer? {setup}")),
+            format!("{msg}, {days} days ago"),
+            Some(format!("Is the timer there? {setup}")),
         );
     } else {
         o.say(Level::Pass, msg, None);
@@ -554,7 +551,7 @@ fn now_secs() -> i64 {
 fn kdf_warning(status: &serde_json::Value) -> Option<String> {
     (status["kdf_current"] == false).then(|| {
         format!(
-            "baúl: la frase del baúl se estira con un coste antiguo ({})",
+            "vault: the vault passphrase is stretched with an old cost ({})",
             sanitize::line(status["kdf"].as_str().unwrap_or("?"))
         )
     })
@@ -578,11 +575,15 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         if dirs.data.join("vault.bin").exists() {
             o.say(
                 Level::Warn,
-                "baúl: hay un baúl pero no está corriendo, sus valores no se comprobaron en lo que Clio escribió (S-18)".into(),
-                Some("`clio vault start` y vuelve a correr `clio doctor`.".into()),
+                "vault: there is a vault but it is not running, its values were not checked against what Clio wrote (S-18)".into(),
+                Some("`clio vault start` and run `clio doctor` again.".into()),
             );
         } else {
-            o.say(Level::Pass, "baúl: no hay (es opcional)".into(), None);
+            o.say(
+                Level::Pass,
+                "vault: there is none (it is optional)".into(),
+                None,
+            );
         }
         return;
     };
@@ -590,14 +591,14 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         o.say(
             Level::Warn,
             line,
-            Some("`clio vault upgrade-kdf` (pide tu frase; deja una copia del archivo anterior que puedes borrar cuando compruebes el baúl).".into()),
+            Some("`clio vault upgrade-kdf` (it asks for your passphrase; it leaves a copy of the earlier file that you can delete once you have checked the vault).".into()),
         );
     }
     if status["locked"] == true {
         o.say(
             Level::Warn,
-            "baúl: está bloqueado, no conoce sus valores y no puede decir que no estén en lo que Clio escribió (S-18)".into(),
-            Some("Desbloquéalo y vuelve a correr `clio doctor`.".into()),
+            "vault: it is locked, it does not know its values and cannot say they are not in what Clio wrote (S-18)".into(),
+            Some("Unlock it and run `clio doctor` again.".into()),
         );
         return;
     }
@@ -611,7 +612,7 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
             let why = r.error.unwrap_or_default();
             o.say(
                 Level::Warn,
-                format!("baúl: no pudo revisar lo que Clio escribió ({why})"),
+                format!("vault: it could not check what Clio wrote ({why})"),
                 None,
             );
             return;
@@ -619,7 +620,7 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         Err(e) => {
             o.say(
                 Level::Warn,
-                format!("baúl: no pudo revisar lo que Clio escribió ({e})"),
+                format!("vault: it could not check what Clio wrote ({e})"),
                 None,
             );
             return;
@@ -648,7 +649,7 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
     if found.is_empty() {
         o.say(
             Level::Pass,
-            "baúl: ningún valor del baúl en lo que Clio escribió (S-18)".into(),
+            "vault: no value of the vault in what Clio wrote (S-18)".into(),
             None,
         );
     } else {
@@ -656,12 +657,12 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         o.say(
             Level::Fail,
             format!(
-                "baúl: {} archivo(s) de Clio tienen un valor del baúl (S-18): {}{}",
+                "vault: {} file(s) of Clio hold a value of the vault (S-18): {}{}",
                 found.len(),
                 found.iter().take(8).cloned().collect::<Vec<_>>().join(", "),
-                if more > 0 { format!(" y {more} más") } else { String::new() }
+                if more > 0 { format!(" and {more} more") } else { String::new() }
             ),
-            Some("Dentro de ~/.local/share/clio. Borra el run o el archivo y rota ese secreto (`clio vault`): alguien pudo verlo.".into()),
+            Some("Inside ~/.local/share/clio. Delete the run or the file and rotate that secret (`clio vault`): someone may have seen it.".into()),
         );
     }
 }
@@ -675,37 +676,37 @@ fn pi_jail_line(o: &mut Report, dirs: &Dirs) {
         .and_then(|c| by_provider(&c.model.provider))
         .filter(|c| c.pi_extension.is_some())
         .map(|c| c.name);
-    let no_claude = |name: &str| format!("; el conector {name} NO arrancará sin ella");
+    let no_claude = |name: &str| format!("; the connector {name} will NOT start without it");
     match status() {
         Status::Ready(v) => o.say(
             Level::Pass,
-            format!("jaula de Pi: bwrap {v} arranca; Pi corre sin ver el baúl ni tus archivos y solo alcanza al proveedor del modelo, y la autoprueba corre en cada arranque (ADR 0009)"),
+            format!("Pi jail: bwrap {v} starts; Pi runs without seeing the vault or your files and reaches only the model provider, and the self-test runs on every start (ADR 0009)"),
             None,
         ),
         Status::Off => o.say(
             Level::Fail,
             format!(
-                "jaula de Pi: CLIO_PI_JAIL=off, Pi corre con tus mismos permisos y puede ver el baúl y tus archivos{}",
+                "Pi jail: CLIO_PI_JAIL=off, Pi runs with your own permissions and can see the vault and your files{}",
                 bridge.map(no_claude).unwrap_or_default()
             ),
-            Some("Quita CLIO_PI_JAIL=off del entorno.".into()),
+            Some("Remove CLIO_PI_JAIL=off from the environment.".into()),
         ),
         Status::Unsupported => match bridge {
             Some(name) => o.say(
                 Level::Fail,
-                format!("jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap){}", no_claude(name)),
-                Some("Usa otro conector en este sistema, por ejemplo `clio connect opencode`.".into()),
+                format!("Pi jail: this system cannot have it (only Linux with bubblewrap){}", no_claude(name)),
+                Some("Use another connector on this system, for example `clio connect opencode`.".into()),
             ),
             None => o.say(
                 Level::Warn,
-                "jaula de Pi: este sistema no puede tenerla (solo Linux con bubblewrap), Pi corre con tus mismos permisos".into(),
+                "Pi jail: this system cannot have it (only Linux with bubblewrap), Pi runs with your own permissions".into(),
                 None,
             ),
         },
         Status::Unavailable(why) => o.say(
             Level::Fail,
-            format!("jaula de Pi: no puede arrancar aquí, Pi NO arrancará ({why})"),
-            Some("Hace falta bubblewrap (bwrap), prlimit (util-linux) y espacios de nombres de usuario sin privilegios; ver docs/decisions/0009-pi-runs-inside-a-jail.md.".into()),
+            format!("Pi jail: it cannot start here, Pi will NOT start ({why})"),
+            Some("It needs bubblewrap (bwrap), prlimit (util-linux) and unprivileged user namespaces; see docs/decisions/0009-pi-runs-inside-a-jail.md.".into()),
         ),
     }
 }
@@ -729,7 +730,7 @@ fn host_lines(o: &mut Report, script: &Path) {
         Err(e) => {
             o.say(
                 Level::Warn,
-                format!("no se pudo correr el chequeo del equipo: {e}"),
+                format!("the machine check could not be run: {e}"),
                 None,
             );
             return;
@@ -747,7 +748,7 @@ fn host_lines(o: &mut Report, script: &Path) {
             continue;
         };
         let hint = (lv != Level::Pass).then(|| {
-            "Del chequeo del equipo (infra/local/check-host.sh); ver docs/uso-local.md.".to_owned()
+            "From the machine check (infra/local/check-host.sh); see docs/uso-local.md.".to_owned()
         });
         o.say(lv, rest.trim().to_owned(), hint);
     }
@@ -755,7 +756,7 @@ fn host_lines(o: &mut Report, script: &Path) {
     if !out.status.success() && !host_failed {
         o.say(
             Level::Fail,
-            "el chequeo del equipo reportó un fallo".into(),
+            "the machine check reported a failure".into(),
             None,
         );
     }
@@ -776,29 +777,29 @@ fn host_mode_lines(o: &mut Report, dirs: &Dirs) {
 
 fn host_report(o: &mut Report, found: Result<(clio_node::Launcher, Result<(), String>), String>) {
     use clio_node::Launcher;
-    let fix = Some("Hace falta bubblewrap (bwrap) o sudo sin contraseña con systemd-run; sin eso Clio trabaja sin consola en el modo anfitrión.".to_owned());
+    let fix = Some("It needs bubblewrap (bwrap) or passwordless sudo with systemd-run; without that Clio works without a console in host mode.".to_owned());
     match &found {
         Err(why) => o.say(
             Level::Fail,
-            format!("modo anfitrión: no hay con qué correr la consola ({why}): no habrá consola"),
+            format!("host mode: there is nothing to run the console with ({why}): there will be no console"),
             fix,
         ),
         Ok((l, Err(why))) => o.say(
             Level::Fail,
-            format!("modo anfitrión: la consola ({l:?}) no pasa su autoprueba ({why}): no habrá consola"),
+            format!("host mode: the console ({l:?}) does not pass its self-test ({why}): there will be no console"),
             fix,
         ),
         Ok((l, Ok(()))) => o.say(
             Level::Pass,
-            format!("modo anfitrión: la consola corre con {l:?} y pasa su autoprueba (lo de Clio tapado, red solo cuando se pide)"),
+            format!("host mode: the console runs with {l:?} and passes its self-test (Clio's own hidden, network only when asked for)"),
             None,
         ),
     }
     if matches!(found, Ok((Launcher::Bwrap, _))) {
         o.say(
             Level::Warn,
-            "la consola de Clio no tendrá sudo".into(),
-            Some("Con sudo sin contraseña (y systemd-run) la consola lo tendría.".into()),
+            "Clio's console will have no sudo".into(),
+            Some("With passwordless sudo (and systemd-run) the console would have it.".into()),
         );
     }
 }
@@ -812,17 +813,17 @@ pub fn collect(dirs: &Dirs) -> Report {
         match mode(d) {
             None => o.say(
                 Level::Warn,
-                format!("{} no existe", d.display()),
-                Some("Ejecuta `clio init`.".into()),
+                format!("{} does not exist", d.display()),
+                Some("Run `clio init`.".into()),
             ),
             Some(m) if m & 0o077 != 0 => o.say(
                 Level::Fail,
-                format!("{} tiene modo {m:o}, debe ser 700 (S-23)", d.display()),
+                format!("{} has mode {m:o}, it must be 700 (S-23)", d.display()),
                 Some(format!("chmod 700 {}", d.display())),
             ),
             Some(_) => o.say(
                 Level::Pass,
-                format!("{} es privada (700)", d.display()),
+                format!("{} is private (700)", d.display()),
                 None,
             ),
         }
@@ -831,9 +832,8 @@ pub fn collect(dirs: &Dirs) -> Report {
     if dirs.runtime.is_none() {
         o.say(
             Level::Warn,
-            "XDG_RUNTIME_DIR no está definida, no se pueden revisar los sockets de la bóveda"
-                .into(),
-            Some("Entra por una sesión normal (login) para que exista.".into()),
+            "XDG_RUNTIME_DIR is not set, the vault sockets cannot be checked".into(),
+            Some("Log in through a normal session so that it exists.".into()),
         );
     }
     data_audit(&mut o, &dirs.data);
@@ -844,7 +844,7 @@ pub fn collect(dirs: &Dirs) -> Report {
             o.say(
                 Level::Pass,
                 format!(
-                    "la configuración carga ({}/{})",
+                    "the configuration loads ({}/{})",
                     c.model.provider, c.model.model
                 ),
                 None,
@@ -857,12 +857,14 @@ pub fn collect(dirs: &Dirs) -> Report {
             if names_builtin_adapter(&c.model.command) {
                 // A path older versions of `init` wrote is not run: said, so it can be removed.
                 let old = c.model.command.get(1).map_or_else(String::new, |p| {
-                    format!("; model.command nombra {p}, que ya no se usa y puede quedar en []")
+                    format!(
+                        "; model.command names {p}, which is no longer used and can be left as []"
+                    )
                 });
                 o.say(
                     Level::Pass,
                     format!(
-                        "el adaptador del modelo es el que trae este binario ({}){old}",
+                        "the model adapter is the one this binary brings ({}){old}",
                         builtin_adapter_path(dirs, conn).display()
                     ),
                     None,
@@ -872,12 +874,12 @@ pub fn collect(dirs: &Dirs) -> Report {
             {
                 o.say(
                     Level::Fail,
-                    format!("el adaptador del modelo {script} no existe"),
-                    Some("Corrige model.command en ~/.config/clio/config.json, o déjalo en [] para usar el que trae Clio.".into()),
+                    format!("the model adapter {script} does not exist"),
+                    Some("Fix model.command in ~/.config/clio/config.json, or leave it as [] to use the one Clio brings.".into()),
                 );
             }
         }
-        Err(e) => o.say(Level::Warn, e, Some("Ejecuta `clio init`.".into())),
+        Err(e) => o.say(Level::Warn, e, Some("Run `clio init`.".into())),
     }
     old_key_file(&mut o, dirs);
     if let Some(rt) = &dirs.runtime
@@ -890,7 +892,7 @@ pub fn collect(dirs: &Dirs) -> Report {
                     o.say(
                         Level::Fail,
                         format!(
-                            "el socket {} tiene modo {m:o}, debe ser 600",
+                            "the socket {} has mode {m:o}, it must be 600",
                             e.path().display()
                         ),
                         Some(format!("chmod 600 {}", e.path().display())),
@@ -898,7 +900,7 @@ pub fn collect(dirs: &Dirs) -> Report {
                 } else {
                     o.say(
                         Level::Pass,
-                        format!("el socket {} es 600", e.path().display()),
+                        format!("the socket {} is 600", e.path().display()),
                         None,
                     );
                 }
@@ -909,14 +911,14 @@ pub fn collect(dirs: &Dirs) -> Report {
     if l.is_empty() {
         o.say(
             Level::Pass,
-            "ningún proceso clio escucha fuera de loopback (S-38)".into(),
+            "no clio process listens outside loopback (S-38)".into(),
             None,
         );
     } else {
         o.say(
             Level::Fail,
-            format!("clio escucha fuera de loopback: {}", l.join(", ")),
-            Some("Detén ese proceso: Clio no debe escuchar en una dirección pública.".into()),
+            format!("clio listens outside loopback: {}", l.join(", ")),
+            Some("Stop that process: Clio must not listen on a public address.".into()),
         );
     }
     for (level, msg, hint) in super::pi::checks(dirs) {
@@ -979,16 +981,16 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
         "{}",
         if r.ok() {
             st.green(&format!(
-                "doctor: bien ({} ok, {}; los avisos son decisión tuya)",
+                "doctor: good ({} ok, {}; the warnings are your call)",
                 r.count(Level::Pass),
-                plural(r.count(Level::Warn), "aviso", "avisos")
+                plural(r.count(Level::Warn), "warning", "warnings")
             ))
         } else {
             st.red(&format!(
-                "doctor: hay {} ({} ok, {})",
-                plural(r.count(Level::Fail), "fallo", "fallos"),
+                "doctor: {} ({} ok, {})",
+                plural(r.count(Level::Fail), "failure", "failures"),
                 r.count(Level::Pass),
-                plural(r.count(Level::Warn), "aviso", "avisos")
+                plural(r.count(Level::Warn), "warning", "warnings")
             ))
         }
     );
@@ -1020,11 +1022,11 @@ mod tests {
         assert_eq!(bwrap[0].0, Level::Pass);
         assert_eq!(
             bwrap[1],
-            (Level::Warn, "la consola de Clio no tendrá sudo".into())
+            (Level::Warn, "Clio's console will have no sudo".into())
         );
         let broken = said(Ok((Launcher::Bwrap, Err("x".into()))));
         assert_eq!(broken[0].0, Level::Fail);
-        assert_eq!(said(Err("nada".into()))[0].0, Level::Fail);
+        assert_eq!(said(Err("nothing".into()))[0].0, Level::Fail);
     }
 
     #[test]
@@ -1047,7 +1049,7 @@ mod tests {
         };
         let (level, msg) = said(1_800_000_000);
         assert!(
-            matches!(level, Level::Warn) && msg.contains("todavía no durmió"),
+            matches!(level, Level::Warn) && msg.contains("has not slept yet"),
             "{msg}"
         );
         // With the timer installed it only has not run yet: no warning, nothing to install.
@@ -1062,7 +1064,7 @@ mod tests {
         std::fs::write(&unit, "").unwrap();
         let (level, msg) = said(1_800_000_000);
         assert!(
-            matches!(level, Level::Pass) && msg.contains("el timer ya está instalado"),
+            matches!(level, Level::Pass) && msg.contains("the timer is already installed"),
             "{msg}"
         );
         let mut r = clio_memory::sleep::Report {
@@ -1083,19 +1085,19 @@ mod tests {
         write(&r);
         let (level, msg) = said(1_800_003_600);
         assert!(
-            matches!(level, Level::Pass) && msg.contains("completa"),
+            matches!(level, Level::Pass) && msg.contains("complete"),
             "{msg}"
         );
         let (level, msg) = said(1_800_000_000 + 5 * 86_400);
         assert!(
-            matches!(level, Level::Warn) && msg.contains("hace 4 días"),
+            matches!(level, Level::Warn) && msg.contains("4 days ago"),
             "{msg}"
         );
-        r.alarms.push("la copia falló".into());
+        r.alarms.push("the backup failed".into());
         write(&r);
         let (level, msg) = said(1_800_003_600);
         assert!(
-            matches!(level, Level::Warn) && msg.contains("la copia falló"),
+            matches!(level, Level::Warn) && msg.contains("the backup failed"),
             "{msg}"
         );
     }

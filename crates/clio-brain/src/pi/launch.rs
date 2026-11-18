@@ -153,10 +153,10 @@ fn resolve_ref(paths: &PiPaths, r: &str) -> Result<(OsString, String), PiError> 
         let root = paths
             .sessions_dir()
             .canonicalize()
-            .map_err(|e| PiError::Io(format!("sesiones de Pi: {e}")))?;
+            .map_err(|e| PiError::Io(format!("Pi sessions: {e}")))?;
         if !p.starts_with(&root) || p.extension().is_none_or(|x| x != "jsonl") {
             return Err(PiError::Verification(format!(
-                "la sesión {} no está en la carpeta de sesiones de Pi",
+                "the session {} is not in Pi's sessions folder",
                 text::line(r, 120)
             )));
         }
@@ -165,13 +165,13 @@ fn resolve_ref(paths: &PiPaths, r: &str) -> Result<(OsString, String), PiError> 
             .and_then(|s| s.to_str())
             .and_then(|s| s.rsplit_once('_').map(|(_, id)| id.to_owned()))
             .filter(|id| valid_id(id))
-            .ok_or_else(|| PiError::Io("el nombre del archivo de sesión no trae un id".into()))?;
+            .ok_or_else(|| PiError::Io("the session file name carries no id".into()))?;
         Ok((p.into_os_string(), id))
     } else if valid_id(r) {
         Ok((r.into(), r.to_owned()))
     } else {
         Err(PiError::Io(format!(
-            "referencia de sesión inválida: {}",
+            "invalid session reference: {}",
             text::line(r, 60)
         )))
     }
@@ -185,7 +185,7 @@ fn resolve(l: &Launch) -> Result<Resolved, PiError> {
                 Some(i) if valid_id(i) => i.clone(),
                 Some(i) => {
                     return Err(PiError::Io(format!(
-                        "id de sesión inválido: {}",
+                        "invalid session id: {}",
                         text::line(i, 60)
                     )));
                 }
@@ -305,7 +305,7 @@ pub struct Built {
 pub fn build(l: &Launch) -> Result<Built, PiError> {
     if !l.cwd.is_absolute() || !l.cwd.is_dir() {
         return Err(PiError::Io(format!(
-            "la carpeta del proyecto {} no existe",
+            "the project folder {} does not exist",
             text::line(&l.cwd.display().to_string(), 120)
         )));
     }
@@ -313,7 +313,7 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
         && !(g.is_absolute() && g.is_file())
     {
         return Err(PiError::NotInstalled(format!(
-            "no encuentro la extensión de guardia {}",
+            "could not find the guard extension {}",
             text::line(&g.display().to_string(), 120)
         )));
     }
@@ -321,7 +321,7 @@ pub fn build(l: &Launch) -> Result<Built, PiError> {
         && !l.install.dir.join(x).is_file()
     {
         return Err(PiError::NotInstalled(
-            "falta el puente de Claude (pi-claude-agent-sdk): clio pi install".into(),
+            "the Claude bridge is missing (pi-claude-agent-sdk): clio pi install".into(),
         ));
     }
     let r = resolve(l)?;
@@ -459,7 +459,7 @@ pub fn verify_startup(c: &RpcClient, l: &Launch, session_id: &str) -> Result<Sta
     };
     if st.provider != l.provider.id || st.model != l.provider.model {
         return fail(format!(
-            "el modelo activo es {}/{}, se pidió {}/{}",
+            "the active model is {}/{}, {}/{} was asked for",
             text::line(&st.provider, 40),
             text::line(&st.model, 60),
             l.provider.id,
@@ -468,12 +468,12 @@ pub fn verify_startup(c: &RpcClient, l: &Launch, session_id: &str) -> Result<Sta
     }
     if st.session_id != session_id && !matches!(l.session, SessionTarget::Open(_)) {
         return fail(format!(
-            "la sesión activa es {}, se pidió {session_id}",
+            "the active session is {}, {session_id} was asked for",
             text::line(&st.session_id, 64)
         ));
     }
     if st.is_streaming {
-        return fail("Pi arrancó ya ocupado".into());
+        return fail("Pi started already busy".into());
     }
     // Extension commands, skills and prompt templates all show up here: only the guard's allowed.
     for cmd in c.get_commands()? {
@@ -484,7 +484,7 @@ pub fn verify_startup(c: &RpcClient, l: &Launch, session_id: &str) -> Result<Sta
             };
         if !ok {
             return fail(format!(
-                "comando inesperado /{} (origen {})",
+                "unexpected command /{} (source {})",
                 text::line(cmd["name"].as_str().unwrap_or("?"), 40),
                 text::line(cmd["source"].as_str().unwrap_or("?"), 20)
             ));
@@ -505,7 +505,7 @@ pub fn check_loadout(messages: &[Value], allowed: &[String]) -> Result<(), Strin
             let n = t["name"].as_str().unwrap_or("?");
             if !allowed.iter().any(|a| a == n) {
                 return Err(format!(
-                    "la sesión declara la herramienta {}, fuera de la lista permitida",
+                    "the session declares the tool {}, outside the allowed list",
                     text::line(n, 40)
                 ));
             }
@@ -681,7 +681,7 @@ mod tests {
         };
         assert_eq!(
             e.to_string(),
-            "falta el puente de Claude (pi-claude-agent-sdk): clio pi install"
+            "the Claude bridge is missing (pi-claude-agent-sdk): clio pi install"
         );
     }
 

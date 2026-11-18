@@ -52,7 +52,7 @@ fn apply_refuses_a_file_that_carries_a_masked_value() {
         let o = e.try_clio(&["apply", "--yes", "--force", &id]);
         let err = String::from_utf8_lossy(&o.stderr).into_owned();
         assert!(
-            !o.status.success() && err.contains("tachado"),
+            !o.status.success() && err.contains("redacted value"),
             "{masked}: {err}"
         );
         assert_eq!(

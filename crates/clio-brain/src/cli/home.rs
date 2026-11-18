@@ -33,9 +33,9 @@ pub struct Dirs {
 
 impl Dirs {
     pub fn from_env() -> Res<Self> {
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME no está definida")?);
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
         if !home.is_absolute() {
-            return Err("HOME debe ser una ruta absoluta".into());
+            return Err("HOME must be an absolute path".into());
         }
         let data = home.join(".local/share/clio");
         Ok(Self {
@@ -76,7 +76,7 @@ impl Dirs {
     pub fn need_runtime(&self) -> Res<&Path> {
         self.runtime
             .as_deref()
-            .ok_or_else(|| "XDG_RUNTIME_DIR no está definida (entra por una sesión normal)".into())
+            .ok_or_else(|| "XDG_RUNTIME_DIR is not set (log in through a normal session)".into())
     }
 }
 
@@ -147,7 +147,7 @@ impl Mode {
     /// What `--host` or `--copy` say, which decides over the configuration; `None`: neither.
     pub fn from_flags(host: bool, copy: bool) -> Res<Option<Mode>> {
         match (host, copy) {
-            (true, true) => Err("--host y --copy no van juntas".into()),
+            (true, true) => Err("--host and --copy do not go together".into()),
             (true, false) => Ok(Some(Mode::Host)),
             (false, true) => Ok(Some(Mode::Copy)),
             (false, false) => Ok(None),
@@ -232,13 +232,13 @@ impl ModelCfg {
         let at = file.display();
         if clio_brain::connector::by_provider(&self.provider).is_none() {
             return Err(format!(
-                "{at}: model.provider {:?} no es un conector: usa clio connect opencode|claude|anthropic-api",
+                "{at}: model.provider {:?} is not a connector: use clio connect opencode|claude|anthropic-api",
                 self.provider
             ));
         }
         if !clio_brain::pi::launch::THINKING.contains(&self.thinking.as_str()) {
             return Err(format!(
-                "{at}: model.thinking {:?} no es un nivel de Pi ({})",
+                "{at}: model.thinking {:?} is not a Pi level ({})",
                 self.thinking,
                 clio_brain::pi::launch::THINKING.join(", ")
             ));
@@ -247,7 +247,7 @@ impl ModelCfg {
             && !clio_brain::connector::is_loopback(u)
         {
             return Err(format!(
-                "{at}: model.base_url solo puede apuntar a esta máquina (127.0.0.1, localhost, [::1])"
+                "{at}: model.base_url can only point at this machine (127.0.0.1, localhost, [::1])"
             ));
         }
         Ok(())
@@ -299,7 +299,7 @@ impl Config {
     fn load_inner(dirs: &Dirs, provider: Option<&str>) -> Res<Self> {
         let p = dirs.config_file();
         let text = std::fs::read_to_string(&p)
-            .map_err(|e| format!("{}: {e} (ejecuta `clio init` primero)", p.display()))?;
+            .map_err(|e| format!("{}: {e} (run `clio init` first)", p.display()))?;
         let mut cfg: Self =
             serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
         if let Some(provider) = provider {
@@ -311,8 +311,12 @@ impl Config {
 
     /// The connector of `model.provider` (`load` checks that there is one).
     fn connector(&self) -> Res<&'static Connector> {
-        by_provider(&self.model.provider)
-            .ok_or_else(|| format!("model.provider {:?} no es un conector", self.model.provider))
+        by_provider(&self.model.provider).ok_or_else(|| {
+            format!(
+                "model.provider {:?} is not a connector",
+                self.model.provider
+            )
+        })
     }
 
     /// The model adapter's program and arguments as a run starts it: the adapter of the active
@@ -419,7 +423,7 @@ pub fn claude_code(dirs: &Dirs) -> Res<PathBuf> {
     clio_brain::pi::install::locate(&super::pi::paths(dirs))
         .ok()
         .and_then(|i| clio_brain::pi::install::claude_code_bin(&i.dir))
-        .ok_or_else(|| "falta Claude Code (pi-claude-agent-sdk): clio pi install".to_owned())
+        .ok_or_else(|| "Claude Code (pi-claude-agent-sdk) is missing: clio pi install".to_owned())
 }
 
 /// Where the adapter file `file` inside this binary is written: `<data>/adapters/<file>`.
@@ -438,7 +442,7 @@ fn adapter_source(c: &Connector) -> Res<&'static str> {
         ADAPTER_FILE => Ok(ADAPTER_SOURCE),
         CLAUDE_ADAPTER_FILE => Ok(CLAUDE_ADAPTER_SOURCE),
         API_ADAPTER_FILE => Ok(API_ADAPTER_SOURCE),
-        _ => Err(format!("el adaptador de {} todavía no está", c.name)),
+        _ => Err(format!("the adapter of {} is not there yet", c.name)),
     }
 }
 
@@ -478,9 +482,9 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         println!(
             "{ok}  {} {} (0700)",
             if existed {
-                "ya estaba   "
+                "existed     "
             } else {
-                "creada      "
+                "created     "
             },
             d.display()
         );
@@ -496,22 +500,22 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         Ok(link) => {
             let (a, q, _) = link.counts().unwrap_or((0, 0, 0));
             println!(
-                "{ok}  memoria      {} (0600; {a} recuerdos, {q} en cuarentena)",
+                "{ok}  memory       {} (0600; {a} memories, {q} in quarantine)",
                 MemoryLink::db_path(&dirs.data).display()
             );
         }
-        Err(e) => println!("{}  memoria: {e}", st.mark(Level::Warn)),
+        Err(e) => println!("{}  memory: {e}", st.mark(Level::Warn)),
     }
     let cfg = dirs.config_file();
     if cfg.exists() {
-        println!("{ok}  ya existe    {} (se deja como está)", cfg.display());
+        println!("{ok}  exists       {} (left as it is)", cfg.display());
     } else {
         // No path in the file: an empty command is the adapter inside this binary, so the file
         // keeps working when Clio is updated or moved to another machine.
         let c = Config::default_with(Vec::new());
         let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
         write_private(&cfg, text.as_bytes())?;
-        println!("{ok}  creada       {} (0600)", cfg.display());
+        println!("{ok}  created      {} (0600)", cfg.display());
     }
     super::pi::init_lines(dirs);
     // The active connector (a new config is OpenCode); the key is never shown.
@@ -520,21 +524,18 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         .and_then(|c| by_provider(&c.model.provider))
         .unwrap_or(&CONNECTORS[0]);
     if std::env::var_os(c.key_env).is_some_and(|v| !v.is_empty()) {
-        println!(
-            "{ok}  llave del modelo: viene de {} (no se muestra)",
-            c.key_env
-        );
+        println!("{ok}  model key: it comes from {} (not shown)", c.key_env);
     } else if super::vault::has_model_key(dirs, c) {
-        println!("{ok}  llave del modelo: está en el baúl (no se muestra)");
+        println!("{ok}  model key: it is in the vault (not shown)");
     } else {
         println!(
-            "{}  falta la llave del modelo: abre el baúl (clio vault start) y ejecuta clio connect {}",
+            "{}  the model key is missing: start the vault (clio vault start) and run clio connect {}",
             st.mark(Level::Warn),
             c.name
         );
     }
     println!(
-        "\nsiguiente: {}, y luego {}",
+        "\nnext: {}, and then {}",
         st.bold("clio doctor"),
         st.bold("clio")
     );
@@ -708,7 +709,7 @@ mod tests {
         // No Pi: the message says how to get it.
         assert_eq!(
             c.model_command(&dirs).unwrap_err(),
-            "falta Claude Code (pi-claude-agent-sdk): clio pi install"
+            "Claude Code (pi-claude-agent-sdk) is missing: clio pi install"
         );
         // A Pi of the pinned version, with Claude Code for this machine.
         let v = clio_brain::pi::install::pinned_version().unwrap();

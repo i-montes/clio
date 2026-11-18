@@ -604,14 +604,14 @@ fn attack_43() -> Option<bool> {
         "the versioned Clio prompt is the system prompt"
     );
     assert!(
-        !system_text(&reqs[0]).contains("read content from outside"),
+        !system_text(&reqs[0]).contains("has read content from outside"),
         "clean at the start"
     );
     // The system prompt is built when a run starts, so the notice shows up from the next run on.
     let _ = s.pi.prompt("anything else?");
     let last = model.requests().pop().unwrap();
     assert!(
-        system_text(&last).contains("read content from outside"),
+        system_text(&last).contains("has read content from outside"),
         "tainted after the read"
     );
     assert_eq!(
@@ -665,7 +665,7 @@ fn attack_43() -> Option<bool> {
         "the reopened session told the new host it is tainted (it never read anything in this process)"
     );
     assert!(
-        system_text(&model2.requests()[0]).contains("read content from outside"),
+        system_text(&model2.requests()[0]).contains("has read content from outside"),
         "the reopened session knows it is tainted"
     );
     assert_eq!(

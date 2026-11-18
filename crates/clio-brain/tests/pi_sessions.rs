@@ -71,7 +71,7 @@ fn lists_titles_names_counts_and_dates() {
         (b.title.as_str(), b.name.as_deref()),
         ("Login work", Some("Login work"))
     );
-    assert_eq!(by("ccc").title, "(sin mensajes)");
+    assert_eq!(by("ccc").title, "(no messages)");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn broken_files_are_skipped_with_a_warning_and_do_not_break_the_list() {
         "{ids:?}"
     );
     assert_eq!(l.warnings.len(), 4, "{:?}", l.warnings);
-    assert!(l.warnings.iter().all(|w| w.starts_with("se ignora")));
+    assert!(l.warnings.iter().all(|w| w.starts_with("ignored")));
     assert!(
         list_sessions(Path::new("/nonexistent-clio-dir"))
             .sessions
@@ -189,7 +189,7 @@ fn a_big_file_is_sampled_not_loaded_and_hundreds_of_sessions_list_fast() {
 }
 
 // The title of a session is the first thing the person typed, not the envelope the brain put in
-// front of it (spec: Jev, «el antes del prompt»).
+// front of it (spec: Jev, "before the prompt").
 #[test]
 fn the_title_is_what_the_person_typed_not_the_envelope() {
     let d = tempfile::tempdir().unwrap();

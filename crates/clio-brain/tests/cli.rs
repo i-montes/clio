@@ -198,11 +198,11 @@ fn full_cycle_run_diff_apply_undo() {
     assert_eq!(e.read("app.py"), OLD_APP);
     assert!(!e.proj().join("docs").exists());
     assert!(
-        out_run.contains("NO se copió") && out_run.contains(".env"),
+        out_run.contains("NOT copied") && out_run.contains(".env"),
         "{out_run}"
     );
     assert!(
-        out_run.contains("1 modificados, 1 creados, 0 borrados"),
+        out_run.contains("1 modified, 1 created, 0 deleted"),
         "{out_run}"
     );
     assert!(out_run.contains("clio diff") && out_run.contains("clio apply"));
@@ -244,7 +244,7 @@ fn full_cycle_run_diff_apply_undo() {
     assert!(diff.contains("+++ b/docs/new.md"));
 
     let applied = e.clio(&["apply", "--yes", &id]);
-    assert!(applied.contains("2 archivo(s) aplicados"), "{applied}");
+    assert!(applied.contains("2 file(s) applied"), "{applied}");
     assert_eq!(e.read("app.py"), NEW_APP);
     assert_eq!(e.read("docs/new.md"), "hello\n");
     assert_eq!(e.read("notes.txt"), "keep me\n");
@@ -283,7 +283,7 @@ fn apply_declines_without_confirmation() {
     use std::io::Write;
     child.stdin.take().unwrap().write_all(b"n\n").unwrap();
     let o = child.wait_with_output().unwrap();
-    assert!(text(&o.stdout).contains("no se aplicó"));
+    assert!(text(&o.stdout).contains("not applied"));
     assert_eq!(e.read("app.py"), OLD_APP);
 }
 
@@ -299,7 +299,7 @@ fn apply_refuses_when_the_original_changed() {
     let o = e.try_clio(&["apply", "--yes", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("cambió en el original"),
+        text(&o.stderr).contains("changed in the original"),
         "{}",
         text(&o.stderr)
     );
@@ -326,7 +326,7 @@ fn apply_refuses_a_symlink_that_escapes() {
     let o = e.try_clio(&["apply", "--yes", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("enlace simbólico"),
+        text(&o.stderr).contains("symbolic link"),
         "{}",
         text(&o.stderr)
     );
@@ -351,7 +351,7 @@ fn apply_refuses_protected_and_secret_paths_even_with_force() {
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("ruta protegida"),
+        text(&o.stderr).contains("protected path"),
         "{}",
         text(&o.stderr)
     );
@@ -359,7 +359,7 @@ fn apply_refuses_protected_and_secret_paths_even_with_force() {
     std::fs::write(sandbox.join(".env.production"), "A=1\n").unwrap();
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     assert!(
-        text(&o.stderr).contains("parece un secreto"),
+        text(&o.stderr).contains("it looks like a secret"),
         "{}",
         text(&o.stderr)
     );
@@ -381,7 +381,7 @@ fn apply_refuses_agent_folders_any_case_and_ignores_generated_ones() {
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("ruta protegida"),
+        text(&o.stderr).contains("protected path"),
         "{}",
         text(&o.stderr)
     );
@@ -407,7 +407,7 @@ fn apply_refuses_what_the_diff_cannot_show_unless_forced() {
     let o = e.try_clio(&["apply", "--yes", &id]);
     assert!(!o.status.success());
     assert!(
-        text(&o.stderr).contains("no se pueden mostrar completos"),
+        text(&o.stderr).contains("cannot be shown in full"),
         "{}",
         text(&o.stderr)
     );
@@ -442,7 +442,7 @@ fn init_is_idempotent_and_private() {
     )
     .unwrap();
     let out = e.clio(&["init"]);
-    assert!(out.contains("se deja como está"), "{out}");
+    assert!(out.contains("left as it is"), "{out}");
     assert_eq!(
         std::fs::read_to_string(&cfg).unwrap(),
         before,
@@ -501,7 +501,7 @@ fn the_model_adapter_is_the_one_inside_the_binary() {
     let out = text(&o.stdout);
     assert!(o.status.success(), "{out}{}", text(&o.stderr));
     assert!(
-        out.contains("el adaptador del modelo es el que trae este binario"),
+        out.contains("the model adapter is the one this binary brings"),
         "{out}"
     );
 
@@ -514,18 +514,18 @@ fn the_model_adapter_is_the_one_inside_the_binary() {
     let out = text(&o.stdout);
     assert!(o.status.success(), "{out}{}", text(&o.stderr));
     assert!(
-        out.contains("el adaptador del modelo es el que trae este binario"),
+        out.contains("the model adapter is the one this binary brings"),
         "{out}"
     );
-    assert!(out.contains("ya no se usa"), "{out}");
-    assert!(!out.contains("openai_compat.py no existe"), "{out}");
+    assert!(out.contains("is no longer used"), "{out}");
+    assert!(!out.contains("openai_compat.py does not exist"), "{out}");
 
     // Another adapter, written by the person, is theirs: missing, it is a failure.
     cfg["model"]["command"] = json!(["python3", "/ya/no/esta/mi_adaptador.py"]);
     std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
     let o = e.try_clio(&["doctor"]);
     assert_eq!(o.status.code(), Some(1));
-    assert!(text(&o.stdout).contains("mi_adaptador.py no existe"));
+    assert!(text(&o.stdout).contains("mi_adaptador.py does not exist"));
 }
 
 #[test]
@@ -545,7 +545,7 @@ fn a_config_with_an_unknown_provider_says_to_connect() {
     std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
     let o = e.try_clio(&["doctor"]);
     let out = format!("{}{}", text(&o.stdout), text(&o.stderr));
-    assert!(out.contains("esta máquina"), "{out}");
+    assert!(out.contains("this machine"), "{out}");
 }
 
 #[test]
@@ -579,7 +579,7 @@ fn connector_line(e: &Env, extra_env: &[(&str, &str)]) -> String {
         .unwrap();
     text(&o.stdout)
         .lines()
-        .find(|l| l.contains("conector "))
+        .find(|l| l.contains("connector "))
         .unwrap_or_default()
         .to_owned()
 }
@@ -597,7 +597,7 @@ fn doctor_says_the_claude_connector_will_not_start_with_the_jail_off() {
             .unwrap();
         text(&o.stdout)
             .lines()
-            .find(|l| l.contains("jaula de Pi"))
+            .find(|l| l.contains("Pi jail"))
             .unwrap_or_default()
             .to_owned()
     };
@@ -606,11 +606,12 @@ fn doctor_says_the_claude_connector_will_not_start_with_the_jail_off() {
         other.starts_with("FAIL") && other.contains("CLIO_PI_JAIL=off"),
         "{other}"
     );
-    assert!(!other.contains("conector"), "{other}");
+    assert!(!other.contains("connector"), "{other}");
     use_claude(&e);
     let claude = jail_line(&e);
     assert!(
-        claude.starts_with("FAIL") && claude.contains("el conector claude NO arrancará sin ella"),
+        claude.starts_with("FAIL")
+            && claude.contains("the connector claude will NOT start without it"),
         "{claude}"
     );
 }
@@ -642,7 +643,7 @@ fn doctor_says_a_connector_key_is_in_the_vault_and_where_it_may_go() {
     assert!(
         line.starts_with("PASS")
             && line.contains(
-                "conector claude: la llave está en el baúl y solo puede ir a api.anthropic.com"
+                "connector claude: the key is in the vault and can only go to api.anthropic.com"
             ),
         "{line}"
     );
@@ -651,7 +652,7 @@ fn doctor_says_a_connector_key_is_in_the_vault_and_where_it_may_go() {
     let line = connector_line(&e, &[("CLAUDE_CODE_OAUTH_TOKEN", "from-the-variable")]);
     assert!(
         line.starts_with("PASS")
-            && line.contains("conector claude: la llave viene de CLAUDE_CODE_OAUTH_TOKEN")
+            && line.contains("connector claude: the key comes from CLAUDE_CODE_OAUTH_TOKEN")
             && !line.contains("from-the-variable"),
         "{line}"
     );
@@ -687,12 +688,12 @@ fn doctor_warns_about_a_key_file_left_behind() {
     let out = text(&o.stdout);
     let line = out
         .lines()
-        .find(|l| l.contains("queda una llave"))
+        .find(|l| l.contains("a key is left"))
         .unwrap_or_default();
     assert!(
         line.starts_with("WARN")
             && line.contains(&format!(
-                "queda una llave en {}: clio connect opencode la pasa al baúl",
+                "a key is left in {}: clio connect opencode moves it into the vault",
                 key.display()
             )),
         "{out}"
@@ -739,7 +740,7 @@ fn run_refuses_broad_or_huge_workspaces() {
     for ws in ["/", &e.home().display().to_string()] {
         let o = e.try_clio(&["run", "--workspace", ws, "hazlo"]);
         assert!(!o.status.success(), "{ws}");
-        assert!(text(&o.stderr).contains("rechazo"), "{}", text(&o.stderr));
+        assert!(text(&o.stderr).contains("refusing"), "{}", text(&o.stderr));
     }
     // Lower the limit to 2 files: the project (3 files) is too big until --allow-broad.
     let cfg_path = e.home().join(".config/clio/config.json");
@@ -776,7 +777,7 @@ fn no_arguments_without_a_terminal_prints_help_and_exits_0() {
     }
     let o = e.try_clio(&["frobnicate"]);
     assert_eq!(o.status.code(), Some(2));
-    assert!(text(&o.stderr).contains("comando desconocido"));
+    assert!(text(&o.stderr).contains("unknown command"));
 }
 
 #[test]
@@ -791,10 +792,10 @@ fn run_prints_a_line_per_step_and_a_plain_panel_without_escape_codes() {
     ]);
     assert!(!o.contains('\u{1b}'), "a pipe gets no color codes: {o:?}");
     assert!(o.contains("[1/40] read_file app.py"), "{o}");
-    assert!(o.contains("permitido"), "{o}");
-    assert!(o.contains("[4/40] el modelo dice que terminó"), "{o}");
+    assert!(o.contains("allowed"), "{o}");
+    assert!(o.contains("[4/40] the model says it is done"), "{o}");
     assert!(
-        o.contains("agente:") && o.contains("El original NO se tocó"),
+        o.contains("agent:") && o.contains("The original was NOT touched"),
         "{o}"
     );
     assert!(
@@ -861,7 +862,7 @@ fn the_default_harness_says_when_it_falls_back_to_the_builtin_loop() {
     let o = e.try_clio(&["run", "--workspace", &proj, "arregla total en app.py"]);
     assert!(o.status.success());
     assert!(
-        text(&o.stderr).contains("Pi no está disponible"),
+        text(&o.stderr).contains("Pi is not available"),
         "{}",
         text(&o.stderr)
     );
@@ -875,7 +876,7 @@ fn the_default_harness_says_when_it_falls_back_to_the_builtin_loop() {
         "arregla total en app.py",
     ]);
     assert!(o.status.success());
-    assert!(!text(&o.stderr).contains("Pi no está disponible"));
+    assert!(!text(&o.stderr).contains("Pi is not available"));
 }
 
 #[test]
@@ -896,7 +897,7 @@ fn runs_show_and_doctor_speak_json() {
     // The table is aligned and has a header.
     let table = e.clio(&["runs"]);
     assert!(
-        table.starts_with("RUN") && table.contains("pendiente de revisar"),
+        table.starts_with("RUN") && table.contains("pending review"),
         "{table}"
     );
     e.clio(&["apply", "--yes", &id]);
@@ -1041,7 +1042,7 @@ fn pty_cancelling_a_live_run_leaves_it_cancelled_and_the_original_untouched() {
     assert_eq!(e.read("app.py"), OLD_APP);
     let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
     assert_eq!(runs[0]["status"], "cancelled");
-    assert!(e.clio(&["runs"]).contains("cancelado"));
+    assert!(e.clio(&["runs"]).contains("cancelled"));
 }
 
 /// Prints the plain outputs (for the docs): `cargo test -p clio-brain --test cli print_plain -- --ignored --nocapture`.
@@ -1173,11 +1174,11 @@ fn debug_writes_a_private_log_and_stderr_lines_without_the_secret() {
     p.canaries.assert_clean("stderr", &err);
     assert!(!err.contains('\u{1b}'), "stderr is sanitized: {err:?}");
     for want in [
-        "[debug] depuración activa",
-        "[debug] contexto #1",
-        "[debug] llamada #1",
-        "[debug] petición #1",
-        "[debug] pasarela #1",
+        "[debug] debug on",
+        "[debug] context #1",
+        "[debug] call #1",
+        "[debug] request #1",
+        "[debug] gateway #1",
         "read_file",
     ] {
         assert!(err.contains(want), "{want}\n{err}");
@@ -1306,7 +1307,7 @@ fn every_run_keeps_its_usage_and_context_in_usage_json() {
 // The real host script is Linux-only (ss, findmnt, systemctl): this test does not apply on macOS.
 #[cfg(target_os = "linux")]
 #[test]
-fn doctor_shows_each_check_once_and_in_spanish_with_the_real_host_script() {
+fn doctor_shows_each_check_once_with_the_real_host_script() {
     let e = Env::new();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/local/check-host.sh");
     let o = e
@@ -1342,21 +1343,13 @@ fn doctor_shows_each_check_once_and_in_spanish_with_the_real_host_script() {
         .collect();
     let count = |needle: &str| msgs.iter().filter(|m| m.contains(needle)).count();
     // Permissions: one line per Clio folder, not two.
-    assert_eq!(count("es privada (700)"), 3, "{msgs:#?}");
+    assert_eq!(count("is private (700)"), 3, "{msgs:#?}");
     assert_eq!(count("(S-23)"), 0, "{msgs:#?}");
     // Ports: one line, Clio's own.
-    assert_eq!(count("escucha fuera de loopback"), 1, "{msgs:#?}");
+    assert_eq!(count("listens outside loopback"), 1, "{msgs:#?}");
     assert_eq!(count("ningún proceso de Clio escucha"), 0, "{msgs:#?}");
-    // The host script's own lines are in Spanish.
-    for english in [
-        "is private",
-        "listens",
-        "must be",
-        "is not running",
-        "firewall active",
-        "is not installed",
-        "backup tool",
-    ] {
+    // The host script's own lines are still in Spanish (infra/local/check-host.sh).
+    for english in ["firewall active", "backup tool"] {
         assert_eq!(count(english), 0, "{english}: {msgs:#?}");
     }
     assert!(
@@ -1539,7 +1532,7 @@ fn connect_without_the_vault_changes_nothing() {
     let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy\n", &[]);
     assert!(!o.status.success());
     assert!(
-        all_text(&o).contains("el baúl no está corriendo"),
+        all_text(&o).contains("the vault is not running"),
         "{}",
         all_text(&o)
     );
@@ -1583,7 +1576,7 @@ fn connect_claude_trims_stores_and_switches() {
     assert!(o.status.success(), "{out}");
     assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
     assert!(
-        out.contains("Clio usa tu suscripción a través de Claude Code (oficial). El token sale de: claude setup-token"),
+        out.contains("Clio uses your subscription through Claude Code (official). The token comes from: claude setup-token"),
         "{out}"
     );
     assert!(
@@ -1591,7 +1584,7 @@ fn connect_claude_trims_stores_and_switches() {
         "{out}"
     );
     assert!(
-        out.contains("conectado: claude / claude-sonnet-5-5 respondió"),
+        out.contains("connected: claude / claude-sonnet-5-5 answered"),
         "{out}"
     );
     let list = e.vault_list();
@@ -1612,7 +1605,7 @@ fn connect_claude_trims_stores_and_switches() {
     assert_eq!(mode(&e.home().join(".config/clio/config.json")), 0o600);
     // model.command (the scripted adapter of this Env) is the person's own program: warned about,
     // and the probe did not use it (it would have left its `seen` file).
-    assert!(out.contains("model.command es un programa tuyo"), "{out}");
+    assert!(out.contains("model.command is a program of yours"), "{out}");
     assert!(!e.tmp.path().join("script/seen").exists());
     // The probe went through Claude Code, with the trimmed token only in its environment.
     let seen = e.claude_seen().expect("Claude Code was not run");
@@ -1620,12 +1613,7 @@ fn connect_claude_trims_stores_and_switches() {
         seen["env"]["CLAUDE_CODE_OAUTH_TOKEN"],
         "sk-ant-oat01-decoy-token"
     );
-    assert!(
-        seen["stdin"]
-            .as_str()
-            .unwrap()
-            .contains("Responde solo: ok")
-    );
+    assert!(seen["stdin"].as_str().unwrap().contains("Reply only: ok"));
     assert!(!seen["argv"].to_string().contains("sk-ant-oat01"));
 }
 
@@ -1638,7 +1626,7 @@ fn connect_claude_without_the_bridge_saves_nothing() {
     let out = all_text(&o);
     assert!(!o.status.success(), "{out}");
     assert!(
-        out.contains("falta el puente de Claude (pi-claude-agent-sdk): clio pi install"),
+        out.contains("the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install"),
         "{out}"
     );
     assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
@@ -1670,7 +1658,7 @@ fn connect_anthropic_api_stores_and_switches() {
     assert!(o.status.success(), "{out}");
     assert!(!out.contains(key), "{out}");
     assert!(
-        out.contains("conectado: anthropic-api / claude-sonnet-5-5 respondió"),
+        out.contains("connected: anthropic-api / claude-sonnet-5-5 answered"),
         "{out}"
     );
     let list = e.vault_list();
@@ -1685,7 +1673,7 @@ fn connect_anthropic_api_stores_and_switches() {
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(seen[0]["headers"]["x_api_key_matches"], json!(true));
     assert_eq!(seen[0]["headers"]["authorization_present"], json!(false));
-    assert_eq!(seen[0]["last_user"], "Responde solo: ok");
+    assert_eq!(seen[0]["last_user"], "Reply only: ok");
 }
 
 #[test]
@@ -1718,7 +1706,7 @@ fn connect_with_an_unknown_model_warns() {
     );
     assert!(o.status.success(), "{}", all_text(&o));
     assert!(
-        all_text(&o).contains("ventana de contexto desconocida"),
+        all_text(&o).contains("unknown context window"),
         "{}",
         all_text(&o)
     );
@@ -1746,7 +1734,7 @@ fn connect_reuses_a_key_already_in_the_vault_and_still_probes() {
     assert!(o.status.success(), "{out}");
     assert!(!out.contains("guardada"), "{out}");
     assert!(
-        out.contains("conectado: anthropic-api / claude-opus-5-5 respondió"),
+        out.contains("connected: anthropic-api / claude-opus-5-5 answered"),
         "{out}"
     );
     let seen = fake.requests();
@@ -1768,7 +1756,7 @@ fn connect_keeps_the_key_when_the_probe_fails() {
     let out = all_text(&o);
     assert!(o.status.success(), "{out}");
     assert!(
-        out.contains("guardado, pero anthropic-api no respondió"),
+        out.contains("stored, but anthropic-api did not answer"),
         "{out}"
     );
     assert!(!out.contains("sk-ant-api03-decoy"), "{out}");
@@ -1828,7 +1816,7 @@ fn a_locked_vault_is_opened_by_vault_start() {
     let o = e.with_stdin(&["connect", "claude"], "sk-ant-oat01-decoy\n", &[]);
     assert!(!o.status.success());
     assert!(
-        all_text(&o).contains("el baúl está cerrado: clio vault start"),
+        all_text(&o).contains("the vault is locked: clio vault start"),
         "{}",
         all_text(&o)
     );
@@ -1845,7 +1833,7 @@ fn a_locked_vault_is_opened_by_vault_start() {
         "hazlo",
     ]);
     assert!(
-        !o.status.success() && text(&o.stderr).contains("el baúl está cerrado: clio vault start"),
+        !o.status.success() && text(&o.stderr).contains("the vault is locked: clio vault start"),
         "{}",
         all_text(&o)
     );
@@ -1862,14 +1850,14 @@ fn a_locked_vault_is_opened_by_vault_start() {
     assert!(o.status.success(), "{}", all_text(&o));
     let o = e.with_stdin(&["connect", "claude"], "", &[]);
     assert!(
-        !all_text(&o).contains("el baúl está cerrado"),
+        !all_text(&o).contains("the vault is locked"),
         "{}",
         all_text(&o)
     );
     // Running and open: nothing to do, and it says so.
     let o = e.with_stdin(&["vault", "start"], &format!("{PASS}\n"), &[]);
     assert!(
-        !o.status.success() && all_text(&o).contains("ya está corriendo"),
+        !o.status.success() && all_text(&o).contains("is already running"),
         "{}",
         all_text(&o)
     );
@@ -1896,7 +1884,7 @@ fn a_wrong_passphrase_at_start_leaves_no_server_behind() {
     let o = e.with_stdin(&["vault", "start"], "wrong phrase\n", &[]);
     assert!(!o.status.success(), "{}", all_text(&o));
     assert!(
-        all_text(&o).contains("no se pudo abrir el baúl"),
+        all_text(&o).contains("could not unlock the vault"),
         "{}",
         all_text(&o)
     );
@@ -1920,10 +1908,11 @@ fn doctor_says_a_key_file_already_in_the_vault_can_go() {
     let out = text(&e.try_clio(&["doctor"]).stdout);
     let line = out
         .lines()
-        .find(|l| l.contains("queda una llave"))
+        .find(|l| l.contains("a key is left"))
         .unwrap_or_default();
     assert!(
-        line.contains("ya está en el baúl") && line.contains(&format!("rm {}", key.display())),
+        line.contains("it is already in the vault")
+            && line.contains(&format!("rm {}", key.display())),
         "{out}"
     );
     // connect, which reuses the stored key, says the same.
@@ -1961,12 +1950,12 @@ fn a_named_workspace_is_a_copy_under_the_host_default() {
     let proj = e.path("proj");
     let o = e.try_clio(&["run", "--host", "--workspace", &proj, "x"]);
     assert!(
-        !o.status.success() && text(&o.stderr).contains("no va con --host"),
+        !o.status.success() && text(&o.stderr).contains("does not go with --host"),
         "{o:?}"
     );
     let o = e.try_clio(&["run", "x"]);
     assert!(
-        !o.status.success() && text(&o.stderr).contains("modo anfitrión necesita Pi"),
+        !o.status.success() && text(&o.stderr).contains("host mode needs Pi"),
         "{o:?}"
     );
 }

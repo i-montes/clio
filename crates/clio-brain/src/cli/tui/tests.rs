@@ -717,7 +717,7 @@ fn a_finished_live_run_offers_the_detail() {
         )))))],
     );
     assert_eq!(cmds, vec![Cmd::LoadHome]);
-    assert!(screen_text(&a, 80, 24).contains("terminó"));
+    assert!(screen_text(&a, 80, 24).contains("finished"));
     let (_, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert_eq!(
         cmds,
@@ -737,7 +737,7 @@ fn a_finished_live_run_offers_the_detail() {
             &[],
         )))))],
     );
-    assert!(screen_text(&a, 80, 24).contains("cancelado"));
+    assert!(screen_text(&a, 80, 24).contains("cancelled"));
     let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
     assert_eq!((a.screen, cmds), (Screen::Home, vec![Cmd::LoadHome]));
 }
@@ -877,7 +877,7 @@ fn slash_filters_the_list_and_the_selection_follows_the_filter() {
 #[test]
 fn the_filter_matches_status_and_id_and_says_when_nothing_matches() {
     let (a, _) = feed(with_runs(), vec![ch('/')]);
-    let (a, _) = feed(a, "fallido".chars().map(ch).collect());
+    let (a, _) = feed(a, "failed".chars().map(ch).collect());
     assert_eq!(a.home.visible(), vec![2]);
     let (a, _) = feed(a, vec![key(KeyCode::Esc)]);
     assert!(
@@ -958,10 +958,10 @@ fn home_draws_state_and_runs_without_overflow() {
             assert!(t.contains("llave presente"), "{t}");
             assert!(t.contains("doctor: 12 ok · 3 avisos · 0 fallos"), "{t}");
             assert!(
-                t.contains("1031-1816-5a67") && t.contains("pendiente de revisar"),
+                t.contains("1031-1816-5a67") && t.contains("pending review"),
                 "{t}"
             );
-            assert!(t.contains("aplicado") && t.contains("fallido"), "{t}");
+            assert!(t.contains("applied") && t.contains("failed"), "{t}");
             assert!(t.contains("arregla parse_date en dates.py"), "{t}");
             assert!(t.contains("q salir") && t.contains("? ayuda"), "{t}");
             if w >= 120 {
@@ -1064,7 +1064,7 @@ fn detail_draws_summary_message_files_and_a_colored_diff() {
         assert_clean(&t);
         if w >= 80 {
             assert!(
-                t.contains("pendiente de revisar") && t.contains("arregla parse_date"),
+                t.contains("pending review") && t.contains("arregla parse_date"),
                 "{t}"
             );
             assert!(

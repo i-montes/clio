@@ -23,12 +23,12 @@ impl Stop {
     /// Why, in words for the person (it reaches the screen).
     pub fn reason(self) -> &'static str {
         match self {
-            Self::Steps => "tope de pasos de la tarea",
-            Self::Time => "tope de tiempo de la tarea",
-            Self::Cost => "tope de costo de la tarea",
-            Self::DayCost | Self::DaySteps => "presupuesto del día agotado: sigo mañana",
-            Self::Repeats => "la misma acción se repitió demasiadas veces (posible bucle)",
-            Self::Retries => "tope de reintentos de la tarea",
+            Self::Steps => "the task's step limit",
+            Self::Time => "the task's time limit",
+            Self::Cost => "the task's cost limit",
+            Self::DayCost | Self::DaySteps => "the day's budget is used up: I go on tomorrow",
+            Self::Repeats => "the same action repeated too many times (possible loop)",
+            Self::Retries => "the task's retry limit",
         }
     }
 }

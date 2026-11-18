@@ -161,7 +161,7 @@ fn pi_does_not_start_when_its_jail_cannot_be_built() {
         Ok(_) => panic!("Pi started without a jail it could build"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("jaula"), "{err}");
+    assert!(err.contains("jail"), "{err}");
 }
 
 // S-06 S-03, S-59, attack-55 (phase 3b): the jail has a network of its own. Inside, a host's abstract
@@ -363,7 +363,9 @@ fn pi_starts_with_the_claude_bridge_inside_the_jail() {
             std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
             "CLIO_REQUIRE_PI=1 and the bridge is not installed"
         );
-        eprintln!("SKIPPED {test}: falta el puente (cd adapters/pi && npm ci --ignore-scripts)");
+        eprintln!(
+            "SKIPPED {test}: the bridge is missing (cd adapters/pi && npm ci --ignore-scripts)"
+        );
         return;
     }
     if let jail::Status::Unavailable(why) = jail::status() {
@@ -513,7 +515,9 @@ fn hooks_of_the_working_copy_do_not_run_in_the_bridges_claude_code() {
             std::env::var("CLIO_REQUIRE_PI").as_deref() != Ok("1"),
             "CLIO_REQUIRE_PI=1 and Claude Code is not installed"
         );
-        eprintln!("SKIPPED {test}: falta Claude Code (cd adapters/pi && npm ci --ignore-scripts)");
+        eprintln!(
+            "SKIPPED {test}: Claude Code is missing (cd adapters/pi && npm ci --ignore-scripts)"
+        );
         return;
     };
     if ["/usr/bin/unshare", "/usr/bin/timeout", "/usr/bin/python3"]

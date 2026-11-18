@@ -178,7 +178,7 @@ elif scenario == "typeahead":
     run = os.path.basename(latest_run())
     pid, fd = spawn(args=["apply", run])
     os.write(fd, b"s\n")
-    out["asked"] = pump(fd, lambda: b"[s/N]" in buf)
+    out["asked"] = pump(fd, lambda: b"[y/N]" in buf)
     time.sleep(0.3)
     os.write(fd, b"\n")  # a person who really answers: no
     out["code"] = finish(pid, fd)

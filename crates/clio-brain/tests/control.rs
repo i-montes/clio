@@ -260,7 +260,7 @@ fn the_day_counts_steps_and_cost_across_two_loads_and_resets_the_next_day() {
     assert_eq!(c.begin_step("d", 0, &mut second), Err(Stop::DaySteps));
     assert_eq!(
         Stop::DaySteps.reason(),
-        "presupuesto del día agotado: sigo mañana"
+        "the day's budget is used up: I go on tomorrow"
     );
     second.save();
 

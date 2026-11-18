@@ -181,7 +181,7 @@ pub fn event_json(e: &Event, at_ms: u64) -> Value {
 fn stderr_line(e: &Event) -> Option<String> {
     Some(match e {
         Event::Context(c) => format!(
-            "contexto #{}: {} tok aprox. (sistema {} {}, objetivo {}, herramientas {}, conversación {} en {} turnos, externo {} en {} lecturas, salidas {}, memoria {} en {} recuerdos)",
+            "context #{}: {} tok approx. (system {} {}, goal {}, tools {}, conversation {} in {} turns, external {} in {} reads, outputs {}, memory {} in {} memories)",
             c.call,
             c.total(),
             c.system,
@@ -197,11 +197,11 @@ fn stderr_line(e: &Event) -> Option<String> {
             c.memory_items
         ),
         Event::Usage(u) => format!(
-            "llamada #{}: {} ms, entrada {} tok, salida {} tok, costo {} micro-USD, reintentos {}",
+            "call #{}: {} ms, input {} tok, output {} tok, cost {} micro-USD, retries {}",
             u.call, u.model_ms, u.input_tokens, u.output_tokens, u.cost_micro, u.retries
         ),
         Event::Exchange(x) => format!(
-            "petición #{} ({} mensajes, {} car.):\n{}\nrespuesta:\n{}",
+            "request #{} ({} messages, {} chars):\n{}\nresponse:\n{}",
             x.call,
             x.messages,
             x.request_chars,
@@ -213,7 +213,7 @@ fn stderr_line(e: &Event) -> Option<String> {
             cut(&x.response, VIEW_FIELD_MAX)
         ),
         Event::Decision(d) => format!(
-            "pasarela #{}: {} {} -> {} (regla {}) {} ms: {}",
+            "gateway #{}: {} {} -> {} (rule {}) {} ms: {}",
             d.n,
             d.tool,
             cut(&d.args, 300),
@@ -222,8 +222,8 @@ fn stderr_line(e: &Event) -> Option<String> {
             d.tool_ms,
             d.reason
         ),
-        Event::ProtocolError { reason } => format!("error de protocolo: {reason}"),
-        Event::Memory { title, lines } => format!("memoria: {title}\n  {}", lines.join("\n  ")),
+        Event::ProtocolError { reason } => format!("protocol error: {reason}"),
+        Event::Memory { title, lines } => format!("memory: {title}\n  {}", lines.join("\n  ")),
         _ => return None,
     })
 }
@@ -343,10 +343,7 @@ impl Tee {
             && !self.write_error
         {
             self.write_error = true;
-            eprintln!(
-                "clio: no se pudo escribir debug.log: {}",
-                sanitize::line(&x)
-            );
+            eprintln!("clio: could not write debug.log: {}", sanitize::line(&x));
         }
         if self.ctl.stderr
             && let Some(t) = stderr_line(e)

@@ -29,19 +29,19 @@ impl Assessment {
     /// One line for the person.
     pub fn notice(&self) -> String {
         let level = match self.level {
-            Level::Direct => "nivel 0 · directo",
-            Level::Simple => "nivel 1 · simple",
-            Level::Full => "nivel 2 · completo",
-            Level::Long => "nivel 3 · largo",
+            Level::Direct => "level 0 · direct",
+            Level::Simple => "level 1 · simple",
+            Level::Full => "level 2 · full",
+            Level::Long => "level 3 · long",
         };
         let why = match self.reason {
-            Reason::Forced => "lo pediste con /rápido o /plan",
-            Reason::HardRule => "regla dura",
-            Reason::VerbRule => "por lo que pides",
-            Reason::Doubt => "ante la duda",
+            Reason::Forced => "you asked for it with /rápido or /plan",
+            Reason::HardRule => "hard rule",
+            Reason::VerbRule => "by what you ask",
+            Reason::Doubt => "when in doubt",
         };
         let irreversible = if self.maybe_irreversible {
-            "; puede ser irreversible"
+            "; may be irreversible"
         } else {
             ""
         };
@@ -163,8 +163,8 @@ mod tests {
     fn the_notice_names_the_level_and_why() {
         let a = assessor();
         let n = a.assess("Borra la carpeta de pruebas").notice();
-        assert!(n.contains("nivel 2"), "{n}");
+        assert!(n.contains("level 2"), "{n}");
         assert!(n.contains("irreversible"), "{n}");
-        assert!(a.assess("¿Qué hora es?").notice().contains("nivel 0"));
+        assert!(a.assess("¿Qué hora es?").notice().contains("level 0"));
     }
 }

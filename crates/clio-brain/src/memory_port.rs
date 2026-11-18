@@ -1,7 +1,7 @@
 //! The tool host's window into the memory, which is the agent's: it reads the active memories of
 //! the places the session reads, and saves, corrects, forgets (to quarantine), pins, merges and
 //! undoes its own changes, all at once (S-60, S-61). With Jev, what is written is guarded first:
-//! a clear «no» refuses it, anything else saves (S-64). The tool host process runs this. Reading opens the database with [`MemoryLink::open_read`], which never
+//! a clear "no" refuses it, anything else saves (S-64). The tool host process runs this. Reading opens the database with [`MemoryLink::open_read`], which never
 //! creates or changes a file and never takes the writer lock, so the person's `clio memory
 //! remember` is not blocked while the agent reads. A proposal opens it for writing for that one
 //! call and closes it: the writer lock is held for as long as the engine lives, and holding it
@@ -23,10 +23,10 @@ use crate::memory_link::{Draft, EmbedModel, HELD_BY_BLOCK, MemoryLink, Place, Re
 
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
-const NOT_READABLE: &str = "ese recuerdo no existe o no se puede leer";
+const NOT_READABLE: &str = "that memory does not exist or cannot be read";
 /// What the agent hears when its ordinary tools reach an entry of the person's blocks.
-const IN_A_BLOCK: &str = "ese recuerdo está en un bloque de la persona: se cambia con memory_block_edit, en una sesión limpia";
-const NO_VECTORS: &str = "solo texto: el modelo de vectores no está disponible";
+const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, in a clean session";
+const NO_VECTORS: &str = "text only: the vector model is not available";
 
 pub struct LinkPort {
     data: PathBuf,
@@ -95,12 +95,12 @@ impl LinkPort {
         if slot.is_none() || stale {
             match MemoryLink::open_read_in(&self.data, &self.model, self.project.as_deref()) {
                 Ok(Some(link)) => *slot = Some(link),
-                Ok(None) => return Err("la memoria no existe todavía".into()),
+                Ok(None) => return Err("the memory does not exist yet".into()),
                 Err(why) => {
                     // The detail names a path of the person's: it goes to the service's log, not
                     // to the model.
                     eprintln!("clio-toolhost: memory: {why}");
-                    return Err("la memoria no se puede abrir ahora".into());
+                    return Err("the memory cannot be opened now".into());
                 }
             }
         }
@@ -113,7 +113,7 @@ impl LinkPort {
     fn writer(&self) -> Result<MemoryLink, String> {
         MemoryLink::open_write_in(&self.data, &self.model, self.project.as_deref()).map_err(|why| {
             eprintln!("clio-toolhost: memory: {why}");
-            "la memoria no se puede abrir para escribir ahora".to_owned()
+            "the memory cannot be opened for writing now".to_owned()
         })
     }
 
@@ -126,7 +126,7 @@ impl LinkPort {
         }
     }
 
-    /// Asks Jev (when there is one) about a text before it is written: a clear «no» is the reason
+    /// Asks Jev (when there is one) about a text before it is written: a clear "no" is the reason
     /// the agent hears; otherwise the category to keep (Jev's when it was sure).
     fn guard(&self, draft: &Draft, judging: &Judging) -> Result<Option<Category>, String> {
         let Some(judge) = &self.judge else {
@@ -159,7 +159,7 @@ impl LinkPort {
             // A session's summary is named here, has no category and is never a lesson.
             Draft {
                 text: draft.text.clone(),
-                title: Some(format!("Sesión {}", civil_date(now_secs()))),
+                title: Some(format!("Session {}", civil_date(now_secs()))),
                 category: None,
                 kind: MemoryType::Episodic,
             }
@@ -305,7 +305,7 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        // All of one scope (one project, not just «a project»), and the merge is saved there.
+        // All of one scope (one project, not just "a project"), and the merge is saved there.
         let first = {
             let link = self.reader()?;
             let mut first: Option<MemoryRow> = None;
@@ -317,7 +317,7 @@ impl MemoryPort for LinkPort {
                     .ok_or_else(|| NOT_READABLE.to_owned())?;
                 not_in_a_block(&link, r.id)?;
                 if first.as_ref().is_some_and(|f| f.scope != r.scope) {
-                    return Err("solo se unen memorias del mismo sitio".into());
+                    return Err("only memories of the same place are merged".into());
                 }
                 first.get_or_insert(r);
             }
@@ -342,7 +342,9 @@ impl MemoryPort for LinkPort {
         // A new memory, active, not one of them (the engine answers a repeat with the existing
         // one): otherwise nothing is forgotten.
         if o.kind != OpKind::Add || o.state != State::Active || ids.contains(&o.memory.0) {
-            return Err("la unión no dio una memoria nueva y activa: no se olvidó nada".into());
+            return Err(
+                "the merge did not give a new, active memory: nothing was forgotten".into(),
+            );
         }
         for id in ids {
             // Best effort: the merge is made; a relation that does not follow is a note lost.
@@ -351,7 +353,7 @@ impl MemoryPort for LinkPort {
         for (forgotten, id) in ids.iter().enumerate() {
             if let Err(why) = link.forget_as_agent(MemoryId(*id)) {
                 return Err(format!(
-                    "se guardó m{} y se olvidaron {forgotten} de {}; falló una: {why}",
+                    "saved m{} and forgot {forgotten} of {}; one failed: {why}",
                     o.memory.0,
                     ids.len()
                 ));
@@ -445,7 +447,7 @@ impl MemoryPort for LinkPort {
             // The engine's own message may repeat the query; the model gets a fixed one.
             let (rows, abstained) = link
                 .search_all(query, limit)
-                .map_err(|_| "la búsqueda en la memoria falló".to_owned())?;
+                .map_err(|_| "the memory search failed".to_owned())?;
             Ok(Found {
                 items: rows.iter().map(|r| item(link, r, NEAR_SEARCH)).collect(),
                 abstained,
@@ -503,7 +505,7 @@ impl MemoryPort for LinkPort {
                 .unwrap_or_else(|| link.scope());
             let recent = engine
                 .recent(home, 30)
-                .map_err(|_| "la memoria no se pudo leer".to_owned())?;
+                .map_err(|_| "the memory could not be read".to_owned())?;
             let mut out: Vec<MemoryRow> = Vec::new();
             if let Some(summary) = recent.iter().find(|r| r.kind == MemoryType::Episodic) {
                 out.push(summary.clone());
@@ -542,7 +544,7 @@ fn not_in_a_block(link: &MemoryLink, id: MemoryId) -> Result<(), String> {
     match link.block_of(id) {
         Ok(None) => Ok(()),
         Ok(Some(_)) => Err(IN_A_BLOCK.to_owned()),
-        Err(_) => Err("la memoria no se pudo leer".to_owned()),
+        Err(_) => Err("the memory could not be read".to_owned()),
     }
 }
 
@@ -598,7 +600,10 @@ fn item(link: &MemoryLink, row: &MemoryRow, near: usize) -> MemoryItem {
             let mut n = link.relation_notes(row);
             // Still active, but old enough that it may no longer hold: the model checks it.
             if link.is_due(row) {
-                n.insert(0, "revisar: pasó su plazo, puede estar desfasado".into());
+                n.insert(
+                    0,
+                    "revisar: its review date has passed, it may be out of date".into(),
+                );
             }
             n
         },

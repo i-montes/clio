@@ -102,7 +102,7 @@ fn the_memory_screen_draws_clean_and_exact_at_every_size() {
         let last = t.lines().last().unwrap().trim();
         let home = screen_text(&with_runs(), w, h);
         let home_last = home.lines().last().unwrap();
-        for data in ["↑12,4k", "↓3,1k", "$0", "7/40", "31"] {
+        for data in ["↑12.4k", "↓3.1k", "$0", "7/40", "31"] {
             assert!(
                 last.contains(data) && home_last.contains(data),
                 "{w}x{h}: {data} not in {last:?} / {home_last:?}"
@@ -343,7 +343,7 @@ fn the_context_view_shows_the_memoria_layer_with_its_size_and_share() {
             .find(|l| l.contains("memoria"))
             .unwrap_or_else(|| panic!("no memoria layer at {w}x{h}\n{t}"));
         assert!(line.contains("3 recuerdos"), "{line}");
-        assert!(line.contains("1,8k"), "{line}");
+        assert!(line.contains("1.8k"), "{line}");
         assert!(line.contains("1,4 %"), "{line}");
     }
 }

@@ -100,10 +100,10 @@ pub fn prepare(l: &Launch) -> Result<Option<PiJail>, PiError> {
         let off = if bridge {
             ""
         } else {
-            ", o pon CLIO_PI_JAIL=off bajo tu responsabilidad"
+            ", or set CLIO_PI_JAIL=off at your own risk"
         };
         PiError::Spawn(format!(
-            "Pi no arranca: la jaula de Pi no se pudo preparar ({why}). Sin la jaula Pi tendría tus mismos permisos; instala bubblewrap (bwrap) y habilita los espacios de nombres de usuario{off} (ADR 0009)"
+            "Pi does not start: the Pi jail could not be set up ({why}). Without the jail Pi would have your own permissions; install bubblewrap (bwrap) and enable user namespaces{off} (ADR 0009)"
         ))
     };
     let jail = Jail::detect().map_err(&refuse)?;
@@ -130,9 +130,9 @@ fn unjailed(l: &Launch, off: bool, linux: bool) -> Result<bool, PiError> {
         return Ok(true);
     }
     Err(PiError::Spawn(if off {
-        "el conector claude necesita la jaula de Pi: quita CLIO_PI_JAIL=off (ADR 0009)".into()
+        "the claude connector needs the Pi jail: remove CLIO_PI_JAIL=off (ADR 0009)".into()
     } else {
-        "el conector claude necesita la jaula de Pi, que solo existe en Linux con bubblewrap: usa otro conector en este sistema, por ejemplo `clio connect opencode` (ADR 0009)".into()
+        "the claude connector needs the Pi jail, which only exists on Linux with bubblewrap: use another connector on this system, for example `clio connect opencode` (ADR 0009)".into()
     }))
 }
 
@@ -156,14 +156,14 @@ fn refuse_odd_claude_paths(cwd: &Path) -> Result<(), PiError> {
             continue;
         };
         let what = if m.is_symlink() {
-            "como enlace simbólico"
+            "as a symbolic link"
         } else if name == ".mcp.json" && !m.is_file() {
-            "y no es un archivo normal"
+            "and is not a regular file"
         } else {
             continue;
         };
         return Err(PiError::Spawn(format!(
-            "la copia de trabajo tiene {} {what}: Clio no arranca Claude Code así",
+            "the working copy has {} {what}: Clio does not start Claude Code like that",
             p.display()
         )));
     }
@@ -399,7 +399,7 @@ impl PiJail {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("no se pudo iniciar bwrap: {e}"))?;
+            .map_err(|e| format!("could not start bwrap: {e}"))?;
         let t = Instant::now();
         let status = loop {
             if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
@@ -408,7 +408,7 @@ impl PiJail {
             if t.elapsed() > SELFTEST_TIMEOUT {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("la autoprueba no terminó a tiempo".into());
+                return Err("the self-test did not finish in time".into());
             }
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -423,10 +423,10 @@ impl PiJail {
             .collect::<Vec<_>>()
             .join(" | ");
         Err(format!(
-            "la autoprueba falló (salida {}): {said}",
+            "the self-test failed (exit {}): {said}",
             status
                 .code()
-                .map_or("por señal".to_owned(), |c| c.to_string())
+                .map_or("by signal".to_owned(), |c| c.to_string())
         ))
     }
 }
@@ -623,7 +623,7 @@ mod tests {
             assert_eq!(
                 e.to_string(),
                 format!(
-                    "la copia de trabajo tiene {} como enlace simbólico: Clio no arranca Claude Code así",
+                    "the working copy has {} as a symbolic link: Clio does not start Claude Code like that",
                     link.display()
                 )
             );
@@ -636,7 +636,7 @@ mod tests {
         // A `.mcp.json` that is a folder or a FIFO would not be covered: refused too.
         let mcp = cwd.join(".mcp.json");
         let odd = format!(
-            "la copia de trabajo tiene {} y no es un archivo normal: Clio no arranca Claude Code así",
+            "the working copy has {} and is not a regular file: Clio does not start Claude Code like that",
             mcp.display()
         );
         std::fs::create_dir(&mcp).unwrap();
@@ -663,9 +663,9 @@ mod tests {
         let msg = |r: Result<bool, PiError>| r.err().map(|e| e.to_string()).unwrap_or_default();
         assert_eq!(
             msg(unjailed(&claude, true, true)),
-            "el conector claude necesita la jaula de Pi: quita CLIO_PI_JAIL=off (ADR 0009)"
+            "the claude connector needs the Pi jail: remove CLIO_PI_JAIL=off (ADR 0009)"
         );
-        assert!(msg(unjailed(&claude, false, false)).contains("solo existe en Linux"));
+        assert!(msg(unjailed(&claude, false, false)).contains("only exists on Linux"));
         assert!(!unjailed(&claude, false, true).unwrap());
         for other in ["opencode", "anthropic-api"] {
             let l = launch_for(other, t.path(), t.path());

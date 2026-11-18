@@ -1653,8 +1653,8 @@ mod tests {
         assert_eq!(col(r1, "rm -r"), col(r2, "du -sh"), "{screen}");
         assert_eq!(col(r2, "du -sh"), col(r3, "ls  "), "{screen}");
         let end = |r: &str, s: &str| col(r, s) + text::width(s);
-        assert_eq!(end(r1, "0,4 s"), end(r2, "1,5 s"), "{screen}");
-        assert_eq!(end(r2, "1,5 s"), end(r3, "1 min 20 s"), "{screen}");
+        assert_eq!(end(r1, "0.4 s"), end(r2, "1.5 s"), "{screen}");
+        assert_eq!(end(r2, "1.5 s"), end(r3, "1 min 20 s"), "{screen}");
     }
 
     #[test]
@@ -2074,7 +2074,7 @@ mod tests {
             cut.chat
                 .items
                 .iter()
-                .any(|i| matches!(i, Item::Error(m) if m.contains("tope de pasos"))),
+                .any(|i| matches!(i, Item::Error(m) if m.contains("step limit"))),
             "the chat shows the cap that cut the run"
         );
         let clean = settle(None);
@@ -2108,7 +2108,7 @@ mod tests {
                 .chat
                 .items
                 .iter()
-                .any(|i| matches!(i, Item::Note(m) if m.contains("nivel 2"))),
+                .any(|i| matches!(i, Item::Note(m) if m.contains("level 2"))),
             "the chat shows the level"
         );
         assert!(
