@@ -1,12 +1,21 @@
 # Clio
 
-Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-60): [`docs/security.md`](docs/security.md); threat model: [`docs/threat-model.md`](docs/threat-model.md); reporting: [`SECURITY.md`](SECURITY.md). Decisions: [`docs/decisions/`](docs/decisions/). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Autonomous personal agent. Design: [`docs/specs/`](docs/specs/). Security rules (S-01 to S-66): [`docs/security.md`](docs/security.md); threat model: [`docs/threat-model.md`](docs/threat-model.md); reporting: [`SECURITY.md`](SECURITY.md). Decisions: [`docs/decisions/`](docs/decisions/). Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Architecture
 
-![Clio architecture, design v2](docs/clio-architecture.svg)
+![Clio architecture: the guard is at the door](docs/clio-architecture.svg)
 
-Design v2, aligned with [ADR 0006](docs/decisions/0006-local-first-vps-optional.md) (the host is this PC; a VPS is optional) and [ADR 0007](docs/decisions/0007-pi-is-the-agent-harness.md) (Pi keeps its sessions; Clio lists and opens them).
+The guard is at the door ([ADR 0006](docs/decisions/0006-local-first-vps-optional.md), [ADR 0012](docs/decisions/0012-host-mode.md)). Clio has full use of the terminal of the machine it lives on, and the security layer is built around that instead of walling the agent in:
+
+1. Pi, the agent harness, and the model stay in a `bwrap` jail ([ADR 0009](docs/decisions/0009-pi-runs-inside-a-jail.md)). They never see the vault, your files or Clio's data. The only credential inside is the model key, and it reaches only the model provider.
+2. Every effect goes through the tool host (`clio-toolhost`), which decides each operation in code.
+3. A judge (Temis, the owner's own service, reached through the Jev adapter) reads text that comes from outside before the model does, and withholds what tries to give the agent orders.
+4. Four classes of action wait for your approval: delete, spend, send and control.
+5. Secrets live in the vault. The model sees names, never values.
+6. Everything is logged, and file changes can be undone.
+
+Pi keeps its own sessions; Clio lists and opens them ([ADR 0007](docs/decisions/0007-pi-is-the-agent-harness.md)).
 
 ## Setup
 
@@ -19,9 +28,18 @@ just test
 just audit   # cargo-deny and cargo-audit (S-41)
 ```
 
-## Using Clio on your PC
+## Using Clio on your machine
 
-`just install` (or `cargo build --release -p clio-brain -p clio-vault` and copy `target/release/clio*` to `~/.local/bin`), then `clio init`, `clio vault start` (once per boot; the model key lives in the vault), `clio connect opencode`, `clio connect claude` (your Claude subscription, through the official Claude Code that `clio pi install` brings, about 400 MB once; the token comes from `claude setup-token`; it uses your plan's quota like Claude Code, and the bridge package warns that Anthropic could change how it bills the Agent SDK) or `clio connect anthropic-api` (an Anthropic API key, billed per token), `clio run --workspace DIR "instruction"`, `clio diff <id>`, `clio apply <id>`. By default (host mode, [ADR 0012](docs/decisions/0012-host-mode.md)) the agent acts on your machine, with what deletes, spends or sends set aside for your approval and everything logged; with `--workspace DIR`, `--copy` or `"mode": "copy"` it works on a copy of your project and you decide what goes back. In the chat, Pi runs inside a `bwrap` jail with its own network namespace and will not start if the jail cannot be built ([ADR 0009](docs/decisions/0009-pi-runs-inside-a-jail.md)). On a server, `loginctl enable-linger $USER` keeps the vault's runtime folder across logouts. Clio ships with who she is: her primordial memories (the blocks `identidad`, `reglas`, `preferencias` and `vigilancia` of the memory) go to the model with authority in every session, the first chat has her introduce herself and ask who you are, and you change them by talking to her in a clean session (one that read nothing from outside); `clio memory identity` shows them and `clio memory remember "text" --block B` writes one by hand. Guide (in Spanish): [`docs/uso-local.md`](docs/uso-local.md).
+1. Install: `just install` (or `cargo build --release -p clio-brain -p clio-vault` and copy `target/release/clio*` to `~/.local/bin`). Then `clio init`.
+2. Start the vault once per boot: `clio vault start`. The model key lives there. On a server, `loginctl enable-linger $USER` keeps the vault's runtime folder across logouts.
+3. Pick a model connector: `clio connect opencode`, `clio connect claude` or `clio connect anthropic-api`. `claude` uses your Claude subscription through the official Claude Code, which `clio pi install` brings (about 400 MB, once); the token comes from `claude setup-token`, it uses your plan's quota like Claude Code, and the bridge package warns that Anthropic could change how it bills the Agent SDK. `anthropic-api` takes an Anthropic API key, billed per token.
+4. Type `clio` to open the chat, or `clio run "instruction"` for one job without the interface.
+
+By default Clio works in host mode ([ADR 0012](docs/decisions/0012-host-mode.md)): the agent acts on your machine, what deletes, spends, sends or touches Clio's own setup waits for your approval (`clio pending`, `clio approve <id>`, `clio reject <id>`, or the question at the end of a chat turn), and everything is logged (`clio actions`). With `--copy`, `"mode": "copy"` in `config.json`, or `clio run --workspace DIR`, it works on a copy of one project instead, and you decide what goes back with `clio diff <id>` and `clio apply <id>`. On Linux, in both modes, Pi runs inside its jail and does not start if the jail cannot be built ([ADR 0009](docs/decisions/0009-pi-runs-inside-a-jail.md)).
+
+Clio ships with who she is. Her primordial memories (the blocks `identidad`, `reglas`, `preferencias` and `vigilancia`) go to the model with authority in every session. In the first chat she introduces herself and asks who you are. You change them by talking to her in a clean session (one that read nothing from outside). `clio memory identity` shows them and `clio memory remember "text" --block B` writes one by hand.
+
+Guide: [`docs/uso-local.md`](docs/uso-local.md).
 
 ## Layout
 

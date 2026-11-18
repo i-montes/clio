@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 1620" role="img" width="1020" height="1620" aria-labelledby="t d">
-<title id="t">Clio — architecture (v2)</title>
-<desc id="d">Diseño v2 de Clio: la persona pide desde la PWA en cualquier nodo; un triaje decide el nivel; los niveles 0 y 1 van directo al núcleo con presupuesto; los niveles 2 y 3 pasan por contrato, capa de control y núcleo; toda acción pasa por la pasarela y se ejecuta en un nodo con snapshot por tarea; la salida pasa por un filtro y por la verificación; si falla, un diagnóstico decide antes de volver al control; el cierre devuelve la respuesta o el informe a la persona y escribe la memoria; clio-memory a la izquierda, clio-network, la base Pi y clio-trace abajo.</desc>
+<title id="t">Clio — architecture: the guard is at the door</title>
+<desc id="d">How Clio is guarded: the person asks, answers, approves and types secrets; the Clio service starts Pi, the agent harness, inside a bwrap jail with its own network, where only the model key exists and reaches only the provider; every effect goes through the tool host, the door, where a gateway decides each operation, a scrubber strikes secrets out, a judge (Temis, through the Jev adapter) reads outside text before the model and withholds injections, four classes of action (delete, spend, send, control) are set aside for the person, and every effect is logged with copies for undo; the vault holds secrets the model never sees; clio-memory on the left; the machine in host mode below, with copy mode as the alternative.</desc>
 <style>
   svg { --panel: #ffffff; --panel2: #e7eeed; --ink: #14262b; --muted: #55686d; --line: #8aa0a5; --accent: #0c6a79; --accent-soft: #d9eef1; --on-accent: #ffffff; --gate: #b4730b; --gate-soft: #fbefd3; --gate-ink: #7a4a00; --sans: "Schibsted Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif; --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
   @media (prefers-color-scheme: dark) { svg { --panel: #142428; --panel2: #102226; --ink: #e2edee; --muted: #9bb1b5; --line: #4b6469; --accent: #5cc6d6; --accent-soft: #123a41; --on-accent: #0e1a1d; --gate: #e3b04b; --gate-soft: #3a2d0f; --gate-ink: #f0c46a; } }
@@ -65,297 +65,250 @@
 <marker id="g1g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mkg"/></marker>
 <marker id="g1f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="mka"/></marker>
 </defs>
-<rect class="cont" x="20" y="16" width="970" height="78" rx="10"/>
-<text class="cap" x="36" y="38">PERSONA · DESDE LA PWA EN CUALQUIER NODO (TELÉFONO, LAPTOP) · PASSKEY CON HUELLA O FACE ID</text>
-<g transform="translate(968,32)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<rect class="box" x="34" y="50" width="228" height="36" rx="8"/>
-<text class="h2" x="46" y="65">Pide</text>
-<text class="s11" x="46" y="79">si Clio trabaja, queda en cola; «para» es inmediato</text>
-<rect class="box" x="272" y="50" width="228" height="36" rx="8"/>
-<text class="h2" x="284" y="65">Contesta</text>
-<text class="s11" x="284" y="79">una pregunta a la vez</text>
-<rect class="box" x="510" y="50" width="228" height="36" rx="8"/>
-<text class="h2" x="522" y="65">Aprueba con passkey</text>
-<text class="s11" x="522" y="79">firma el hash de la acción exacta</text>
-<rect class="box" x="748" y="50" width="228" height="36" rx="8"/>
-<text class="h2" x="760" y="65">Recibe</text>
-<text class="s11" x="760" y="79">respuestas, informes y resúmenes</text>
-<rect class="cont" x="20" y="124" width="230" height="596" rx="10"/>
-<text class="cap" x="36" y="146">CLIO-MEMORY</text>
-<text class="lab" x="236" y="146" text-anchor="end">SQLite · un escritor</text>
-<rect class="box" x="34" y="158" width="202" height="44" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="46" y="176">Identidad (fija)</text>
-<text class="s11" x="46" y="192">siempre en el prompt, con tope</text>
-<rect class="box" x="34" y="210" width="202" height="36" rx="8"/>
-<text class="h2" x="46" y="225">Trabajo</text>
-<text class="s11" x="46" y="239">contexto actual</text>
-<rect class="box" x="34" y="250" width="202" height="36" rx="8"/>
-<text class="h2" x="46" y="265">Episódica</text>
-<text class="s11" x="46" y="279">qué pasó, en árbol</text>
-<rect class="box" x="34" y="290" width="202" height="36" rx="8"/>
-<text class="h2" x="46" y="305">Semántica</text>
-<text class="s11" x="46" y="319">hechos con dos fechas</text>
-<rect class="box" x="34" y="330" width="202" height="36" rx="8"/>
-<text class="h2" x="46" y="345">Procedimental</text>
-<text class="s11" x="46" y="359">skills probados; dos niveles</text>
-<text class="s11" x="36" y="386">verdad: el registro de operaciones;</text>
-<text class="s11" x="36" y="400">olvida con reglas y deduplica</text>
-<rect class="box" x="34" y="414" width="202" height="80" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="46" y="435">Recuperación</text>
-<g class="jv"><rect x="142" y="424" width="58" height="15" rx="7.5"/><text x="171.0" y="435" text-anchor="middle">Jev opc.</text></g>
-<text class="s11" x="46" y="450">léxica + vectorial, filtra,</text>
-<text class="s11" x="46" y="465">recorta a un presupuesto;</text>
-<text class="s11" x="46" y="480">puede abstenerse</text>
-<rect class="gate" x="34" y="506" width="202" height="48" rx="8"/>
-<text class="h2" x="46" y="527">Cuarentena</text>
-<text class="s11" x="46" y="540">lo olvidado; vuelve con REVERT</text>
-<rect class="core" x="34" y="566" width="202" height="122" rx="10"/>
-<text class="h2" x="46" y="587">Gestor de memoria</text>
-<g class="jv"><rect x="172" y="576" width="58" height="15" rx="7.5"/><text x="201.0" y="587" text-anchor="middle">Jev opc.</text></g>
-<text class="s11" x="46" y="602">ADD, UPDATE, FORGET, NOOP,</text>
-<text class="s11" x="46" y="617">REVERT; PURGE, de la persona</text>
-<text class="s11" x="46" y="632">del agente: todo activo ya;</text>
-<text class="s11" x="46" y="647">antes: Jev (seguro, categoría)</text>
-<text class="s11" x="46" y="662">y el detector de secretos;</text>
-<text class="s11" x="46" y="677">parecidos distintos conviven</text>
-<g transform="translate(176,704)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<g transform="translate(196,704)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<g transform="translate(216,704)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<rect class="box" x="290" y="124" width="330" height="66" rx="8" style="stroke-width:1.8"/>
-<text class="h" x="302" y="145">Triaje</text>
-<g class="jv"><rect x="358" y="134" width="34" height="15" rx="7.5"/><text x="375.0" y="145" text-anchor="middle">Jev</text></g>
-<text class="s11" x="302" y="160">0 directo · 1 simple · 2 completo · 3 largo</text>
-<text class="s11" x="302" y="175">elige el modelo; sube de nivel, nunca baja</text>
-<g transform="translate(604,139)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<path class="ln" d="M455 94 V122" marker-end="url(#g1a)"/>
-<text class="lab" x="463" y="112">pedido</text>
-<path class="ln" d="M250 157 H288" marker-end="url(#g1a)"/>
-<text class="lab" x="269" y="150" text-anchor="middle">lee</text>
-<rect class="box" x="290" y="214" width="330" height="60" rx="8"/>
-<text class="h" x="302" y="235">Contrato de la tarea</text>
-<text class="s11" x="302" y="251">objetivo, alcance, criterios comprobables, parada;</text>
-<text class="s11" x="302" y="266">spec antes del plan si cambia una interfaz</text>
-<g transform="translate(604,229)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<path class="ln" d="M455 190 V212" marker-end="url(#g1a)"/>
-<text class="lab" x="463" y="206">2 y 3</text>
-<rect class="cont" x="290" y="298" width="330" height="156" rx="10"/>
-<text class="cap" x="306" y="318">CAPA DE CONTROL · SIEMPRE ENCENDIDA</text>
-<g transform="translate(580,314)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<g transform="translate(600,314)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<rect class="box" x="312" y="324" width="140" height="48" rx="8"/>
-<text class="h2" x="322" y="341">Planificador</text>
-<text class="s11" x="322" y="355">solo niveles 2 y 3</text>
-<text class="s11" x="322" y="368">explora · spec · plan</text>
-<rect class="box" x="458" y="324" width="140" height="48" rx="8"/>
-<text class="h2" x="468" y="341">Presupuesto</text>
-<text class="s11" x="468" y="355">pasos, tiempo, coste</text>
-<text class="s11" x="468" y="368">corte duro, en todo nivel</text>
-<rect class="box" x="312" y="378" width="140" height="48" rx="8"/>
-<text class="h2" x="322" y="395">Anti-bucle</text>
-<text class="s11" x="322" y="409">pasos repetidos</text>
-<text class="s11" x="322" y="422">o sin avance</text>
-<g class="jv"><rect x="400" y="384" width="34" height="15" rx="7.5"/><text x="417.0" y="395" text-anchor="middle">Jev</text></g>
-<rect class="box" x="458" y="378" width="140" height="48" rx="8"/>
-<text class="h2" x="468" y="395">Reintentos</text>
-<text class="s11" x="468" y="409">contexto fresco</text>
-<text class="s11" x="468" y="422">+ paquete de evidencia</text>
-<text class="s11" x="306" y="444">puntos de control: ningún tramo largo sin verificar</text>
-<path class="ln" d="M455 274 V296" marker-end="url(#g1a)"/>
-<text class="lab" x="463" y="290">contrato</text>
-<path class="ln" d="M290 170 H272 V500 H288" marker-end="url(#g1a)"/>
-<text class="lab" transform="rotate(-90 264 335)" x="264" y="335" text-anchor="middle">0 y 1: directo, con presupuesto</text>
-<rect class="core" x="290" y="478" width="330" height="92" rx="10"/>
-<text class="h" x="302" y="499">Núcleo cognitivo (LLM)</text>
-<text x="302" y="512">razona y propone; no ejecuta</text>
-<text x="302" y="529">modelo según nivel; herramientas que recomienda Jev</text>
-<text x="302" y="546">bucle de Pi, sin orquestador</text>
-<g transform="translate(584,493)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<g transform="translate(604,493)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<path class="ln" d="M455 454 V476" marker-end="url(#g1a)"/>
-<text class="lab" x="463" y="470">plan y límites</text>
-<path class="ln" d="M250 522 H288" marker-end="url(#g1a)"/>
-<text class="lab" x="269" y="515" text-anchor="middle">lee</text>
-<rect class="core" x="290" y="632" width="150" height="96" rx="10"/>
-<text class="h2" x="302" y="653">Diagnóstico</text>
-<g class="jv"><rect x="386" y="642" width="34" height="15" rx="7.5"/><text x="403.0" y="653" text-anchor="middle">Jev</text></g>
-<text class="s11" x="302" y="668">1. junta evidencia (código)</text>
-<text class="s11" x="302" y="683">2. clasifica (Jev o reglas)</text>
-<text class="s11" x="302" y="698">3. hipótesis y corrección</text>
-<text class="s11" x="302" y="713">   (LLM, contexto fresco)</text>
-<rect class="core" x="290" y="820" width="300" height="110" rx="10"/>
-<text class="h" x="302" y="841">Verificación</text>
-<g class="jv"><rect x="400" y="830" width="34" height="15" rx="7.5"/><text x="417.0" y="841" text-anchor="middle">Jev</text></g>
-<text class="s11" x="302" y="854">señales externas, no autocrítica;</text>
-<text class="s11" x="302" y="869">invariantes del contrato, en código;</text>
-<text class="s11" x="302" y="884">por paso y contra el objetivo;</text>
-<text class="s11" x="302" y="899">otro proceso, no quien escribió;</text>
-<text class="s11" x="302" y="914">en 0 y 1: solo filtro y formato</text>
-<g transform="translate(554,835)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<g transform="translate(574,835)"><circle r="8" class="bE"/><text class="bt tE" y="3.5">E</text></g>
-<path class="ln" d="M560 820 V572" marker-end="url(#g1a)"/>
-<text class="lab" x="568" y="700">verificado</text>
-<path class="ln" d="M470 570 V818" marker-end="url(#g1a)"/>
-<text class="lab" transform="rotate(-90 462 700)" x="462" y="700" text-anchor="middle">sin herramientas (0)</text>
-<path class="lf" d="M370 820 V730" marker-end="url(#g1f)"/>
-<text class="lab" x="378" y="780">falla</text>
-<path class="lf" d="M440 680 H640 V530 a8 8 0 0 0 0 -16 V376 H622" marker-end="url(#g1f)"/>
-<text class="lab" transform="rotate(-90 650 600)" x="650" y="600" text-anchor="middle">a control, con evidencia</text>
-<rect class="box" x="290" y="960" width="330" height="64" rx="8" style="stroke-width:1.8"/>
-<text class="h" x="302" y="981">Cierre: respuesta o informe</text>
-<text class="s11" x="302" y="996">0 y 1: respuesta · 2 y 3: informe de cierre</text>
-<text class="s11" x="302" y="1011">verificado, pendiente y siguiente paso</text>
-<path class="ln" d="M455 930 V958" marker-end="url(#g1a)"/>
-<text class="lab" x="463" y="950">cumple</text>
-<path class="ln" d="M290 988 H262 V627 H238" marker-end="url(#g1a)"/>
-<text class="lab" transform="rotate(-90 276 810)" x="276" y="810" text-anchor="middle">escribe al cerrar el episodio</text>
-<path class="ln" d="M620 988 H988 V96" marker-end="url(#g1a)"/>
-<text class="lab" transform="rotate(-90 1000 700)" x="1000" y="700" text-anchor="middle">respuesta · informe · resumen</text>
-<rect class="box" x="660" y="124" width="270" height="92" rx="10" style="stroke-width:1.8"/>
-<text class="h" x="672" y="145">Vault de secretos</text>
-<text class="s11" x="672" y="158">proceso aparte; el LLM ve {{secreto:x}}</text>
-<text class="s11" x="672" y="173">cada secreto atado a su destino</text>
-<text class="s11" x="672" y="188">tokens cortos al ejecutor; todo a la traza</text>
-<g transform="translate(894,139)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<g transform="translate(914,139)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<path class="ln" d="M915 216 V698" marker-end="url(#g1a)"/>
-<text class="lab" transform="rotate(-90 925 440)" x="925" y="440" text-anchor="middle">token corto, atado a destino</text>
-<path class="ln" d="M620 150 H652 V96" marker-end="url(#g1a)"/>
-<text class="lab" x="660" y="118">pregunta, una a la vez</text>
-<rect class="gate" x="660" y="478" width="240" height="204" rx="10"/>
-<text class="h" x="672" y="499">Pasarela: antes de actuar</text>
-<g class="jv"><rect x="850" y="488" width="34" height="15" rx="7.5"/><text x="867.0" y="499" text-anchor="middle">Jev</text></g>
-<text class="s11" x="672" y="512">catálogo: cada herramienta declara su efecto</text>
-<text class="s11" x="672" y="527">reversible o con política: pasa sola</text>
-<text class="s11" x="672" y="542">contaminada + destino nuevo: pregunta</text>
-<text class="s11" x="672" y="557">irreversible sin política: passkey;</text>
-<text class="s11" x="672" y="572">ausente: aparta y sigue con lo reversible</text>
-<text class="s11" x="672" y="587">Jev: preguntas cerradas, texto limpio</text>
-<text class="s11" x="672" y="602">registro de efectos, idempotente</text>
-<text class="s11" x="672" y="617">niega una vez, con razón; N bloqueos: pregunta</text>
-<text class="s11" x="672" y="632">falla cerrada: sin pasarela, nada corre</text>
-<g transform="translate(864,668)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<g transform="translate(884,668)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<path class="ln" d="M620 522 H658" marker-end="url(#g1a)"/>
-<text class="lab" x="639" y="515" text-anchor="middle">acción</text>
-<path class="lg" d="M900 500 H950 V96" marker-end="url(#g1g)"/>
-<text class="labg" transform="rotate(-90 942 330)" x="942" y="330" text-anchor="middle">pide aprobación</text>
-<path class="lg" d="M968 96 V540 H902" marker-end="url(#g1g)"/>
-<text class="labg" transform="rotate(-90 960 180)" x="960" y="180" text-anchor="middle">sí o no</text>
-<rect class="box" x="660" y="700" width="270" height="100" rx="10" style="stroke-width:1.8"/>
-<text class="h" x="672" y="721">Ejecución en nodos</text>
-<text class="s11" x="672" y="734">daemon aparte, con su lista local; sin SSH</text>
-<text class="s11" x="672" y="749">snapshot por tarea: lo del sandbox es</text>
-<text class="s11" x="672" y="764">reversible por construcción</text>
-<text class="s11" x="672" y="779">arrienda recursos: repo, ruta, nodo</text>
-<g transform="translate(894,715)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<g transform="translate(914,715)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<path class="ln" d="M770 682 V698" marker-end="url(#g1a)"/>
-<text class="lab" x="778" y="694">orden firmada</text>
-<rect class="gate" x="660" y="830" width="270" height="48" rx="8"/>
-<text class="h2" x="672" y="851">Filtro de salidas</text>
-<text class="s11" x="672" y="864">tacha secretos; lo externo marca la sesión</text>
-<path class="ln" d="M770 800 V828" marker-end="url(#g1a)"/>
-<text class="lab" x="778" y="820">salida</text>
-<path class="ln" d="M660 854 H592" marker-end="url(#g1a)"/>
-<text class="lab" x="626" y="847" text-anchor="middle">resultado</text>
-<line class="dot" x1="455" y1="1024" x2="455" y2="1050"/><line class="dot" x1="795" y1="878" x2="795" y2="1050"/>
-<rect class="cont" x="20" y="1050" width="970" height="226" rx="10"/>
-<text class="cap" x="36" y="1072">CLIO-NETWORK · EL CEREBRO VIVE EN EL EQUIPO ANFITRIÓN (ESTE PC; UN VPS ES OPCIONAL)</text>
-<g transform="translate(948,1066)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<g transform="translate(968,1066)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<rect class="box" x="34" y="1084" width="180" height="66" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="46" y="1105">Programador</text>
-<text class="s11" x="46" y="1118">hora, intervalo o evento</text>
-<text class="s11" x="46" y="1133">contrato y política fijos</text>
-<path class="ln" d="M214 1117 H224" marker-end="url(#g1a)"/>
-<rect class="core" x="226" y="1084" width="180" height="66" rx="10"/>
-<text class="h2" x="238" y="1105">Cerebro · anfitrión</text>
-<text class="s11" x="238" y="1118">cola por prioridad; una sesión</text>
-<text class="s11" x="238" y="1133">por contrato; orquesta en código</text>
-<path class="ln" d="M406 1117 H416" marker-end="url(#g1a)"/>
-<rect class="box" x="418" y="1084" width="250" height="66" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="430" y="1105">Enrutador de nodos</text>
-<g class="jv"><rect x="562" y="1094" width="34" height="15" rx="7.5"/><text x="579.0" y="1105" text-anchor="middle">Jev</text></g>
-<text class="s11" x="430" y="1118">reglas descartan; Jev elige o pregunta</text>
-<text class="s11" x="430" y="1133">lee preferencias; arrienda recursos</text>
-<path class="ln" d="M680 1117 H670" marker-end="url(#g1a)"/>
-<rect class="box" x="682" y="1084" width="294" height="66" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="694" y="1105">Registro de nodos</text>
-<text class="s11" x="694" y="1118">laptop: shell, repos, Docker, GUI · libre</text>
-<text class="s11" x="694" y="1133">teléfono: PWA, aprobar, cámara · sin shell</text>
-<text class="lab" x="964" y="1105" text-anchor="end">latido: el WebSocket</text>
-<path class="ln" d="M543 1150 V1156 M137 1156 H851"/>
-<path class="ln" d="M137 1156 V1162" marker-end="url(#g1a)"/>
-<path class="ln" d="M367 1156 V1162" marker-end="url(#g1a)"/>
-<path class="ln" d="M609 1156 V1162" marker-end="url(#g1a)"/>
-<path class="ln" d="M851 1156 V1162" marker-end="url(#g1a)"/>
-<rect class="box" x="34" y="1164" width="206" height="50" rx="8"/>
-<text class="h2" x="46" y="1184">Daemon anfitrión (aparte)</text>
-<text class="s11" x="46" y="1202">investigar, sandbox, sin secretos</text>
-<rect class="box" x="252" y="1164" width="230" height="50" rx="8"/>
-<text class="h2" x="264" y="1184">Nodo: laptop</text>
-<text class="s11" x="264" y="1202">daemon · proyectos y builds</text>
-<rect class="box" x="494" y="1164" width="230" height="50" rx="8"/>
-<text class="h2" x="506" y="1184">Nodo: otro equipo</text>
-<text class="s11" x="506" y="1202">daemon · capturas y apps</text>
-<rect class="gate" x="736" y="1164" width="230" height="50" rx="8"/>
-<text class="h2" x="748" y="1184">Nodo: teléfono</text>
-<text class="s11" x="748" y="1202">PWA · conversar y aprobar</text>
-<rect class="box" x="34" y="1226" width="932" height="40" rx="8" style="stroke-width:1.8"/>
-<text class="h2" x="46" y="1244">Bus de eventos y notificador</text>
-<text class="s11" x="46" y="1259">WebSocket que abre cada nodo: mensajes con ID, nunca se pierden · push al teléfono según urgencia · lo no urgente, en un resumen</text>
-<path class="dot" d="M200 720 V1040 H500 V1082"/>
-<text class="lab" transform="rotate(-90 192 880)" x="192" y="880" text-anchor="middle">lee preferencias</text>
-<line class="dot" x1="135" y1="1276" x2="135" y2="1300"/>
-<line class="dot" x1="455" y1="1276" x2="455" y2="1300"/>
-<line class="dot" x1="830" y1="1276" x2="830" y2="1300"/>
-<rect class="cont" x="20" y="1300" width="970" height="130" rx="10"/>
-<text class="cap" x="36" y="1322">BASE: PI (MIT) + CATÁLOGO DE MODELOS · LO QUE NO CONSTRUYO</text>
-<text class="lab" x="934" y="1322" text-anchor="end">versión fijada, detrás de un adaptador propio</text>
-<g transform="translate(948,1316)"><circle r="8" class="bE"/><text class="bt tE" y="3.5">E</text></g>
-<g transform="translate(968,1316)"><circle r="8" class="bI"/><text class="bt tI" y="3.5">I</text></g>
-<rect class="box" x="34" y="1334" width="228" height="30" rx="7"/>
-<text class="h2" x="46" y="1353">Bucle del agente</text>
-<text class="mono m" x="250" y="1353" text-anchor="end">pi-agent-core</text>
-<rect class="box" x="272" y="1334" width="228" height="30" rx="7"/>
-<text class="h2" x="284" y="1353">Proveedores de modelos</text>
-<text class="mono m" x="488" y="1353" text-anchor="end">pi-ai</text>
-<rect class="box" x="510" y="1334" width="228" height="30" rx="7"/>
-<text class="h2" x="522" y="1353">read · write · edit · bash</text>
-<text class="mono m" x="726" y="1353" text-anchor="end">+3 más</text>
-<rect class="box" x="748" y="1334" width="228" height="30" rx="7"/>
-<text class="h2" x="760" y="1353">Hooks de extensión</text>
-<text class="mono m" x="964" y="1353" text-anchor="end">tool_call</text>
-<rect class="box" x="34" y="1370" width="228" height="30" rx="7"/>
-<text class="h2" x="46" y="1389">Compactación</text>
-<text class="mono m" x="250" y="1389" text-anchor="end">limpiada</text>
-<rect class="box" x="272" y="1370" width="228" height="30" rx="7"/>
-<text class="h2" x="284" y="1389">Skills y AGENTS.md</text>
-<text class="mono m" x="488" y="1389" text-anchor="end">SKILL.md</text>
-<rect class="box" x="510" y="1370" width="228" height="30" rx="7"/>
-<text class="h2" x="522" y="1389">Sesiones de Pi</text>
-<text class="mono m" x="726" y="1389" text-anchor="end">JSONL</text>
-<rect class="box" x="748" y="1370" width="228" height="30" rx="7"/>
-<text class="h2" x="760" y="1389">Modelos</text>
-<text class="mono m" x="964" y="1389" text-anchor="end">alternativo por nivel</text>
-<text x="36" y="1418">Pi no trae permisos, MCP, subagentes, plan mode ni to-dos: lo pongo yo encima, como extensiones; nada mío entra en las carpetas que Pi carga solo (S-16)</text>
-<line class="dot" x1="135" y1="1430" x2="135" y2="1454"/>
-<line class="dot" x1="455" y1="1430" x2="455" y2="1454"/>
-<line class="dot" x1="830" y1="1430" x2="830" y2="1454"/>
-<rect class="cont" x="20" y="1454" width="970" height="150" rx="10"/>
-<text class="cap" x="36" y="1476">CLIO-TRACE · TELEMETRÍA, GOBERNANZA Y EVALUACIÓN, EN TODAS LAS CAPAS</text>
-<g transform="translate(948,1470)"><circle r="8" class="bR"/><text class="bt tR" y="3.5">R</text></g>
-<g transform="translate(968,1470)"><circle r="8" class="bM"/><text class="bt tM" y="3.5">M</text></g>
-<rect class="box" x="34" y="1488" width="306" height="50" rx="8"/>
-<text class="h2" x="46" y="1508">Trazas por pedido</text>
-<text class="s11" x="46" y="1526">cascada, camino crítico, tiempo humano aparte</text>
-<rect class="box" x="352" y="1488" width="306" height="50" rx="8"/>
-<text class="h2" x="364" y="1508">Métricas que se quedan</text>
-<text class="s11" x="364" y="1526">pass^k y horizonte al 80 %: los números de la autonomía</text>
-<rect class="box" x="670" y="1488" width="306" height="50" rx="8"/>
-<text class="h2" x="682" y="1508">Eventos del sistema</text>
-<text class="s11" x="682" y="1526">nodos, reconexiones, colas, versiones</text>
-<text x="36" y="1562">costo calculado con una tabla de precios versionada; topes duros por día y por tarea, que cortan y avisan</text>
-<text x="36" y="1580">banco de 10 tareas repetidas: cada ascenso de confianza se gana con k de k; la auditoría sale de las trazas y del registro de operaciones</text>
-<text class="m" x="36" y="1598">clio-memory y clio-network traen su extensión OpenTelemetry; el traceparent viaja en el WebSocket; sin contenido de prompts salvo para depurar</text>
+
+<!-- The person -->
+<rect class="cont" x="20" y="16" width="980" height="88" rx="10"/>
+<text class="cap" x="36" y="38">THE PERSON · IN THE CHAT (clio) OR AT THE TERMINAL · THE ONLY ONE WHO APPROVES</text>
+<rect class="box" x="34" y="50" width="228" height="44" rx="8"/>
+<text class="h2" x="46" y="66">Asks</text>
+<text class="s11" x="46" y="82">any language; Clio answers in it</text>
+<rect class="box" x="276" y="50" width="228" height="44" rx="8"/>
+<text class="h2" x="288" y="66">Answers</text>
+<text class="s11" x="288" y="82">ask_person: one question, a few options</text>
+<rect class="box" x="518" y="50" width="228" height="44" rx="8"/>
+<text class="h2" x="530" y="66">Approves or rejects</text>
+<text class="s11" x="530" y="82">what was set aside, one by one</text>
+<rect class="box" x="760" y="50" width="228" height="44" rx="8"/>
+<text class="h2" x="772" y="66">Types a secret</text>
+<text class="s11" x="772" y="82">masked box, straight into the vault</text>
+
+<!-- Clio service -->
+<rect class="box" x="290" y="128" width="440" height="58" rx="8"/>
+<text class="h2" x="302" y="146">Clio service (clio)</text>
+<text class="s11" x="302" y="162">owns the sessions, the chat and the day's budget; starts Pi in its jail</text>
+<text class="s11" x="302" y="176">and the tool host beside it, and stops both when the session ends</text>
+<path class="ln" d="M400 104 V126" marker-end="url(#g1a)"/>
+<text class="lab" x="408" y="118">message</text>
+<path class="ln" d="M510 186 V206" marker-end="url(#g1a)"/>
+<text class="lab" x="518" y="200">prompt</text>
+
+<!-- Jail -->
+<rect class="cont" x="270" y="208" width="480" height="236" rx="10" style="stroke-dasharray:6 4;stroke-width:1.4"/>
+<text class="cap" x="286" y="230">THE JAIL · bwrap · ITS OWN NETWORK NAMESPACE</text>
+<rect class="box" x="286" y="242" width="214" height="96" rx="8"/>
+<text class="h2" x="298" y="261">Pi, the agent harness</text>
+<text class="s11" x="298" y="278">pinned version, no install scripts;</text>
+<text class="s11" x="298" y="292">the agent loop, the sessions and</text>
+<text class="s11" x="298" y="306">compaction; read · write · edit ·</text>
+<text class="s11" x="298" y="320">bash · find · ls are Pi's own tools</text>
+<rect class="box" x="520" y="242" width="214" height="96" rx="8"/>
+<text class="h2" x="532" y="261">clio-guard</text>
+<text class="s11" x="532" y="278">the only extension Pi loads;</text>
+<text class="s11" x="532" y="292">22 tools (24 in host mode); each</text>
+<text class="s11" x="532" y="306">operation becomes a request to</text>
+<text class="s11" x="532" y="320">the tool host, and nothing else</text>
+<path class="ln" d="M500 290 H518" marker-end="url(#g1a)"/>
+<text class="s11" x="286" y="362">Sees no vault, no home folder and no Clio data. In host mode its working</text>
+<text class="s11" x="286" y="376">folder is empty; in copy mode the copy is read-only to it.</text>
+<text class="s11" x="286" y="398">Holds no credential but the model key, which reaches only the provider,</text>
+<text class="s11" x="286" y="412">through the egress proxy. No jail or a failed self-test: Pi does not start.</text>
+<text class="s11" x="286" y="432">Pi and the model are not trusted: everything below assumes they were fooled.</text>
+
+<!-- Model -->
+<rect class="box" x="770" y="242" width="226" height="96" rx="8"/>
+<text class="h2" x="782" y="261">Model (LLM provider)</text>
+<text class="s11" x="782" y="278">reached only through Clio's egress</text>
+<text class="s11" x="782" y="292">proxy: one host:443, nothing else;</text>
+<text class="s11" x="782" y="306">sees the model's context, with the</text>
+<text class="s11" x="782" y="320">known secrets struck out</text>
+<path class="ln" d="M752 290 H768" marker-start="url(#g1a)" marker-end="url(#g1a)"/>
+
+<!-- Memory -->
+<rect class="cont" x="20" y="128" width="230" height="682" rx="10"/>
+<text class="cap" x="36" y="150">CLIO-MEMORY</text>
+<text class="lab" x="236" y="150" text-anchor="end">SQLite · one file</text>
+<rect class="box" x="34" y="162" width="202" height="72" rx="8" style="stroke-width:1.8"/>
+<text class="h2" x="46" y="181">The person's blocks</text>
+<text class="s11" x="46" y="197">identidad · reglas · preferencias</text>
+<text class="s11" x="46" y="211">· vigilancia; changed when the</text>
+<text class="s11" x="46" y="225">person asks, in a clean session</text>
+<rect class="box" x="34" y="244" width="202" height="72" rx="8"/>
+<text class="h2" x="46" y="263">The agent's memory</text>
+<text class="s11" x="46" y="279">saved active at once, origin</text>
+<text class="s11" x="46" y="293">marked agente or externo; every</text>
+<text class="s11" x="46" y="307">change logged and revertible</text>
+<rect class="gate" x="34" y="326" width="202" height="58" rx="8"/>
+<text class="h2" x="46" y="345">Quarantine</text>
+<text class="s11" x="46" y="361">what was forgotten; it comes</text>
+<text class="s11" x="46" y="375">back with revert</text>
+<rect class="box" x="34" y="394" width="202" height="86" rx="8"/>
+<text class="h2" x="46" y="413">Before saving</text>
+<g class="jv"><rect x="196" y="402" width="32" height="15" rx="7.5"/><text x="212" y="413" text-anchor="middle">Jev</text></g>
+<text class="s11" x="46" y="429">closed questions on what the</text>
+<text class="s11" x="46" y="443">agent saves; only a clear «no»</text>
+<text class="s11" x="46" y="457">refuses; no answer: saved as</text>
+<text class="s11" x="46" y="471">without the check</text>
+<text class="s11" x="36" y="508">The model reads and writes it</text>
+<text class="s11" x="36" y="522">only through the tool host's</text>
+<text class="s11" x="36" y="536">memory tools, with a budget</text>
+<text class="s11" x="36" y="550">per session. Reading what is not</text>
+<text class="s11" x="36" y="564">the person's marks the session.</text>
+<path class="ln" d="M268 600 H252" marker-end="url(#g1a)"/>
+<text class="lab10" x="36" y="604">memory tools ▸</text>
+
+<!-- Tool host: the door -->
+<rect class="core" x="270" y="470" width="480" height="340" rx="10"/>
+<text class="cap" x="286" y="492">THE DOOR · EVERY EFFECT GOES THROUGH HERE</text>
+<text class="h" x="286" y="514">Tool host (clio-toolhost)</text>
+<text class="s11" x="286" y="531">a process of its own behind a private socket; it decides in code, not the model</text>
+<path class="ln" d="M627 444 V468" marker-end="url(#g1a)"/>
+<text class="lab" x="635" y="460">every operation</text>
+
+<rect class="box" x="286" y="544" width="222" height="74" rx="8"/>
+<text class="h2" x="298" y="563">Gateway</text>
+<text class="s11" x="298" y="579">deny by default, per operation;</text>
+<text class="s11" x="298" y="593">Clio's own folders refused;</text>
+<text class="s11" x="298" y="607">10 denials in a row: it stops</text>
+<rect class="gate" x="518" y="544" width="222" height="74" rx="8"/>
+<text class="h2" x="530" y="563">Set aside for the person</text>
+<text class="s11" x="530" y="579">delete · spend · send · control;</text>
+<text class="s11" x="530" y="593">not run; the task goes on; 24 h,</text>
+<text class="s11" x="530" y="607">at most 3 questions a day</text>
+
+<rect class="box" x="286" y="628" width="222" height="74" rx="8"/>
+<text class="h2" x="298" y="647">Scrubber</text>
+<text class="s11" x="298" y="663">vault values and key shapes struck</text>
+<text class="s11" x="298" y="677">out of every result; what came</text>
+<text class="s11" x="298" y="691">from outside is wrapped as data</text>
+<rect class="gate" x="518" y="628" width="222" height="74" rx="8"/>
+<text class="h2" x="530" y="647">Judge at the door</text>
+<text class="s11" x="530" y="663">outside text is judged before the</text>
+<text class="s11" x="530" y="677">model reads it; a suspect session's</text>
+<text class="s11" x="530" y="691">networked commands wait as send</text>
+
+<rect class="box" x="286" y="712" width="222" height="74" rx="8"/>
+<text class="h2" x="298" y="731">Action log</text>
+<text class="s11" x="298" y="747">a line before and after every</text>
+<text class="s11" x="298" y="761">command and write; no line</text>
+<text class="s11" x="298" y="775">before, no action</text>
+<rect class="box" x="518" y="712" width="222" height="74" rx="8"/>
+<text class="h2" x="530" y="731">Copy before change</text>
+<text class="s11" x="530" y="747">write and edit keep the old file;</text>
+<text class="s11" x="530" y="761">clio undo walks them back; what a</text>
+<text class="s11" x="530" y="775">command changes has no copy</text>
+
+<!-- Set aside -> person -->
+<path class="lg" d="M740 560 H760 V72 H748" marker-end="url(#g1g)"/>
+<text class="labg" x="772" y="380">set aside: asked when the turn</text>
+<text class="labg" x="772" y="394">ends, or clio pending / approve</text>
+
+<!-- Judge -->
+<rect class="gate" x="770" y="520" width="226" height="144" rx="8"/>
+<text class="h2" x="782" y="539">Temis, the judge</text>
+<g class="jv"><rect x="956" y="528" width="32" height="15" rx="7.5"/><text x="972" y="539" text-anchor="middle">Jev</text></g>
+<text class="s11" x="782" y="555">the owner's service, reached through</text>
+<text class="s11" x="782" y="569">the Jev adapter; one closed question,</text>
+<text class="s11" x="782" y="583">injection, on text the vault cleaned.</text>
+<text class="s11" x="782" y="597">At 0.9 or more: withheld from the</text>
+<text class="s11" x="782" y="611">model, kept 0600 for the person, the</text>
+<text class="s11" x="782" y="625">session marked suspect. No answer</text>
+<text class="s11" x="782" y="639">in 5 s, or no judge: as before, with</text>
+<text class="s11" x="782" y="653">a note in the chat</text>
+<path class="lf" d="M742 650 H768" marker-start="url(#g1f)" marker-end="url(#g1f)"/>
+
+<!-- Vault -->
+<rect class="box" x="770" y="680" width="226" height="130" rx="8"/>
+<text class="h2" x="782" y="699">Vault (clio-vault)</text>
+<text class="s11" x="782" y="715">a process of its own; each secret</text>
+<text class="s11" x="782" y="729">bound to TOOL:DOMAIN; the model</text>
+<text class="s11" x="782" y="743">sees names, never values; a typed</text>
+<text class="s11" x="782" y="757">secret comes in on the person's</text>
+<text class="s11" x="782" y="771">socket. No tool of the model sends</text>
+<text class="s11" x="782" y="785">a stored secret anywhere yet.</text>
+<path class="ln" d="M752 760 H768" marker-end="url(#g1a)"/>
+<path class="lg" d="M988 72 H1008 V745 H998" marker-end="url(#g1g)"/>
+
+<!-- The machine -->
+<path class="ln" d="M590 810 V834" marker-end="url(#g1a)"/>
+<text class="lab" x="598" y="826">commands and file writes</text>
+<path class="lf" d="M430 834 V812" marker-end="url(#g1f)"/>
+<text class="lab" x="422" y="826" text-anchor="end">outside text, to the judge first</text>
+<rect class="cont" x="20" y="836" width="980" height="216" rx="10"/>
+<text class="cap" x="36" y="858">THE MACHINE · HOST MODE, THE FACTORY DEFAULT</text>
+<rect class="box" x="34" y="872" width="228" height="74" rx="8"/>
+<text class="h2" x="46" y="891">Host launcher</text>
+<text class="s11" x="46" y="907">a systemd-run unit (sudo works where</text>
+<text class="s11" x="46" y="921">it is passwordless) or bwrap; no</text>
+<text class="s11" x="46" y="935">passed self-test, no commands</text>
+<rect class="box" x="276" y="872" width="228" height="74" rx="8"/>
+<text class="h2" x="288" y="891">Clio's folders masked</text>
+<text class="s11" x="288" y="907">empty and read-only to a command,</text>
+<text class="s11" x="288" y="921">refused by the file tools; not a</text>
+<text class="s11" x="288" y="935">wall against sudo</text>
+<rect class="box" x="518" y="872" width="228" height="74" rx="8"/>
+<text class="h2" x="530" y="891">Network per command</text>
+<text class="s11" x="530" y="907">none unless the command asks</text>
+<text class="s11" x="530" y="921">(network: true), and asking marks</text>
+<text class="s11" x="530" y="935">the session; time limit optional</text>
+<rect class="box" x="760" y="872" width="228" height="74" rx="8"/>
+<text class="h2" x="772" y="891">Background jobs</text>
+<text class="s11" x="772" y="907">bash with background: true; at</text>
+<text class="s11" x="772" y="921">most 4; job_output and job_stop;</text>
+<text class="s11" x="772" y="935">they stop when the session ends</text>
+<rect class="box" x="34" y="958" width="954" height="80" rx="8" style="stroke-dasharray:4 3"/>
+<text class="h2" x="46" y="977">Copy mode instead (--copy, "mode": "copy", clio run --workspace DIR)</text>
+<text class="s11" x="46" y="995">The agent works on a copy of one project. bash runs in a bwrap jail with no network and no home folder, under a time limit;</text>
+<text class="s11" x="46" y="1009">credential files are not copied. You review with clio diff and bring changes back with clio apply; clio undo restores the original.</text>
+<text class="s11" x="46" y="1027">The tool host, the scrubber, the judge and the vault work the same way in both modes.</text>
+
+<!-- Logged -->
+<rect class="cont" x="20" y="1072" width="980" height="132" rx="10"/>
+<text class="cap" x="36" y="1094">EVERYTHING IS LOGGED · FILE CHANGES CAN BE UNDONE</text>
+<rect class="box" x="34" y="1106" width="228" height="86" rx="8"/>
+<text class="h2" x="46" y="1125">Action log</text>
+<text class="mono" x="46" y="1141">host/actions.jsonl</text>
+<text class="s11" x="46" y="1157">every command and write, before</text>
+<text class="s11" x="46" y="1171">and after; set aside, denied and</text>
+<text class="s11" x="46" y="1185">withheld too; clio actions</text>
+<rect class="box" x="276" y="1106" width="228" height="86" rx="8"/>
+<text class="h2" x="288" y="1125">File changes</text>
+<text class="mono" x="288" y="1141">changes.jsonl, backups/</text>
+<text class="s11" x="288" y="1157">a copy before each write;</text>
+<text class="s11" x="288" y="1171">clio undo walks them back,</text>
+<text class="s11" x="288" y="1185">last first</text>
+<rect class="box" x="518" y="1106" width="228" height="86" rx="8"/>
+<text class="h2" x="530" y="1125">Pending</text>
+<text class="mono" x="530" y="1141">host/pending/&lt;id&gt;.json</text>
+<text class="s11" x="530" y="1157">what waits for the person; runs</text>
+<text class="s11" x="530" y="1171">once, exactly as saved (hash);</text>
+<text class="s11" x="530" y="1185">expires after 24 hours</text>
+<rect class="box" x="760" y="1106" width="228" height="86" rx="8"/>
+<text class="h2" x="772" y="1125">Withheld</text>
+<text class="mono" x="772" y="1141">withheld/&lt;ms&gt;-&lt;n&gt;.txt</text>
+<text class="s11" x="772" y="1157">what the judge kept from the</text>
+<text class="s11" x="772" y="1171">model, mode 0600, for the</text>
+<text class="s11" x="772" y="1185">person to read</text>
+
+<!-- The guard is at the door -->
+<rect class="cont" x="20" y="1226" width="980" height="378" rx="10"/>
+<text class="cap" x="36" y="1248">THE GUARD IS AT THE DOOR · WHAT HOLDS WHEN THE MODEL WAS FOOLED</text>
+<g transform="translate(46,1276)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">1</text></g>
+<text class="h2" x="64" y="1280">The harness and the model stay jailed</text>
+<text class="s11" x="64" y="1296">Pi and the model never see the vault, the person's files or Clio's data. The only credential in the jail is the model key, and it reaches only the provider.</text>
+<g transform="translate(46,1328)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">2</text></g>
+<text class="h2" x="64" y="1332">Every effect goes through the tool host</text>
+<text class="s11" x="64" y="1348">Reading, writing, running a command, the memory: each is a request to the tool host, and the gateway decides each one in code.</text>
+<g transform="translate(46,1380)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">3</text></g>
+<text class="h2" x="64" y="1384">Outside text meets the judge first</text>
+<text class="s11" x="64" y="1400">Temis reads what a tool brought in from outside before the model does. An injection is withheld, the session becomes suspect, and its networked commands wait.</text>
+<g transform="translate(46,1432)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">4</text></g>
+<text class="h2" x="64" y="1436">Four classes of action wait for the owner</text>
+<text class="s11" x="64" y="1452">Delete (borrar), spend (gastar), send (enviar) and control are set aside, not run. The person approves each one, and it runs once, exactly as saved.</text>
+<g transform="translate(46,1484)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">5</text></g>
+<text class="h2" x="64" y="1488">Secrets live in the vault</text>
+<text class="s11" x="64" y="1504">The model sees names, never values. A secret the task needs is typed by the person into the vault, and never passes through Pi, the guard or the model.</text>
+<g transform="translate(46,1536)"><circle r="9" class="bM"/><text class="bt tM" y="3.5">6</text></g>
+<text class="h2" x="64" y="1540">Everything is logged, and file changes can be undone</text>
+<text class="s11" x="64" y="1556">The action log has a line before and after each effect. The file tools keep a copy before they write, and clio undo walks them back.</text>
+<text class="s11" x="36" y="1588">What it does not stop: a script that gets around the list, root under the systemd launcher, daemons reached by their Unix sockets. See docs/threat-model.md.</text>
 </svg>
