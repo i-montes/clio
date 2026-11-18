@@ -366,6 +366,7 @@ dependencies = [
  "clio-gateway",
  "clio-node",
  "clio-vault",
+ "regex",
  "rustix",
  "serde",
  "serde_json",
