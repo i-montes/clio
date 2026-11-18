@@ -29,3 +29,13 @@ fn writing_over_an_executable_keeps_it_executable() {
     sb.write("notes.txt", b"x").unwrap();
     assert_eq!(mode(&root.join("notes.txt")) & 0o111, 0);
 }
+
+#[test]
+fn the_whole_machine_as_root_takes_any_scratch_and_is_never_snapshotted() {
+    let t = tempfile::tempdir().unwrap();
+    let inside = t.path().join("root");
+    std::fs::create_dir(&inside).unwrap();
+    assert!(Sandbox::new(&inside, &inside.join("scratch")).is_err());
+    let sb = Sandbox::new(std::path::Path::new("/"), &t.path().join("scratch")).unwrap();
+    assert!(sb.snapshot().is_err());
+}

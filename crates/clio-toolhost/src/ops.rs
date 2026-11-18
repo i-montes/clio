@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use clio_core::Effect;
-use clio_node::jail::{Jail, Job};
+use clio_node::jail::{Jail, JailOutput, Job};
 use clio_node::{Error, Result, Sandbox, Tool};
 use serde_json::{Value, json};
 
@@ -44,7 +44,8 @@ fn tool(
     }
 }
 
-pub fn tools(jail: bool) -> Vec<Tool> {
+/// `host`: `exec` is declared here but served by `ToolHost` itself, with the host launcher.
+pub fn tools(jail: bool, host: bool) -> Vec<Tool> {
     let mut v = vec![
         tool(
             "fs_read",
@@ -89,7 +90,18 @@ pub fn tools(jail: bool) -> Vec<Tool> {
             },
         ),
     ];
-    if jail {
+    if jail && host {
+        v.push(tool(
+            "exec",
+            "Run a shell command on the host (network only when asked, Clio's folders hidden)",
+            Effect::LocalReversible,
+            |_, _| {
+                Err(Error::Jail(
+                    "host commands are not run by the executor".into(),
+                ))
+            },
+        ));
+    } else if jail {
         v.push(tool(
             "exec",
             "Run a shell command inside the jail (no network, only the working copy)",
@@ -251,6 +263,11 @@ fn exec(s: &Sandbox, a: &Value) -> Result<Value> {
             ..Job::default()
         })
         .map_err(Error::Jail)?;
+    Ok(exec_result(&out, secs))
+}
+
+/// What a command returns to the model, in either mode.
+pub fn exec_result(out: &JailOutput, secs: u64) -> Value {
     let mut output = out.stdout.clone();
     if !out.stderr.is_empty() {
         if !output.is_empty() && !output.ends_with('\n') {
@@ -264,13 +281,13 @@ fn exec(s: &Sandbox, a: &Value) -> Result<Value> {
     if out.truncated {
         output.push_str("\n[output truncated: only the tail is shown]");
     }
-    Ok(json!({
+    json!({
         "output": output,
         "exit_code": out.exit_code,
         "signal": out.signal,
         "timed_out": out.timed_out,
         "timeout_secs": secs,
-    }))
+    })
 }
 
 #[cfg(test)]

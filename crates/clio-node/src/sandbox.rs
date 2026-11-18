@@ -68,12 +68,13 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 impl Sandbox {
-    /// `root` must exist; `scratch` is created and must not be inside `root`.
+    /// `root` must exist; `scratch` is created and must not be inside `root`, unless `root` is
+    /// `/` (the host mode), which is never snapshotted.
     pub fn new(root: &Path, scratch: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
         fs::create_dir_all(scratch)?;
         let scratch = scratch.canonicalize()?;
-        if scratch.starts_with(&root) {
+        if root.parent().is_some() && scratch.starts_with(&root) {
             return Err(Error::Escape("scratch inside the sandbox".into()));
         }
         Ok(Self {
@@ -191,6 +192,9 @@ impl Sandbox {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
+        if self.root.parent().is_none() {
+            return Err(Error::Escape("a snapshot of the whole machine".into()));
+        }
         let store = self
             .scratch
             .join(format!("snap-{}", self.next.fetch_add(1, Ordering::SeqCst)));

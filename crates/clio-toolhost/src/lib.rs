@@ -17,10 +17,15 @@
 //!    every answer (S-05). The `filter` operation cleans, scrubs and wraps (`wrap_untrusted`) the
 //!    final text of any tool result, whatever Pi made of it.
 //!
-//! Nothing in this crate talks to the network. See `README.md` for the protocol.
+//! Host mode (`Config.host`, see `host`): the same tools on the real machine, never on Clio's
+//! own folders, with `exec` through the host launcher (the network only when a command asks).
+//!
+//! Nothing in this crate talks to the network, except a host-mode command that asks for it. See
+//! `README.md` for the protocol.
 
 pub mod ask;
 pub mod cli;
+pub mod host;
 mod memory;
 mod ops;
 mod sanitize;
@@ -44,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+pub use host::HostCfg;
 pub use memory::{
     BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Near, Origin,
     ProposalDraft, ProposalKind, Proposed, Saved, memory_args,
@@ -159,6 +165,8 @@ pub struct Config {
     /// What the brain must show to close a session (`closing`): a secret the brain made and put in
     /// this process's environment, which Pi never gets.
     pub said_token: Option<String>,
+    /// Host mode: the tools act on the real machine (`/`) instead of `work`. `None`: copy mode.
+    pub host: Option<HostCfg>,
 }
 
 impl Config {
@@ -173,6 +181,7 @@ impl Config {
             rules: None,
             memory: None,
             said_token: None,
+            host: None,
         }
     }
 }
@@ -210,6 +219,7 @@ pub struct ToolHost {
     said_token: Option<String>,
     /// Where the memory tools keep their budget and their log.
     run_dir: PathBuf,
+    host: Option<host::Host>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -223,7 +233,7 @@ fn digest_hex(s: &str) -> String {
         .collect()
 }
 
-fn arg_specs(tool: &str) -> Vec<ArgSpec> {
+fn arg_specs(tool: &str, host: bool) -> Vec<ArgSpec> {
     let a = |name: &str, kind, required| ArgSpec {
         name: name.into(),
         kind,
@@ -239,6 +249,11 @@ fn arg_specs(tool: &str) -> Vec<ArgSpec> {
             a("limit", ArgKind::Int, false),
         ],
         "fs_write" => vec![path, a("content", ArgKind::Text, true)],
+        "exec" if host => vec![
+            a("command", ArgKind::Text, true),
+            a("timeout", ArgKind::Int, false),
+            a("network", ArgKind::Bool, false),
+        ],
         "exec" => vec![
             a("command", ArgKind::Text, true),
             a("timeout", ArgKind::Int, false),
@@ -258,12 +273,22 @@ fn valid_session(s: &str) -> bool {
 impl ToolHost {
     pub fn new(cfg: Config) -> Result<Self, String> {
         let e = |x: &dyn std::fmt::Display| x.to_string();
-        let exec_status = match cfg.jail {
-            JailMode::Off => Err("the jail is switched off".to_owned()),
-            JailMode::Auto => prove_jail(),
+        let (host, exec_status) = match cfg.host {
+            Some(h) => {
+                let (h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
+                (Some(h), status)
+            }
+            None if cfg.jail == JailMode::Off => (None, Err("the jail is switched off".to_owned())),
+            None => (None, prove_jail()),
+        };
+        // In host mode the tools work on the whole machine; paths reach them absolute.
+        let root = if host.is_some() {
+            PathBuf::from("/")
+        } else {
+            cfg.work.clone()
         };
         let mut registry = Registry::new();
-        for t in ops::tools(exec_status.is_ok()) {
+        for t in ops::tools(exec_status.is_ok(), host.is_some()) {
             registry.register(t).map_err(|x| e(&x))?;
         }
         let (mut tools, mut descriptions) = (Vec::new(), HashMap::new());
@@ -281,7 +306,7 @@ impl ToolHost {
                     .ok_or_else(|| format!("tool {name} has no declared effect"))?,
                 egress: Egress::None,
                 description_hash: hash.clone(),
-                args: arg_specs(name),
+                args: arg_specs(name, host.is_some()),
             });
             descriptions.insert(name.to_owned(), hash);
         }
@@ -292,7 +317,7 @@ impl ToolHost {
             }
         }
         let extra = cfg.rules.unwrap_or(Rules {
-            sandbox_root: cfg.work.clone(),
+            sandbox_root: root.clone(),
             allowed_binaries: vec![],
             trusted_domains: vec![],
             protected_paths: vec![],
@@ -308,7 +333,7 @@ impl ToolHost {
             }
         }
         let gateway = Gateway::new(Rules {
-            sandbox_root: cfg.work.clone(),
+            sandbox_root: root.clone(),
             // `exec` takes a shell string, not an argv: it is not about binaries but about the
             // jail it runs in (see `bash_rule`), so no binary list applies (S-12).
             allowed_binaries: vec![],
@@ -322,7 +347,7 @@ impl ToolHost {
         })?;
         std::fs::create_dir_all(&cfg.run_dir).map_err(|x| e(&x))?;
         let log = EffectLog::open(&cfg.run_dir.join("effects.jsonl")).map_err(|x| e(&x))?;
-        let mut sandbox = Sandbox::new(&cfg.work, &cfg.scratch).map_err(|x| e(&x))?;
+        let mut sandbox = Sandbox::new(&root, &cfg.scratch).map_err(|x| e(&x))?;
         // A program that runs in the folder can edit files in place: snapshots must be copies.
         sandbox.set_copy_snapshots(true);
         Ok(Self {
@@ -346,6 +371,7 @@ impl ToolHost {
             memory_timeout: memory::MEMORY_TIMEOUT,
             said_token: cfg.said_token,
             run_dir: cfg.run_dir,
+            host,
         })
     }
 
@@ -445,7 +471,16 @@ impl ToolHost {
             self.run_dir.join("tainted.json"),
             self.run_dir.join("tainted.json.tmp"),
         );
-        let text = json!({ "sources": sources }).to_string();
+        // Another host on the same run (an approval) may have written it: its sources stay.
+        let mut all: Vec<String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| serde_json::from_value(v["sources"].clone()).ok())
+            .unwrap_or_default();
+        all.extend(sources.iter().map(|s| (*s).to_owned()));
+        all.sort_unstable();
+        all.dedup();
+        let text = json!({ "sources": all }).to_string();
         let saved = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -496,7 +531,7 @@ impl ToolHost {
             self.mark(&req.session, "restored");
         }
         let tainted = self.is_tainted(&req.session);
-        let Value::Object(map) = req.args.clone() else {
+        let Value::Object(mut map) = req.args.clone() else {
             return self.refuse(
                 &req.id,
                 "protocol",
@@ -553,6 +588,14 @@ impl ToolHost {
                 tainted,
             );
         }
+        // Host mode: a relative path is under the home folder; the gateway sees it absolute.
+        if let Some(h) = &self.host
+            && let Some(p) = map.get("path").and_then(Value::as_str)
+        {
+            let abs = h.cfg.home.join(p).to_string_lossy().into_owned();
+            map.insert("path".into(), Value::from(abs));
+            req.args = Value::Object(map.clone());
+        }
         let ar = ActionRequest {
             tool: req.tool.clone(),
             version: "1".into(),
@@ -603,7 +646,47 @@ impl ToolHost {
                 reason: why.into(),
             };
         }
+        // Clio's own folders, wherever the path really lands.
+        let mut real = None;
+        if allowed
+            && let Some(h) = &self.host
+            && let Some(p) = map.get("path").and_then(Value::as_str)
+        {
+            match h.path(p) {
+                Ok(r) => real = Some(r),
+                Err((rule, why)) => {
+                    allowed = false;
+                    out = DecisionOut {
+                        outcome: "deny".into(),
+                        rule: rule.into(),
+                        reason: why,
+                    };
+                }
+            }
+        }
         if !allowed {
+            if let Some(h) = &self.host
+                && host::LOGGED.contains(&req.tool.as_str())
+            {
+                let what = map
+                    .get("command")
+                    .or_else(|| map.get("path"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let network = map.get("network").and_then(Value::as_bool) == Some(true);
+                let what = self.clean(what);
+                if let Err(e) = h.log(
+                    &req.session,
+                    &req.tool,
+                    &what,
+                    network,
+                    "deny",
+                    &out.rule,
+                    None,
+                ) {
+                    eprintln!("clio-toolhost: the action log lost a line: {e}");
+                }
+            }
             let why = if d.outcome == Outcome::Ask {
                 format!(
                     "it needs a person's approval and nobody is available ({})",
@@ -632,13 +715,27 @@ impl ToolHost {
         if memory::MEMORY_OPS.contains(&req.tool.as_str()) {
             return self.memory_call(&req, &map, out);
         }
+        let action_id = format!(
+            "{}:{}:{}",
+            req.session,
+            req.call_id,
+            self.counter.fetch_add(1, Ordering::SeqCst)
+        );
+        if let Some(h) = &self.host {
+            let (ok, content, data, external) =
+                self.host_run(h, &req, action_id, &out.rule, real.as_deref());
+            return Response {
+                id: req.id,
+                ok,
+                content,
+                data,
+                decision: out,
+                tainted: self.is_tainted(&req.session),
+                external,
+            };
+        }
         let action = Action {
-            id: format!(
-                "{}:{}:{}",
-                req.session,
-                req.call_id,
-                self.counter.fetch_add(1, Ordering::SeqCst)
-            ),
+            id: action_id,
             tool: req.tool.clone(),
             args: Value::Object(map),
         };

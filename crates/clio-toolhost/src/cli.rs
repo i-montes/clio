@@ -8,6 +8,9 @@
 //! extra values. With `--memory-data` the memory tools are offered, over what the binary's
 //! [`MemoryFactory`] makes of the two folders (the loose `clio-toolhost` has none). The vector
 //! models' folders come from the parent, best first: this process runs with another `HOME`.
+//!
+//! Host mode: `--host-home H --host-state S --host-run ID [--host-control P]... [--host-rules
+//! FILE]` (the person's `host.json`). `--work` is then not needed: the tools work on `/`.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -17,7 +20,8 @@ use std::sync::Arc;
 use clio_core::SystemClock;
 use clio_vault::{Scrubber, VaultClient};
 
-use crate::{Config, JailMode, MemoryPort, Server, ToolHost};
+use crate::ask::HostRules;
+use crate::{Config, HostCfg, JailMode, MemoryPort, Server, ToolHost};
 
 /// Builds the memory from its data folder and the vector models' folders (best first; none: text).
 pub type MemoryFactory<'a> = &'a dyn Fn(&Path, &[PathBuf]) -> Result<Arc<dyn MemoryPort>, String>;
@@ -31,6 +35,8 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let (mut dir, mut work, mut scratch, mut run_dir) = (None, None, None, None);
     let (mut rules, mut vault, mut jail) = (None, None, JailMode::Auto);
     let (mut memory_data, mut memory_model) = (None, Vec::new());
+    let (mut host_home, mut host_state, mut host_run) = (None, None, None);
+    let (mut host_control, mut host_rules) = (Vec::new(), None);
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -42,6 +48,11 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
             "--vault-socket" => vault = Some(PathBuf::from(value()?)),
             "--memory-data" => memory_data = Some(PathBuf::from(value()?)),
             "--memory-model" => memory_model.push(PathBuf::from(value()?)),
+            "--host-home" => host_home = Some(PathBuf::from(value()?)),
+            "--host-state" => host_state = Some(PathBuf::from(value()?)),
+            "--host-control" => host_control.push(PathBuf::from(value()?)),
+            "--host-rules" => host_rules = Some(PathBuf::from(value()?)),
+            "--host-run" => host_run = Some(value()?),
             "--jail" => {
                 jail = match value()?.as_str() {
                     "auto" => JailMode::Auto,
@@ -54,11 +65,42 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     }
     let need = |v: Option<PathBuf>, n: &str| v.ok_or_else(|| format!("{n} is required"));
     let dir = need(dir, "--socket-dir")?;
+    let host = match host_home {
+        Some(home) => {
+            let mut rules = HostRules::factory();
+            if let Some(p) = host_rules {
+                let text =
+                    std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                rules = rules.with_file(&text)?;
+            }
+            Some(HostCfg {
+                home,
+                state: need(host_state, "--host-state")?,
+                control: host_control,
+                rules,
+                run: host_run.ok_or("--host-run is required")?,
+                launcher: None,
+            })
+        }
+        None if host_state.is_some()
+            || host_run.is_some()
+            || host_rules.is_some()
+            || !host_control.is_empty() =>
+        {
+            return Err("the --host-* options need --host-home".into());
+        }
+        None => None,
+    };
+    let work = match (&host, work) {
+        (Some(h), None) => h.home.clone(),
+        (_, w) => need(w, "--work")?,
+    };
     let mut cfg = Config::new(
-        &need(work, "--work")?,
+        &work,
         &need(scratch, "--scratch")?,
         &need(run_dir, "--run-dir")?,
     );
+    cfg.host = host;
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));
     cfg.said_token = std::env::var("CLIO_SAID_TOKEN")

@@ -108,6 +108,50 @@ const WRAPPERS: [(&str, &[&str]); 5] = [
     ("xargs", &["-n", "-I", "-L", "-P"]),
 ];
 
+/// Programs whose global options can come before the subcommand, with the ones that take a value.
+const GLOBALS: [(&str, &[&str]); 4] = [
+    (
+        "git",
+        &[
+            "-C",
+            "-c",
+            "--git-dir",
+            "--work-tree",
+            "--namespace",
+            "--config-env",
+        ],
+    ),
+    (
+        "docker",
+        &[
+            "-c",
+            "--context",
+            "-H",
+            "--host",
+            "--config",
+            "-l",
+            "--log-level",
+        ],
+    ),
+    (
+        "kubectl",
+        &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--cluster",
+            "--user",
+            "-s",
+            "--server",
+            "--kubeconfig",
+            "--token",
+            "--as",
+            "--as-group",
+        ],
+    ),
+    ("gh", &["-R", "--repo"]),
+];
+
 #[derive(Debug, Clone)]
 pub struct HostRules {
     rules: Vec<(Class, Regex)>,
@@ -251,7 +295,7 @@ impl HostRules {
 }
 
 /// Simple commands as words: quotes dropped (`'DROP TABLE t'` is three words), wrappers peeled,
-/// the program by its bare name.
+/// the program by its bare name, and its global options dropped (`git -C d push` is `git push`).
 fn simple_commands(command: &str) -> impl Iterator<Item = Vec<&str>> {
     command
         .split([';', '&', '|', '\n', '`', '(', ')'])
@@ -265,6 +309,13 @@ fn simple_commands(command: &str) -> impl Iterator<Item = Vec<&str>> {
                 && !p.contains(['<', '>'])
             {
                 *p = p.rsplit('/').next().unwrap_or(p);
+            }
+            if let Some((_, valued)) = GLOBALS.iter().find(|(n, _)| w.first() == Some(n)) {
+                let mut i = 1;
+                while let Some(o) = w.get(i).filter(|o| o.starts_with('-')) {
+                    i += if valued.contains(o) { 2 } else { 1 };
+                }
+                w.drain(1..i.min(w.len()));
             }
             w
         })
@@ -533,6 +584,35 @@ mod tests {
             None,
             &["git push origin feat/x", "git push -u origin fix-1"],
         ),
+        // Global options before the subcommand do not hide it.
+        (
+            Some(Enviar),
+            &[
+                "git -C dir push origin main",
+                "git -c k=v push",
+                "git --no-pager -C a push --tags",
+                "gh -R o/r pr merge 3",
+            ],
+        ),
+        (
+            Some(Borrar),
+            &[
+                "docker -H h volume rm v",
+                "docker --context x system prune -af",
+                "kubectl -n x delete pod p",
+                "kubectl --context=c delete ns x",
+                "gh --repo o/r repo delete x",
+            ],
+        ),
+        (
+            None,
+            &[
+                "git -C dir push origin feat/x",
+                "git -C dir status",
+                "docker -H h ps",
+                "kubectl -n x get pods",
+            ],
+        ),
         (
             Some(Enviar),
             &[
@@ -710,6 +790,8 @@ mod tests {
             "docker logs c",
             "docker compose logs web",
             "kubectl logs p",
+            "docker --context x logs c",
+            "kubectl -n x logs p",
             "tail -f /var/log/syslog",
             "ls ~/Downloads",
             "sudo cat </var/mail/u",
