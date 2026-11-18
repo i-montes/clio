@@ -1062,3 +1062,65 @@ fn the_person_merges_renames_and_archives_projects() {
             .success()
     );
 }
+
+// ---------------------------------------------------------------- clio memory identity
+
+fn seeded() -> Env {
+    let e = Env::new(true);
+    for (text, block) in [
+        ("Eres Clio", "identidad"),
+        ("Hablas claro", "identidad"),
+        ("No borras nada sin permiso", "reglas"),
+        ("el correo del banco", "vigilancia"),
+    ] {
+        e.clio(&["memory", "remember", text, "--block", block]);
+    }
+    e
+}
+
+#[test]
+fn identity_prints_the_blocks_in_order() {
+    let e = seeded();
+    let before = std::fs::read(e.db()).unwrap();
+    let out = e.clio(&["memory", "identity"]);
+    let at = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s:?} not in {out}"));
+    let names = [
+        at("identidad"),
+        at("reglas"),
+        at("preferencias"),
+        at("vigilancia"),
+    ];
+    assert!(names.is_sorted(), "{out}");
+    assert!(
+        at("1. [m1] Eres Clio") < at("2. [m2] Hablas claro"),
+        "{out}"
+    );
+    assert!(at("1. [m3] No borras nada sin permiso") > names[1], "{out}");
+    let empty = at("(vacío)");
+    assert!(names[2] < empty && empty < names[3], "{out}");
+    assert!(at("el correo del banco") > names[3], "{out}");
+    assert_eq!(std::fs::read(e.db()).unwrap(), before, "it only reads");
+}
+
+#[test]
+fn identity_without_a_memory_says_so() {
+    let e = Env::new(false);
+    let out = e.clio(&["memory", "identity"]);
+    assert!(out.contains("todavía no hay memoria"), "{out}");
+}
+
+#[test]
+fn identity_as_json_has_the_four_blocks() {
+    let e = seeded();
+    let j: Value = serde_json::from_str(&e.clio(&["memory", "identity", "--json"])).unwrap();
+    let names: Vec<&str> = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["identidad", "reglas", "preferencias", "vigilancia"]);
+    assert_eq!(j[0]["entries"][1], json!({"id": 2, "text": "Hablas claro"}));
+    assert_eq!(j[2]["entries"], json!([]));
+    assert_eq!(j[3]["entries"][0]["text"], "el correo del banco");
+}

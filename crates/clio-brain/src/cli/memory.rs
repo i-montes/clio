@@ -3,7 +3,9 @@
 //! something (`remember`, `promote`, `archive`, `feedback`) act as the person; the agent has no
 //! way to reach any of them (S-25, S-26). `purge` deletes for good, so it asks first and only the person can run it.
 
-use clio_brain::memory_link::{EmbedModel, MemoryLink, Res, kind_label, origin_label, state_label};
+use clio_brain::memory_link::{
+    BLOCK_NAMES, EmbedModel, MemoryLink, Res, kind_label, origin_label, state_label,
+};
 use clio_memory::{MemoryId, MemoryRow, Signal, State};
 use serde_json::{Value, json};
 
@@ -18,8 +20,10 @@ pub const USAGE: &str = "clio memory: lo que Clio recuerda (todo local, ~/.local
   clio memory search <consulta> [--json]      busca entre lo activo (la cuarentena no sale aquí)
   clio memory list [--pending] [--json]       recientes; --pending: cuarentena y procedimientos por aprobar
   clio memory show <id> [--json]              un recuerdo completo, con de dónde salió
-  clio memory remember \"texto\" [--block identidad|reglas|preferencias]
+  clio memory remember \"texto\" [--block identidad|reglas|preferencias|vigilancia]
                                               un hecho tuyo (origen: persona), activo al instante
+  clio memory identity [--json]               los recuerdos primordiales: quién es Clio, cómo trabaja,
+                                              quién eres tú y lo que vigila (se cambian hablando con ella)
   clio memory promote <id> [--yes]            aprueba un recuerdo pendiente (solo tú; pregunta antes)
   clio memory archive <id> [--yes]            lo archiva: ya no se recuerda (pregunta antes)
   clio memory purge <id> [--reason \"motivo\"] [--yes]
@@ -232,6 +236,41 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                         "todavía no hay recuerdos activos"
                     },
                 );
+            }
+        }
+        "identity" => {
+            let json = args.flag("--json");
+            args.rest()?;
+            let Some(link) = open_read(dirs, false)? else {
+                println!("{NONE_YET}");
+                return Ok(0);
+            };
+            let mut blocks = Vec::new();
+            for name in BLOCK_NAMES {
+                blocks.push((name, link.block_rows(name)?));
+            }
+            if json {
+                let items: Vec<Value> = blocks
+                    .iter()
+                    .map(|(name, rows)| {
+                        let entries: Vec<Value> = rows
+                            .iter()
+                            .map(|r| json!({"id": r.id.0, "text": r.content}))
+                            .collect();
+                        json!({"name": name, "entries": entries})
+                    })
+                    .collect();
+                print_json(&Value::Array(items))?;
+            } else {
+                for (name, rows) in &blocks {
+                    println!("{}", st.bold(name));
+                    if rows.is_empty() {
+                        println!("  {}", st.dim("(vacío)"));
+                    }
+                    for (n, r) in rows.iter().enumerate() {
+                        println!("  {}. [m{}] {}", n + 1, r.id.0, sanitize::line(&r.content));
+                    }
+                }
             }
         }
         "show" => {
