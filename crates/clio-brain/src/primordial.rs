@@ -24,13 +24,26 @@ pub const PRIMORDIAL: [(&str, &str); 4] = [
     ),
 ];
 
-/// Writes the four when `identidad` and `reglas` are both empty (`true`); otherwise touches
-/// nothing (`false`).
+/// Writes the four when `identidad` and `reglas` are both empty (`true`); a seed cut after its
+/// identity (`identidad` holds exactly the two of fábrica, `reglas` nothing) gets its rules. Any
+/// other state is the person's: nothing is touched (`false`).
 pub fn seed(link: &MemoryLink) -> Res<bool> {
-    if !link.block_rows("identidad")?.is_empty() || !link.block_rows("reglas")?.is_empty() {
+    let identity: Vec<String> = link
+        .block_rows("identidad")?
+        .into_iter()
+        .map(|r| r.content)
+        .collect();
+    if !link.block_rows("reglas")?.is_empty() {
         return Ok(false);
     }
-    for (block, text) in PRIMORDIAL {
+    let todo = if identity.is_empty() {
+        &PRIMORDIAL[..]
+    } else if identity == [PRIMORDIAL[0].1, PRIMORDIAL[1].1] {
+        &PRIMORDIAL[2..]
+    } else {
+        return Ok(false);
+    };
+    for (block, text) in todo {
         link.block_add(block, text)?;
     }
     Ok(true)
@@ -69,5 +82,20 @@ mod tests {
         assert!(!seed(&link).unwrap());
         assert_eq!(texts(&link, "identidad"), ["Eres Ada"]);
         assert!(texts(&link, "reglas").is_empty());
+    }
+
+    #[test]
+    fn a_seed_cut_after_its_identity_finishes_the_next_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = MemoryLink::open_write(tmp.path(), &EmbedModel::none()).unwrap();
+        for (block, text) in &PRIMORDIAL[..2] {
+            link.block_add(block, text).unwrap();
+        }
+        assert!(seed(&link).unwrap());
+        assert_eq!(
+            texts(&link, "identidad"),
+            [PRIMORDIAL[0].1, PRIMORDIAL[1].1]
+        );
+        assert_eq!(texts(&link, "reglas"), [PRIMORDIAL[2].1, PRIMORDIAL[3].1]);
     }
 }

@@ -229,7 +229,8 @@ impl SessionSource for LocalSource {
             &pi.session_id,
             &run_dir,
             project.as_deref(),
-            self.presentation,
+            // Only a new session: an old one is the middle of a conversation.
+            self.presentation && matches!(target, Target::New { .. }),
         );
         pre.set_summaries(cfg.memory.session_summary);
         // A session that was marked before (the service leaves the mark in the run folder) is

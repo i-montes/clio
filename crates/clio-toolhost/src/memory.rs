@@ -1142,8 +1142,9 @@ impl ToolHost {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
         };
+        // The port checks the taint too: it gets the session's own.
         let judging = Judging {
-            tainted: false,
+            tainted: self.is_tainted(&req.session),
             session: req.session.clone(),
         };
         let block = name.clone();

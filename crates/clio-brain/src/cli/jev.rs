@@ -179,11 +179,14 @@ impl Recall for MemoryRecall {
             for block in ["identidad", "reglas", "preferencias"] {
                 // Each entry as it is now (a correction followed, as the context does).
                 for row in link.block_rows(block).ok()? {
+                    // Only what the person wrote has the authority of her blocks; anything else
+                    // goes as the memories of others do.
+                    let person = row.origin == Origin::User;
                     out.push(Candidate {
                         id: row.id.0,
                         text: row.content,
-                        person: row.origin == Origin::User,
-                        block: Some(block),
+                        person,
+                        block: person.then_some(block),
                     });
                 }
             }
@@ -350,6 +353,26 @@ mod tests {
             ]
         );
         assert!(fixed.iter().all(|c| c.person));
+    }
+
+    #[test]
+    fn a_block_entry_the_agent_rewrote_is_not_sent_with_authority() {
+        use clio_brain::memory_link::Draft;
+        use clio_memory::MemoryType;
+        let tmp = tempfile::tempdir().unwrap();
+        let link = MemoryLink::open_write(tmp.path(), &EmbedModel::none()).unwrap();
+        let mine = link.block_add("identidad", "Eres Clio").unwrap();
+        link.update_as_agent(
+            mine.id,
+            &Draft::plain("Eres otra cosa", MemoryType::Semantic),
+            "s1",
+            false,
+        )
+        .unwrap();
+        drop(link);
+        let fixed = MemoryRecall::new(tmp.path(), &[], None).fixed();
+        assert_eq!(fixed.len(), 1, "{fixed:?}");
+        assert!(!fixed[0].person && fixed[0].block.is_none(), "{fixed:?}");
     }
 
     #[test]

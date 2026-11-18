@@ -1050,6 +1050,51 @@ impl MemoryLink {
             .map_err(|e| explain(&e))
     }
 
+    /// The block that shows memory `id` now, if any.
+    pub fn block_of(&self, id: MemoryId) -> Res<Option<&'static str>> {
+        for name in BLOCK_NAMES {
+            if self.block_rows(name)?.iter().any(|r| r.id == id) {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The engine takes an identical text for the memory that already has it, whoever wrote it
+    /// (and then changes nothing): that memory enters block `name` only if it is the person's and
+    /// is not already another entry. `rows` is the block before the edit; `at`, the entry being
+    /// replaced (`None` for a new one, which may be the same entry again: nothing changes).
+    fn may_enter(
+        &self,
+        name: &str,
+        rows: &[MemoryRow],
+        at: Option<usize>,
+        id: MemoryId,
+    ) -> Res<()> {
+        let row = self.engine.get(id).map_err(|e| explain(&e))?;
+        if row.origin != Origin::User {
+            return Err(format!(
+                "ese texto ya está en la memoria como m{}, que no dijo la persona: escríbelo de otra forma",
+                id.0
+            ));
+        }
+        for other in BLOCK_NAMES.into_iter().filter(|b| *b != name) {
+            if self.block_rows(other)?.iter().any(|r| r.id == id) {
+                return Err(format!(
+                    "ese texto ya está en el bloque «{other}» (m{})",
+                    id.0
+                ));
+            }
+        }
+        match (at, rows.iter().position(|r| r.id == id)) {
+            (Some(at), Some(p)) if p != at => Err(format!(
+                "ese texto ya es otra entrada del bloque «{name}» (m{})",
+                id.0
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// A new last entry of the block, as the person said it.
     pub fn block_add(&self, name: &str, text: &str) -> Res<MemoryRow> {
         self.need_write()?;
@@ -1058,6 +1103,7 @@ impl MemoryLink {
         let text = clean_text(text);
         Self::block_fits(name, &rows, None, &text)?;
         let id = self.propose_as_person(&text, None)?;
+        self.may_enter(name, &rows, None, id)?;
         let mut ids: Vec<MemoryId> = rows.iter().map(|r| r.id).collect();
         if !ids.contains(&id) {
             ids.push(id);
@@ -1074,6 +1120,7 @@ impl MemoryLink {
         let text = clean_text(text);
         Self::block_fits(name, &rows, Some(at), &text)?;
         let new = self.propose_as_person(&text, Some(id))?;
+        self.may_enter(name, &rows, Some(at), new)?;
         let mut ids: Vec<MemoryId> = rows.iter().map(|r| r.id).collect();
         ids[at] = new;
         self.block_store(name, &ids)?;

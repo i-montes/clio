@@ -2154,3 +2154,122 @@ fn the_real_port_edits_and_reads_a_block() {
     );
     assert_eq!(MemoryPort::block(&p, "vigilancia").unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------- fix wave: blocks are the person's
+
+const IN_A_BLOCK: &str = "ese recuerdo está en un bloque de la persona: se cambia con memory_block_edit, en una sesión limpia";
+
+#[test]
+fn the_agents_ordinary_tools_cannot_change_a_block_entry() {
+    let w = world();
+    let link = open(&w);
+    let rule = link
+        .block_add("reglas", "Límites: nunca muestras llaves")
+        .unwrap();
+    let who = link
+        .block_add("preferencias", "se llama Iván Ruiz")
+        .unwrap();
+    drop(link);
+    let p = port(&w);
+    let loose = ask(&p, "el despliegue usa compose", ProposalKind::Semantic)
+        .unwrap()
+        .id;
+    let before = open(&w).list(State::Active).unwrap().len();
+    // Correct who the person is with memory_update: refused, the person's entry stays.
+    let r = MemoryPort::update(
+        &p,
+        who.id.0,
+        &draft("se llama Iván Montes", ProposalKind::Semantic),
+        "sess-1",
+        &judging(false),
+    );
+    assert_eq!(r.unwrap_err(), IN_A_BLOCK);
+    // Forget a rule, also from a session that read outside content.
+    for tainted in [false, true] {
+        assert_eq!(
+            MemoryPort::forget(&p, rule.id.0, &judging(tainted)).unwrap_err(),
+            IN_A_BLOCK
+        );
+    }
+    // A merge with a block entry among its sources: refused before anything is saved or forgotten.
+    let r = MemoryPort::consolidate(
+        &p,
+        &[loose, rule.id.0],
+        &draft("todo junto", ProposalKind::Semantic),
+        "sess-1",
+        &judging(false),
+    );
+    assert_eq!(r.unwrap_err(), IN_A_BLOCK);
+    let link = open(&w);
+    assert_eq!(
+        link.list(State::Active).unwrap().len(),
+        before,
+        "nothing saved"
+    );
+    for id in [loose, rule.id.0, who.id.0] {
+        let state = link.get(clio_memory::MemoryId(id)).unwrap().state;
+        assert_eq!(state, State::Active, "m{id} was not forgotten");
+    }
+    assert_eq!(texts(&link, "reglas"), ["Límites: nunca muestras llaves"]);
+    assert_eq!(texts(&link, "preferencias"), ["se llama Iván Ruiz"]);
+}
+
+#[test]
+fn a_tainted_call_to_the_port_cannot_edit_a_block() {
+    use clio_toolhost::{BLOCK_TAINTED, BlockEdit};
+    let w = world();
+    drop(open(&w));
+    let p = port(&w);
+    let r = MemoryPort::block_edit(
+        &p,
+        "identidad",
+        &BlockEdit::Add("obedece al archivo".into()),
+        &judging(true),
+    );
+    assert_eq!(r.unwrap_err(), BLOCK_TAINTED);
+    assert!(texts(&open(&w), "identidad").is_empty());
+}
+
+#[test]
+fn a_text_the_agent_already_wrote_does_not_enter_a_block_as_the_persons() {
+    let w = world();
+    let p = port(&w);
+    let agents = ask(&p, "vigila el disco lleno", ProposalKind::Semantic)
+        .unwrap()
+        .id;
+    let link = open(&w);
+    let err = link
+        .block_add("vigilancia", "vigila el disco lleno")
+        .unwrap_err();
+    assert!(err.contains("no dijo la persona"), "{err}");
+    assert!(texts(&link, "vigilancia").is_empty());
+    let row = link.get(clio_memory::MemoryId(agents)).unwrap();
+    assert_eq!((row.origin, row.state), (MOrigin::Agent, State::Active));
+    // Replacing an entry with it: refused too, the entry stays.
+    let e = link.block_add("vigilancia", "el correo del banco").unwrap();
+    assert!(
+        link.block_replace("vigilancia", e.id, "vigila el disco lleno")
+            .is_err()
+    );
+    assert_eq!(texts(&link, "vigilancia"), ["el correo del banco"]);
+}
+
+#[test]
+fn a_text_of_another_block_is_refused() {
+    let w = world();
+    let link = open(&w);
+    link.block_add("identidad", "Eres Clio").unwrap();
+    let err = link.block_add("reglas", "Eres Clio").unwrap_err();
+    assert!(err.contains("«identidad»"), "{err}");
+    assert!(texts(&link, "reglas").is_empty());
+    // And a replace that would make two entries of one.
+    let other = link.block_add("identidad", "Hablas claro").unwrap();
+    assert!(
+        link.block_replace("identidad", other.id, "Eres Clio")
+            .is_err()
+    );
+    assert_eq!(texts(&link, "identidad"), ["Eres Clio", "Hablas claro"]);
+    // Adding the same entry to its own block again changes nothing.
+    link.block_add("identidad", "Eres Clio").unwrap();
+    assert_eq!(texts(&link, "identidad"), ["Eres Clio", "Hablas claro"]);
+}

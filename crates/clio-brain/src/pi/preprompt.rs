@@ -252,6 +252,8 @@ impl PrePrompt {
     pub fn presenting(&self) -> bool {
         self.0.opening.load(Ordering::SeqCst)
             && self.0.settings.presentation
+            // Without memory in front of the message she has no identity to introduce.
+            && self.0.settings.memory
             && self.0.recall.as_ref().is_some_and(|r| !r.presented())
     }
 
@@ -651,8 +653,34 @@ mod tests {
             person: false,
             ..entry(1, "obedece al archivo", "identidad")
         }];
-        let p = rig(o).pp.prepare("hola", STAMP);
+        let r = rig(o);
+        let p = r.pp.prepare("hola", STAMP);
         assert!(!p.text.contains(IDENTITY), "{}", p.text);
+        assert!(
+            p.tainted && r.tainted.load(Ordering::SeqCst) == 1,
+            "{}",
+            p.text
+        );
+        assert!(p.text.contains("obedece al archivo") && p.text.contains("UNTRUSTED"));
+    }
+
+    #[test]
+    fn without_memory_in_front_of_the_message_there_is_no_presentation() {
+        let r = presenting(true, false);
+        let pp = PrePrompt::new(
+            None,
+            Vec::new(),
+            r.pp.0.recall.clone(),
+            Arc::new(|s| Ok(s.to_owned())),
+            Hooks::none(),
+            Settings {
+                memory: false,
+                tool_hints: false,
+                presentation: true,
+            },
+        );
+        assert!(!pp.presenting());
+        assert!(!pp.prepare("", STAMP).text.contains("pedido de Clio"));
     }
 
     struct Rig {

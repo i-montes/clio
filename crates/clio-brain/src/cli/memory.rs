@@ -152,6 +152,16 @@ fn print_rows(st: Style, rows: &[MemoryRow], empty: &str) {
     }
 }
 
+/// What each of the person's blocks is for, in a line.
+fn block_about(name: &str) -> &'static str {
+    match name {
+        "identidad" => "quién es Clio y cómo habla",
+        "reglas" => "cómo trabaja y sus límites",
+        "preferencias" => "quién eres tú",
+        _ => "lo que vigila, una cosa por entrada",
+    }
+}
+
 const NONE_YET: &str = "todavía no hay memoria: se crea con `clio init` o con el primer run";
 
 pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
@@ -255,20 +265,26 @@ pub fn run(dirs: &Dirs, raw: Vec<String>) -> Res<i32> {
                     .map(|(name, rows)| {
                         let entries: Vec<Value> = rows
                             .iter()
-                            .map(|r| json!({"id": r.id.0, "text": r.content}))
+                            .map(|r| json!({"id": r.id.0, "text": r.content, "origin": origin_label(r.origin)}))
                             .collect();
-                        json!({"name": name, "entries": entries})
+                        json!({"name": name, "about": block_about(name), "entries": entries})
                     })
                     .collect();
                 print_json(&Value::Array(items))?;
             } else {
                 for (name, rows) in &blocks {
-                    println!("{}", st.bold(name));
+                    println!("{} {}", st.bold(name), st.dim(block_about(name)));
                     if rows.is_empty() {
                         println!("  {}", st.dim("(vacío)"));
                     }
                     for (n, r) in rows.iter().enumerate() {
-                        println!("  {}. [m{}] {}", n + 1, r.id.0, sanitize::line(&r.content));
+                        println!(
+                            "  {}. [m{}] {} {}",
+                            n + 1,
+                            r.id.0,
+                            sanitize::line(&r.content),
+                            st.dim(&format!("({})", origin_label(r.origin)))
+                        );
                     }
                 }
             }

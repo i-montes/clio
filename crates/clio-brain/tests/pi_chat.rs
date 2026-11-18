@@ -1443,3 +1443,38 @@ fn presentations(w: &World) -> usize {
         })
         .count()
 }
+
+// An install from before this version has sessions and an empty `preferencias`: reopening one is
+// the middle of a conversation, never the place to introduce herself.
+#[test]
+fn a_resumed_session_never_presents() {
+    if can_run("resume_no_present", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"text":"primera respuesta","usage":[10,2]},{"text":"segunda respuesta","usage":[10,2]},{"text":"tercera respuesta","usage":[10,2]}]"#,
+    );
+    let _vault = start_vault(&w, "jev-test-key-7676");
+    let o = w
+        .clio(&["run", "--harness", "pi", "primera pregunta"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v = w.pty_with(
+        "reopen_turn",
+        json!({"row": "primera pregunta", "ask": "segunda pregunta", "answer": "segunda respuesta", "as_is": true}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["selector", "row_listed", "reopened", "answered"]);
+    let link = clio_brain::memory_link::MemoryLink::open_read(
+        &w.home().join(".local/share/clio"),
+        &clio_brain::memory_link::EmbedModel::none(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(link.block_rows("preferencias").unwrap().is_empty());
+    assert_eq!(presentations(&w), 0, "no automatic turn and no request");
+    let said = told_with(&w, "segunda pregunta");
+    assert!(!said.contains(PRESENTATION), "{said}");
+}

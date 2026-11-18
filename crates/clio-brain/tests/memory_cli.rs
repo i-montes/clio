@@ -1100,6 +1100,9 @@ fn identity_prints_the_blocks_in_order() {
     assert!(names[2] < empty && empty < names[3], "{out}");
     assert!(at("el correo del banco") > names[3], "{out}");
     assert_eq!(std::fs::read(e.db()).unwrap(), before, "it only reads");
+    assert!(out.contains("quién es Clio y cómo habla"), "{out}");
+    assert!(out.contains("lo que vigila"), "{out}");
+    assert!(out.contains("(persona)"), "the origin of each entry: {out}");
 }
 
 #[test]
@@ -1120,7 +1123,11 @@ fn identity_as_json_has_the_four_blocks() {
         .map(|b| b["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["identidad", "reglas", "preferencias", "vigilancia"]);
-    assert_eq!(j[0]["entries"][1], json!({"id": 2, "text": "Hablas claro"}));
+    assert_eq!(
+        j[0]["entries"][1],
+        json!({"id": 2, "text": "Hablas claro", "origin": "persona"})
+    );
+    assert_eq!(j[0]["about"], "quién es Clio y cómo habla");
     assert_eq!(j[2]["entries"], json!([]));
     assert_eq!(j[3]["entries"][0]["text"], "el correo del banco");
 }

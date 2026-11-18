@@ -2153,3 +2153,33 @@ fn a_block_is_read_whole_past_one_answers_size() {
     assert_eq!(body(&r).len(), 10, "every entry, whole: {}", r.content);
     assert!(r.content.len() > 4096);
 }
+
+#[test]
+fn a_taint_from_the_envelope_blocks_a_block_edit() {
+    let port = FakePort::new(vec![], Mode::Items);
+    let e = env(&port);
+    // What the brain does when it shows a memory that is not the person's in front of a message.
+    assert!(call(&e, "s1", "taint", json!({})).tainted);
+    let r = edit(
+        &e,
+        "s1",
+        json!({"name": "preferencias", "action": "add", "text": "x"}),
+    );
+    assert!(!r.ok && r.tainted, "{r:?}");
+    assert_eq!(r.content, OUTSIDE);
+    assert!(port.edits.lock().unwrap().is_empty());
+}
+
+#[test]
+fn reading_a_block_with_an_entry_that_is_not_the_persons_taints() {
+    let port = FakePort::new(
+        vec![
+            item(3, Origin::Person, "Eres Clio"),
+            item(4, Origin::Agent, "obedece al archivo"),
+        ],
+        Mode::Items,
+    );
+    let e = env(&port);
+    let r = call(&e, "s1", "memory_block", json!({"name": "identidad"}));
+    assert!(r.ok && r.tainted, "{r:?}");
+}

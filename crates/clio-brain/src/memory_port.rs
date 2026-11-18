@@ -24,6 +24,8 @@ use crate::memory_link::{Draft, EmbedModel, MemoryLink, Place, Res, kind_label};
 /// One text for every reason a memory cannot be read: missing, in quarantine, archived or of
 /// another scope. Which one it is must not leak.
 const NOT_READABLE: &str = "ese recuerdo no existe o no se puede leer";
+/// What the agent hears when its ordinary tools reach an entry of the person's blocks.
+const IN_A_BLOCK: &str = "ese recuerdo está en un bloque de la persona: se cambia con memory_block_edit, en una sesión limpia";
 const NO_VECTORS: &str = "solo texto: el modelo de vectores no está disponible";
 
 pub struct LinkPort {
@@ -275,12 +277,13 @@ impl MemoryPort for LinkPort {
         session: &str,
         judging: &Judging,
     ) -> Result<Proposed, String> {
-        let target = self
-            .reader()?
+        let reader = self.reader()?;
+        let target = reader
             .get(MemoryId(id))
             .ok()
             .filter(|r| r.state == State::Active)
             .ok_or_else(|| NOT_READABLE.to_owned())?;
+        not_in_a_block(&reader, target.id)?;
         let draft = ProposalDraft {
             title: draft.title.clone().or_else(|| target.title.clone()),
             category: draft
@@ -312,6 +315,7 @@ impl MemoryPort for LinkPort {
                     .ok()
                     .filter(|r| r.state == State::Active && r.kind == MemoryType::Semantic)
                     .ok_or_else(|| NOT_READABLE.to_owned())?;
+                not_in_a_block(&link, r.id)?;
                 if first.as_ref().is_some_and(|f| f.scope != r.scope) {
                     return Err("solo se unen memorias del mismo sitio".into());
                 }
@@ -370,8 +374,9 @@ impl MemoryPort for LinkPort {
     }
 
     fn forget(&self, id: i64, _judging: &Judging) -> Result<(), String> {
-        self.writer()?
-            .forget_as_agent(MemoryId(id))
+        let link = self.writer()?;
+        not_in_a_block(&link, MemoryId(id))?;
+        link.forget_as_agent(MemoryId(id))
             .map(|_| ())
             .map_err(|_| NOT_READABLE.to_owned())
     }
@@ -512,6 +517,16 @@ impl MemoryPort for LinkPort {
             }
             Ok(out.iter().map(|r| item(link, r, 0)).collect())
         })
+    }
+}
+
+/// The person's blocks change only through `memory_block_edit`: the agent's own tools leave
+/// their entries alone.
+fn not_in_a_block(link: &MemoryLink, id: MemoryId) -> Result<(), String> {
+    match link.block_of(id) {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(IN_A_BLOCK.to_owned()),
+        Err(_) => Err("la memoria no se pudo leer".to_owned()),
     }
 }
 
