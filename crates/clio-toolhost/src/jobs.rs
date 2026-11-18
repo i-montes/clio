@@ -66,6 +66,10 @@ impl Out {
         if f.seek(SeekFrom::Start(len - keep)).is_err() || f.read_to_end(&mut tail).is_err() {
             return;
         }
+        // What is kept starts at a line: the cut half of one (a value, maybe) is never read.
+        if let Some(nl) = tail.iter().position(|b| *b == b'\n') {
+            tail.drain(..=nl);
+        }
         let tmp = self.file.with_extension("tmp");
         let written = fs::OpenOptions::new()
             .write(true)
@@ -355,12 +359,8 @@ impl ToolHost {
             {
                 let _ = f.take(READ_CAP).read_to_end(&mut buf);
             }
-            // Whole lines only while more may come: a value cut in two would get past the
-            // scrubber, which knows only whole values.
             let last = ended.is_some() && job.read + (buf.len() as u64) >= out.written;
-            if !last && let Some(nl) = buf.iter().rposition(|b| *b == b'\n') {
-                buf.truncate(nl + 1);
-            } // shortcut: a line longer than READ_CAP is still handed over in parts.
+            whole_lines(&mut buf, last);
             job.read += buf.len() as u64;
             (buf, note, job.read < out.written)
         };
@@ -435,6 +435,21 @@ impl ToolHost {
     }
 }
 
+/// What a read may hand over: whole lines only while more may come, since a value cut in two
+/// would get past the scrubber, which knows only whole values. A buffer with no line end is held
+/// back, unless it is a full read (a line longer than `READ_CAP`).
+// shortcut: such a line is still handed over in parts.
+fn whole_lines(buf: &mut Vec<u8>, last: bool) {
+    if last {
+        return;
+    }
+    match buf.iter().rposition(|b| *b == b'\n') {
+        Some(nl) => buf.truncate(nl + 1),
+        None if (buf.len() as u64) < READ_CAP => buf.clear(),
+        None => {}
+    }
+}
+
 fn ending(e: &End) -> String {
     if e.suspect {
         ": it was stopped because the session became suspect (it read text Clio's judge flagged) while this command had the network".into()
@@ -447,5 +462,43 @@ fn ending(e: &End) -> String {
             || ", killed by a signal".into(),
             |c| format!(", exit code {c}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_hands_over_whole_lines_while_more_may_come() {
+        let read = |b: &[u8], last| {
+            let mut v = b.to_vec();
+            whole_lines(&mut v, last);
+            v
+        };
+        assert_eq!(read(b"one\ntw", false), b"one\n");
+        assert!(read(b"token=abc", false).is_empty());
+        assert_eq!(read(b"token=abc", true), b"token=abc");
+        let full = vec![b'a'; usize::try_from(READ_CAP).unwrap()];
+        assert_eq!(read(&full, false).len(), full.len());
+    }
+
+    #[test]
+    fn what_is_kept_after_a_drop_starts_at_a_line() {
+        let t = tempfile::tempdir().unwrap();
+        let mut out = Out {
+            file: t.path().join("j1.log"),
+            written: 0,
+            dropped: 0,
+        };
+        fs::write(&out.file, b"").unwrap();
+        let line = format!("{}secret-value-{}\n", "x".repeat(1000), "y".repeat(23));
+        while out.dropped == 0 {
+            out.append(line.as_bytes());
+        }
+        let kept = fs::read(&out.file).unwrap();
+        assert!(kept.starts_with(b"xxx") && kept.ends_with(b"\n"));
+        assert_eq!(kept.len() as u64, out.written - out.dropped);
+        assert_eq!(kept.len() % line.len(), 0);
     }
 }
