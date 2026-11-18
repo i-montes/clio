@@ -32,7 +32,7 @@ def check_base() -> None:
     local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
     own = u.scheme == "https" and u.hostname == "api.anthropic.com"
     if not own and not local:
-        fail("LLM_BASE_URL debe ser https://api.anthropic.com (o http://127.0.0.1 o localhost)")
+        fail("LLM_BASE_URL must be https://api.anthropic.com (or http://127.0.0.1 or localhost)")
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -57,11 +57,11 @@ else:
     key, request = os.environ.get("ANTHROPIC_API_KEY"), sent
 key = key.strip() if isinstance(key, str) else ""
 if not key:
-    fail("falta la llave: Clio la manda en el sobre, o define ANTHROPIC_API_KEY")
+    fail("missing key: Clio sends it in the envelope, or set ANTHROPIC_API_KEY")
 # A key with a line break or a non-ASCII character makes `http.client` raise an error that quotes
 # the header, key included: refuse it here, without printing it.
 if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
-    fail("la llave tiene un carácter que no puede ir en una cabecera HTTP (un salto de línea, un espacio, algo no ASCII)")
+    fail("the key has a character that cannot go in an HTTP header (a line break, a space, something not ASCII)")
 
 # Clio's `system` messages go in the API's `system`; the API takes only `role` and plain-text
 # `content` in user/assistant messages and rejects empty ones, so that is all that is sent and
@@ -76,7 +76,7 @@ for m in request["messages"]:
     elif m.get("role") in ("user", "assistant"):
         messages.append({"role": m["role"], "content": text})
 if not messages:
-    fail("la petición no tiene ningún mensaje de usuario o asistente con texto")
+    fail("the request has no user or assistant message with text")
 body = {
     "model": request["model"],
     "max_tokens": request.get("max_tokens") or 4096,
@@ -107,7 +107,7 @@ except Exception as e:  # timeout, bad JSON: only the kind, a message could quot
     fail(type(e).__name__)
 
 if not isinstance(answer, dict):
-    fail("la respuesta no es JSON válido")
+    fail("the answer is not valid JSON")
 usage = answer.get("usage")
 usage = usage if isinstance(usage, dict) else {}
 blocks = answer.get("content")

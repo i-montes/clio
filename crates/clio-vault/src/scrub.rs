@@ -257,6 +257,8 @@ pub(crate) fn prints(value: &str) -> Vec<Print> {
         .collect()
 }
 
+/// The marks keep their Spanish words (`secreto`, `tachado`, `patrón`): like `{{secreto:name}}`
+/// they are the syntax the model, the prompts and saved files already use.
 fn marker(name: &str) -> String {
     format!("[secreto:{name} tachado]")
 }
@@ -264,7 +266,7 @@ fn marker(name: &str) -> String {
 /// What replaces a key the vault does not know (a provider shape found in a file or an output).
 /// It says what happened and what to do in the place where the value was, because the model
 /// reads it there: it cannot see the value, and it must not write the mark back over it.
-const PATTERN_MARK: &str = "[secreto:patrón tachado: parece una llave y no está en el baúl; no la reescribas, pídesela a la persona]";
+const PATTERN_MARK: &str = "[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]";
 
 /// How many marks this filter left in `text` (`[secreto:... tachado...]`, of either kind).
 pub fn count_masks(text: &str) -> usize {

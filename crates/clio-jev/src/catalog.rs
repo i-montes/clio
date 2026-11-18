@@ -1,6 +1,6 @@
 //! The questions about tools, generated from the catalog the guard reports at the start of a
 //! session: one yes/no per active tool, built from the tool's own `use_when`. Adding a tool to the
-//! guard adds its question here; there is no second list to keep (spec: «Catálogo de herramientas»).
+//! guard adds its question here; there is no second list to keep (spec: «Catálogo de herramientas», a Spanish document).
 //! The answers are SUGGESTIONS for the model, never a restriction.
 
 use serde_json::Value;
@@ -15,7 +15,7 @@ const MAX_USE_WHEN: usize = 300;
 pub struct ToolHint {
     pub name: String,
     /// What the message needs for this tool to be the right one, as an infinitive phrase:
-    /// «leer archivos del equipo».
+    /// «read files on the machine».
     pub use_when: String,
 }
 
@@ -49,7 +49,7 @@ pub fn tool_questions(catalog: &[ToolHint]) -> Result<Questions, String> {
         qs.noul(
             &t.name,
             &format!(
-                "Para atender `mensaje_de_la_persona` hace falta {}.",
+                "To handle `mensaje_de_la_persona` you need to {}.",
                 t.use_when.trim_end_matches('.')
             ),
         )
@@ -73,9 +73,9 @@ mod tests {
 
     fn cat() -> Vec<ToolHint> {
         parse_catalog(&json!([
-            {"name": "read", "use_when": "leer archivos del equipo"},
-            {"name": "bash", "use_when": "ejecutar comandos en una terminal."},
-            {"name": "memory_search", "use_when": "consultar lo que se recuerda de la persona"},
+            {"name": "read", "use_when": "read files on the machine"},
+            {"name": "bash", "use_when": "run commands in a terminal."},
+            {"name": "memory_search", "use_when": "look up what is remembered about the person"},
         ]))
         .unwrap()
     }
@@ -87,11 +87,11 @@ mod tests {
         let j = qs.to_json();
         assert_eq!(
             j["read"]["instructions"],
-            "Para atender `mensaje_de_la_persona` hace falta leer archivos del equipo."
+            "To handle `mensaje_de_la_persona` you need to read files on the machine."
         );
         assert_eq!(
             j["bash"]["instructions"],
-            "Para atender `mensaje_de_la_persona` hace falta ejecutar comandos en una terminal."
+            "To handle `mensaje_de_la_persona` you need to run commands in a terminal."
         );
         assert_eq!(j["memory_search"]["type"], "noul");
     }
@@ -101,7 +101,7 @@ mod tests {
         let mut c = cat();
         c.push(ToolHint {
             name: "grep".into(),
-            use_when: "buscar texto dentro de archivos".into(),
+            use_when: "search for text inside files".into(),
         });
         let j = tool_questions(&c).unwrap().to_json();
         assert!(j.get("grep").is_some());

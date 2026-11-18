@@ -57,11 +57,11 @@ pub enum JevError {
 impl std::fmt::Display for JevError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Open => write!(f, "Jev no responde (disyuntor abierto)"),
-            Self::Budget => write!(f, "presupuesto diario de Jev agotado"),
-            Self::Key(e) => write!(f, "sin clave de Jev: {e}"),
-            Self::Call(e) => write!(f, "falló la llamada a Jev: {e}"),
-            Self::Bad(e) => write!(f, "respuesta de Jev no válida: {e}"),
+            Self::Open => write!(f, "Jev is not answering (breaker open)"),
+            Self::Budget => write!(f, "Jev's daily budget is used up"),
+            Self::Key(e) => write!(f, "no Jev key: {e}"),
+            Self::Call(e) => write!(f, "the call to Jev failed: {e}"),
+            Self::Bad(e) => write!(f, "invalid answer from Jev: {e}"),
         }
     }
 }
@@ -133,16 +133,16 @@ impl Transport for Process {
             err.join().unwrap_or_default(),
         );
         let Some(status) = status else {
-            return Err("tiempo agotado".into());
+            return Err("timed out".into());
         };
         if !status.success() {
             let msg = String::from_utf8_lossy(&err).replace(key, "***");
             return Err(clean_line(&msg));
         }
         if out.len() as u64 > MAX_REPLY_BYTES {
-            return Err("respuesta demasiado grande".into());
+            return Err("answer too large".into());
         }
-        serde_json::from_slice(&out).map_err(|_| "la respuesta no es JSON".to_owned())
+        serde_json::from_slice(&out).map_err(|_| "the answer is not JSON".to_owned())
     }
 }
 
@@ -362,7 +362,7 @@ mod tests {
     }
 
     fn q() -> Questions {
-        Questions::new().noul("x", "¿Sí?").unwrap()
+        Questions::new().noul("x", "Yes?").unwrap()
     }
 
     fn ask(r: &Rig) -> Result<Answers, JevError> {
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn without_a_key_nothing_is_called_and_it_counts_as_a_failure() {
-        let r = rig(Config::default(), Err("el baúl está bloqueado".into()));
+        let r = rig(Config::default(), Err("the vault is locked".into()));
         for _ in 0..3 {
             assert!(matches!(ask(&r), Err(JevError::Key(_))));
         }

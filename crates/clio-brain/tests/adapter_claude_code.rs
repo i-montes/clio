@@ -202,7 +202,7 @@ fn an_error_answer_is_a_clear_error() {
     );
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success(), "{err}");
-    assert!(err.contains("Claude Code respondió con error"), "{err}");
+    assert!(err.contains("Claude Code answered with an error"), "{err}");
     assert!(err.contains("Invalid API key"), "{err}");
     assert!(!err.contains(TOKEN) && !err.contains("Traceback"), "{err}");
     assert!(o.stdout.is_empty());
@@ -243,7 +243,7 @@ fn without_the_binary_says_to_install() {
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(!o.status.success(), "{args:?}");
         assert!(
-            err.contains("falta Claude Code (pi-claude-agent-sdk): clio pi install"),
+            err.contains("Claude Code is missing (pi-claude-agent-sdk): clio pi install"),
             "{args:?}: {err}"
         );
     }
@@ -298,7 +298,7 @@ fn non_utf8_output_is_a_clear_error() {
         &envelope(r#"[{"role":"user","content":"x"}]"#),
     );
     let err = String::from_utf8_lossy(&o.stderr);
-    assert!(!o.status.success() && err.contains("JSON válido"), "{err}");
+    assert!(!o.status.success() && err.contains("valid JSON"), "{err}");
     assert!(!err.contains("Traceback"), "{err}");
 }
 

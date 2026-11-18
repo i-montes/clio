@@ -1,11 +1,11 @@
 # clio-jev
 
-Cliente de Jev (TypeSafe System One): preguntas cerradas (sí/no o elegir una opción) y probabilidades, nunca texto. **Opcional**: sin clave, sin red, sin presupuesto o con el disyuntor abierto no hay respuesta y quien llama sigue con sus reglas. Diseño: `docs/specs/2026-11-03-jev-design.md`; regla S-62.
+Client of Jev (TypeSafe System One): closed questions (yes/no or pick an option) and probabilities, never text. **Optional**: without a key, without a network, without budget or with the breaker open there is no answer and the caller goes on with its own rules. Design: `docs/specs/2026-11-03-jev-design.md`; rule S-62.
 
-- `wire`: las preguntas y las respuestas ya comprobadas (nada que falte, nada de otro tipo, números en rango, opciones que se ofrecieron).
-- `client`: la llamada con tiempo máximo (3 s), disyuntor (3 fallos seguidos, 60 s) y presupuesto diario de tokens. El modelo es `jev-latest`; la versión que contestó vuelve en cada respuesta y `model_changed()` avisa si cambió. El HTTP lo hace `adapters/jev/jev_systemone.py` (biblioteca estándar de Python, como el adaptador de modelos): la clave llega por la entrada estándar desde el vault y solo sale hacia `api.typesafe.ai` por TLS, sin seguir redirecciones.
-- `catalog`: una pregunta sí/no por herramienta, generada desde el catálogo que la guardia (`adapters/pi/extensions/clio-guard`, `USE_WHEN`) informa al empezar la sesión. Agregar una herramienta a la guardia agrega su pregunta; no hay otra lista.
+- `wire`: the questions and the answers once checked (nothing missing, nothing of another type, numbers in range, options that were offered).
+- `client`: the call with a time limit (3 s), a circuit breaker (3 failures in a row, 60 s) and a daily token budget. The model is `jev-latest`; the version that answered comes back in every answer and `model_changed()` warns if it changed. The HTTP is done by `adapters/jev/jev_systemone.py` (Python standard library, like the model adapter): the key arrives on standard input from the vault and only goes out to `api.typesafe.ai` over TLS, without following redirects.
+- `catalog`: one yes/no question per tool, generated from the catalog that the guard (`adapters/pi/extensions/clio-guard`, `USE_WHEN`) reports when the session starts. Adding a tool to the guard adds its question; there is no other list. The question names the state key `mensaje_de_la_persona` (the person's message), which the brain fills.
 
-Todavía nada llama a este crate: la entrega 2 lo conecta al «antes del prompt».
+Nothing calls this crate yet: delivery 2 connects it to the «before the prompt» step.
 
     cargo test -p clio-jev

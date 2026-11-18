@@ -41,7 +41,7 @@ fn apply_refuses_a_file_that_carries_a_masked_value() {
     let e = Env::new();
     put(&e.proj(), "notes.md", "hello\n");
     let id = e.run();
-    let masked = "[secreto:patrón tachado: parece una llave y no está en el baúl; no la reescribas, pídesela a la persona]";
+    let masked = "[secreto:patrón tachado: it looks like a key and is not in the vault; do not write it back, ask the person for it]";
     put(&e.sandbox(&id), "notes.md", &format!("key = {masked}\n"));
     let o = e.try_clio(&["apply", "--yes", "--force", &id]);
     let err = String::from_utf8_lossy(&o.stderr).into_owned();

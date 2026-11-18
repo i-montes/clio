@@ -18,7 +18,7 @@ import sys
 import tempfile
 
 TIMEOUT = 170
-MISSING = "falta Claude Code (pi-claude-agent-sdk): clio pi install"
+MISSING = "Claude Code is missing (pi-claude-agent-sdk): clio pi install"
 # Claude Code talks to nothing but the model (the same variables Clio gives it inside the jail).
 QUIET = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -62,9 +62,9 @@ else:
     key, request = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), sent
 key = key.strip() if isinstance(key, str) else ""
 if not key:
-    fail("falta el token: Clio lo manda en el sobre, o define CLAUDE_CODE_OAUTH_TOKEN")
+    fail("missing token: Clio sends it in the envelope, or set CLAUDE_CODE_OAUTH_TOKEN")
 if not all(0x21 <= ord(ch) <= 0x7E for ch in key):
-    fail("el token tiene un carácter que no puede tener (un salto de línea, un espacio, algo no ASCII)")
+    fail("the token has a character it cannot have (a line break, a space, something not ASCII)")
 
 # Clio's `system` messages become the system prompt (in place of Claude Code's own); the rest of
 # the conversation goes on stdin as text, one block per turn when there is more than one.
@@ -78,7 +78,7 @@ for m in request["messages"]:
     elif m.get("role") in ("user", "assistant"):
         turns.append((m["role"], text))
 if not turns:
-    fail("la petición no tiene ningún mensaje de usuario o asistente con texto")
+    fail("the request has no user or assistant message with text")
 prompt = turns[0][1] if len(turns) == 1 else "\n\n".join(f"[{r}]\n{t}" for r, t in turns)
 
 argv = [
@@ -112,7 +112,7 @@ try:
     )
     stdout, _ = proc.communicate(prompt, timeout=TIMEOUT)
 except subprocess.TimeoutExpired:
-    fail(f"Claude Code no respondió en {TIMEOUT} s")
+    fail(f"Claude Code did not answer within {TIMEOUT} s")
 except OSError as e:
     fail(f"no pude ejecutar Claude Code: {type(e).__name__}")
 finally:
@@ -129,13 +129,13 @@ try:
 except ValueError:
     answer = None
 if not isinstance(answer, dict):
-    fail(f"Claude Code no devolvió JSON válido (código {proc.returncode})")
+    fail(f"Claude Code did not return valid JSON (code {proc.returncode})")
 if answer.get("is_error") or proc.returncode != 0:
     why = answer.get("result")
     if not isinstance(why, str):
         errors = answer.get("errors")
         why = "; ".join(e for e in errors if isinstance(e, str)) if isinstance(errors, list) else ""
-    fail(f"Claude Code respondió con error: {why.replace(key, '***')[:300]}")
+    fail(f"Claude Code answered with an error: {why.replace(key, '***')[:300]}")
 usage = answer.get("usage")
 usage = usage if isinstance(usage, dict) else {}
 result = answer.get("result")

@@ -69,7 +69,7 @@ fn jev(base: &str, timeout: Duration) -> Jev {
 }
 
 fn questions() -> Questions {
-    Questions::new().noul("x", "¿Sí?").unwrap()
+    Questions::new().noul("x", "Yes?").unwrap()
 }
 
 fn ask(j: &Jev) -> Result<clio_jev::Answers, JevError> {

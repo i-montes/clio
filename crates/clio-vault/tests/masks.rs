@@ -16,7 +16,7 @@ fn a_mark_for_a_value_the_vault_does_not_know_says_what_to_do() {
         "\n"
     ));
     assert!(out.contains("[secreto:patrón tachado"), "{out}");
-    assert!(out.contains("baúl") && out.contains("persona"), "{out}");
+    assert!(out.contains("vault") && out.contains("person"), "{out}");
     assert!(!out.contains("ghp_"), "{out}");
 }
 

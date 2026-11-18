@@ -262,20 +262,20 @@ mod tests {
 
     fn qs() -> Questions {
         Questions::new()
-            .noul("necesita_memoria", "¿Hace falta memoria?")
+            .noul("needs_memory", "Is memory needed?")
             .unwrap()
             .choice(
-                "operacion",
-                "¿Qué hacer?",
-                &[("add", "nueva"), ("noop", "repetida")],
+                "operation",
+                "What to do?",
+                &[("add", "new"), ("noop", "repeated")],
             )
             .unwrap()
     }
 
     fn reply() -> Value {
         json!({"model":"jev-1.14.0","answers":{
-            "necesita_memoria":{"type":"noul","noul":0.9},
-            "operacion":{"type":"choice","choice":"add","confidence":0.8,"probabilities":{"add":0.8,"noop":0.2}}},
+            "needs_memory":{"type":"noul","noul":0.9},
+            "operation":{"type":"choice","choice":"add","confidence":0.8,"probabilities":{"add":0.8,"noop":0.2}}},
             "usage":{"input_tokens":283,"output_tokens":20}})
     }
 
@@ -283,22 +283,22 @@ mod tests {
     fn questions_serialize_in_the_shape_of_the_api() {
         let j = qs().to_json();
         assert_eq!(
-            j["necesita_memoria"],
-            json!({"type":"noul","instructions":"¿Hace falta memoria?"})
+            j["needs_memory"],
+            json!({"type":"noul","instructions":"Is memory needed?"})
         );
         assert_eq!(
-            j["operacion"]["criteria"],
-            json!({"add":"nueva","noop":"repetida"})
+            j["operation"]["criteria"],
+            json!({"add":"new","noop":"repeated"})
         );
-        assert_eq!(j["operacion"]["type"], "choice");
+        assert_eq!(j["operation"]["type"], "choice");
     }
 
     #[test]
     fn names_and_options_are_checked() {
-        for bad in ["", "Mayuscula", "con espacio", "ñ", &"a".repeat(65)] {
+        for bad in ["", "Uppercase", "with space", "ñ", &"a".repeat(65)] {
             assert!(Questions::new().noul(bad, "x").is_err(), "{bad:?}");
         }
-        assert!(qs().noul("operacion", "x").is_err(), "repeated");
+        assert!(qs().noul("operation", "x").is_err(), "repeated");
         assert!(Questions::new().choice("c", "x", &[]).is_err());
         assert!(
             Questions::new()
@@ -311,11 +311,11 @@ mod tests {
     #[test]
     fn clean_scrubs_every_string_at_any_depth() {
         let dirty =
-            json!({"a": "tengo SECRETO", "b": ["x SECRETO", {"c": "SECRETO"}], "n": 3, "t": true});
-        let c = Clean::new(dirty, &|s| s.replace("SECRETO", "***"));
+            json!({"a": "have SECRET", "b": ["x SECRET", {"c": "SECRET"}], "n": 3, "t": true});
+        let c = Clean::new(dirty, &|s| s.replace("SECRET", "***"));
         assert_eq!(
             c.as_value(),
-            &json!({"a": "tengo ***", "b": ["x ***", {"c": "***"}], "n": 3, "t": true})
+            &json!({"a": "have ***", "b": ["x ***", {"c": "***"}], "n": 3, "t": true})
         );
     }
 
@@ -345,15 +345,15 @@ mod tests {
         let a = Answers::parse(&qs(), &reply()).unwrap();
         assert_eq!(a.model, "jev-1.14.0");
         assert_eq!(a.input_tokens, 283);
-        assert_eq!(a.noul("necesita_memoria"), Some(0.9));
+        assert_eq!(a.noul("needs_memory"), Some(0.9));
         assert_eq!(
-            a.get("operacion"),
+            a.get("operation"),
             Some(&Answer::Choice {
                 choice: "add".into(),
                 confidence: 0.8
             })
         );
-        assert_eq!(a.noul("operacion"), None);
+        assert_eq!(a.noul("operation"), None);
     }
 
     #[test]
@@ -363,49 +363,49 @@ mod tests {
             (
                 "missing",
                 Box::new(|v| {
-                    v["answers"].as_object_mut().unwrap().remove("operacion");
+                    v["answers"].as_object_mut().unwrap().remove("operation");
                 }),
             ),
             (
                 "unasked",
                 Box::new(|v| {
-                    v["answers"]["otra"] = json!({"type":"noul","noul":0.5});
+                    v["answers"]["other"] = json!({"type":"noul","noul":0.5});
                 }),
             ),
             (
                 "wrong type",
                 Box::new(|v| {
-                    v["answers"]["necesita_memoria"]["type"] = json!("choice");
+                    v["answers"]["needs_memory"]["type"] = json!("choice");
                 }),
             ),
             (
                 "noul above 1",
                 Box::new(|v| {
-                    v["answers"]["necesita_memoria"]["noul"] = json!(1.5);
+                    v["answers"]["needs_memory"]["noul"] = json!(1.5);
                 }),
             ),
             (
                 "noul below 0",
                 Box::new(|v| {
-                    v["answers"]["necesita_memoria"]["noul"] = json!(-0.1);
+                    v["answers"]["needs_memory"]["noul"] = json!(-0.1);
                 }),
             ),
             (
                 "noul a string",
                 Box::new(|v| {
-                    v["answers"]["necesita_memoria"]["noul"] = json!("0.9");
+                    v["answers"]["needs_memory"]["noul"] = json!("0.9");
                 }),
             ),
             (
                 "choice not offered",
                 Box::new(|v| {
-                    v["answers"]["operacion"]["choice"] = json!("purge");
+                    v["answers"]["operation"]["choice"] = json!("purge");
                 }),
             ),
             (
                 "confidence above 1",
                 Box::new(|v| {
-                    v["answers"]["operacion"]["confidence"] = json!(2);
+                    v["answers"]["operation"]["confidence"] = json!(2);
                 }),
             ),
             (

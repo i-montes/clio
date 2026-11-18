@@ -318,21 +318,21 @@ fn every_contract_state_change_is_in_the_trace_in_order() {
     let id = t.new_trace_id();
     let root = t.start_span(&id, None, Kind::Agent, "task").expect("root");
     for (from, to) in [
-        ("borrador", "aprobado"),
-        ("aprobado", "en curso"),
-        ("en curso", "cerrado con éxito"),
+        ("draft", "approved"),
+        ("approved", "running"),
+        ("running", "closed ok"),
     ] {
         clock.advance(10);
         t.contract_state(&root, "c-1", from, to).expect("state");
     }
-    t.contract_state(&root, "c-2", "borrador", "cancelado")
+    t.contract_state(&root, "c-2", "draft", "cancelled")
         .expect("other contract");
     assert_eq!(
         t.contract_history("c-1").expect("history"),
         [
-            ("borrador".to_string(), "aprobado".to_string()),
-            ("aprobado".to_string(), "en curso".to_string()),
-            ("en curso".to_string(), "cerrado con éxito".to_string()),
+            ("draft".to_string(), "approved".to_string()),
+            ("approved".to_string(), "running".to_string()),
+            ("running".to_string(), "closed ok".to_string()),
         ]
     );
     assert_eq!(t.contract_history("c-2").expect("history").len(), 1);

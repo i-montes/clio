@@ -261,7 +261,7 @@ fn a_request_with_nothing_to_send_fails_before_calling() {
         &envelope(r#"[{"role":"system","content":"solo"},{"role":"user","content":""}]"#),
     );
     assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("ningún mensaje"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no user or assistant message"));
     assert!(seen.is_empty());
 }
 
@@ -341,7 +341,7 @@ fn a_key_with_a_control_or_non_ascii_character_fails_without_printing_it() {
         let o = run_adapter(&[("LLM_BASE_URL", "http://127.0.0.1:9")], &stdin);
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(
-            !o.status.success() && err.contains("cabecera"),
+            !o.status.success() && err.contains("HTTP header"),
             "{bad}: {err}"
         );
         assert!(!err.contains("SECRET"), "{bad}: {err}");

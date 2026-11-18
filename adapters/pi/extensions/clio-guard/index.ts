@@ -60,30 +60,30 @@ export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
 const ACTIVE: string[] = [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
 const ALLOWED = new Set<string>(ACTIVE);
 /**
- * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
+ * What each tool is for, as Jev is asked about it («you need to <use_when>», Jev spec): one entry per
  * tool, and a tool added to TOOL_NAMES without one does not compile. The catalog below reaches the
  * brain at the start of every session, so Jev's questions come from here and from no other list.
  */
 export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
-	read: "leer archivos del equipo",
-	write: "crear un archivo nuevo o reescribirlo entero",
-	edit: "cambiar un trecho de un archivo que ya existe",
-	bash: "ejecutar comandos en una terminal",
-	find: "buscar archivos por su nombre",
-	ls: "ver qué hay dentro de una carpeta",
-	memory_search: "consultar lo que se recuerda de esta persona o de conversaciones pasadas",
-	memory_get: "leer una memoria concreta de la persona por su número",
-	memory_timeline: "ver qué se guardó antes y después de una memoria, en la misma sesión",
-	memory_context: "recuperar el resumen de la última sesión y lo más reciente del proyecto, por ejemplo al retomar el trabajo",
-	memory_save: "guardar algo relevante que conviene recordar: un dato de la persona, una decisión, una causa",
-	memory_session_summary: "guardar el resumen de la sesión: objetivo, lo hecho, lo descubierto y los siguientes pasos, al cerrar o tras compactar",
-	memory_update: "corregir o poner al día una memoria concreta que quedó desfasada o mal, con lo verificado",
-	memory_consolidate: "unir varias memorias que dicen lo mismo en una sola",
-	memory_forget: "olvidar un recuerdo que ya no sirve o está mal",
-	memory_revert: "deshacer un cambio propio de la memoria",
-	memory_pin: "fijar un recuerdo para tenerlo siempre presente",
-	memory_block: "leer entero lo que la persona fijó: quién es Clio, cómo trabaja, quién es la persona o lo que vigila",
-	memory_block_edit: "cambiar, porque la persona lo pide aquí, quién es Clio, cómo trabaja, lo que sabe de la persona o lo que vigila",
+	read: "read files on the machine",
+	write: "create a new file or rewrite one whole",
+	edit: "change a part of a file that already exists",
+	bash: "run commands in a terminal",
+	find: "find files by their name",
+	ls: "see what is inside a folder",
+	memory_search: "look up what is remembered about this person or from past conversations",
+	memory_get: "read one specific memory of the person by its number",
+	memory_timeline: "see what was saved before and after a memory, in the same session",
+	memory_context: "recover the summary of the last session and the most recent things of the project, for example when picking the work back up",
+	memory_save: "save something relevant that is worth remembering: a fact about the person, a decision, a cause",
+	memory_session_summary: "save the session summary: goal, what was done, what was discovered and the next steps, when closing or after compacting",
+	memory_update: "correct or bring up to date one specific memory that went stale or wrong, with what was verified",
+	memory_consolidate: "merge several memories that say the same thing into one",
+	memory_forget: "forget a memory that no longer helps or is wrong",
+	memory_revert: "undo a change you made to the memory",
+	memory_pin: "pin a memory to keep it always in mind",
+	memory_block: "read whole what the person set: who Clio is, how she works, who the person is or what she watches",
+	memory_block_edit: "change, because the person asks for it here, who Clio is, how she works, what she knows about the person or what she watches",
 	ask_person: "ask the person one question with a few answers to pick from, when the doubt is real",
 	request_secret: "ask the person to put a token or key the task needs into the vault, bound to where it may be sent",
 	todo_write: "keep a short checklist of the steps of a longer job, shown to the person",
@@ -131,7 +131,7 @@ const oneLine = (s: unknown, max: number) =>
 	(typeof s === "string" ? s : "").replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 const HOST_BASH_RULE =
 	"bash runs on the person's machine, in the home folder, with the time limit you give in `timeout` (none if you give none); it has no network unless you set `network: true`, which marks the session. Clio's own folders are not visible.";
-const NETWORK = { type: "boolean", description: "la orden necesita red; marca la sesión" };
+const NETWORK = { type: "boolean", description: "the command needs the network; it marks the session" };
 const BACKGROUND = {
 	type: "boolean",
 	description:
@@ -164,7 +164,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		if (HOST) {
 			// The host decides (it knows Clio's own folders), but it would take `~` as a folder name.
 			return p.startsWith("~")
-				? "usa una ruta absoluta o relativa a la carpeta personal: «~» no se expande aquí"
+				? "use an absolute path, or one relative to the home folder: «~» is not expanded here"
 				: undefined;
 		}
 		if (p.startsWith("~")) return "the path must be inside the working folder";
@@ -275,7 +275,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 	// Every call carries the model's own words on why it does it (`reason`, a few words in the
 	// user's language); the chat shows it as the step's title. Pi's tool never sees it.
 	const REASON =
-		"Always: what this does, for the user, in the user's language and at most 6 words (e.g. 'Revisar la estructura', 'Leer la configuración'). The chat shows it as the step's title; the user reads this, not the arguments.";
+		"Always: what this does, for the user, in the user's language and at most 6 words (e.g. 'Review the structure', 'Read the configuration'). The chat shows it as the step's title; the user reads this, not the arguments.";
 	// biome-ignore lint/suspicious/noExplicitAny: Pi's tool definitions are generic over their schema
 	const register = (d: any) => {
 		const schema = d.parameters ?? { type: "object", properties: {} };
