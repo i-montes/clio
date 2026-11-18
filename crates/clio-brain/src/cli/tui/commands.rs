@@ -626,6 +626,7 @@ fn numbers(app: &App, context: bool) -> Modal {
         vec![
             format!("input         {} tokens", tokens(t.input)),
             format!("cached        {} tokens", tokens(t.cache_read)),
+            cache_line(&t),
             format!("output        {} tokens", tokens(t.output)),
             format!("cost          {}", usage::usd(s.cost_micro)),
             format!("steps         {}", s.steps),
@@ -634,6 +635,21 @@ fn numbers(app: &App, context: bool) -> Modal {
         ]
     };
     Modal::text(if context { "Context" } else { "Usage" }, lines)
+}
+
+/// The cache hit rate: cache-read tokens over every prompt token (input, cache read and cache
+/// write), or that the provider reported no cache use (not 0 %).
+fn cache_line(t: &clio_brain::pi::rpc::Usage) -> String {
+    use crate::cli::usage::tokens;
+    let prompt = t.input + t.cache_read + t.cache_write;
+    if t.cache_read + t.cache_write == 0 {
+        return "cache hit     none reported by the provider".to_owned();
+    }
+    let pct = (u128::from(t.cache_read) * 100 + u128::from(prompt) / 2) / u128::from(prompt);
+    format!(
+        "cache hit     {pct} % of the prompt ({} tokens read from cache)",
+        tokens(t.cache_read)
+    )
 }
 
 /// A row of the menu: its head, what it does, whether it is the current one, whether it is blocked.

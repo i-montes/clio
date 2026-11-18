@@ -950,3 +950,37 @@ fn undo_leaves_one_note_in_the_chat_saying_what_it_did() {
     );
     assert!(notes(&a).is_empty() && a.notice.as_deref() == Some("boom"));
 }
+
+// `/usage` says how much of the prompt was read from the provider's cache, and that the provider
+// reported none rather than 0 %.
+#[test]
+fn usage_shows_the_cache_hit_rate_or_that_there_is_none() {
+    use clio_brain::pi::rpc::{SessionStats, Usage};
+    let lines = |usage: Usage| {
+        let mut a = open();
+        a.chat.meter.refresh(&SessionStats {
+            usage,
+            ..SessionStats::default()
+        });
+        let (a, _) = run(a, "/usage");
+        a.modal.unwrap().lines.join("\n")
+    };
+    let s = lines(Usage {
+        input: 2_000,
+        cache_read: 95_000,
+        cache_write: 3_000,
+        ..Usage::default()
+    });
+    assert!(
+        s.contains("cache hit     95 % of the prompt (95k tokens read from cache)"),
+        "{s}"
+    );
+    let s = lines(Usage {
+        input: 2_000,
+        ..Usage::default()
+    });
+    assert!(
+        s.contains("cache hit     none reported by the provider"),
+        "{s}"
+    );
+}
