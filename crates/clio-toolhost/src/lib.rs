@@ -566,11 +566,6 @@ impl ToolHost {
     /// `handle`, but a host-mode command stops as soon as `cancel` says so (the caller went away:
     /// the person aborted, the session ended). Its log line then says `stopped`.
     pub fn handle_until(&self, mut req: Request, cancel: &dyn Fn() -> bool) -> Response {
-        // How many run in the background: a count for the chat, not worth waiting for a command.
-        if req.tool == "jobs" && valid_session(&req.session) {
-            return self.job_op(&req, &Map::new());
-        }
-        let _one_at_a_time = lock(&self.busy);
         if req.tool == memory::OLD_SAVE {
             req.tool = "memory_save".into();
         }
@@ -594,8 +589,28 @@ impl ToolHost {
                 tainted,
             );
         };
-        if req.tool == "filter" {
-            return self.filter(&req, &map, tainted);
+        let closing = || {
+            lock(&self.sessions)
+                .get(&req.session)
+                .is_some_and(|t| t.closing)
+        };
+        // These touch only their own locks: they never wait behind a command that runs (which
+        // may have no time limit), so the guard's filter and job_stop are answered meanwhile.
+        match req.tool.as_str() {
+            "filter" => return self.filter(&req, &map, tainted),
+            "jobs" => return self.job_op(&req, &map),
+            "job_output" | "job_stop" if !closing() => return self.job_op(&req, &map),
+            _ => {}
+        }
+        let _one_at_a_time = lock(&self.busy);
+        // The caller gave up while this waited for the one before: nothing runs for nobody.
+        if cancel() {
+            return self.refuse(
+                &req.id,
+                "protocol",
+                "the caller went away before the call ran".into(),
+                tainted,
+            );
         }
         if req.tool == "taint" {
             return self.taint(&req);
@@ -605,11 +620,7 @@ impl ToolHost {
         }
         // The last turn of a closed session saves its summary and nothing else: no file, no
         // command, no other change of the memory.
-        if req.tool != "memory_session_summary"
-            && lock(&self.sessions)
-                .get(&req.session)
-                .is_some_and(|t| t.closing)
-        {
+        if req.tool != "memory_session_summary" && closing() {
             return self.refuse(
                 &req.id,
                 "closing",
@@ -620,9 +631,6 @@ impl ToolHost {
         // Not a tool of the gateway's: nothing is run, and no value ever comes through here.
         if req.tool == "request_secret" {
             return self.request_secret(&req, &map, tainted);
-        }
-        if matches!(req.tool.as_str(), "job_output" | "job_stop" | "jobs") {
-            return self.job_op(&req, &map);
         }
         if map
             .get("content")

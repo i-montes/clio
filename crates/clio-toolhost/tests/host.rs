@@ -1224,3 +1224,53 @@ fn the_oldest_output_of_a_background_command_is_dropped_with_a_note() {
         .len();
     assert!(kept <= 4 << 20, "{kept}");
 }
+
+// A foreground command with no time limit holds the host for itself; the guard's `filter` and
+// `job_stop` (and `job_output`) do not wait behind it.
+#[test]
+fn filter_and_job_stop_are_answered_while_a_command_runs() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let host = Arc::new(ToolHost::new(cfg(&r)).unwrap());
+    if let Err(why) = host.exec_available() {
+        eprintln!("SKIPPED (the host launcher cannot run here, exec was not tested): {why}");
+        return;
+    }
+    let req = |tool: &str, args: Value| Request {
+        id: "i1".into(),
+        tool: tool.into(),
+        args,
+        session: "s".into(),
+        call_id: "c1".into(),
+        tainted: false,
+    };
+    let job = job_id(&host.handle(req(
+        "exec",
+        json!({"command": "sleep 300", "background": true}),
+    )));
+    let m = format!("clio-busy-test-{}", std::process::id());
+    let (h, cmd) = (host.clone(), format!("sleep 300; echo {m}"));
+    let run = std::thread::spawn(move || {
+        h.handle(Request {
+            id: "i2".into(),
+            tool: "exec".into(),
+            args: json!({ "command": cmd }),
+            session: "s".into(),
+            call_id: "c2".into(),
+            tainted: false,
+        })
+    });
+    wait_for("the command started", || procs_with(&m) > 0);
+    let t0 = std::time::Instant::now();
+    let f = host.handle(req("filter", json!({"items": [{"text": "hello"}]})));
+    assert!(f.ok && f.data["items"][0] == "hello", "{f:?}");
+    let out = host.handle(req("job_output", json!({ "id": job })));
+    assert!(out.ok && out.content.contains("still runs"), "{out:?}");
+    let stop = host.handle(req("job_stop", json!({ "id": job })));
+    assert!(stop.ok && stop.content.contains("stopped"), "{stop:?}");
+    assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+    // The foreground command was there all along.
+    assert!(procs_with(&m) > 0 && !run.is_finished());
+    host.stop(Duration::from_secs(5));
+    assert_eq!(run.join().unwrap().data["stopped"], true);
+}
