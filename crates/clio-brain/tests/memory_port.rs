@@ -2207,7 +2207,7 @@ fn the_real_port_edits_and_reads_a_block() {
 
 // ---------------------------------------------------------------- fix wave: blocks are the person's
 
-const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, in a clean session";
+const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, as the person asks";
 
 #[test]
 fn the_agents_ordinary_tools_cannot_change_a_block_entry() {

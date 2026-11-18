@@ -29,6 +29,9 @@ pub enum Class {
     /// Not an action: a secret the model asked the person for (`request_secret`). It is answered
     /// with the value, which goes to the vault, never run.
     Secret,
+    /// Not an action: a change to one of the person's blocks from a session that read outside
+    /// content (`memory_block_edit`). Approved, it is written as the person's; never run.
+    Memory,
 }
 
 impl fmt::Display for Class {
@@ -39,6 +42,7 @@ impl fmt::Display for Class {
             Send => "send",
             Control => "control",
             Class::Secret => "secret",
+            Class::Memory => "memory",
         })
     }
 }
@@ -312,8 +316,8 @@ impl HostRules {
             self.foreign.push(f);
         }
         for a in file.ask {
-            if a.class == Class::Secret {
-                return Err("host.json: «secret» is not a class of action".into());
+            if matches!(a.class, Class::Secret | Class::Memory) {
+                return Err(format!("host.json: «{}» is not a class of action", a.class));
             }
             let re = Regex::new(&a.pattern)
                 .map_err(|e| format!("host.json: invalid pattern «{}»: {e}", a.pattern))?;
@@ -1234,6 +1238,15 @@ mod tests {
                 r#"{"ask": [{"class": "otra", "pattern": "x"}]}"#,
                 "unknown variant",
             ),
+            // Not actions: nothing the person's file says can create one.
+            (
+                r#"{"ask": [{"class": "secret", "pattern": "x"}]}"#,
+                "«secret» is not a class of action",
+            ),
+            (
+                r#"{"ask": [{"class": "memory", "pattern": "x"}]}"#,
+                "«memory» is not a class of action",
+            ),
         ] {
             let e = HostRules::factory().with_file(json).unwrap_err();
             assert!(
@@ -1263,6 +1276,8 @@ mod tests {
             (Spend, "spend"),
             (Send, "send"),
             (Control, "control"),
+            (Class::Secret, "secret"),
+            (Class::Memory, "memory"),
         ] {
             assert_eq!(c.to_string(), n);
             assert_eq!(serde_json::to_string(&c).unwrap(), format!("\"{n}\""));

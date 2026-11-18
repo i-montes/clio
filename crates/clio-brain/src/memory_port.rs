@@ -25,7 +25,7 @@ use crate::memory_link::{Draft, EmbedModel, HELD_BY_BLOCK, MemoryLink, Place, Re
 /// another scope. Which one it is must not leak.
 const NOT_READABLE: &str = "that memory does not exist or cannot be read";
 /// What the agent hears when its ordinary tools reach an entry of the person's blocks.
-const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, in a clean session";
+const IN_A_BLOCK: &str = "that memory is in a block of the person: it is changed with memory_block_edit, as the person asks";
 const NO_VECTORS: &str = "text only: the vector model is not available";
 
 pub struct LinkPort {
@@ -410,7 +410,8 @@ impl MemoryPort for LinkPort {
     }
 
     /// The person's own words, so with the person's authority: never from a session that read
-    /// outside content (the tool host already refuses it; this is the second lock).
+    /// outside content (the tool host sets such a change aside for the person; this is the second
+    /// lock). An approved one comes with `tainted: false` from the person's `clio`, never the jail.
     fn block_edit(
         &self,
         name: &str,

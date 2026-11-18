@@ -17,8 +17,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::ask::Class;
-use crate::host::{Host, MAX_TIMEOUT_SECS, now_ms};
-use crate::{DecisionOut, Request, Response, ToolHost, lock};
+use crate::host::{Host, MAX_TIMEOUT_SECS, log_line, now_ms};
+use crate::{BlockEdit, DecisionOut, Judging, MemoryPort, Request, Response, ToolHost, lock};
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
 /// What is kept of an approved action's output.
@@ -80,6 +80,106 @@ pub struct SecretCfg {
 pub fn secret_of(p: &Pending) -> Option<(&str, &str, &str)> {
     let s = |k: &str| p.args.get(k).and_then(Value::as_str).unwrap_or("");
     (p.class == Class::Secret).then(|| (s("name"), s("destination"), s("why")))
+}
+
+/// A change to one of the person's blocks, as it was set aside: the block, the action (`add`,
+/// `replace`, `remove`), the text to write and, for replace and remove, the entry and what it said
+/// then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockChange<'a> {
+    pub name: &'a str,
+    pub action: &'a str,
+    pub text: Option<&'a str>,
+    pub id: Option<i64>,
+    pub old: Option<&'a str>,
+}
+
+/// What block change `p` would write, read from its arguments (never from `what`).
+pub fn block_of(p: &Pending) -> Option<BlockChange<'_>> {
+    let s = |k: &str| p.args.get(k).and_then(Value::as_str);
+    (p.class == Class::Memory).then(|| BlockChange {
+        name: s("name").unwrap_or(""),
+        action: s("action").unwrap_or(""),
+        text: s("text"),
+        id: p.args.get("id").and_then(Value::as_i64),
+        old: s("old"),
+    })
+}
+
+/// The person approves block change `id`: it is written as it was stored (same hash), with the
+/// person's authority, through the same port a clean session writes with, and once. A replace or
+/// a remove whose entry is gone or no longer says what it said when it was asked writes nothing.
+/// The model has no way here: only the person's `clio` calls this, outside the jail.
+pub fn approve_block(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    port: &dyn MemoryPort,
+) -> Result<Pending, String> {
+    let mut p = check(state, id, now_ms)?;
+    let Some(b) = block_of(&p) else {
+        return Err(format!("{id} is not a change to a block"));
+    };
+    if hash_of(&p.tool, &p.args) != p.hash {
+        return Err(format!(
+            "{id} changed after it was set aside: nothing was written"
+        ));
+    }
+    let edit = match (b.action, b.id, b.text) {
+        ("add", None, Some(t)) => BlockEdit::Add(t.to_owned()),
+        ("replace", Some(n), Some(t)) => BlockEdit::Replace(n, t.to_owned()),
+        ("remove", Some(n), None) => BlockEdit::Remove(n),
+        _ => return Err(format!("{id} is damaged: nothing was written")),
+    };
+    let name = b.name.to_owned();
+    if let Some(n) = b.id {
+        let now = port.block(&name)?;
+        if !now
+            .iter()
+            .any(|e| e.id == n && Some(e.text.as_str()) == b.old)
+        {
+            return Err(format!(
+                "entry m{n} of «{name}» changed or is gone since this was asked: nothing was written"
+            ));
+        }
+    }
+    // Claimed before it is written: a second approval, even from another process, finds it.
+    claim(state, id).map_err(|_| format!("{id} was already answered"))?;
+    let judging = Judging {
+        tainted: false,
+        session: p.session.clone(),
+    };
+    let written = port.block_edit(&name, &edit, &judging).inspect_err(|_| {
+        // Nothing was written: it still waits.
+        let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
+    })?;
+    let done = if matches!(edit, BlockEdit::Remove(_)) {
+        format!(
+            "removed from «{name}»: m{} is in quarantine, the person can restore it",
+            written.id
+        )
+    } else {
+        format!("saved in «{name}» as m{}", written.id)
+    };
+    p.state = State::Done {
+        exit_code: None,
+        output_tail: done,
+    };
+    save(state, &p)?;
+    if let Err(e) = log_line(
+        state,
+        &p.run,
+        &p.session,
+        &p.tool,
+        &p.what,
+        false,
+        "approved",
+        "host/approved",
+        None,
+    ) {
+        eprintln!("clio-toolhost: the action log lost a line: {e}");
+    }
+    Ok(p)
 }
 
 /// The person typed the value of secret request `id`: `store` puts it in the vault. Claimed
@@ -267,6 +367,21 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     claim(state, id).map_err(|_| format!("{id} was already answered"))?;
     p.state = State::Rejected;
     save(state, &p)?;
+    if p.class == Class::Memory
+        && let Err(e) = log_line(
+            state,
+            &p.run,
+            &p.session,
+            &p.tool,
+            &p.what,
+            false,
+            "rejected",
+            "host/rejected",
+            None,
+        )
+    {
+        eprintln!("clio-toolhost: the action log lost a line: {e}");
+    }
     Ok(p)
 }
 
@@ -380,15 +495,34 @@ impl ToolHost {
         class: Class,
         reason: Option<&str>,
     ) -> Response {
+        let at = (
+            h.cfg.state.as_path(),
+            h.cfg.run.as_str(),
+            h.cfg.rules.questions_per_day(),
+        );
+        self.aside_at(at, req, req.args.clone(), class, reason)
+    }
+
+    /// `aside` with where it waits given apart (`state`, `run`, the day's questions) and the
+    /// arguments it keeps: a block change waits in a chat that is not in host mode too.
+    pub(crate) fn aside_at(
+        &self,
+        (state, run, per_day): (&Path, &str, u32),
+        req: &Request,
+        args: Value,
+        class: Class,
+        reason: Option<&str>,
+    ) -> Response {
         let now = now_ms();
+        let network = args["network"].as_bool() == Some(true);
         let mut draft = Pending {
             id: String::new(),
             class,
             tool: req.tool.clone(),
-            args: req.args.clone(),
+            args,
             hash: String::new(),
             what: String::new(),
-            run: h.cfg.run.clone(),
+            run: run.to_owned(),
             session: req.session.clone(),
             created_ms: now,
             expires_ms: now + DAY_MS,
@@ -397,11 +531,11 @@ impl ToolHost {
             reason: reason.map(str::to_owned),
         };
         draft.what = self.clean(shown(&draft));
-        let network = req.args["network"].as_bool() == Some(true);
-        let (content, rule) = match set_aside(&h.cfg.state, draft, h.cfg.rules.questions_per_day())
-        {
+        let (content, rule) = match set_aside(state, draft, per_day) {
             Ok(p) => {
-                if let Err(e) = h.log(
+                if let Err(e) = log_line(
+                    state,
+                    run,
                     &req.session,
                     &req.tool,
                     &p.what,
@@ -453,6 +587,11 @@ impl ToolHost {
         if p.class == Class::Secret {
             return Err(format!(
                 "{id} asks for a secret: it is answered with the value, not run"
+            ));
+        }
+        if p.class == Class::Memory {
+            return Err(format!(
+                "{id} changes one of your blocks: it is written when approved, not run"
             ));
         }
         if p.run != h.cfg.run {

@@ -503,7 +503,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 	);
 	memoryTool(
 		"memory_block_edit",
-		"Change one of the person's blocks because the person asked for it in this conversation: add an entry, replace one (its number) or remove one. It is saved as the person's words. Refused in a session that read outside content.",
+		"Change one of the person's blocks because the person asked for it in this conversation: add an entry, replace one (its number) or remove one. It is saved as the person's words. In a session that read outside content it is set aside and written only if the person approves it.",
 		{
 			name: blockName,
 			action: { type: "string", enum: ["add", "replace", "remove"], description: "add a new entry, replace one, or remove one." },

@@ -11,10 +11,11 @@
 //! marked as tainted only when a memory is not the person's own (S-05): marking on every read
 //! would tire the person and be ignored, never marking would make S-05 mean nothing.
 //!
-//! A session may spend 20 calls and 24 KiB of returned text (S-47). The count lives in a file of the
-//! run folder, so a restarted service of the same run does not give a fresh budget (the MCP server
-//! has a folder per process, so its budget is per process), and what is logged are facts
-//! (ids, counts, a short hash of the query), never the text of a query or of a memory.
+//! A session may spend 20 calls and 24 KiB of returned text in a rolling hour (S-47). The count
+//! lives in a file of the run folder, so a restarted service of the same run does not give a fresh
+//! budget (the MCP server has a folder per process, so its budget is per process), and what is
+//! logged are facts (ids, counts, a short hash of the query), never the text of a query or of a
+//! memory.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -83,9 +84,10 @@ const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
 const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
 const BLOCK_DESCRIPTION: &str = "Read one of the person's blocks whole, in order, each entry with its id: identidad (who Clio is and how she speaks), reglas (how she works and her limits), preferencias (who the person is), vigilancia (what she watches) (read-only)";
 const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
-const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. Refused in a session that read outside content";
-/// What a session that read outside content hears when it tries to change a block: the person's
-/// own words only enter from a clean session (S-05).
+const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. In a session that read outside content it is set aside and written only if the person approves it";
+/// What a session that read outside content hears when it tries to change a block and nobody can
+/// be asked (no person, as in `clio run`): the person's own words only enter from a clean session
+/// or with the person's approval (S-05).
 pub const BLOCK_TAINTED: &str = "this session read content from outside: identity and what is watched are only changed in a clean session. Open a new session and ask for it there.";
 
 /// Changes a session may make in an hour through forget, pin, revert and consolidate (S-47, S-65).
@@ -636,12 +638,15 @@ fn cut(s: &str, max: usize) -> String {
 struct Budget {
     calls: u32,
     bytes: u64,
-    /// The saves and the changes: when each was counted (ms), for the rolling hour.
+    /// The calls: when each was counted (ms), for the rolling hour.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     at: Vec<i64>,
+    /// The reads' text: when (ms) and how many bytes, for the rolling hour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sent: Vec<(i64, u64)>,
 }
 
-/// The saves and changes count over this rolling window, not the session's whole life: a
+/// The reads, saves and changes count over this rolling window, not the session's whole life: a
 /// conversation that never ends would otherwise run out for good. Not reset by a compaction: Pi
 /// reports those, and Pi is inside the jail.
 const BUDGET_WINDOW_MS: i64 = 60 * 60 * 1000;
@@ -664,6 +669,27 @@ impl Budget {
     fn count(&mut self, now: i64) {
         self.at.push(now);
         self.calls = self.calls.saturating_add(1);
+    }
+
+    /// `in_hour` for the bytes the reads returned: an older file's bytes are taken as sent now.
+    fn bytes_in_hour(&mut self, now: i64) -> u64 {
+        let known: u64 = self.sent.iter().map(|s| s.1).sum();
+        let old = self.bytes.saturating_sub(known);
+        if old > 0 {
+            self.sent.push((now, old));
+        }
+        self.sent
+            .retain(|(t, _)| now.saturating_sub(*t) < BUDGET_WINDOW_MS);
+        self.bytes = self.sent.iter().map(|s| s.1).sum();
+        self.bytes
+    }
+
+    /// `n` more bytes returned, by a call made at `now`.
+    fn spend(&mut self, now: i64, n: u64) {
+        if n > 0 {
+            self.sent.push((now, n));
+            self.bytes = self.bytes.saturating_add(n);
+        }
     }
 
     /// No file is a fresh budget; a file that cannot be read or understood is an error, never a
@@ -808,15 +834,19 @@ impl ToolHost {
             Ok(b) => b,
             Err(why) => return self.budget_denied(req, &format!("the memory budget: {why}")),
         };
-        let left = MAX_BUDGET_BYTES.saturating_sub(budget.bytes);
-        if budget.calls >= MAX_CALLS || left < MIN_ROOM {
+        let now = self.clock.now_ms();
+        let calls = budget.in_hour(now);
+        let left = MAX_BUDGET_BYTES.saturating_sub(budget.bytes_in_hour(now));
+        if calls >= MAX_CALLS || left < MIN_ROOM {
+            // Kept even so: an older file's count starts its hour now, not at every call.
+            let _ = budget.save(&path);
             return self.budget_denied(
                 req,
-                "this session spent its memory budget (20 calls or 24 KiB of text)",
+                "this session spent its memory budget for this hour (20 calls or 24 KiB of text an hour): try again later",
             );
         }
         // Counted before the port is asked: failed and rejected calls spend it too.
-        budget.calls += 1;
+        budget.count(now);
         if let Err(why) = budget.save(&path) {
             return self.budget_denied(req, &format!("the memory budget cannot be kept: {why}"));
         }
@@ -832,7 +862,7 @@ impl ToolHost {
         let resp = self.memory_answer(req, args, out, cap, &mut facts);
         // Only what a memory said counts: an error or a refusal is not text of the memory.
         let bytes = if resp.ok { resp.content.len() } else { 0 };
-        budget.bytes += bytes as u64;
+        budget.spend(now, bytes as u64);
         let logged = budget
             .save(&path)
             .and_then(|()| self.log_facts(req, &facts, bytes));
@@ -1128,16 +1158,35 @@ impl ToolHost {
         Ok(text)
     }
 
-    /// `memory_block_edit`: the person's words, so only from a session that read nothing from
-    /// outside (checked before anything else, the port never hears of it). Its arguments are
-    /// checked before it is counted, and it counts as one of the session's saves.
+    /// `memory_block_edit`: the person's words. A clean session writes them at once; a session
+    /// that read outside content (`tainted`, `suspect`) sets them aside for the person, who sees
+    /// the exact change and approves it (`pending::approve_block`), and the port never hears of it
+    /// here; with nobody to ask, it is refused. Its arguments are checked before it is counted, and
+    /// it counts as one of the session's saves.
     fn block_edit_call(
         &self,
         req: &Request,
         args: &Map<String, Value>,
         out: DecisionOut,
     ) -> Response {
-        if self.is_tainted(&req.session) {
+        let marked = self.is_tainted(&req.session);
+        // Where a change waits for the person: host mode, or a chat (where secrets wait too).
+        let waits = self
+            .host
+            .as_ref()
+            .map(|h| {
+                (
+                    h.cfg.state.as_path(),
+                    h.cfg.run.as_str(),
+                    h.cfg.rules.questions_per_day(),
+                )
+            })
+            .or_else(|| {
+                self.secrets
+                    .as_ref()
+                    .map(|c| (c.state.as_path(), c.run.as_str(), c.per_day))
+            });
+        if marked && waits.is_none() {
             return Response {
                 id: req.id.clone(),
                 ok: false,
@@ -1202,6 +1251,9 @@ impl ToolHost {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
         };
+        if let Some(at) = waits.filter(|_| marked) {
+            return self.block_aside(req, out, at, &port, name, edit);
+        }
         // The port checks the taint too: it gets the session's own.
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
@@ -1242,6 +1294,46 @@ impl ToolHost {
             Ok(()) => resp,
             Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
         }
+    }
+
+    /// A marked session's block change, set aside exactly as it would be written (the text
+    /// already cleaned) with, for a replace or a remove, the entry's text now: the person sees
+    /// both, and the approval writes nothing if that entry changed meanwhile.
+    fn block_aside(
+        &self,
+        req: &Request,
+        out: DecisionOut,
+        at: (&Path, &str, u32),
+        port: &Arc<dyn MemoryPort>,
+        name: String,
+        edit: BlockEdit,
+    ) -> Response {
+        let (action, id, text) = match &edit {
+            BlockEdit::Add(t) => ("add", None, Some(t.clone())),
+            BlockEdit::Replace(n, t) => ("replace", Some(*n), Some(t.clone())),
+            BlockEdit::Remove(n) => ("remove", Some(*n), None),
+        };
+        let mut args = json!({ "name": name, "action": action });
+        if let Some(n) = id {
+            let block = name.clone();
+            let entries = match self.ask_port(port, move |p| p.block(&block)) {
+                Ok(e) => e,
+                Err(why) => return self.memory_failed(req, out, &why),
+            };
+            let Some(old) = entries.into_iter().find(|e| e.id == n) else {
+                return self.memory_failed(
+                    req,
+                    out,
+                    &format!("m{n} is not an entry of «{}»", self.tidy(&name, 40)),
+                );
+            };
+            args["id"] = n.into();
+            args["old"] = old.text.into();
+        }
+        if let Some(t) = text {
+            args["text"] = t.into();
+        }
+        self.aside_at(at, req, args, crate::ask::Class::Memory, None)
     }
 
     fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {
