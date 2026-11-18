@@ -450,6 +450,7 @@ fn init_is_idempotent_and_private() {
     );
     for d in [
         ".config/clio",
+        ".config/clio/commands",
         ".local/share/clio",
         ".local/share/clio/runs",
     ] {

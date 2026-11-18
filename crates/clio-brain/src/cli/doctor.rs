@@ -237,7 +237,7 @@ fn jail_lines(o: &mut Report) {
                 Level::Warn,
                 format!("jail: run_tests is off, {why}"),
                 Some(
-                    "It needs Linux, bubblewrap (bwrap), prlimit (util-linux), python3 and unprivileged user namespaces; see docs/uso-local.md.".into(),
+                    "It needs Linux, bubblewrap (bwrap), prlimit (util-linux), python3 and unprivileged user namespaces; see docs/usage.md.".into(),
                 ),
             );
             o.jail = Some(json!({"available": false, "reason": why, "checks": []}));
@@ -748,7 +748,7 @@ fn host_lines(o: &mut Report, script: &Path) {
             continue;
         };
         let hint = (lv != Level::Pass).then(|| {
-            "From the machine check (infra/local/check-host.sh); see docs/uso-local.md.".to_owned()
+            "From the machine check (infra/local/check-host.sh); see docs/usage.md.".to_owned()
         });
         o.say(lv, rest.trim().to_owned(), hint);
     }
@@ -1027,6 +1027,38 @@ mod tests {
         let broken = said(Ok((Launcher::Bwrap, Err("x".into()))));
         assert_eq!(broken[0].0, Level::Fail);
         assert_eq!(said(Err("nothing".into()))[0].0, Level::Fail);
+    }
+
+    // A person who makes `~/.config/clio/commands/` by hand gets 755 and 644: the check is not
+    // weakened for it, and each failure says the command that fixes it.
+    #[test]
+    fn a_commands_folder_made_with_default_permissions_fails_and_says_how_to_fix_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("commands");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("review.md"), "# Review\nReview $ARGUMENTS").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            dir.join("review.md"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let mut o = Report::default();
+        check_tree(&mut o, t.path(), 0);
+        let said: Vec<_> = o
+            .checks
+            .iter()
+            .map(|c| (c.level, c.msg.clone(), c.hint.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said.iter().all(|(l, ..)| *l == Level::Fail), "{said:?}");
+        assert!(said[0].1.contains("it must be 700 (S-23)"), "{said:?}");
+        assert_eq!(said[0].2, format!("chmod 700 {}", dir.display()));
+        assert_eq!(
+            said[1].2,
+            format!("chmod 600 {}", dir.join("review.md").display())
+        );
     }
 
     #[test]

@@ -491,6 +491,9 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         Ok(())
     };
     made(&dirs.config)?;
+    // Where the person's own slash commands go: born private, so `clio doctor` (S-23) has nothing
+    // to say about a folder the person would otherwise make with the default permissions.
+    made(&dirs.config.join("commands"))?;
     made(&dirs.data)?;
     made(&dirs.runs)?;
     made(dirs.need_runtime()?)?;
