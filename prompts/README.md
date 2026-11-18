@@ -1,10 +1,11 @@
-# Prompts de sistema
+# System prompts
 
-Los prompts viven en el repositorio, versionados: `system/<nombre>@<versión>.md`, con la línea `version: <n>` al principio igual a la del nombre.
+The prompts live in the repository, versioned: `system/<name>@<version>.md`, with a `version: <n>` line at the top equal to the one in the file name.
 
-- **Una versión publicada no se edita.** Un cambio es una versión nueva (`clio@2.md`); la anterior se queda. Así cada traza puede decir qué versión usó (`clio.prompt.version` en clio-trace) y el banco compara versiones.
-- `MANIFEST.json` guarda el sha256 de cada archivo. `scripts/check-prompts.py` falla si un prompt cambia sin que cambie el manifiesto, o si falta una entrada: el cambio queda explícito en el diff y lo revisa la persona (`CODEOWNERS`).
-- **Nada cuya filtración importe (S-09).** El prompt de sistema se supone público: sin llaves, correos, rutas de tu máquina, direcciones IP ni cadenas largas de aspecto aleatorio. El escáner lo comprueba; la revisión humana comprueba lo que un patrón no ve (nombres de personas, detalles de tu infraestructura).
-- Cambiar un prompt pasa por la misma compuerta que el código: tests, banco y ataques (`ci.yml` no filtra por rutas).
+- **A published version is never edited.** A change is a new version (`clio@2.md`); the previous one stays. That way each trace can say which version it used (`clio.prompt.version` in clio-trace) and the bench compares versions.
+- `MANIFEST.json` holds the sha256 of each file. `scripts/check-prompts.py` fails if a prompt changes without the manifest changing, or if an entry is missing: the change shows in the diff and the person reviews it (`CODEOWNERS`).
+- **Nothing whose leak matters (S-09).** The system prompt is assumed public: no keys, emails, paths of your machine, IP addresses or long random-looking strings. The scanner checks that; the human review checks what a pattern cannot see (people's names, details of your infrastructure).
+- Changing a prompt goes through the same gate as code: tests, bench and attacks (`ci.yml` does not filter by path).
+- The prompts are in English; the model answers in the language the person writes in (a line near the top of each says so). `clio-agent@21` and `clio-host@5` are the English versions of `@20` and `@4`, which are partly in Spanish and stay as they were.
 
-Para registrar un cambio: editar o añadir el archivo, correr `python3 scripts/check-prompts.py --update` y subir el archivo y el manifiesto juntos.
+To register a change: edit or add the file, run `python3 scripts/check-prompts.py --update` and commit the file and the manifest together.
