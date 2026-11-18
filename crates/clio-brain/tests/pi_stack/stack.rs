@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 /// The tools the guard registers: Pi's own, the thirteen memory ones and Clio's own. `grep` is not
 /// here: see the extension.
-const TOOLS: [&str; 20] = [
+const TOOLS: [&str; 21] = [
     "read",
     "write",
     "edit",
@@ -48,6 +48,7 @@ const TOOLS: [&str; 20] = [
     "memory_block",
     "memory_block_edit",
     "ask_person",
+    "request_secret",
 ];
 
 pub(crate) fn calls(list: &[(&str, Value)]) -> Turn {

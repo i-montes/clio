@@ -97,7 +97,7 @@ fn smoke(with_agent: bool) {
     assert!(ends.iter().all(|(_, err, _)| !err), "{ends:?}");
     assert_eq!(
         declared_tools(&model).len(),
-        20,
+        21,
         "{:?}",
         declared_tools(&model)
     );
@@ -649,7 +649,7 @@ fn attack_60() -> Option<bool> {
     all_errors(&ends);
     assert_eq!(
         declared_tools(&model).len(),
-        20,
+        21,
         "{:?}",
         declared_tools(&model)
     );

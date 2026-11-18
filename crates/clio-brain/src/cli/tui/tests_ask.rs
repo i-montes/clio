@@ -300,3 +300,124 @@ fn hostile_question_text_is_one_clean_line_and_capped() {
         "{screen}"
     );
 }
+
+// ---------------------------------------------------------------- the secret box
+
+const VALUE: &str = "lin_api_Zq8vX2mN4pR7tY1wK9sB3dF6";
+
+pub(super) fn secrets(suspect: bool) -> Input {
+    Input::Bg(Bg::ChatSecrets(
+        vec![(
+            "ab12cd34".into(),
+            (
+                "linear".into(),
+                "http_fetch:api.linear.app".into(),
+                "to read the issues of the sprint".into(),
+            ),
+        )],
+        suspect,
+    ))
+}
+
+/// No 8 bytes in a row of `VALUE` are in `hay`.
+fn none_of_the_value(hay: &str) -> bool {
+    VALUE
+        .as_bytes()
+        .windows(8)
+        .all(|w| !hay.as_bytes().windows(8).any(|h| h == w))
+}
+
+#[test]
+fn the_secret_box_says_where_the_value_may_go_and_shows_only_dots() {
+    let (a, _) = feed(chat(), vec![Input::Tick(100), secrets(false)]);
+    let screen = screen_text(&a, 90, 30);
+    assert!(
+        screen.contains("Clio asks for a secret")
+            && screen.contains("linear")
+            && screen.contains("it can only be sent to http_fetch:api.linear.app")
+            && screen.contains("why: to read the issues of the sprint")
+            && screen.contains("Esc decline")
+            && !screen.contains("Visto bueno")
+            && !screen.contains("tried to give orders"),
+        "{screen}"
+    );
+    // Typed within the quiet second: nothing.
+    let (a, _) = feed(
+        a,
+        vec![Input::Tick(300), ch('x'), Input::Paste("yy".into())],
+    );
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert!(s.value.is_empty());
+    // After it: typed and pasted (line ends dropped), each a dot on screen.
+    let mut inputs = vec![Input::Tick(2_000)];
+    inputs.extend(VALUE[..10].chars().map(ch));
+    inputs.push(Input::Paste(format!("{}\n", &VALUE[10..])));
+    inputs.extend([ch('!'), key(KeyCode::Backspace)]);
+    let (mut a, cmds) = feed(a, inputs);
+    assert!(cmds.is_empty());
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(s.value.expose(), VALUE);
+    let dots = "•".repeat(VALUE.chars().count());
+    for debug in [false, true] {
+        a.debug = debug;
+        let screen = screen_text(&a, 120, 40);
+        assert!(screen.contains(&dots), "{screen}");
+        assert!(none_of_the_value(&screen), "{screen}");
+    }
+    // A turn that ends does not take it away; Enter sends the value, and only in its command.
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatSettled {
+            result: Err("x".into()),
+            refresh: None,
+        })],
+    );
+    assert!(a.prompt.is_some());
+    let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+    assert!(a.prompt.is_none() && a.answering == 1);
+    let [Cmd::ChatSecret { id, name, value }] = &cmds[..] else {
+        panic!("{cmds:?}")
+    };
+    assert_eq!((id.as_str(), name.as_str()), ("ab12cd34", "linear"));
+    assert_eq!(value.as_ref().unwrap().0.expose(), VALUE);
+    // What can be printed of the app's state and its commands holds none of it.
+    let printed = format!("{cmds:?} {:?}", a.chat.items);
+    assert!(none_of_the_value(&printed), "{printed}");
+    let boxed = value.clone();
+    let panic = std::panic::catch_unwind(|| panic!("{boxed:?}")).unwrap_err();
+    assert!(none_of_the_value(panic.downcast_ref::<String>().unwrap()));
+}
+
+#[test]
+fn esc_declines_a_secret_and_a_suspect_session_says_so() {
+    let (a, _) = feed(chat(), vec![secrets(true)]);
+    let screen = screen_text(&a, 90, 30);
+    assert!(screen.contains("tried to give orders"), "{screen}");
+    let (a, cmds) = feed(a, vec![Input::Tick(2_000), key(KeyCode::Esc)]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatSecret {
+            id: "ab12cd34".into(),
+            name: "linear".into(),
+            value: None
+        }]
+    );
+    assert!(a.prompt.is_none());
+    // Paste goes nowhere in a question.
+    let (a, _) = feed(
+        a,
+        vec![
+            select("q1", "Which?", &OPTIONS),
+            Input::Tick(5_000),
+            Input::Paste("hello".into()),
+        ],
+    );
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert!(q.typing.is_none() && !q.ready);
+}

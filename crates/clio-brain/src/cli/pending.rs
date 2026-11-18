@@ -9,7 +9,7 @@ use clio_brain::pi::launch::valid_id;
 use clio_toolhost::ask::HostRules;
 use clio_toolhost::pending::{self, Pending, State};
 use clio_toolhost::{Config, HostCfg, JailMode, ToolHost};
-use clio_vault::Scrubber;
+use clio_vault::{Scrubber, SecretValue};
 use serde_json::Value;
 
 use super::home::Dirs;
@@ -31,9 +31,36 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
 }
 
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
-/// out. Never the stored `what`.
+/// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
-    Scrubber::default().scrub(pending::shown(p))
+    match pending::secret_of(p) {
+        Some((name, dest, _)) => format!("{name}, it can only be sent to {dest}"),
+        None => Scrubber::default().scrub(pending::shown(p)),
+    }
+}
+
+/// The person's answer to secret request `id`: the value (`Some`) goes to the vault, `None`
+/// declines it. What the model is told with the next message.
+pub fn answer_secret(dirs: &Dirs, id: &str, value: Option<&SecretValue>) -> Res<String> {
+    let st = state(dirs);
+    let p = pending::check(&st, id, now_ms())?;
+    let Some((name, dest, _)) = pending::secret_of(&p) else {
+        return Err(format!("{id} is not a secret request"));
+    };
+    let note = match value {
+        None => {
+            pending::reject(&st, id)?;
+            format!("the person declined {name}")
+        }
+        Some(v) => {
+            pending::answer_secret(&st, id, now_ms(), |_| {
+                super::vault::store_requested(dirs, name, dest, v)
+            })?;
+            format!("secret {name} saved, bound to {dest}")
+        }
+    };
+    let _ = pending::answered_at_terminal(&st, id);
+    Ok(note)
 }
 
 /// Its class in «», and why it waits when the class alone does not say it.
@@ -155,8 +182,22 @@ pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
     Ok(p)
 }
 
-/// `clio approve ID`.
+/// `clio approve ID`. A secret request asks for the value here, with no echo.
 pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
+    let p = pending::check(&state(dirs), id, now_ms())?;
+    if let Some((name, dest, why)) = pending::secret_of(&p) {
+        println!(
+            "{id} asks for the secret {name}; it can only be sent to {dest}\nwhy: {}",
+            sanitize::line(why)
+        );
+        let typed = super::vault::read_secret("value (not shown)")?;
+        if typed.is_empty() {
+            return Err("nothing typed: nothing was stored".into());
+        }
+        let value = SecretValue::new(typed);
+        println!("{}", answer_secret(dirs, id, Some(&value))?);
+        return Ok(());
+    }
     let p = approve(dirs, id)?;
     println!("aprobado {}: {}", p.id, sanitize::multiline(&outcome(&p)));
     Ok(())
@@ -165,6 +206,10 @@ pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
 /// `clio reject ID`.
 pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = reject(dirs, id)?;
+    if let Some((name, ..)) = pending::secret_of(&p) {
+        println!("declined {}: {name} is not stored", p.id);
+        return Ok(());
+    }
     println!(
         "rechazado {}: {} no se ejecuta",
         p.id,
@@ -260,4 +305,172 @@ pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
         println!("{}", action_line(v, true));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use clio_core::SystemClock;
+    use clio_toolhost::pending::SecretCfg;
+    use clio_toolhost::{Config, JailMode, ToolHost};
+    use clio_vault::{Vault, VaultClient};
+    use serde_json::json;
+
+    use super::*;
+
+    const VALUE: &str = "lin_api_Zq8vX2mN4pR7tY1wK9sB3dF6";
+
+    fn dirs_in(root: &Path) -> Dirs {
+        let data = root.join("data");
+        Dirs {
+            config: root.join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: Some(root.join("run/clio")),
+            home: root.to_path_buf(),
+        }
+    }
+
+    /// A vault on the dirs' sockets, open, and a toolhost that stores requests where the chat
+    /// and `clio pending` look for them.
+    fn setup(root: &Path) -> (Dirs, ToolHost) {
+        let dirs = dirs_in(root);
+        let rt = dirs.runtime.clone().unwrap();
+        std::fs::create_dir_all(&rt).unwrap();
+        let (v, _) =
+            Vault::init(None, "correct horse battery staple", Arc::new(SystemClock)).unwrap();
+        let (g, p) = (rt.join("vault-gateway.sock"), rt.join("vault-person.sock"));
+        let person = p.clone();
+        std::thread::spawn(move || clio_vault::server::serve(Arc::new(v), &g, &p));
+        let end = Instant::now() + Duration::from_secs(5);
+        while !person.exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let run = dirs.runs.join("r1");
+        let mut cfg = Config::new(&work, &run.join("scratch"), &run.join("toolhost"));
+        cfg.jail = JailMode::Off;
+        cfg.secrets = Some(SecretCfg {
+            state: state(&dirs),
+            run: "r1".into(),
+            person,
+            per_day: 3,
+        });
+        (dirs, ToolHost::new(cfg).unwrap())
+    }
+
+    fn request(h: &ToolHost, name: &str) -> String {
+        let line = json!({"id":"i","tool":"request_secret","args":{"name":name,"destination":"http_fetch:api.linear.app","why":"to read the issues"},"session":"s1","call_id":"c","tainted":false}).to_string();
+        let r: Value = serde_json::from_str(&h.handle_line(&line)).unwrap();
+        let text = r["content"].as_str().unwrap();
+        text.strip_prefix("requested ")
+            .and_then(|t| t.split(':').next())
+            .unwrap_or_else(|| panic!("{text}"))
+            .to_owned()
+    }
+
+    /// Every file under `root`, read whole.
+    fn all_files(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if let Ok(b) = std::fs::read(&p) {
+                    out.push((p, b));
+                }
+            }
+        }
+        out
+    }
+
+    /// No 8 bytes in a row of `VALUE` are in `hay`.
+    fn holds_none_of_the_value(hay: &[u8]) -> bool {
+        VALUE
+            .as_bytes()
+            .windows(8)
+            .all(|w| !hay.windows(8).any(|h| h == w))
+    }
+
+    // The value goes from the person's field to the vault, bound to the destination the request
+    // named, and nowhere else: not the pending file, not the day's questions, not the run folder
+    // (the toolhost's log and effects), not a debug print, not a panic message.
+    #[test]
+    fn a_requested_secret_is_stored_bound_and_leaves_no_byte_behind() {
+        let t = tempfile::tempdir().unwrap();
+        let (dirs, host) = setup(t.path());
+        let id = request(&host, "linear");
+        assert_eq!(pending::list(&state(&dirs)).len(), 1);
+        let mut v = clio_vault::SecretValue::with_capacity(64);
+        VALUE.chars().for_each(|c| assert!(v.push(c)));
+        let note = answer_secret(&dirs, &id, Some(&v)).unwrap();
+        assert_eq!(
+            note,
+            "secret linear saved, bound to http_fetch:api.linear.app"
+        );
+        let gw = VaultClient::new(&dirs.runtime.clone().unwrap().join("vault-gateway.sock"));
+        assert_eq!(
+            gw.resolve("linear", "http_fetch", "api.linear.app", "")
+                .unwrap()
+                .expose(),
+            VALUE
+        );
+        assert!(
+            gw.resolve("linear", "http_fetch", "evil.example", "")
+                .is_err()
+        );
+        // Answered once.
+        assert!(answer_secret(&dirs, &id, Some(&v)).is_err());
+        for (p, bytes) in all_files(t.path()) {
+            assert!(
+                holds_none_of_the_value(&bytes),
+                "{} holds the value",
+                p.display()
+            );
+        }
+        let mut shown = format!("{v:?}");
+        shown += &format!("{:?}", crate::cli::tui::ask::SecretBox(Arc::new(v)));
+        assert!(holds_none_of_the_value(shown.as_bytes()), "{shown}");
+        let mut b = clio_vault::SecretValue::with_capacity(64);
+        VALUE.chars().for_each(|c| assert!(b.push(c)));
+        let boxed = crate::cli::tui::ask::SecretBox(Arc::new(b));
+        let panic = std::panic::catch_unwind(|| panic!("while storing: {boxed:?}")).unwrap_err();
+        let msg = panic.downcast_ref::<String>().unwrap();
+        assert!(holds_none_of_the_value(msg.as_bytes()), "{msg}");
+    }
+
+    #[test]
+    fn a_declined_or_taken_name_stores_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let (dirs, host) = setup(t.path());
+        let id = request(&host, "linear");
+        assert_eq!(
+            answer_secret(&dirs, &id, None).unwrap(),
+            "the person declined linear"
+        );
+        assert!(answer_secret(&dirs, &id, None).is_err());
+        // A secret of that name made meanwhile (`clio vault put`) is never replaced.
+        let id = request(&host, "other");
+        let mut v = clio_vault::SecretValue::with_capacity(64);
+        VALUE.chars().for_each(|c| assert!(v.push(c)));
+        let person = VaultClient::new(&dirs.runtime.clone().unwrap().join("vault-person.sock"));
+        let first = clio_vault::SecretValue::new("the-first-value-0123456789".into());
+        let to = vec![clio_vault::Dest::new("http_fetch", "api.linear.app")];
+        person
+            .put("other", &first, clio_vault::Kind::ApiKey, to)
+            .unwrap();
+        let err = answer_secret(&dirs, &id, Some(&v)).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        // It still waits: the person can answer it again.
+        assert!(pending::check(&state(&dirs), &id, now_ms()).is_ok());
+        // An action set aside is not a secret request.
+        assert!(answer_secret(&dirs, "nope", None).is_err());
+    }
 }

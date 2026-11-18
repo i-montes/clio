@@ -22,6 +22,9 @@ pub enum Class {
     Gastar,
     Enviar,
     Control,
+    /// Not an action: a secret the model asked the person for (`request_secret`). It is answered
+    /// with the value, which goes to the vault, never run.
+    Secret,
 }
 
 impl fmt::Display for Class {
@@ -31,6 +34,7 @@ impl fmt::Display for Class {
             Gastar => "gastar",
             Enviar => "enviar",
             Control => "control",
+            Class::Secret => "secret",
         })
     }
 }
@@ -285,6 +289,9 @@ impl HostRules {
             self.foreign.push(f);
         }
         for a in file.ask {
+            if a.class == Class::Secret {
+                return Err("host.json: «secret» is not a class of action".into());
+            }
             let re = Regex::new(&a.pattern)
                 .map_err(|e| format!("host.json: patrón inválido «{}»: {e}", a.pattern))?;
             self.rules.push((a.class, re));

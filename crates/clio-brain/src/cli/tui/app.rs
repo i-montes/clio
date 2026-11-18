@@ -128,6 +128,13 @@ pub enum Cmd {
         id: String,
         value: Option<String>,
     },
+    /// The person's answer to a secret the model asked for: the value goes to the vault, `None`
+    /// declines it.
+    ChatSecret {
+        id: String,
+        name: String,
+        value: Option<super::ask::SecretBox>,
+    },
     /// Leave the chat: stop its Pi and its toolhost.
     ChatClose,
     /// The chat's slash commands (`commands.rs`): read the person's own commands again.
@@ -201,6 +208,9 @@ pub enum Bg {
     ChatAsks(Vec<(String, String)>),
     /// What came of an answer to one of them.
     ChatAnswered(Result<String, String>),
+    /// The secrets this turn asked the person for: (id, (name, destination, why)) each, and
+    /// whether the session is suspect.
+    ChatSecrets(Vec<(String, (String, String, String))>, bool),
     /// The person's commands (`<config>/commands/*.md`) and the files left out.
     Commands(Vec<Custom>, Vec<String>),
     /// A command's choices and the picker's footer.
@@ -610,7 +620,11 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         }
         Input::Resize => vec![],
         Input::Paste(text) => {
+            let quiet = app.quiet();
             app.last_key_ms = Some(app.now_ms);
+            if app.confirm.is_none() && app.notice.is_none() {
+                super::ask::paste(app, &text, quiet);
+            }
             if app.confirm.is_some()
                 || app.prompt.is_some()
                 || app.notice.is_some()
@@ -1026,6 +1040,15 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             next_ask(app);
             vec![]
         }
+        Bg::ChatSecrets(asks, suspect) => {
+            for (id, what) in asks {
+                let session = app.chat.session_id.clone();
+                let ask =
+                    super::ask::SecretAsk::new(&id, &session, (&what.0, &what.1, &what.2), suspect);
+                app.offer(super::ask::Prompt::Secret(ask));
+            }
+            vec![]
+        }
         Bg::ChatAnswered(r) => {
             app.answering = app.answering.saturating_sub(1);
             app.chat.items.push(match r {
@@ -1118,9 +1141,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
-            // A question lives inside its turn: Pi answered it by itself if the turn ended.
-            app.prompt = None;
-            app.prompts.clear();
+            // A question lives inside its turn: Pi answered it by itself if the turn ended. A
+            // secret request waits for its answer.
+            use super::ask::Prompt;
+            if matches!(app.prompt, Some(Prompt::Question(_))) {
+                app.prompt = None;
+            }
+            app.prompts.retain(|p| matches!(p, Prompt::Secret(_)));
             next_ask(app);
             app.chat.aborting = false;
             app.chat.stop_tools();
@@ -1477,9 +1504,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     if let Some(c) = &app.confirm {
         confirm_dialog(f, area, app, c);
-    } else if let Some(super::ask::Prompt::Question(q)) = &app.prompt {
+    } else if let Some(p) = &app.prompt {
         // Under the top bar and its rule, like the boxes of the commands.
-        super::ask::draw(f, rest, app, q);
+        match p {
+            super::ask::Prompt::Question(q) => super::ask::draw(f, rest, app, q),
+            super::ask::Prompt::Secret(s) => super::ask::draw_secret(f, rest, app, s),
+        }
     } else if let Some(n) = &app.notice {
         let lines: Vec<Line> = sanitize::multiline(n)
             .lines()

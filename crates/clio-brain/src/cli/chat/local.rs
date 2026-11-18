@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use clio_core::SystemClock;
 use clio_toolhost::pending::Pending;
+use clio_vault::SecretValue;
 
 use clio_brain::agent::AgentConfig;
 use clio_brain::connector;
@@ -210,10 +211,12 @@ impl SessionSource for LocalSource {
             self.copy_of(&id)
         };
         let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
-        if host {
+        // A chat can ask the person for a secret in both modes: its requests wait there too.
+        if host || self.presentation {
             // 0700 even if an earlier version left it open (S-23).
             crate::cli::mkdir_private(&state)?;
         }
+        let person = crate::cli::vault::person_socket(d)?;
         // The project of the session, for the memory: decided here from the person's own folder
         // (the copy has no history), never by the model.
         let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))
@@ -248,6 +251,12 @@ impl SessionSource for LocalSource {
                     rules: rules.as_deref(),
                     run: &id,
                 }),
+                // Only with a person there to answer (not `clio run`).
+                secrets: self.presentation.then_some((
+                    state.as_path(),
+                    id.as_str(),
+                    person.as_path(),
+                )),
             },
         )?;
         // 3. Pi
@@ -332,11 +341,13 @@ impl SessionSource for LocalSource {
             taint_file,
             summarized: AtomicBool::new(false),
             busy: Mutex::new(()),
-            host: host.then(|| HostSide {
+            // Host mode, or a chat (copy mode): what waits for the person (a secret request).
+            host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
                 run: id.clone(),
                 asked: Mutex::default(),
                 approved: Mutex::default(),
+                notes: Mutex::default(),
             }),
         };
         let refresh = s.refresh().ok();
@@ -429,7 +440,7 @@ struct ChatSession {
     host: Option<HostSide>,
 }
 
-/// Host mode: what the session set aside and what the person answered at the terminal.
+/// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
 struct HostSide {
     dirs: Arc<Dirs>,
     run: String,
@@ -437,6 +448,9 @@ struct HostSide {
     asked: Mutex<HashSet<String>>,
     /// What the actions the person approved did, for the model's next message.
     approved: Mutex<Vec<String>>,
+    /// What the person answered to the secrets the model asked for (never a value), for the
+    /// model's next message.
+    notes: Mutex<Vec<String>>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -467,17 +481,26 @@ impl Session for ChatSession {
             self.budget,
             self.day.clone(),
         );
-        let approved = self
+        let (approved, notes) = self
             .host
             .as_ref()
-            .map(|h| std::mem::take(&mut *locked(&h.approved)))
+            .map(|h| {
+                (
+                    std::mem::take(&mut *locked(&h.approved)),
+                    std::mem::take(&mut *locked(&h.notes)),
+                )
+            })
             .unwrap_or_default();
         if !approved.is_empty() {
             // What an approved action printed is outside text, read by a service of its own:
             // the session is marked here, as its own toolhost would.
             jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
         }
-        let data = approved.join("\n\n");
+        let data = approved
+            .into_iter()
+            .chain(notes)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         run_assessed_with(
             &self.pi.client,
             &self.assessor,
@@ -514,6 +537,12 @@ impl Session for ChatSession {
                         .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
             })
             .ok_or_else(|| format!("{id} no es de esta sesión"))?;
+        if pending::waiting(&h.dirs)
+            .iter()
+            .any(|p| p.id == id && clio_toolhost::pending::secret_of(p).is_some())
+        {
+            return Err(format!("{id} asks for a secret: answer it in its own box"));
+        }
         if !yes {
             pending::reject(&h.dirs, id)?;
             return Ok(format!("rechazado {id}: no se ejecuta"));
@@ -521,6 +550,21 @@ impl Session for ChatSession {
         let what = pending::outcome(&pending::approve(&h.dirs, id)?);
         locked(&h.approved).push(format!("la persona aprobó {id}: {what}"));
         Ok(format!("aprobado {id}: {what}"))
+    }
+
+    fn answer_secret(&self, id: &str, value: Option<&SecretValue>) -> Result<String, String> {
+        let h = self
+            .host
+            .as_ref()
+            .filter(|h| locked(&h.asked).contains(id))
+            .ok_or_else(|| format!("{id} is not of this session"))?;
+        let note = pending::answer_secret(&h.dirs, id, value)?;
+        locked(&h.notes).push(note.clone());
+        Ok(note)
+    }
+
+    fn suspect(&self) -> bool {
+        std::fs::read_to_string(&self.taint_file).is_ok_and(|t| t.contains("\"suspect\""))
     }
 
     fn steer(&self, text: &str) -> Result<(), PiError> {

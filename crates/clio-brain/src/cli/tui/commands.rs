@@ -854,6 +854,13 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         KeyCode::Enter if picks > 0 => {
             let (id, what) = m.picks[m.sel.min(picks - 1)].clone();
             app.modal = None;
+            // A secret is typed into its own box, never approved like an action.
+            if what.starts_with("«secret»") {
+                app.flash = Some(format!(
+                    "{id} asks for a secret: answer it with `clio approve {id}` in a terminal"
+                ));
+                return vec![];
+            }
             let mut c = Confirm::new(Action::Approve, id, 0, what);
             c.session.clone_from(&app.chat.session_id);
             app.confirm = Some(c);

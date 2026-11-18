@@ -207,6 +207,31 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         question(&mut a, quiet, typed);
         out.push((name, a));
     }
+    for (name, typed, suspect) in [
+        ("Clio pide un secreto, vacío", 0, false),
+        ("Clio pide un secreto, con caracteres", 23, true),
+    ] {
+        let mut a = conversation(false);
+        let mut s = super::ask::SecretAsk::new(
+            "ab12cd34",
+            "sid",
+            (
+                "linear",
+                "http_fetch:api.linear.app",
+                "to read the open issues of this sprint",
+            ),
+            suspect,
+        );
+        a.now_ms = 300_000;
+        a.last_key_ms = Some(0);
+        s.shown_ms = 0;
+        s.ready = typed > 0;
+        (0..typed).for_each(|_| {
+            s.value.push('x');
+        });
+        a.prompt = Some(super::ask::Prompt::Secret(s));
+        out.push((name, a));
+    }
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;

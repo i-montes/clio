@@ -9,6 +9,9 @@
 //! [`MemoryFactory`] makes of the two folders (the loose `clio-toolhost` has none). The vector
 //! models' folders come from the parent, best first: this process runs with another `HOME`.
 //!
+//! `request_secret`: `--secret-state S --secret-run ID --vault-person P` (where requests wait, the
+//! run, the vault's person socket); without them nobody can be asked for a secret.
+//!
 //! Host mode: `--host-home H --host-state S --host-run ID [--host-control P]... [--host-rules
 //! FILE]` (the person's `host.json`). `--work` is then not needed: the tools work on `/`.
 
@@ -37,6 +40,7 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let (mut memory_data, mut memory_model) = (None, Vec::new());
     let (mut host_home, mut host_state, mut host_run) = (None, None, None);
     let (mut host_control, mut host_rules) = (Vec::new(), None);
+    let (mut secret_state, mut secret_run, mut vault_person) = (None, None, None);
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -53,6 +57,9 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
             "--host-control" => host_control.push(PathBuf::from(value()?)),
             "--host-rules" => host_rules = Some(PathBuf::from(value()?)),
             "--host-run" => host_run = Some(value()?),
+            "--secret-state" => secret_state = Some(PathBuf::from(value()?)),
+            "--secret-run" => secret_run = Some(value()?),
+            "--vault-person" => vault_person = Some(PathBuf::from(value()?)),
             "--jail" => {
                 jail = match value()?.as_str() {
                     "auto" => JailMode::Auto,
@@ -100,6 +107,20 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
         &need(scratch, "--scratch")?,
         &need(run_dir, "--run-dir")?,
     );
+    cfg.secrets = match (secret_state, secret_run, vault_person) {
+        (Some(state), Some(run), Some(person)) => Some(crate::pending::SecretCfg {
+            state,
+            run,
+            person,
+            // The day's questions are the person's: the same cap as the actions set aside.
+            per_day: host.as_ref().map_or_else(
+                || HostRules::factory().questions_per_day(),
+                |h| h.rules.questions_per_day(),
+            ),
+        }),
+        (None, None, None) => None,
+        _ => return Err("--secret-state, --secret-run and --vault-person go together".into()),
+    };
     cfg.host = host;
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));

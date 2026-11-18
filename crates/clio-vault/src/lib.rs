@@ -133,6 +133,12 @@ impl Dest {
         }
     }
 
+    /// `TOOL:DOMAIN`, as `clio-vault put --dest` takes it; both parts non-empty.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (tool, domain) = s.split_once(':')?;
+        (!tool.is_empty() && !domain.is_empty()).then(|| Self::new(tool, domain))
+    }
+
     fn allows(&self, tool: &str, domain: &str) -> bool {
         let d = domain.to_ascii_lowercase();
         self.tool == tool && (d == self.domain || d.ends_with(&format!(".{}", self.domain)))
@@ -164,12 +170,60 @@ pub struct SecretSpec {
     pub expires_at_ms: Option<i64>,
 }
 
-/// A value in memory. It prints as `[redacted]` and has no `Display`.
+/// A value in memory. It prints as `[redacted]`, has no `Display`, and its bytes are zeroed when
+/// it is dropped.
 pub struct SecretValue(String);
+
+/// Zeroes the bytes of `s` and leaves it empty. Best effort: no `zeroize` dependency, so a copy the
+/// allocator made earlier (a `String` that grew) is not reached; `with_capacity` avoids growing.
+pub fn wipe(s: &mut String) {
+    let mut bytes = std::mem::take(s).into_bytes();
+    bytes.fill(0);
+    std::hint::black_box(&bytes);
+}
 
 impl SecretValue {
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// A value read whole (a line at the terminal).
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// An empty value typed into one buffer that never grows (at most `cap` bytes), for a value the
+    /// person types.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self(String::with_capacity(cap))
+    }
+
+    /// Adds `c` if it fits without growing the buffer.
+    pub fn push(&mut self, c: char) -> bool {
+        let fits = self.0.len() + c.len_utf8() <= self.0.capacity();
+        if fits {
+            self.0.push(c);
+        }
+        fits
+    }
+
+    pub fn pop(&mut self) {
+        self.0.pop();
+    }
+
+    /// How many characters: what a masked field shows.
+    pub fn chars(&self) -> usize {
+        self.0.chars().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for SecretValue {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
     }
 }
 impl fmt::Debug for SecretValue {
@@ -325,7 +379,8 @@ fn prints_aad(name: &str) -> Vec<u8> {
     [b"prints:", name.as_bytes()].concat()
 }
 
-fn valid_name(n: &str) -> bool {
+/// A secret's name: lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to 64 of them.
+pub fn valid_name(n: &str) -> bool {
     !n.is_empty()
         && n.len() <= 64
         && n.chars()

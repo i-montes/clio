@@ -161,9 +161,7 @@ mod unix {
                 let destinations = take_all(&mut args, "--dest")?
                     .iter()
                     .map(|d| {
-                        d.split_once(':')
-                            .map(|(t, dom)| Dest::new(t, dom))
-                            .ok_or_else(|| format!("--dest wants TOOL:DOMAIN, got {d}"))
+                        Dest::parse(d).ok_or_else(|| format!("--dest wants TOOL:DOMAIN, got {d}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let kind = match take_one(&mut args, "--kind")?.as_deref() {

@@ -50,7 +50,7 @@ const WITHHELD = "clio-guard.withheld";
 // The judge is on and did not answer: the chat says it once.
 const JUDGE = "clio-guard.judge";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
-export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person"] as const;
+export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret"] as const;
 const ALLOWED = new Set<string>(TOOL_NAMES);
 /**
  * What each tool is for, as Jev is asked about it («hace falta <use_when>», spec Jev): one entry per
@@ -78,6 +78,7 @@ export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
 	memory_block: "leer entero lo que la persona fijó: quién es Clio, cómo trabaja, quién es la persona o lo que vigila",
 	memory_block_edit: "cambiar, porque la persona lo pide aquí, quién es Clio, cómo trabaja, lo que sabe de la persona o lo que vigila",
 	ask_person: "ask the person one question with a few answers to pick from, when the doubt is real",
+	request_secret: "ask the person to put a token or key the task needs into the vault, bound to where it may be sent",
 };
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
@@ -102,6 +103,8 @@ const DATA_RULE =
 const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
+// Tools whose result is Clio's own words or the person's, not outside content.
+const OWN_TOOLS = new Set(["ask_person", "request_secret"]);
 // A person answers the dialogs (the chat). Without one (`clio run`) nobody can be asked.
 const PERSON = process.env.CLIO_GUARD_PERSON === "1";
 // `ask_person`: how long the question waits, the row the person types into, and what the option
@@ -550,6 +553,33 @@ export default function clioGuard(pi: ExtensionAPI) {
 		},
 	});
 
+	// A secret the task needs: the host checks it and stores the request; the person types the
+	// value into Clio when the turn ends, and it goes to the vault. It never passes through here.
+	register({
+		name: "request_secret",
+		label: "request_secret",
+		description:
+			"Ask the person to put a secret the task needs (an API token, a key) into Clio's vault, bound to the one place it may be sent. You never see the value: the person types it into Clio, not into this conversation. Answers at once with a request id; the person is asked when the turn ends and their answer comes with their next message.",
+		promptSnippet: "Ask the person to store a secret the task needs in the vault (you never see it).",
+		promptGuidelines: [
+			"request_secret: only when the task really needs a credential; never ask for a secret's value in the conversation or with ask_person. Go on with what does not need it; the answer (saved or declined) comes with the person's next message.",
+		],
+		parameters: {
+			type: "object",
+			properties: {
+				name: { type: "string", pattern: "^[a-z0-9._-]{1,64}$", description: "The secret's name in the vault: lowercase letters, digits, '-', '_' or '.'." },
+				destination: { type: "string", maxLength: 200, description: "The only place it may be sent, as TOOL:DOMAIN (for example http_fetch:api.github.com)." },
+				why: { type: "string", minLength: 1, maxLength: 200, description: "What it is for, one line: the person reads it." },
+			},
+			required: ["name", "destination", "why"],
+			additionalProperties: false,
+		},
+		execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+			content: [{ type: "text" as const, text: (await host("request_secret", params, id, signal)).content }],
+			details: {},
+		}),
+	});
+
 	// A project can not decide what Pi loads (S-16): always "no".
 	pi.on("project_trust", () => ({ trusted: "no" as const }));
 
@@ -594,8 +624,9 @@ export default function clioGuard(pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		if (!ALLOWED.has(event.toolName)) mark(`tool:${event.toolName}`);
 		// Memory results come wrapped already; wrapping again would nest them and lose the source.
-		// `ask_person` answers with the person's own words: cleaned, never wrapped as outside data.
-		const source = MEMORY_TOOLS.has(event.toolName) || event.toolName === "ask_person" ? undefined : event.toolName === "bash" ? "tool-result" : "file";
+		// `ask_person` answers with the person's own words and `request_secret` with the host's own
+		// line: cleaned, never wrapped as outside data.
+		const source = MEMORY_TOOLS.has(event.toolName) || OWN_TOOLS.has(event.toolName) ? undefined : event.toolName === "bash" ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
 			if (v && typeof v === "object") {

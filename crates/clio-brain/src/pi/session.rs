@@ -20,7 +20,7 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 20] = [
+pub const GUARD_TOOLS: [&str; 21] = [
     "read",
     "write",
     "edit",
@@ -41,6 +41,7 @@ pub const GUARD_TOOLS: [&str; 20] = [
     "memory_block",
     "memory_block_edit",
     "ask_person",
+    "request_secret",
 ];
 pub const PROMPT_NAME: &str = "clio-agent@20";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@20.md");
@@ -174,6 +175,9 @@ pub struct ToolhostOpts<'a> {
     pub extra_env: &'a [(String, String)],
     /// Host mode: the tools act on the real machine (`clio toolhost --host-*`).
     pub host: Option<HostOpts<'a>>,
+    /// A person can be asked for a secret (`request_secret`): where requests wait (`Dirs.data/host`),
+    /// the run, and the vault's person socket.
+    pub secrets: Option<(&'a Path, &'a str, &'a Path)>,
 }
 
 /// The `--host-*` options of `clio toolhost`.
@@ -222,6 +226,7 @@ impl Toolhost {
             memory,
             extra_env,
             host,
+            secrets,
         } = opts;
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
@@ -275,6 +280,14 @@ impl Toolhost {
             if let Some(r) = h.rules {
                 cmd.arg("--host-rules").arg(r);
             }
+        }
+        if let Some((state, run, person)) = secrets {
+            cmd.arg("--secret-state")
+                .arg(state)
+                .arg("--secret-run")
+                .arg(run)
+                .arg("--vault-person")
+                .arg(person);
         }
         let mut child = cmd
             .arg("--socket-dir")

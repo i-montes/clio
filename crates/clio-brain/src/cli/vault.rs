@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use clio_vault::proto::Request;
-use clio_vault::{VaultClient, VaultError};
+use clio_vault::{Dest, Kind, SecretValue, VaultClient, VaultError};
 
 use super::home::Dirs;
 use super::{Res, io_err, mkdir_private, write_private};
@@ -282,6 +282,44 @@ fn person_call(dirs: &Dirs, sub: &str, args: Vec<String>, stdin: Option<&str>) -
 pub fn put(dirs: &Dirs, name: &str, dest: &str, value: &str) -> Res<()> {
     let args = vec![name.to_owned(), "--dest".into(), dest.into()];
     person_call(dirs, "put", args, Some(value))
+}
+
+/// The vault's person socket (whether or not the vault runs): `request_secret` asks it, at request
+/// time, only whether it is open and which names it has.
+pub fn person_socket(dirs: &Dirs) -> Res<PathBuf> {
+    Ok(paths(dirs)?.person)
+}
+
+/// Stores a secret the model asked for (`request_secret`) the way `clio vault put` does, a `Put`
+/// on the person's socket, but from this process: the value goes from `value` to the socket and
+/// nowhere else (no other process, no argument, no file). It never replaces a secret of that name.
+pub fn store_requested(dirs: &Dirs, name: &str, dest: &str, value: &SecretValue) -> Res<()> {
+    let d = Dest::parse(dest).ok_or_else(|| format!("{dest} is not TOOL:DOMAIN"))?;
+    let c = VaultClient::new(&paths(dirs)?.person).with_timeout(Duration::from_secs(10));
+    let not_running = |_| "the vault is not running: start it (clio vault start) and answer again";
+    let list = c.call(&Request::List).map_err(not_running)?;
+    if !list.ok {
+        return Err("the vault is locked: unlock it (clio vault start) and answer again".into());
+    }
+    if list
+        .data
+        .and_then(|d| d.as_array().cloned())
+        .is_some_and(|a| a.iter().any(|m| m["name"] == name))
+    {
+        return Err(format!(
+            "a secret named {name} already exists: nothing was stored"
+        ));
+    }
+    c.put(name, value, Kind::ApiKey, vec![d])
+        .map_err(|e| match e {
+            VaultError::Locked => {
+                "the vault is locked: unlock it (clio vault start) and answer again".into()
+            }
+            VaultError::InvalidValue => {
+                "that is too short to be a secret: nothing was stored".into()
+            }
+            other => format!("the vault did not store it: {other}"),
+        })
 }
 
 /// Ok only if the vault is running AND unlocked; the error says which of the two it is.

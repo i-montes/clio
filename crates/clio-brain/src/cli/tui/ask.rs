@@ -6,6 +6,10 @@
 //! approve an action set aside or take a secret. The question and the answers are the model's
 //! text: cleaned, capped and drawn as plain text. Like an approval, it takes its first key only
 //! after the quiet second (`App::quiet`), so what the person was typing never answers it.
+//!
+//! A secret the model asked for (`request_secret`) has its own box, `Clio asks for a secret`, at
+//! the end of the turn: its name, where it may be sent, why, and a masked field. The value lives
+//! only here, in a `SecretValue` (zeroed when dropped), and goes from here to the vault.
 
 use std::cell::Cell;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -14,6 +18,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
+
+use std::sync::Arc;
+
+use clio_vault::SecretValue;
 
 use super::app::{self, App, Cmd};
 use super::{sanitize, text};
@@ -148,21 +156,80 @@ impl Question {
     }
 }
 
-/// What waits for the person besides an approval: a question of the guard's.
+/// The longest value the secret field takes, in bytes: its buffer never grows.
+pub const MAX_SECRET: usize = 8192;
+
+/// A secret the model asked for, waiting for the person's value.
+pub struct SecretAsk {
+    pub id: String,
+    pub session: String,
+    pub name: String,
+    pub destination: String,
+    pub why: String,
+    /// The judge flagged the session: the box says so.
+    pub suspect: bool,
+    pub value: SecretValue,
+    pub ready: bool,
+    pub shown_ms: u64,
+}
+
+impl SecretAsk {
+    pub fn new(
+        id: &str,
+        session: &str,
+        (name, destination, why): (&str, &str, &str),
+        suspect: bool,
+    ) -> Self {
+        Self {
+            id: id.to_owned(),
+            session: session.to_owned(),
+            name: clip(name, 64),
+            destination: clip(destination, 200),
+            why: clip(why, 200),
+            suspect,
+            value: SecretValue::with_capacity(MAX_SECRET),
+            ready: false,
+            shown_ms: 0,
+        }
+    }
+}
+
+/// The value on its way from the box to the vault: shared, never copied, printed as `[redacted]`.
+#[derive(Clone)]
+pub struct SecretBox(pub Arc<SecretValue>);
+
+impl std::fmt::Debug for SecretBox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretBox([redacted])")
+    }
+}
+
+impl PartialEq for SecretBox {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SecretBox {}
+
+/// What waits for the person besides an approval: a question of the guard's, or a secret.
 pub enum Prompt {
     Question(Question),
+    Secret(SecretAsk),
 }
 
 impl Prompt {
     pub fn session(&self) -> &str {
         match self {
             Self::Question(q) => &q.session,
+            Self::Secret(s) => &s.session,
         }
     }
 
     pub fn shown_ms(&self) -> u64 {
         match self {
             Self::Question(q) => q.shown_ms,
+            Self::Secret(s) => s.shown_ms,
         }
     }
 
@@ -170,19 +237,23 @@ impl Prompt {
     pub fn ready(&self) -> bool {
         match self {
             Self::Question(q) => q.ready,
+            Self::Secret(s) => s.ready,
         }
     }
 
     pub fn show(&mut self, now_ms: u64) {
         match self {
             Self::Question(q) => q.shown_ms = now_ms,
+            Self::Secret(s) => s.shown_ms = now_ms,
         }
     }
 
-    /// Pi has already given up on it.
+    /// Pi has already given up on it (a secret request does not end with the turn).
     pub fn expired(&self, now_ms: u64) -> bool {
         match self {
             Self::Question(q) => now_ms >= q.deadline_ms,
+            // It waits a day, in `clio pending` too: the toolhost says when it is gone.
+            Self::Secret(_) => false,
         }
     }
 }
@@ -230,7 +301,10 @@ pub fn on_request(
 fn close(app: &mut App, value: Option<String>) -> Vec<Cmd> {
     match app.prompt.take() {
         Some(Prompt::Question(q)) => vec![Cmd::ChatUi { id: q.id, value }],
-        None => vec![],
+        other => {
+            app.prompt = other;
+            vec![]
+        }
     }
 }
 
@@ -256,6 +330,9 @@ fn choose(app: &mut App, i: usize) -> Vec<Cmd> {
 
 /// A key while the question is on screen.
 pub fn key(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
+    if matches!(app.prompt, Some(Prompt::Secret(_))) {
+        return secret_key(app, k, quiet);
+    }
     let Some(Prompt::Question(q)) = &mut app.prompt else {
         return vec![];
     };
@@ -436,4 +513,140 @@ fn row(t: super::theme::Theme, s: &str, selected: bool, w: usize) -> Line<'stati
     } else {
         Line::from(Span::raw(s))
     }
+}
+
+/// A key in the secret box: typed into the masked field; Enter sends it to the vault, Esc declines.
+fn secret_key(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
+    let Some(Prompt::Secret(s)) = &mut app.prompt else {
+        return vec![];
+    };
+    if !s.ready && !quiet {
+        return vec![];
+    }
+    s.ready = true;
+    let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
+    let value = match k.code {
+        KeyCode::Esc => None,
+        KeyCode::Enter if plain && !s.value.is_empty() => Some(std::mem::replace(
+            &mut s.value,
+            SecretValue::with_capacity(0),
+        )),
+        KeyCode::Backspace => {
+            s.value.pop();
+            return vec![];
+        }
+        KeyCode::Char(c)
+            if !k
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && !c.is_control() =>
+        {
+            s.value.push(c);
+            return vec![];
+        }
+        _ => return vec![],
+    };
+    let Some(Prompt::Secret(s)) = app.prompt.take() else {
+        return vec![];
+    };
+    app.answering += 1;
+    vec![Cmd::ChatSecret {
+        id: s.id,
+        name: s.name,
+        value: value.map(|v| SecretBox(Arc::new(v))),
+    }]
+}
+
+/// A paste into the secret field, the only field of these boxes that takes one (a token is
+/// pasted more often than typed). The line ends are not part of it.
+pub fn paste(app: &mut App, text: &str, quiet: bool) {
+    let Some(Prompt::Secret(s)) = &mut app.prompt else {
+        return;
+    };
+    if !s.ready && !quiet {
+        return;
+    }
+    s.ready = true;
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if !s.value.push(c) {
+            break;
+        }
+    }
+}
+
+/// The secret box: whose secret, where it may go (in the warning colour), why, and the field,
+/// one dot per character.
+pub fn draw_secret(f: &mut Frame, area: Rect, app: &App, s: &SecretAsk) {
+    let t = app.theme;
+    let w = app::dialog_inner(area);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    rows.extend(app::wrap_line(
+        Line::from(vec![
+            Span::styled("Clio asks you to store the secret ", t.plain()),
+            Span::styled(s.name.clone(), t.bold()),
+        ]),
+        w,
+    ));
+    rows.push(Line::from(""));
+    rows.extend(app::wrap_line(
+        Line::from(Span::styled(
+            format!("it can only be sent to {}", s.destination),
+            t.warn(),
+        )),
+        w,
+    ));
+    rows.extend(app::wrap_line(
+        Line::from(vec![
+            Span::styled("why: ", t.dim()),
+            Span::raw(s.why.clone()),
+        ]),
+        w,
+    ));
+    if s.suspect {
+        rows.extend(app::wrap_line(
+            Line::from(Span::styled(
+                "this session read content that tried to give orders: be sure you want this",
+                t.warn(),
+            )),
+            w,
+        ));
+    }
+    rows.push(Line::from(""));
+    let dots = if t.unicode { "•" } else { "*" };
+    let shown = text::fit(
+        &format!("{}{}", dots.repeat(s.value.chars()), t.cursor()),
+        w.saturating_sub(4),
+        t.ellipsis(),
+    );
+    rows.push(Line::from(vec![
+        Span::styled(format!("  {} ", t.prompt()), t.accent_line()),
+        Span::raw(shown),
+    ]));
+    if !s.ready && !app.quiet() {
+        rows.push(Line::from(""));
+        rows.push(Line::from(Span::styled(
+            "wait a second without typing to answer…",
+            t.dim(),
+        )));
+    }
+    rows.push(Line::from(""));
+    let d = format!("   {}   ", t.dot());
+    rows.extend(app::wrap_line(
+        Line::from(vec![
+            Span::styled("Enter", t.key()),
+            Span::styled(" store it in the vault", t.dim()),
+            Span::styled(d, t.dim()),
+            Span::styled("Esc", t.key()),
+            Span::styled(" decline", t.dim()),
+        ]),
+        w,
+    ));
+    app::dialog_box(
+        f,
+        area,
+        t,
+        " Clio asks for a secret ",
+        rows,
+        t.accent_line(),
+    );
 }

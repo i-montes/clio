@@ -1057,9 +1057,24 @@ impl Ctx {
                         let result = session
                             .run_prompt(&text, &cancel, &mut forward)
                             .map_err(|e| e.to_string());
-                        // Host mode: what the turn set aside is asked now, one question each.
-                        let asks: Vec<(String, String)> = session
+                        // Host mode: what the turn set aside is asked now, one question each;
+                        // and the secrets it asked for (within the day's questions), one box each.
+                        let (secrets, aside): (Vec<_>, Vec<_>) = session
                             .new_pending()
+                            .into_iter()
+                            .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
+                        let secrets: Vec<(String, (String, String, String))> = secrets
+                            .iter()
+                            .filter(|p| p.ask)
+                            .filter_map(|p| {
+                                let (n, d, w) = clio_toolhost::pending::secret_of(p)?;
+                                Some((p.id.clone(), (n.into(), d.into(), w.into())))
+                            })
+                            .collect();
+                        if !secrets.is_empty() {
+                            let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, session.suspect())));
+                        }
+                        let asks: Vec<(String, String)> = aside
                             .into_iter()
                             .map(|p| {
                                 let what = super::pending::what(&p);
@@ -1102,6 +1117,20 @@ impl Ctx {
                 self.answered.store(true, Ordering::SeqCst);
                 self.spawn(
                     move |_, _| session.answer(&id, yes),
+                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                );
+            }
+            Cmd::ChatSecret { id, name, value } => {
+                let Some(session) = self.current_chat() else {
+                    self.send(Bg::ChatAnswered(Err("no hay una sesión abierta".into())));
+                    return;
+                };
+                // The value is dropped (and zeroed) when the worker is done with it.
+                self.spawn(
+                    move |_, _| {
+                        let r = session.answer_secret(&id, value.as_ref().map(|b| &*b.0));
+                        r.map_err(|e| format!("{name}: {e}"))
+                    },
                     |r| Bg::ChatAnswered(r.and_then(|x| x)),
                 );
             }

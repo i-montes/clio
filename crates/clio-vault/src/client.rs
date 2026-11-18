@@ -64,10 +64,13 @@ impl VaultClient {
         let mut stream = UnixStream::connect(&self.path).map_err(io)?;
         stream.set_read_timeout(Some(self.timeout)).map_err(io)?;
         stream.set_write_timeout(Some(self.timeout)).map_err(io)?;
-        let line = serde_json::to_string(req).map_err(io)?;
-        writeln!(stream, "{line}")
+        let mut line = serde_json::to_string(req).map_err(io)?;
+        let sent = writeln!(stream, "{line}")
             .and_then(|()| stream.flush())
-            .map_err(io)?;
+            .map_err(io);
+        // It may carry a value or a passphrase.
+        crate::wipe(&mut line);
+        sent?;
         let mut out = String::new();
         match BufReader::new(stream).read_line(&mut out) {
             Ok(0) => Err(io("the vault closed the connection")),
@@ -151,6 +154,31 @@ impl VaultClient {
             }),
             _ => Err(io("answer without the expected fields")),
         }
+    }
+
+    /// Stores a new secret over the person's socket (as `clio-vault put`), the value straight from
+    /// `value`: the request and the line sent are wiped once sent.
+    pub fn put(
+        &self,
+        name: &str,
+        value: &SecretValue,
+        kind: crate::Kind,
+        destinations: Vec<crate::Dest>,
+    ) -> Result<(), VaultError> {
+        let mut req = Request::Put {
+            name: name.into(),
+            value: value.expose().to_owned(),
+            kind,
+            destinations,
+            scope: crate::Scope::Personal,
+            rotate_every_ms: None,
+            expires_at_ms: None,
+        };
+        let r = self.data(&req).map(|_| ());
+        if let Request::Put { value, .. } = &mut req {
+            crate::wipe(value);
+        }
+        r
     }
 
     /// The vault's output filter over `text`. If the vault cannot answer this is an error: the

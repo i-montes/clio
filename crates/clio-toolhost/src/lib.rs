@@ -170,6 +170,8 @@ pub struct Config {
     pub said_token: Option<String>,
     /// Host mode: the tools act on the real machine (`/`) instead of `work`. `None`: copy mode.
     pub host: Option<HostCfg>,
+    /// Where `request_secret` keeps what it asks the person. `None`: nobody can be asked.
+    pub secrets: Option<pending::SecretCfg>,
 }
 
 impl Config {
@@ -185,6 +187,7 @@ impl Config {
             memory: None,
             said_token: None,
             host: None,
+            secrets: None,
         }
     }
 }
@@ -225,6 +228,7 @@ pub struct ToolHost {
     /// Where the memory tools keep their budget and their log.
     run_dir: PathBuf,
     host: Option<host::Host>,
+    secrets: Option<pending::SecretCfg>,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
     /// The service is stopping: a running command is stopped, and nothing new runs.
@@ -385,6 +389,7 @@ impl ToolHost {
             said_token: cfg.said_token,
             run_dir: cfg.run_dir,
             host,
+            secrets: cfg.secrets,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
         })
@@ -600,6 +605,10 @@ impl ToolHost {
                 "the person closed this session: only memory_session_summary is left".into(),
                 tainted,
             );
+        }
+        // Not a tool of the gateway's: nothing is run, and no value ever comes through here.
+        if req.tool == "request_secret" {
+            return self.request_secret(&req, &map, tainted);
         }
         if map
             .get("content")

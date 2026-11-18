@@ -155,6 +155,19 @@ pub trait Session: Send + Sync {
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
         Err(format!("{id} no es de esta sesión"))
     }
+    /// The person's answer to a secret the model asked for (`request_secret`): the value goes to
+    /// the vault, `None` declines it. What the model is told with the next message.
+    fn answer_secret(
+        &self,
+        id: &str,
+        _value: Option<&clio_vault::SecretValue>,
+    ) -> Result<String, String> {
+        Err(format!("{id} is not of this session"))
+    }
+    /// The judge flagged this session (`suspect`): a secret box says so.
+    fn suspect(&self) -> bool {
+        false
+    }
     /// One of Pi's commands (`set_model`, `compact`...) for the chat's slash commands, sent only
     /// while no turn runs; Pi's `data`, or why not.
     fn command(&self, kind: &str, _fields: Value) -> Result<Value, String> {

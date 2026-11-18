@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use clio_node::Action;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::ask::Class;
@@ -23,6 +23,8 @@ use crate::{DecisionOut, Request, Response, ToolHost, lock};
 const DAY_MS: i64 = 24 * 3600 * 1000;
 /// What is kept of an approved action's output.
 const TAIL_BYTES: usize = 4000;
+/// How long the reason of a secret request may be.
+const MAX_WHY: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
@@ -59,6 +61,52 @@ pub enum State {
     },
     Rejected,
     Expired,
+    /// A secret request the person answered: the value went to the vault (and nowhere else).
+    Stored,
+}
+
+/// `request_secret`: where its requests wait (`state`, as the actions set aside), the run they
+/// belong to, the vault's person socket (only `Status` and `List` are asked, at request time) and
+/// how many questions a day the person gets, shared with the actions.
+#[derive(Debug, Clone)]
+pub struct SecretCfg {
+    pub state: PathBuf,
+    pub run: String,
+    pub person: PathBuf,
+    pub per_day: u32,
+}
+
+/// What a secret request asks for: name, destination (`tool:domain`) and why.
+pub fn secret_of(p: &Pending) -> Option<(&str, &str, &str)> {
+    let s = |k: &str| p.args.get(k).and_then(Value::as_str).unwrap_or("");
+    (p.class == Class::Secret).then(|| (s("name"), s("destination"), s("why")))
+}
+
+/// The person typed the value of secret request `id`: `store` puts it in the vault. Claimed
+/// first, so it is stored once; a failed store leaves it waiting.
+pub fn answer_secret(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    store: impl FnOnce(&Pending) -> Result<(), String>,
+) -> Result<Pending, String> {
+    let mut p = check(state, id, now_ms)?;
+    if p.class != Class::Secret {
+        return Err(format!("{id} is not a secret request"));
+    }
+    if hash_of(&p.tool, &p.args) != p.hash {
+        return Err(format!(
+            "{id} changed after it was asked: nothing was stored"
+        ));
+    }
+    claim(state, id).map_err(|_| format!("{id} was already answered"))?;
+    if let Err(e) = store(&p) {
+        let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
+        return Err(e);
+    }
+    p.state = State::Stored;
+    save(state, &p)?;
+    Ok(p)
 }
 
 /// Today's questions (local day).
@@ -80,12 +128,14 @@ pub(crate) fn aside_text(p: &Pending) -> String {
     )
 }
 
-/// What `p` does, its command or its path, read from its arguments every time it is shown or
-/// approved: never from the stored `what`, which a rewritten file could make say something else.
+/// What `p` does, its command or its path (a secret request: its name), read from its arguments
+/// every time it is shown or approved: never from the stored `what`, which a rewritten file could
+/// make say something else.
 pub fn shown(p: &Pending) -> &str {
     p.args
         .get("command")
         .or_else(|| p.args.get("path"))
+        .or_else(|| p.args.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("")
 }
@@ -182,6 +232,7 @@ fn not_waiting(p: &Pending) -> String {
         State::Done { .. } => format!("{} ya se ejecutó", p.id),
         State::Rejected => format!("{} se rechazó: no se ejecuta", p.id),
         State::Expired => format!("{} venció: no se ejecutó", p.id),
+        State::Stored => format!("{} was already answered", p.id),
     }
 }
 
@@ -358,6 +409,11 @@ impl ToolHost {
         let _one_at_a_time = lock(&self.busy);
         let state = &h.cfg.state;
         let mut p = check(state, id, now_ms)?;
+        if p.class == Class::Secret {
+            return Err(format!(
+                "{id} asks for a secret: it is answered with the value, not run"
+            ));
+        }
         if p.run != h.cfg.run {
             return Err(format!("{id} es de otra sesión ({})", p.run));
         }
@@ -400,5 +456,122 @@ impl ToolHost {
         };
         save(state, &p)?;
         Ok(p)
+    }
+
+    /// `request_secret`: checks the name, the destination and the vault now, and stores the
+    /// request for the person; the value is asked for when the turn ends, by the chat, and never
+    /// comes through here.
+    pub(crate) fn request_secret(
+        &self,
+        req: &Request,
+        args: &Map<String, Value>,
+        tainted: bool,
+    ) -> Response {
+        let refuse = |why: String| self.refuse(&req.id, "request_secret", why, tainted);
+        let Some(cfg) = &self.secrets else {
+            return refuse("nobody can be asked for a secret here".into());
+        };
+        let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").trim();
+        let name = arg("name");
+        if !clio_vault::valid_name(name) {
+            return refuse(
+                "`name` must be 1 to 64 lowercase letters, digits, '-', '_' or '.'".into(),
+            );
+        }
+        let Some(dest) = clio_vault::Dest::parse(arg("destination")) else {
+            return refuse(
+                "`destination` must be TOOL:DOMAIN, as in http_fetch:api.github.com".into(),
+            );
+        };
+        let why: String = self
+            .clean(arg("why"))
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(MAX_WHY)
+            .collect();
+        if why.trim().is_empty() {
+            return refuse("`why` must say in one line what the secret is for".into());
+        }
+        // The person's socket, and only to ask whether the vault is open and what names it has.
+        let vault = clio_vault::VaultClient::new(&cfg.person)
+            .with_timeout(std::time::Duration::from_secs(5));
+        let open = vault
+            .call(&clio_vault::proto::Request::Status)
+            .ok()
+            .and_then(|r| r.data)
+            .map(|d| d["locked"].as_bool() == Some(false));
+        match open {
+            None => {
+                return refuse(
+                    "the vault is not running, so nothing can be stored: ask the person to start it (`clio vault start`)".into(),
+                );
+            }
+            Some(false) => {
+                return refuse(
+                    "the vault is locked, so nothing can be stored: ask the person to unlock it (`clio vault start`)".into(),
+                );
+            }
+            Some(true) => {}
+        }
+        let names = vault
+            .call(&clio_vault::proto::Request::List)
+            .ok()
+            .filter(|r| r.ok)
+            .and_then(|r| r.data);
+        let Some(names) = names else {
+            return refuse("the vault did not say which secrets it has: try again later".into());
+        };
+        if names
+            .as_array()
+            .is_some_and(|a| a.iter().any(|m| m["name"] == name))
+        {
+            return refuse(format!(
+                "a secret named {name} already exists: pick another name, or ask the person to run `clio vault put {name}`"
+            ));
+        }
+        let now = now_ms();
+        let draft = Pending {
+            id: String::new(),
+            class: Class::Secret,
+            tool: "request_secret".into(),
+            args: json!({
+                "name": name,
+                "destination": format!("{}:{}", dest.tool, dest.domain),
+                "why": why.trim(),
+            }),
+            hash: String::new(),
+            what: name.to_owned(),
+            run: cfg.run.clone(),
+            session: req.session.clone(),
+            created_ms: now,
+            expires_ms: now + DAY_MS,
+            ask: false,
+            state: State::Waiting,
+            reason: None,
+        };
+        let content = match set_aside(&cfg.state, draft, cfg.per_day) {
+            Ok(p) if p.ask => format!(
+                "requested {}: the person will be asked when the turn ends; go on with what does not need it",
+                p.id
+            ),
+            Ok(p) => format!(
+                "requested {id}: today's questions to the person are used up, so the chat will not ask; the person can answer with `clio approve {id}`. Go on with what does not need it",
+                id = p.id
+            ),
+            Err(e) => return refuse(format!("the request could not be stored ({e})")),
+        };
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: content.clone(),
+            data: Value::Null,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "request_secret".into(),
+                reason: content,
+            },
+            tainted,
+            external: false,
+        }
     }
 }
