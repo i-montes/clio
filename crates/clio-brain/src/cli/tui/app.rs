@@ -219,6 +219,8 @@ pub enum Input {
     Mouse(MouseEvent),
     Paste(String),
     Tick(u64),
+    /// The terminal changed size: only a redraw.
+    Resize,
     Bg(Bg),
 }
 
@@ -506,6 +508,7 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             app.now_ms = ms;
             vec![]
         }
+        Input::Resize => vec![],
         Input::Paste(text) => {
             app.last_key_ms = Some(app.now_ms);
             if app.confirm.is_some() || app.notice.is_some() {

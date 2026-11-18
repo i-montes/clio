@@ -429,6 +429,24 @@ fn killing_clio_with_sigkill_leaves_no_pi_and_no_toolhost() {
     assert_eq!(v["orphans_left"], json!([]));
 }
 
+// The window closes (the terminal hangs up) or a plain `kill` comes: `clio` used to spin at full
+// speed forever inside the terminal reader, Pi and its toolhost alive under it. Now it leaves
+// through its normal way out within seconds, with the code of the signal.
+#[test]
+fn a_terminal_that_goes_away_or_a_sigterm_ends_clio_and_its_children_within_seconds() {
+    if can_run("hangup", true).is_none() {
+        return;
+    }
+    for (scenario, code) in [("hangup", 129), ("sigterm", 143)] {
+        let w = World::new(r#"[{"text":"hello from the fake model"}]"#);
+        let v = w.pty(scenario);
+        ok(&v, &["opened", "orphans_gone"]);
+        assert!(v["procs_while_open"].as_u64().unwrap() >= 2, "{v:#}");
+        assert_eq!(v["code"], json!(code), "{scenario}: {v:#}");
+        assert_eq!(v["orphans_left"], json!([]), "{v:#}");
+    }
+}
+
 // S-18 S-14: the run is a copy (the original is untouched) and the API key stays out of every file
 #[test]
 fn clio_run_with_pi_prints_the_answer_and_the_change_shows_in_diff() {

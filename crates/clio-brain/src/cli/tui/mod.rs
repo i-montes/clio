@@ -213,27 +213,38 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     let to_ms = |t: Instant| u64::try_from(t.duration_since(t0).as_millis()).unwrap_or(u64::MAX);
     // Only for the pseudo-terminal tests (debug builds): the text of every frame, to a file.
     let dump = std::env::var_os("CLIO_TUI_SCREEN_DUMP").filter(|_| cfg!(debug_assertions));
+    // The terminal is read on its own thread: crossterm's reader loops forever, at full speed and
+    // without returning, once the terminal is gone (a read that gives 0 bytes or EIO is retried),
+    // so this loop never waits inside it and can always see a signal or a dead terminal.
+    let (gone, reading) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(true)),
+    );
+    read_terminal(ctx.tx.clone(), gone.clone(), reading.clone());
     // Drawn when something came in, and at least every 100 ms for the clock and the spinners.
     let (mut dirty, mut drawn) = (true, Instant::now());
-    while !app.quit && ended.load(Ordering::SeqCst) == 0 {
+    while !app.quit && ended.load(Ordering::SeqCst) == 0 && !gone.load(Ordering::SeqCst) {
         if dirty || drawn.elapsed() >= Duration::from_millis(100) {
-            let frame = term
-                .draw(|f| draw(f, &app))
-                .map_err(|e| format!("terminal: {e}"))?;
-            if let Some(path) = &dump {
-                dump_screen(frame.buffer, std::path::Path::new(path));
+            match term.draw(|f| draw(f, &app)) {
+                Ok(frame) => {
+                    if let Some(path) = &dump {
+                        dump_screen(frame.buffer, std::path::Path::new(path));
+                    }
+                }
+                // Nothing can be shown any more: leave as if the window closed.
+                Err(_) => break,
             }
             (dirty, drawn) = (false, Instant::now());
         }
-        let ev = if event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
-            Some(event::read().map_err(|e| e.to_string())?)
-        } else {
-            None
-        };
+        // A terminal that hung up says so here even when no signal came.
+        if !std::io::stdout().is_terminal() {
+            break;
+        }
+        // Waits for an input or the next frame; never spins.
+        let first = rx.recv_timeout(Duration::from_millis(100)).ok();
         // The clock first: a key is timed when it comes (the quiet rule of a question).
         let mut inputs: Vec<Input> = vec![Input::Tick(to_ms(Instant::now()))];
-        dirty |= matches!(ev, Some(Term::Resize(..)));
-        inputs.extend(ev.and_then(input_of));
+        inputs.extend(first);
         while let Ok(i) = rx.try_recv() {
             inputs.push(i);
         }
@@ -246,22 +257,26 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
                     // Not `Terminal::clear`: it asks the terminal where the cursor is and waits
                     // for an answer that some terminals never give. A new `Terminal` has empty
                     // buffers, so the next draw repaints every cell.
-                    let e = |x: std::io::Error| format!("terminal: {x}");
-                    execute!(
+                    let cleared = execute!(
                         std::io::stdout(),
                         crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-                    )
-                    .map_err(e)?;
-                    term = Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(e)?;
+                    );
+                    match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
+                        Ok(t) if cleared.is_ok() => term = t,
+                        _ => gone.store(true, Ordering::SeqCst),
+                    }
                 } else {
                     ctx.exec(c);
                 }
             }
         }
     }
-    // Leaving on purpose (not by a signal): the session's summary first, on the normal screen so
-    // the wait is said; a signal or a panic skips it.
-    if ended.load(Ordering::SeqCst) == 0 {
+    reading.store(false, Ordering::SeqCst);
+    // A dead terminal leaves like a signal: no summary (nobody is there to wait for it).
+    let cut = ended.load(Ordering::SeqCst) != 0 || !app.quit;
+    // Leaving on purpose (not by a signal, nor a terminal that went away): the session's summary
+    // first, on the normal screen so the wait is said; a signal or a panic skips it.
+    if !cut {
         let open = ctx.current_chat();
         let closing: Vec<_> = ctx
             .closing
@@ -288,11 +303,41 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     if ctx.answered.load(Ordering::SeqCst) {
         clio_node::host::stop_units_of(std::process::id());
     }
-    // The shell convention for a process ended by a signal.
+    // The shell convention for a process ended by a signal; a terminal that hung up is SIGHUP.
     Ok(match ended.load(Ordering::SeqCst) {
+        0 if cut => 128 + signal_hook::consts::SIGHUP,
         0 => 0,
         sig => 128 + sig as i32,
     })
+}
+
+/// The terminal's events, to `tx`, until `reading` goes off. An error (the terminal is gone) sets
+/// `gone` and ends the thread; the run loop notices on its next pass.
+fn read_terminal(tx: Sender<Input>, gone: Arc<AtomicBool>, reading: Arc<AtomicBool>) {
+    let flag = gone.clone();
+    let spawned = std::thread::Builder::new()
+        .name("clio-terminal".into())
+        .spawn(move || {
+            while reading.load(Ordering::SeqCst) {
+                let ev = match event::poll(Duration::from_millis(100)) {
+                    Ok(false) => continue,
+                    Ok(true) => event::read(),
+                    Err(e) => Err(e),
+                };
+                match ev {
+                    Ok(ev) => {
+                        if let Some(i) = input_of(ev) {
+                            let _ = tx.send(i);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            flag.store(true, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        gone.store(true, Ordering::SeqCst);
+    }
 }
 
 /// What a terminal event is to `update`, if anything. The terminal reports every move of the
@@ -301,6 +346,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
 fn input_of(ev: Term) -> Option<Input> {
     use crossterm::event::MouseEventKind as M;
     match ev {
+        Term::Resize(..) => Some(Input::Resize),
         Term::Key(k) if k.kind != KeyEventKind::Release => Some(Input::Key(k)),
         Term::Paste(s) => Some(Input::Paste(s)),
         Term::Mouse(m) if !matches!(m.kind, M::Moved | M::Drag(_) | M::Up(_)) => {

@@ -2,7 +2,7 @@
 prints a JSON verdict. Stdlib only. Linux only (it reads /proc).
 
 usage: python3 -I pty_chat_driver.py SCENARIO CONFIG_JSON
-SCENARIO: new_chat | abort | steer | reopen | sigkill | one_turn | reopen_turn
+SCENARIO: new_chat | abort | steer | reopen | sigkill | hangup | sigterm | one_turn | reopen_turn
 
 The terminal stream is a diff and is not parsed. In a debug build `clio` writes the text of every
 frame to the file named by CLIO_TUI_SCREEN_DUMP: that is what the waits read. Every wait is
@@ -327,6 +327,33 @@ elif scenario == "sigkill":
     os.kill(pid, signal.SIGKILL)
     os.waitpid(pid, 0)
     out["orphans_gone"] = gone(30)
+    out["orphans_left"] = pi_procs()
+elif scenario in ("hangup", "sigterm"):
+    # The terminal goes away (its window closes: the master side is closed), or a plain `kill`:
+    # `clio` leaves through its normal way out within seconds, and takes Pi and its toolhost.
+    out["opened"] = open_new_chat(fd) and ask(fd, "hola", "hello from the fake model")
+    out["procs_while_open"] = len(pi_procs())
+    if scenario == "hangup":
+        os.close(fd)
+    else:
+        os.kill(pid, signal.SIGTERM)
+    end, code = time.time() + 10, "timeout"
+    while time.time() < end:
+        done, st = os.waitpid(pid, os.WNOHANG)
+        if done:
+            code = os.waitstatus_to_exitcode(st)
+            break
+        if scenario == "sigterm":
+            pump(fd)
+        else:
+            time.sleep(0.05)
+    out["secs"] = round(10 - (end - time.time()), 1)
+    if code == "timeout":
+        out["state"] = open(f"/proc/{pid}/stat").read().split()[2]
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    out["code"] = code
+    out["orphans_gone"] = gone(10)
     out["orphans_left"] = pi_procs()
 else:
     sys.exit("unknown scenario")
