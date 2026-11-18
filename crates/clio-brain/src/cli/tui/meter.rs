@@ -462,7 +462,8 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
             "la pregunta de visto bueno",
             pairs(&[("s y Enter", "ejecutarlo"), ("n o Esc", "rechazarlo")]),
             vec![
-                "Oye la primera tecla tras un segundo sin teclear; con s, Enter enseguida.",
+                "Oye la primera tecla tras un segundo a la vista y un segundo sin teclear.",
+                "Con la s puesta, Enter la ejecuta enseguida.",
                 "Otra tecla tras la s la deshace y vuelve a esperar el segundo.",
             ],
         ));

@@ -202,6 +202,39 @@ pub fn action_line(v: &Value, with_run: bool) -> String {
     )
 }
 
+/// The local clock's offset from UTC, in seconds: read from the same local stamp the chat sends
+/// in `<clio-contexto>` (UTC when the system cannot say).
+pub fn local_offset() -> i64 {
+    let s = clio_brain::pi::envelope::stamp_now();
+    let tz = s.get(s.len().saturating_sub(6)..).unwrap_or("");
+    let n = |r: std::ops::Range<usize>| tz.get(r).and_then(|x| x.parse::<i64>().ok());
+    match (tz.as_bytes().first(), n(1..3), n(4..6)) {
+        (Some(b'-'), Some(h), Some(m)) => -(h * 3600 + m * 60),
+        (Some(b'+'), Some(h), Some(m)) => h * 3600 + m * 60,
+        _ => 0,
+    }
+}
+
+/// One entry of the action log for the chat's box: the local time (`HH:MM:SS`, `offset` seconds
+/// from UTC), the tool, the outcome, and what it did with its exit code.
+pub fn action_cells(v: &Value, offset: i64) -> [String; 4] {
+    let s = |v: &Value| sanitize::line(v.as_str().unwrap_or(""));
+    let t = (v["at_ms"].as_i64().unwrap_or(0).div_euclid(1000) + offset).rem_euclid(86_400);
+    let code = v["exit_code"]
+        .as_i64()
+        .map_or_else(String::new, |c| format!(" (salida {c})"));
+    [
+        format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60),
+        s(&v["tool"]),
+        s(&v["outcome"]),
+        format!(
+            "{}{code}{}",
+            s(&v["what"]),
+            if v["network"] == true { " · red" } else { "" }
+        ),
+    ]
+}
+
 /// `clio actions [--run ID] [--json]`: the action log, the newest last.
 pub fn actions(dirs: &Dirs, run: Option<&str>, json: bool) -> Res<()> {
     let lines = action_log(dirs, run)?;

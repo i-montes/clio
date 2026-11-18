@@ -253,7 +253,6 @@ pub const CUSTOM_MAX: u64 = 32 * 1024;
 /// The person's commands in `dir`, by name, and the files left out (a name that is not
 /// `[a-z0-9-]+`, a built-in name, too big, not text). A missing folder is no commands.
 pub fn load_custom(dir: &Path) -> (Vec<Custom>, Vec<String>) {
-    use std::io::Read;
     let (mut out, mut left) = (Vec::new(), Vec::new());
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = e.path();
@@ -269,15 +268,15 @@ pub fn load_custom(dir: &Path) -> (Vec<Custom>, Vec<String>) {
             left.push(file);
             continue;
         }
-        let mut bytes = Vec::new();
-        let read =
-            std::fs::File::open(&path).and_then(|f| f.take(CUSTOM_MAX + 1).read_to_end(&mut bytes));
-        let text = match (read, String::from_utf8(bytes)) {
-            (Ok(n), Ok(t)) if n as u64 <= CUSTOM_MAX && path.is_file() => t,
-            _ => {
-                left.push(file);
-                continue;
-            }
+        // Only a regular file, never through a link: a FIFO or a device named `*.md` would
+        // block the open or the read (the open itself never waits, see `read_regular_capped`).
+        let regular = e.file_type().is_ok_and(|t| t.is_file());
+        let read = regular
+            .then(|| crate::cli::work::read_regular_capped(&path, CUSTOM_MAX).ok())
+            .flatten();
+        let Some(Ok(text)) = read.map(String::from_utf8) else {
+            left.push(file);
+            continue;
         };
         let (what, body) = match text.split_once('\n') {
             Some((first, rest)) if first.starts_with("# ") => (first[2..].trim(), rest),
@@ -381,8 +380,8 @@ pub struct Menu {
     pub sel: usize,
     /// A command's choices; `None` while they load.
     pub pick: Option<(Run, Option<Vec<Choice>>)>,
-    /// Where the last draw put the rows: the area, and the first row shown.
-    pub rows_at: Cell<(Rect, usize)>,
+    /// Where the last draw put the rows: the area, the first row shown, and what the rows said.
+    pub rows_at: Cell<(Rect, usize, u64)>,
 }
 
 /// The most rows the menu shows; past them it scrolls.
@@ -481,11 +480,13 @@ pub fn enter(app: &mut App) -> Vec<Cmd> {
     if let Some(t) = find(app, &word) {
         return start(app, t, &args);
     }
+    // With arguments only a whole name runs: `/m sonnet` must not become `/modelo sonnet`.
     let sel = app.chat.menu.as_ref().map_or(0, |m| m.sel);
     match app
         .chat
         .menu
         .as_ref()
+        .filter(|_| args.is_empty())
         .and_then(|_| matches(app, &word).get(sel).copied())
     {
         Some(Entry::Builtin(i)) => start(app, Target::Builtin(COMMANDS[i].run), &args),
@@ -638,10 +639,13 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
     }
 }
 
-/// The agent's last answer, as it came.
+/// The agent's last answer, as the screen shows it: what the model wrote can carry escapes,
+/// control and invisible or bidi characters, and a clipboard is pasted into other terminals.
 fn last_answer(app: &App) -> Option<String> {
     app.chat.items.iter().rev().find_map(|i| match i {
-        super::chat::Item::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+        super::chat::Item::Assistant { text, .. } if !text.trim().is_empty() => {
+            Some(super::sanitize::multiline(text))
+        }
         _ => None,
     })
 }
@@ -681,14 +685,12 @@ fn numbers(app: &App, context: bool) -> Modal {
     Modal::text(if context { "Contexto" } else { "Uso" }, lines)
 }
 
-/// The menu, drawn over the conversation (from `top` down) just above the status line and the
-/// composer (`input`), as wide as it.
-pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
-    let Some(m) = &app.chat.menu else {
-        return;
-    };
-    let t = app.theme;
-    let mut rows: Vec<(String, String, bool, bool)> = Vec::new();
+/// A row of the menu: its head, what it does, whether it is the current one, whether it is blocked.
+type Row = (String, String, bool, bool);
+
+/// The menu's rows, and what it says when it has none.
+fn rows(app: &App, m: &Menu) -> (Vec<Row>, Option<String>) {
+    let mut rows: Vec<Row> = Vec::new();
     let mut empty = None;
     match &m.pick {
         Some((_, None)) => empty = Some("cargando…".to_owned()),
@@ -726,6 +728,25 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
             }
         }
     }
+    (rows, empty)
+}
+
+/// What the rows say, so a click is matched against the rows that were drawn.
+fn rows_id(rows: &[Row]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    rows.hash(&mut h);
+    h.finish()
+}
+
+/// The menu, drawn over the conversation (from `top` down) just above the status line and the
+/// composer (`input`), as wide as it.
+pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
+    let Some(m) = &app.chat.menu else {
+        return;
+    };
+    let t = app.theme;
+    let (rows, empty) = rows(app, m);
     // Over the conversation, leaving the status line under it (it says why a command did not run).
     let bottom = input.y.saturating_sub(1);
     let room = usize::from(bottom.saturating_sub(top).saturating_sub(2));
@@ -744,6 +765,7 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
             u16::try_from(shown).unwrap_or(1),
         ),
         first,
+        rows_id(&rows),
     ));
     let w = usize::from(area.width.saturating_sub(2));
     let head_w = rows
@@ -800,14 +822,16 @@ pub fn draw(f: &mut Frame, input: Rect, top: u16, app: &App) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// A click on a row of the menu runs it, as Enter would.
+/// A click on a row of the menu runs it, as Enter would; only when the rows are still the ones
+/// that were drawn (a click on «cargando…» never picks a choice that came after it).
 pub fn click(app: &mut App, x: u16, y: u16) -> Option<Vec<Cmd>> {
-    let (area, first) = app.chat.menu.as_ref()?.rows_at.get();
+    let m = app.chat.menu.as_ref()?;
+    let (area, first, drawn) = m.rows_at.get();
     if !area.contains(ratatui::layout::Position::new(x, y)) {
         return None;
     }
     let i = first + usize::from(y - area.y);
-    if i >= len(app) {
+    if i >= len(app) || rows_id(&rows(app, m).0) != drawn {
         return Some(vec![]);
     }
     if let Some(m) = &mut app.chat.menu {
@@ -831,6 +855,9 @@ pub struct Modal {
     pub scroll: usize,
     /// How far the last draw let it scroll.
     pub max: Cell<usize>,
+    /// The first columns of each line are a lead (`/acciones`: time, tool, outcome); the rest is
+    /// a command, in the code color, and its wrapped rows start under it. 0: plain lines.
+    pub hang: usize,
 }
 
 impl Modal {
@@ -843,6 +870,7 @@ impl Modal {
             sel: 0,
             scroll: 0,
             max: Cell::new(0),
+            hang: 0,
         }
     }
 }
@@ -888,6 +916,17 @@ pub fn draw_modal(f: &mut Frame, area: Rect, app: &App, m: &Modal) {
             let pad = " ".repeat(inner.saturating_sub(text::width(&row)));
             let style = if i == m.sel { t.selection() } else { t.plain() };
             rows.push(Line::from(Span::styled(format!("{row}{pad}"), style)));
+        } else if m.hang > 0 && inner > m.hang + 8 {
+            let cut = l.char_indices().nth(m.hang).map_or(l.len(), |(b, _)| b);
+            let (lead, cmd) = l.split_at(cut);
+            for (j, row) in text::wrap(cmd, inner - m.hang).into_iter().enumerate() {
+                let lead = if j == 0 {
+                    Span::styled(lead.to_owned(), t.dim())
+                } else {
+                    Span::raw(" ".repeat(m.hang))
+                };
+                rows.push(Line::from(vec![lead, Span::styled(row, t.code())]));
+            }
         } else if text::width(&l) <= inner {
             rows.push(Line::from(l));
         } else {

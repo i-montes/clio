@@ -224,10 +224,11 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
         Arc::new(AtomicBool::new(true)),
     );
     read_terminal(ctx.tx.clone(), gone.clone(), reading.clone());
-    // Drawn when something came in, and at least every 100 ms for the clock and the spinners.
+    // Drawn when something came in (a key, a click, a resize, a background event), and every
+    // 100 ms only while something on screen moves or counts (`App::animating`).
     let (mut dirty, mut drawn) = (true, Instant::now());
     while !app.quit && ended.load(Ordering::SeqCst) == 0 && !gone.load(Ordering::SeqCst) {
-        if dirty || drawn.elapsed() >= Duration::from_millis(100) {
+        if dirty || (app.animating() && drawn.elapsed() >= Duration::from_millis(100)) {
             match term.draw(|f| draw(f, &app)) {
                 Ok(frame) => {
                     if let Some(path) = &dump {
@@ -317,10 +318,14 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
 /// The terminal's events, to `tx`, until `reading` goes off. An error (the terminal is gone) sets
 /// `gone` and ends the thread; the run loop notices on its next pass.
 fn read_terminal(tx: Sender<Input>, gone: Arc<AtomicBool>, reading: Arc<AtomicBool>) {
-    let flag = gone.clone();
-    let spawned = std::thread::Builder::new()
+    let flag = SetOnDrop(gone);
+    // A thread that cannot start drops `flag` with its closure, so that sets `gone` too.
+    let _ = std::thread::Builder::new()
         .name("clio-terminal".into())
         .spawn(move || {
+            // Set however the thread ends, a panic too: the run loop then leaves the normal way
+            // and gives the terminal back, instead of waiting for keys that never come.
+            let _flag = flag;
             while reading.load(Ordering::SeqCst) {
                 let ev = match event::poll(Duration::from_millis(100)) {
                     Ok(false) => continue,
@@ -336,10 +341,15 @@ fn read_terminal(tx: Sender<Input>, gone: Arc<AtomicBool>, reading: Arc<AtomicBo
                     Err(_) => break,
                 }
             }
-            flag.store(true, Ordering::SeqCst);
         });
-    if spawned.is_err() {
-        gone.store(true, Ordering::SeqCst);
+}
+
+/// Sets its flag when dropped, also while a panic unwinds.
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -606,14 +616,9 @@ fn set_model(d: &Dirs, session: Option<&dyn Session>, name: &str) -> Result<Stri
     let cfg = Config::load(d)?;
     let c = clio_brain::connector::by_provider(&cfg.model.provider).ok_or("sin conector")?;
     let known = models(d, session, c)?;
-    // Before the first message, a name the catalog does not list is taken as typed: Pi checks
-    // it when the session starts.
-    let plain = !name.is_empty()
-        && name.len() <= 128
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._:/@-".contains(&b));
-    if !known.iter().any(|m| m == name) && (session.is_some() || !plain) {
+    // Only a name on the list: before the first message the catalog's (and the one configured),
+    // with a session open Pi's. Anything else would be saved and break the next session.
+    if !known.iter().any(|m| m == name) {
         return Err(format!(
             "{} no tiene el modelo «{}»; tiene: {}",
             c.name,
@@ -688,6 +693,30 @@ fn set_effort(d: &Dirs, session: Option<&dyn Session>, level: &str) -> Result<St
         m.insert("thinking".into(), level.into());
     })?;
     Ok(format!("esfuerzo: {name}"))
+}
+
+/// `/acciones`: one row per action, the local time, the tool and the outcome in columns, and
+/// what it did under the code color (see `Modal::hang`).
+fn actions_box(log: &[serde_json::Value], offset: i64) -> commands::Modal {
+    let rows: Vec<[String; 4]> = log
+        .iter()
+        .map(|v| super::pending::action_cells(v, offset))
+        .collect();
+    if rows.is_empty() {
+        return commands::Modal::text(
+            "Acciones",
+            vec!["esta sesión no ejecutó ninguna acción en la máquina".into()],
+        );
+    }
+    let w = |i: usize| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0);
+    let (tool_w, out_w) = (w(1), w(2));
+    let lines = rows
+        .iter()
+        .map(|[at, tool, out, what]| format!("{at}  {tool:<tool_w$}  {out:<out_w$}  {what}"))
+        .collect();
+    let mut m = commands::Modal::text("Acciones", lines);
+    m.hang = 8 + 2 + tool_w + 2 + out_w + 2;
+    m
 }
 
 fn check(dirs: &Dirs, dir: &str) -> Result<Preview, String> {
@@ -1074,20 +1103,18 @@ impl Ctx {
             Cmd::LoadActions { run } => self.spawn(
                 move |d, _| {
                     let log = super::pending::action_log(d, Some(&run))?;
-                    let mut lines: Vec<String> = log
-                        .iter()
-                        .map(|v| super::pending::action_line(v, false))
-                        .collect();
-                    if lines.is_empty() {
-                        lines.push("esta sesión no ejecutó ninguna acción en la máquina".into());
-                    }
-                    Ok::<_, String>(lines)
+                    Ok::<_, String>(actions_box(&log, super::pending::local_offset()))
                 },
-                |r| Bg::Modal("Acciones".into(), r.and_then(|x| x)),
+                |r| Bg::Modal(r.and_then(|x| x)),
             ),
             Cmd::UndoSession { id } => self.spawn(
                 move |d, _| apply::undo_lines(d, &id, false).map(|(_, lines)| lines),
-                |r| Bg::Modal("Deshacer".into(), r.and_then(|x| x)),
+                |r| {
+                    Bg::Modal(
+                        r.and_then(|x| x)
+                            .map(|l| commands::Modal::text("Deshacer", l)),
+                    )
+                },
             ),
             Cmd::Debug(on) => self.debug.set(on),
             Cmd::Cancel => {

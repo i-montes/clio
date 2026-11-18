@@ -236,7 +236,7 @@ pub fn read_regular(p: &Path) -> std::io::Result<Vec<u8>> {
 /// More than the copy itself may hold (200 MB by default), so no legitimate file is refused.
 const READ_CAP: u64 = 256 * 1024 * 1024;
 
-fn read_regular_capped(p: &Path, max: u64) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_regular_capped(p: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or(0);

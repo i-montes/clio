@@ -207,7 +207,7 @@ pub enum Bg {
     /// sessions wait too.
     Pending(Result<Waiting, String>),
     /// Lines to show in a box with that title.
-    Modal(String, Result<Vec<String>, String>),
+    Modal(Result<Modal, String>),
     /// The run ended; `refresh` is Pi's own totals if it could still give them.
     ChatSettled {
         result: Result<clio_brain::pi::rpc::RunSummary, String>,
@@ -294,6 +294,8 @@ pub struct Confirm {
     pub armed: bool,
     /// An action set aside: the session it belongs to (only that session can answer it).
     pub session: String,
+    /// When it came on screen (its quiet second starts then, not when it was queued).
+    pub shown_ms: u64,
 }
 
 /// A set-aside question takes an answer only after this long with no key at all, so the tail of
@@ -311,6 +313,7 @@ impl Confirm {
             note: None,
             armed: false,
             session: String::new(),
+            shown_ms: 0,
         }
     }
 }
@@ -512,10 +515,29 @@ impl App {
         self.view_scroll = 0;
     }
 
-    /// No key for `QUIET_MS`: a set-aside question may take an answer.
+    /// No key for `QUIET_MS`, and the question on screen shown for at least as long: a
+    /// set-aside question may take an answer. A key typed for something else, even one well
+    /// before the question appeared, never answers it.
     pub fn quiet(&self) -> bool {
-        self.last_key_ms
-            .is_none_or(|t| self.now_ms.saturating_sub(t) >= QUIET_MS)
+        let since = |t: u64| self.now_ms.saturating_sub(t) >= QUIET_MS;
+        self.last_key_ms.is_none_or(since)
+            && self.confirm.as_ref().is_none_or(|c| since(c.shown_ms))
+    }
+
+    /// Something on screen moves or counts by itself (a spinner, the seconds of a turn or a run,
+    /// the quiet second of a question): only then does the clock alone redraw the screen.
+    pub fn animating(&self) -> bool {
+        let waiting = self
+            .confirm
+            .as_ref()
+            .is_some_and(|c| c.action == Action::Approve && !c.armed)
+            && !self.quiet();
+        let chat = matches!(self.screen, Screen::Chat | Screen::Sessions)
+            && (self.chat.opening || self.chat.running);
+        let live = (self.screen == Screen::Live
+            || matches!(self.screen, Screen::Context | Screen::Usage) && self.back == Screen::Live)
+            && self.live.outcome.is_none();
+        waiting || chat || live
     }
 
     /// Whether the chat cannot be left now (quit, another session, a new one, a delete); when
@@ -587,7 +609,8 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
         Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
             app.flash = None;
-            // Every key counts for the quiet rule, even one pressed before the question opened.
+            // Every key counts for the quiet rule, even one pressed before the question opened;
+            // and the question itself must have been on screen for the quiet second.
             let quiet = app.quiet();
             app.last_key_ms = Some(app.now_ms);
             // The keys that work everywhere, even over a message.
@@ -632,8 +655,9 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
 }
 
 /// The reply to a confirmation: only `y` (or `s`, for sí) goes ahead. An action set aside, which
-/// is asked when a turn ends while the person may be typing, hears its first key only after
-/// `QUIET_MS` with none (`quiet`): then `s` arms it and `n` or Esc rejects it. Once armed, Enter
+/// is asked when a turn ends while the person may be typing, hears its first key only once it
+/// has been on screen for `QUIET_MS` and no key came for as long (`quiet`): then `s` arms it and
+/// `n` or Esc rejects it. Once armed, Enter
 /// runs it at once; any other key disarms it, and the quiet second starts again.
 fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     let Some(mut c) = app.confirm.take() else {
@@ -684,9 +708,10 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
 /// be answered here and waits in `clio pending`.
 fn next_ask(app: &mut App) {
     while app.confirm.is_none()
-        && let Some(c) = app.asks.pop_front()
+        && let Some(mut c) = app.asks.pop_front()
     {
         if c.session == app.chat.session_id {
+            c.shown_ms = app.now_ms;
             app.confirm = Some(c);
         } else {
             app.flash = Some(format!(
@@ -901,6 +926,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                         // front of anything typed meanwhile, and Enter tries again.
                         Some(text) => {
                             app.chat.items.retain(|i| *i != Item::User(text.clone()));
+                            app.chat.rendered.take();
                             app.chat.items.push(Item::Error(e));
                             let typed = std::mem::take(&mut app.chat.input);
                             app.chat.set_input(if typed.is_empty() {
@@ -1014,9 +1040,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
-        Bg::Modal(title, r) => {
+        Bg::Modal(r) => {
             match r {
-                Ok(lines) => app.modal = Some(Modal::text(&title, lines)),
+                Ok(m) => app.modal = Some(m),
                 Err(e) => app.notice = Some(e),
             }
             vec![]

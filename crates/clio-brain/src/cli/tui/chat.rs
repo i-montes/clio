@@ -180,9 +180,14 @@ pub struct Chat {
     /// `/compactar` runs: nothing is sent until it ends.
     pub compacting: bool,
     streamed: bool,
-    /// The agent's answers as the last draw rendered them, by what went into them: a long
-    /// conversation is drawn ten times a second and parsing all its markdown each time is slow.
-    rendered: RefCell<HashMap<u64, Vec<Line<'static>>>>,
+    /// The text items as the last draw rendered them, by their place in the whole conversation
+    /// (`dropped` + index), with the fingerprint of what went into them: parsing a long
+    /// conversation's markdown on every frame is slow. Cleared when an item is taken out.
+    pub(super) rendered: RefCell<HashMap<usize, (u64, Vec<Line<'static>>)>>,
+    /// Items dropped from the front (past `MAX_ITEMS`) so far.
+    dropped: usize,
+    /// How many times an answer's markdown was parsed (a test counts it).
+    pub(super) parsed: Cell<usize>,
 }
 
 impl Default for Chat {
@@ -225,6 +230,8 @@ impl Chat {
             compacting: false,
             streamed: false,
             rendered: RefCell::default(),
+            dropped: 0,
+            parsed: Cell::new(0),
         }
     }
 
@@ -496,6 +503,7 @@ impl Chat {
         if self.items.len() > MAX_ITEMS {
             let extra = self.items.len() - MAX_ITEMS;
             self.items.drain(..extra);
+            self.dropped += extra;
         }
     }
 
@@ -534,22 +542,46 @@ pub fn content_text(c: &Value) -> String {
 }
 
 /// A tool that failed because the guard or the gateway refused it is "negado", not "falló"; one the
-/// toolhost set aside for the person (`clio_toolhost::pending`) is "apartado".
+/// toolhost set aside for the person (`clio_toolhost::pending`) is "apartado". Only for drawing:
+/// nothing ever decides on this state.
 fn state_of(is_error: bool, text: &str) -> ToolState {
     let t = text.to_lowercase();
-    let aside = text
-        .strip_prefix("apartado ")
-        .and_then(|r| r.split_once(':'))
-        .is_some_and(|(id, _)| !id.is_empty() && !id.contains(char::is_whitespace));
     if !is_error {
         ToolState::Ok
-    } else if aside {
+    } else if unwrapped(text).is_some_and(set_aside) {
         ToolState::SetAside
     } else if t.contains("clio-guard:") || t.contains("denied") || t.contains("denegad") {
         ToolState::Denied
     } else {
         ToolState::Failed
     }
+}
+
+/// What is inside the host's wrapper of a tool's result (`clio_gateway::wrap_untrusted`, as a
+/// tool result or a file), when the text is exactly that wrapper around it, hash included.
+fn unwrapped(text: &str) -> Option<&str> {
+    use clio_gateway::{Source, wrap_untrusted};
+    let (_, rest) = text.split_once('\n')?;
+    let (inner, _) = rest.rsplit_once('\n')?;
+    [Source::ToolResult, Source::File]
+        .into_iter()
+        .any(|s| wrap_untrusted(s, inner) == text)
+        .then_some(inner)
+}
+
+/// The toolhost's answer for an action set aside: `apartado <hex id>: «<class>» …`.
+fn set_aside(text: &str) -> bool {
+    let Some((id, rest)) = text
+        .strip_prefix("apartado ")
+        .and_then(|r| r.split_once(": «"))
+    else {
+        return false;
+    };
+    let class = rest.split_once('»').map_or("", |(c, _)| c);
+    !id.is_empty()
+        && id.bytes().all(|b| b.is_ascii_hexdigit())
+        && !class.is_empty()
+        && class.chars().all(char::is_alphabetic)
 }
 
 /// The model's own words on why it uses a tool (`reason`), one line.
@@ -804,11 +836,77 @@ fn hanging(text: &str, w: usize, lead: Span<'static>, style: Style) -> Vec<Line<
         .collect()
 }
 
-/// The conversation as lines of at most `w` columns.
-fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
+/// An O(1) fingerprint of a text item as it is drawn (its kind, length and ends, the width, the
+/// theme, whether it streams); `None` for a tool, which is drawn fresh (one line, a spinner).
+/// Items only grow at the end, so this changes whenever what they show does.
+fn fingerprint(it: &Item, w: usize, t: Theme) -> Option<u64> {
+    let (tag, text, live) = match it {
+        Item::User(s) => (0u8, s, false),
+        Item::Assistant { text, live } => (1, text, *live),
+        Item::Note(s) => (2, s, false),
+        Item::Error(s) => (3, s, false),
+        Item::Tool { .. } => return None,
+    };
+    let b = text.as_bytes();
+    let ends = (&b[..b.len().min(32)], &b[b.len().saturating_sub(32)..]);
+    let mut h = DefaultHasher::new();
+    (tag, b.len(), ends, live, w, t).hash(&mut h);
+    Some(h.finish())
+}
+
+/// The rows of a text item (not a tool) at `w` columns.
+fn render_item(c: &Chat, it: &Item, w: usize, t: Theme) -> Vec<Line<'static>> {
+    match it {
+        // The accent bar marks the person, on every row.
+        Item::User(text) => wrap(&sanitize::multiline(text), w.saturating_sub(2))
+            .into_iter()
+            .map(|row| {
+                Line::from(vec![
+                    Span::styled(format!("{} ", t.bar_left()), t.accent_line()),
+                    Span::styled(row, t.bold()),
+                ])
+            })
+            .collect(),
+        Item::Assistant { text, live } => {
+            c.parsed.set(c.parsed.get() + 1);
+            markdown::render(text, w.saturating_sub(2), t, *live)
+                .into_iter()
+                .map(|l| {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(l.spans);
+                    Line::from(spans)
+                })
+                .collect()
+        }
+        Item::Note(text) => hanging(
+            text,
+            w,
+            Span::styled(format!("  {} ", t.dot()), t.dim()),
+            t.dim(),
+        ),
+        Item::Error(text) => hanging(
+            text,
+            w,
+            Span::styled(format!("  {} ", t.cross()), t.fail()),
+            t.fail(),
+        ),
+        Item::Tool { .. } => vec![],
+    }
+}
+
+/// The conversation at `w` columns, then `tail`, seen through a window `h` rows high that is
+/// `app.chat.scroll` rows up from the newest: the rows in the window, where it starts, and how
+/// far up it can go. Only the rows in the window are built: the text items' rows come from what
+/// the last draw rendered (`Chat::rendered`), so a frame over a long, finished conversation
+/// parses nothing and copies only what it shows.
+fn conversation(
+    app: &App,
+    t: Theme,
+    w: usize,
+    tail: Vec<Line<'static>>,
+    h: usize,
+) -> (Vec<Line<'static>>, usize, usize) {
     let c = &app.chat;
-    let mut lines: Vec<Line> = Vec::new();
-    let mut last: Option<Kind> = None;
     // The titles of a group of tools share one width, so what they worked on starts in one
     // column, and so do their endings, so those summaries are cut in one column too.
     let label_max = (w * 2 / 5).clamp(12, LABEL_MAX);
@@ -835,9 +933,13 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
         widths[i..i + run].fill((label.min(label_max), tail));
         i += run.max(1);
     }
-    // What this draw renders is kept for the next; what it no longer shows is let go.
-    let mut old = c.rendered.take();
-    let mut fresh = HashMap::new();
+    // Each item's blank row before it (between kinds, and before each message) and its rows.
+    let mut cache = c.rendered.borrow_mut();
+    if cache.len() > c.items.len() {
+        cache.retain(|k, _| *k >= c.dropped);
+    }
+    let mut last: Option<Kind> = None;
+    let mut sizes = Vec::with_capacity(c.items.len());
     for (n, it) in c.items.iter().enumerate() {
         let kind = match it {
             Item::User(_) => Kind::User,
@@ -845,40 +947,42 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
             Item::Tool { .. } => Kind::Tools,
             Item::Note(_) | Item::Error(_) => Kind::Notes,
         };
-        if last != Some(kind) || matches!(kind, Kind::User | Kind::Agent) {
+        let gap = usize::from(last != Some(kind) || matches!(kind, Kind::User | Kind::Agent));
+        last = Some(kind);
+        let rows = match fingerprint(it, w, t) {
+            None => 1,
+            Some(key) => {
+                let e = cache.entry(c.dropped + n).or_insert((!key, vec![]));
+                if e.0 != key {
+                    *e = (key, render_item(c, it, w, t));
+                }
+                e.1.len()
+            }
+        };
+        sizes.push((gap, rows));
+    }
+    let total = sizes.iter().map(|(g, r)| g + r).sum::<usize>() + tail.len();
+    let max = total.saturating_sub(h);
+    let start = max - c.scroll.min(max);
+    let end = (start + h).min(total);
+    let mut lines = Vec::with_capacity(end - start);
+    let mut y = 0;
+    for (n, (it, (gap, rows))) in c.items.iter().zip(sizes).enumerate() {
+        let (a, b) = (y, y + gap + rows);
+        y = b;
+        if b <= start {
+            continue;
+        }
+        if a >= end {
+            break;
+        }
+        // Row `a` is the blank one when there is one; the item's own rows follow.
+        let from = start.max(a + gap) - (a + gap);
+        let to = end.min(b) - (a + gap);
+        if gap == 1 && a >= start {
             lines.push(Line::from(""));
         }
-        last = Some(kind);
         match it {
-            Item::User(text) => {
-                // The accent bar marks the person, on every row.
-                for row in wrap(&sanitize::multiline(text), w.saturating_sub(2)) {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", t.bar_left()), t.accent_line()),
-                        Span::styled(row, t.bold()),
-                    ]));
-                }
-            }
-            Item::Assistant { text, live } => {
-                let mut h = DefaultHasher::new();
-                (text, w, *live, t).hash(&mut h);
-                let key = h.finish();
-                let rows = old
-                    .remove(&key)
-                    .or_else(|| fresh.get(&key).cloned())
-                    .unwrap_or_else(|| {
-                        markdown::render(text, w.saturating_sub(2), t, *live)
-                            .into_iter()
-                            .map(|l| {
-                                let mut spans = vec![Span::raw("  ")];
-                                spans.extend(l.spans);
-                                Line::from(spans)
-                            })
-                            .collect()
-                    });
-                lines.extend(rows.iter().cloned());
-                fresh.insert(key, rows);
-            }
             Item::Tool {
                 name,
                 summary,
@@ -886,31 +990,33 @@ fn conversation(app: &App, t: Theme, w: usize) -> Vec<Line<'static>> {
                 state,
                 ms,
                 ..
-            } => lines.push(tool_line(
-                app,
-                (w, widths[n].0, widths[n].1),
-                name,
-                summary,
-                reason,
-                *state,
-                *ms,
-            )),
-            Item::Note(text) => lines.extend(hanging(
-                text,
-                w,
-                Span::styled(format!("  {} ", t.dot()), t.dim()),
-                t.dim(),
-            )),
-            Item::Error(text) => lines.extend(hanging(
-                text,
-                w,
-                Span::styled(format!("  {} ", t.cross()), t.fail()),
-                t.fail(),
-            )),
+            } => {
+                if from < to {
+                    lines.push(tool_line(
+                        app,
+                        (w, widths[n].0, widths[n].1),
+                        name,
+                        summary,
+                        reason,
+                        *state,
+                        *ms,
+                    ));
+                }
+            }
+            _ => {
+                if let Some((_, rows)) = cache.get(&(c.dropped + n)) {
+                    lines.extend(rows[from.min(to)..to].iter().cloned());
+                }
+            }
         }
     }
-    c.rendered.replace(fresh);
-    lines
+    let skip = start.max(y) - y;
+    lines.extend(
+        tail.into_iter()
+            .skip(skip)
+            .take(end.saturating_sub(y.max(start))),
+    );
+    (lines, start, max)
 }
 
 /// How a tool ended, for its right end: the word when it did not end well, and how long it took.
@@ -1151,22 +1257,22 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
     c.view_h.set(conv.height);
     c.view_w.set(text_area.width);
     let w = usize::from(text_area.width);
-    let mut all = conversation(app, t, w);
+    let mut tail = vec![];
     if let Some(e) = &c.failed {
-        all.push(Line::from(""));
-        all.extend(hanging(
+        tail.push(Line::from(""));
+        tail.extend(hanging(
             e,
             w,
             Span::styled(format!("  {} ", t.cross()), t.fail()),
             t.fail(),
         ));
-        all.push(Line::from(Span::styled(
+        tail.push(Line::from(Span::styled(
             "    Ctrl-S abre las sesiones",
             t.dim(),
         )));
     }
     let h = usize::from(conv.height);
-    let max = all.len().saturating_sub(h);
+    let (shown_rows, start, max) = conversation(app, t, w, tail, h);
     c.scroll_max.set(max);
     if c.is_draft() && c.items.is_empty() {
         let lines = welcome(app);
@@ -1176,9 +1282,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
             Rect::new(conv.x, y, conv.width, conv.height.min(3)),
         );
     } else {
-        let start = max - c.scroll.min(max);
-        let end = (start + h).min(all.len());
-        f.render_widget(Paragraph::new(all[start..end].to_vec()), text_area);
+        f.render_widget(Paragraph::new(shown_rows), text_area);
         if max > 0 {
             let mut st = ScrollbarState::new(max + 1)
                 .position(start)
@@ -1212,8 +1316,11 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
         status,
     );
 
-    // The composer has the keys unless the drawer or a dialog does.
-    let focused = app.screen == Screen::Chat && app.confirm.is_none() && app.notice.is_none();
+    // The composer has the keys unless the drawer, a dialog or a box does.
+    let focused = app.screen == Screen::Chat
+        && app.confirm.is_none()
+        && app.notice.is_none()
+        && app.modal.is_none();
     let block = Block::new()
         .borders(Borders::ALL)
         .border_set(t.border())
@@ -1241,7 +1348,7 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
-    if focused && app.modal.is_none() {
+    if focused {
         super::commands::draw(f, input, conv.y, app);
     }
     if focused {
@@ -1392,13 +1499,31 @@ mod tests {
 
     // Host mode: a call the toolhost set aside for the person is its own state, drawn in the
     // warning color with «apartado», never as a failure; and a group's summaries start in one
-    // column and its endings end at the right edge.
+    // column and its endings end at the right edge. Review: the test used the bare answer and
+    // passed while the real one, which comes wrapped by the host, was drawn as «falló».
     #[test]
     fn a_set_aside_call_is_apartado_and_a_group_lines_up() {
-        let aside = "apartado a1b2: «borrar» necesita el visto bueno de la persona.";
-        assert_eq!(state_of(true, aside), ToolState::SetAside);
-        assert_eq!(state_of(true, "apartado: nada"), ToolState::Failed);
-        assert_eq!(state_of(true, "error: apartado x: y"), ToolState::Failed);
+        use clio_gateway::{Source, wrap_untrusted};
+        let answer = "apartado 2bdcb88e: «borrar» necesita el visto bueno de la persona. No lo intentes de otra forma.";
+        let real = wrap_untrusted(Source::ToolResult, answer);
+        assert!(real.starts_with("<<<UNTRUSTED-DATA tool-result "));
+        assert_eq!(state_of(true, &real), ToolState::SetAside);
+        assert_eq!(
+            state_of(true, &wrap_untrusted(Source::File, answer)),
+            ToolState::SetAside
+        );
+        // Not the exact wrapper, or not the exact answer inside it: the text cannot fake it.
+        for fake in [
+            answer.to_owned(),
+            wrap_untrusted(Source::ToolResult, &format!("salida:\n{answer}")),
+            wrap_untrusted(Source::ToolResult, "apartado x y: «borrar»"),
+            wrap_untrusted(Source::ToolResult, "apartado zz: «borrar»"),
+            wrap_untrusted(Source::Web, answer),
+            real.replace("2bdcb88e:", "2bdcb88f:"),
+            format!("{real}\nmás"),
+        ] {
+            assert_eq!(state_of(true, &fake), ToolState::Failed, "{fake}");
+        }
         let mut a = super::super::tests_gallery::pi(true);
         a.chat = chat();
         let tool = |reason: &str, cmd: &str, state, ms| Item::Tool {
@@ -2015,6 +2140,130 @@ mod tests {
                     .map(|b| (l[..b].chars().count() as u16, y as u16))
             })
             .unwrap_or_else(|| panic!("{text:?} not on screen:\n{s}"))
+    }
+
+    // Review: every frame parsed and copied the whole conversation, ten times a second even when
+    // nothing moved. Now an idle screen is not redrawn, a second frame over an unchanged
+    // conversation parses no markdown, and a streaming answer is parsed again only when it grew.
+    #[test]
+    fn an_idle_screen_is_not_redrawn_and_an_unchanged_conversation_is_not_parsed_again() {
+        use super::super::app::{Bg, Input, update};
+        let mut a = pi_app(false, 100);
+        a.chat = chat();
+        for i in 0..400 {
+            a.chat.items.push(Item::User(format!("pregunta {i}")));
+            a.chat.items.push(Item::Assistant {
+                text: format!("**respuesta** {i}\n\n- uno\n- dos\n\n```\ncódigo\n```"),
+                live: false,
+            });
+        }
+        let (a, _) = update(a, Input::Tick(60_000));
+        assert!(!a.animating(), "an idle chat needs no frame from the clock");
+        let draw = |a: &App| super::super::tests::screen_text(a, 100, 30);
+        draw(&a);
+        let parsed = a.chat.parsed.get();
+        assert_eq!(parsed, 400);
+        draw(&a);
+        assert_eq!(a.chat.parsed.get(), parsed, "the second frame parsed again");
+
+        // A streaming answer: parsed again only when its text changed.
+        let mut a = a;
+        a.chat.running = true;
+        assert!(a.animating(), "the spinner and the seconds move");
+        a.chat.on_event(&delta("hola"));
+        draw(&a);
+        draw(&a);
+        assert_eq!(a.chat.parsed.get(), parsed + 1);
+        a.chat.on_event(&delta(" mundo"));
+        draw(&a);
+        assert_eq!(a.chat.parsed.get(), parsed + 2);
+
+        // The quiet second of a question counts down on its own; once it passed, nothing moves.
+        a.chat.running = false;
+        let (a, _) = update(
+            a,
+            Input::Bg(Bg::ChatAsks(vec![("a1".into(), "«borrar» rm -r x".into())])),
+        );
+        assert!(a.animating());
+        let (a, _) = update(a, Input::Tick(61_000));
+        assert!(!a.animating());
+    }
+
+    // Only the rows in the window are built, and they are exactly the rows of the whole
+    // conversation there, at every scroll, the failure's lines at the end included.
+    #[test]
+    fn the_window_is_the_slice_of_the_whole_conversation_at_every_scroll() {
+        let mut a = pi_app(false, 100);
+        a.chat = chat();
+        for i in 0..6 {
+            a.chat
+                .items
+                .push(Item::User(format!("pregunta {i}\nen dos líneas")));
+            a.chat.items.push(tool_item(i));
+            a.chat.items.push(tool_item(i + 10));
+            a.chat.items.push(Item::Assistant {
+                text: format!("respuesta {i}\n\n- a\n- b"),
+                live: false,
+            });
+            a.chat.items.push(Item::Note(format!("nota {i}")));
+        }
+        let t = a.theme;
+        let tail = || vec![Line::from(""), Line::from("falló"), Line::from("fin")];
+        let text = |v: &[Line]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let (all, start, max) = conversation(&a, t, 60, tail(), 10_000);
+        assert_eq!((start, max), (0, 0));
+        for h in [1, 7, 20] {
+            for scroll in 0..all.len() {
+                a.chat.scroll = scroll;
+                let (rows, start, max) = conversation(&a, t, 60, tail(), h);
+                assert_eq!(max, all.len().saturating_sub(h));
+                let end = (start + h).min(all.len());
+                assert_eq!(
+                    text(&rows),
+                    text(&all[start..end]),
+                    "h {h}, scroll {scroll}"
+                );
+            }
+        }
+    }
+
+    fn tool_item(i: usize) -> Item {
+        Item::Tool {
+            id: format!("t{i}"),
+            name: "bash".into(),
+            summary: format!("ls {i}"),
+            reason: String::new(),
+            state: ToolState::Ok,
+            ms: Some(5),
+        }
+    }
+
+    // Review: with a box open (`/uso`, `/acciones`…) the composer kept the accent border and the
+    // terminal's cursor, as if typing went there.
+    #[test]
+    fn a_box_over_the_chat_takes_the_focus_from_the_composer() {
+        let mut app = pi_app(false, 100);
+        app.theme = Theme {
+            color: true,
+            unicode: true,
+            rgb: false,
+        };
+        let (x, y) = find(&app, 100, "Escribe un mensaje");
+        let look = |app: &App| {
+            let mut term =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+            term.draw(|f| super::super::app::draw(f, app)).unwrap();
+            let border = term.backend().buffer()[(x - 4, y)].style();
+            (
+                border,
+                format!("{:?}", term.backend()).contains("cursor: true"),
+            )
+        };
+        let (focused, cursor) = look(&app);
+        assert!(cursor);
+        app.modal = Some(super::super::commands::Modal::text("Uso", vec!["x".into()]));
+        let (with_box, cursor) = look(&app);
+        assert!(!cursor && with_box != focused, "{with_box:?}");
     }
 
     // `clio` opens on the chat alone: no sessions in sight, the composer with the keys and the

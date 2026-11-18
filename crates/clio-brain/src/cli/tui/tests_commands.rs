@@ -211,6 +211,47 @@ fn each_command_asks_for_its_own_work() {
     }
 }
 
+// Review: a word that is not a command ran the highlighted one with the typed arguments
+// (`/ hola⏎` saved the model «hola»). With arguments only a whole name or alias runs.
+#[test]
+fn a_word_with_arguments_runs_only_a_whole_command_name() {
+    let draft: fn() -> App = || {
+        let mut a = app();
+        a.use_pi();
+        a
+    };
+    for make in [open, draft] {
+        for typed in ["/ hola", "/m sonnet"] {
+            let (a, cmds) = run(make(), typed);
+            assert!(cmds.is_empty(), "{typed}: {cmds:?}");
+            assert_eq!(a.chat.input, typed);
+            let word = typed.split(' ').next().unwrap();
+            assert_eq!(
+                a.flash.as_deref(),
+                Some(format!("no existe el comando {word}").as_str())
+            );
+        }
+    }
+    // A prefix still completes with Tab.
+    let (a, _) = feed(open(), typed("/mod"));
+    let (a, _) = feed(a, vec![key(KeyCode::Tab)]);
+    assert!(a.chat.input.starts_with("/mod") && a.chat.input.ends_with(' '));
+}
+
+// Review: before the first message `/modelo <name>` saved any plausible name. Only one of the
+// catalog's for the active connector (or the one configured) is taken; nothing else is saved.
+#[test]
+fn a_model_not_on_the_list_is_refused_with_the_list_and_not_saved() {
+    let (_t, d) = dirs_with_config();
+    let before = std::fs::read_to_string(d.config_file()).unwrap();
+    let e = super::set_model(&d, None, "hola").unwrap_err();
+    assert!(e.contains("«hola»") && e.contains("tiene:"), "{e}");
+    assert_eq!(std::fs::read_to_string(d.config_file()).unwrap(), before);
+    let current = Config::load(&d).unwrap().model.model;
+    assert!(e.contains(&current), "{e}");
+    assert!(super::set_model(&d, None, &current).is_ok());
+}
+
 #[test]
 fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
     let (a, _) = run(open(), "/modelo");
@@ -248,6 +289,85 @@ fn a_choice_comes_back_into_the_menu_marked_and_enter_applies_it() {
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(cmds.is_empty());
     assert_eq!(a.flash.as_deref(), Some("sin llave: clio connect claude"));
+}
+
+// Review: a click on the «cargando…» row applied the first choice that came after the draw,
+// one the person never saw. A click counts only on the rows that were drawn.
+#[test]
+fn a_click_on_the_loading_row_never_picks_a_choice_that_came_later() {
+    let (a, _) = run(open(), "/model");
+    let s = screen_text(&a, 100, 30);
+    let y = u16::try_from(s.lines().position(|l| l.contains("cargando")).unwrap()).unwrap();
+    let click = || {
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 30,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    };
+    let items = vec![Choice {
+        value: "kimi-k3".into(),
+        label: "kimi-k3".into(),
+        blocked: None,
+        current: false,
+    }];
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::Choices(Run::Model, Ok(items))), click()],
+    );
+    assert!(cmds.is_empty(), "{cmds:?}");
+    // Once drawn, the same click picks it.
+    let s = screen_text(&a, 100, 30);
+    assert!(
+        s.lines().nth(usize::from(y)).unwrap().contains("kimi-k3"),
+        "{s}"
+    );
+    let (_, cmds) = feed(a, vec![click()]);
+    assert_eq!(cmds, vec![Cmd::SetModel("kimi-k3".into())]);
+}
+
+// Review: `/acciones` showed raw UTC stamps. It shows the local `HH:MM:SS`, the tool and the
+// outcome in columns, and the command in the code color with its wrapped rows under it.
+#[test]
+fn the_actions_box_shows_local_time_columns_and_the_command_in_code_color() {
+    let log = vec![
+        json!({"at_ms": 1_795_016_000_000_i64 + 13_000, "tool": "exec", "outcome": "run",
+            "what": format!("sudo du -sh /var/{}", "muy-largo/".repeat(12)), "exit_code": 0}),
+        json!({"at_ms": 1_795_016_060_000_i64, "tool": "fs_write", "outcome": "aside",
+            "what": "/etc/hosts"}),
+    ];
+    // 1 795 016 000 is 2026-11-18 15:33:20 UTC; five hours behind it.
+    let m = super::actions_box(&log, -5 * 3600);
+    assert!(
+        m.lines[0].starts_with("10:33:33  exec      run    sudo du"),
+        "{:?}",
+        m.lines
+    );
+    assert!(
+        m.lines[1].starts_with("10:34:20  fs_write  aside  /etc/hosts"),
+        "{:?}",
+        m.lines
+    );
+    let mut a = open();
+    a.theme = super::theme::Theme {
+        color: true,
+        unicode: true,
+        rgb: false,
+    };
+    a.modal = Some(m);
+    let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    term.draw(|f| super::app::draw(f, &a)).unwrap();
+    let s = screen_text(&a, 100, 30);
+    assert!(!s.contains("UTC"), "{s}");
+    let lines: Vec<&str> = s.lines().collect();
+    let y = lines.iter().position(|l| l.contains("sudo du")).unwrap();
+    // The wrapped row starts where the command does, and the command is in the code color.
+    let col = |l: &str, w: &str| l[..l.find(w).unwrap()].chars().count();
+    let first = col(lines[y], "sudo");
+    assert_eq!(col(lines[y + 1], "/var/muy-largo"), first, "{s}");
+    let cell = &term.backend().buffer()[(u16::try_from(first).unwrap(), u16::try_from(y).unwrap())];
+    assert_eq!(cell.style().fg, a.theme.code().fg, "{s}");
 }
 
 #[test]
@@ -362,6 +482,29 @@ fn copiar_puts_the_last_answer_on_the_clipboard() {
     assert_eq!(a.flash.as_deref(), Some("copiado"));
 }
 
+// Review: `/copiar` gave the clipboard the model's raw bytes. It copies what was shown: no
+// escape (a bracketed-paste end), no C1 control, no bidi or zero-width character.
+#[test]
+fn copiar_copies_the_answer_as_shown_not_its_raw_bytes() {
+    let mut a = open();
+    a.chat.items.push(Item::Assistant {
+        text: "ok\u{1b}[201~ rm -rf ~\u{9b}2J a\u{202e}b\u{200b}c".into(),
+        live: false,
+    });
+    let (_, cmds) = run(a, "/copy");
+    let [Cmd::Clipboard(text)] = cmds.as_slice() else {
+        panic!("{cmds:?}");
+    };
+    assert!(
+        !text.contains(['\u{1b}', '\u{9b}', '\u{202e}', '\u{200b}']),
+        "{text:?}"
+    );
+    assert!(
+        text.starts_with("ok rm -rf ~") && !text.contains("[201~"),
+        "{text:?}"
+    );
+}
+
 // Whatever bytes the answer holds, the terminal receives one OSC 52 sequence whose payload is
 // pure base64: no escape, bell or newline of the text can end it early or start another.
 #[test]
@@ -382,6 +525,33 @@ fn osc52_carries_any_text_as_pure_base64_and_is_capped() {
         );
         assert!(payload.len() <= (64 * 1024_usize).div_ceil(3) * 4);
     }
+}
+
+// Review: a FIFO named `*.md` in the commands folder hung the loader (and a link could read a
+// file outside it). Only regular files are read; the rest is left out, at once.
+#[test]
+fn a_fifo_or_a_link_in_the_commands_folder_is_left_out_without_waiting() {
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path().join("commands");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("bueno.md"), "hola").unwrap();
+    std::fs::write(t.path().join("fuera.md"), "secreto").unwrap();
+    std::os::unix::fs::symlink(t.path().join("fuera.md"), d.join("enlace.md")).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .arg(d.join("tubo.md"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(load_custom(&d));
+    });
+    let (cmds, left) = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the loader waited on the FIFO");
+    let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["bueno"]);
+    assert_eq!(left, vec!["enlace.md", "tubo.md"]);
 }
 
 #[test]

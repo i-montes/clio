@@ -1718,6 +1718,66 @@ fn the_tail_of_what_was_typed_never_answers_a_set_aside_question() {
     );
 }
 
+// Review: the quiet second counted only from the last key, so a question that opened during a
+// pause took `s⏎` typed as a chat message before the person ever saw it. It also waits a second
+// from when it came on screen; a queued one, from when it is shown, not when it was queued.
+#[test]
+fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
+    let ask = |id: &str| Input::Bg(Bg::ChatAsks(vec![(id.into(), "«borrar» rm -r x".into())]));
+    let mut inputs = typed_at(1_000, "x");
+    inputs.extend([Input::Tick(3_500), ask("a1")]);
+    inputs.extend([
+        Input::Tick(3_501),
+        ch('s'),
+        Input::Tick(3_502),
+        key(KeyCode::Enter),
+    ]);
+    let (a, cmds) = feed(host_chat(), inputs);
+    assert!(cmds.is_empty(), "{cmds:?}");
+    assert!(!a.confirm.as_ref().unwrap().armed);
+    assert!(screen_text(&a, 100, 30).contains("espera un segundo"));
+    let (_, cmds) = feed(a, vec![Input::Tick(4_502), ch('s'), key(KeyCode::Enter)]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "a1".into(),
+            yes: true
+        }]
+    );
+
+    // Queued behind another dialog at 1 000, shown at 5 000 when that one closes.
+    let mut a = host_chat();
+    a.screen = Screen::Sessions;
+    a.sessions.sel = 2;
+    let (a, _) = feed(
+        a,
+        vec![
+            Input::Tick(1_000),
+            ch('x'),
+            Input::Bg(Bg::SessionPlan(Ok((
+                "/s/2_otra.jsonl".into(),
+                "otra".into(),
+                "solo la conversación".into(),
+            )))),
+            ask("b2"),
+            Input::Tick(5_000),
+            ch('n'),
+        ],
+    );
+    let c = a.confirm.as_ref().unwrap();
+    assert_eq!((c.id.as_str(), c.shown_ms), ("b2", 5_000));
+    let (a, _) = feed(a, vec![Input::Tick(5_600), ch('s')]);
+    assert!(!a.confirm.as_ref().unwrap().armed);
+    let (_, cmds) = feed(a, vec![Input::Tick(6_700), ch('s'), key(KeyCode::Enter)]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "b2".into(),
+            yes: true
+        }]
+    );
+}
+
 // Review of the sessions bar: with a turn running, Tab and `x` in the list asked to delete another
 // session, its question replaced the one of a set-aside action, and `s` deleted the session.
 #[test]
