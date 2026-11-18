@@ -228,7 +228,10 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res
     // 100 ms only while something on screen moves or counts (`App::animating`).
     let (mut dirty, mut drawn) = (true, Instant::now());
     while !app.quit && ended.load(Ordering::SeqCst) == 0 && !gone.load(Ordering::SeqCst) {
-        if dirty || (app.animating() && drawn.elapsed() >= Duration::from_millis(100)) {
+        if dirty
+            || (app.animating() && drawn.elapsed() >= Duration::from_millis(100))
+            || app.stale_after().is_some_and(|t| drawn.elapsed() >= t)
+        {
             match term.draw(|f| draw(f, &app)) {
                 Ok(frame) => {
                     if let Some(path) = &dump {

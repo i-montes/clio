@@ -110,6 +110,8 @@ pub enum ToolState {
     Denied,
     /// Host mode: set aside for the person's approval (`apartado <id>: …`).
     SetAside,
+    /// Still running when its turn settled or was aborted: it will not end on its own.
+    Stopped,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -404,6 +406,17 @@ impl Chat {
         }
     }
 
+    /// The turn is over: a tool still drawn as running did not end, it was stopped.
+    pub fn stop_tools(&mut self) {
+        for i in &mut self.items {
+            if let Item::Tool { state, .. } = i
+                && *state == ToolState::Running
+            {
+                *state = ToolState::Stopped;
+            }
+        }
+    }
+
     pub fn on_event(&mut self, e: &Event) {
         let (n0, left) = (self.items.len(), MAX_HELD.saturating_sub(self.held));
         let note = |s: &str| clip_to(s, MAX_NOTE.min(left));
@@ -414,7 +427,10 @@ impl Chat {
         }
         match e {
             Event::AgentStart => self.running = true,
-            Event::AgentSettled { .. } => self.running = false,
+            Event::AgentSettled { .. } => {
+                self.running = false;
+                self.stop_tools();
+            }
             Event::TurnEnd => self.turns += 1,
             Event::MessageStart(m) if m.role == "assistant" => self.streamed = false,
             Event::MessageUpdate {
@@ -1054,6 +1070,7 @@ fn tool_tail(t: Theme, state: ToolState, ms: Option<u64>) -> [String; 3] {
         ToolState::Failed => "falló",
         ToolState::Denied => "negado",
         ToolState::SetAside => "apartado",
+        ToolState::Stopped => "stopped",
     };
     let dur = match ms {
         Some(ms) if ms >= 10_000 => usage::duration(ms / 1000),
@@ -1086,6 +1103,7 @@ fn tool_line(
         ToolState::Ok => (t.check(), t.ok()),
         ToolState::Failed | ToolState::Denied => (t.cross(), t.fail()),
         ToolState::SetAside => (t.aside(), t.warn()),
+        ToolState::Stopped => (t.stopped(), t.warn()),
     };
     let [word, sep, dur] = tool_tail(t, state, ms);
     let own_tail = text::width(&word) + text::width(&sep) + text::width(&dur);
@@ -1931,6 +1949,62 @@ mod tests {
         assert!(cmds.is_empty() && left.chat.session_id == "sid", "{cmds:?}");
         let (quit, _) = press(app, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(quit.quit);
+    }
+
+    // A tool still running when the turn settles or is aborted is drawn as stopped, never as
+    // spinning on.
+    #[test]
+    fn a_tool_left_running_when_the_turn_ends_is_drawn_as_stopped() {
+        let mut app = open_chat();
+        for id in ["t1", "t2"] {
+            app.chat.on_event(&Event::ToolStart {
+                id: id.into(),
+                name: "bash".into(),
+                args: json!({"command": "sleep 100"}),
+            });
+        }
+        if let Some(Item::Tool { state, .. }) = app.chat.items.last_mut() {
+            *state = ToolState::Ok;
+        }
+        let (app, _) = super::super::app::update(
+            app,
+            super::super::app::Input::Bg(super::super::app::Bg::ChatSettled {
+                result: Err("aborted".into()),
+                refresh: None,
+            }),
+        );
+        let states: Vec<ToolState> = app
+            .chat
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, [ToolState::Stopped, ToolState::Ok]);
+        let ascii = Theme {
+            color: false,
+            unicode: false,
+            rgb: false,
+        };
+        assert_eq!(tool_tail(ascii, ToolState::Stopped, None)[0], "stopped");
+        assert_eq!(ascii.stopped(), "#");
+        // The pi event does the same.
+        let mut c = Chat::opening(1, 0);
+        c.on_event(&Event::ToolStart {
+            id: "t".into(),
+            name: "read".into(),
+            args: json!({"path": "a"}),
+        });
+        c.on_event(&Event::AgentSettled { aborted: true });
+        assert!(matches!(
+            c.items[..],
+            [Item::Tool {
+                state: ToolState::Stopped,
+                ..
+            }]
+        ));
     }
 
     // S-47: a run cut by its budget says which cap, in the chat; a run that was not cut says nothing.

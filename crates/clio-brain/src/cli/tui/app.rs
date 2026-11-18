@@ -541,6 +541,12 @@ impl App {
         waiting || chat || live
     }
 
+    /// How long a frame may stay on screen with nothing coming in: the sessions drawer shows ages
+    /// («hace 3 min») that go stale without a redraw. `None`: until something comes in.
+    pub fn stale_after(&self) -> Option<std::time::Duration> {
+        (self.screen == Screen::Sessions).then(|| std::time::Duration::from_secs(30))
+    }
+
     /// Whether the chat cannot be left now (quit, another session, a new one, a delete); when
     /// it cannot, the flash says why.
     pub fn busy(&mut self) -> bool {
@@ -1052,6 +1058,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
             app.chat.aborting = false;
+            app.chat.stop_tools();
             match result {
                 Err(e) => app.chat.items.push(super::chat::Item::Error(e)),
                 Ok(summary) => {

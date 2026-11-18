@@ -1963,3 +1963,17 @@ fn pointer_moves_are_not_inputs() {
         assert!(super::input_of(m(k)).is_some(), "{k:?}");
     }
 }
+
+// The sessions drawer shows ages that go stale: it is redrawn at least every 30 s while open;
+// the chat waits for something to come in.
+#[test]
+fn the_sessions_drawer_is_redrawn_while_it_is_open() {
+    let mut a = host_chat();
+    a.screen = Screen::Sessions;
+    assert!(
+        a.stale_after()
+            .is_some_and(|t| t <= std::time::Duration::from_secs(30))
+    );
+    a.screen = Screen::Chat;
+    assert_eq!(a.stale_after(), None);
+}

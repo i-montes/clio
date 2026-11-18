@@ -169,6 +169,10 @@ impl Theme {
     pub fn aside(self) -> &'static str {
         self.pick("◇", "?")
     }
+    /// A tool that was still running when its turn ended.
+    pub fn stopped(self) -> &'static str {
+        self.pick("■", "#")
+    }
     pub fn cross(self) -> &'static str {
         self.pick("✗", "x")
     }
@@ -311,7 +315,13 @@ mod tests {
     #[test]
     fn every_new_symbol_has_an_ascii_stand_in() {
         let t = Theme::decide(false, false, "");
-        for sym in [t.bar_left(), t.bullet(), t.prompt(), t.open_mark()] {
+        for sym in [
+            t.bar_left(),
+            t.bullet(),
+            t.prompt(),
+            t.open_mark(),
+            t.stopped(),
+        ] {
             assert!(sym.is_ascii(), "{sym:?}");
         }
         let b = t.border();
