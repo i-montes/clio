@@ -17,7 +17,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::ask::Class;
-use crate::host::{Host, now_ms};
+use crate::host::{Host, MAX_TIMEOUT_SECS, now_ms};
 use crate::{DecisionOut, Request, Response, ToolHost, lock};
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
@@ -122,8 +122,15 @@ pub(crate) fn aside_text(p: &Pending) -> String {
         .reason
         .as_deref()
         .map_or_else(String::new, |r| format!(" (reason: {r})"));
+    let limit = if unlimited(p) {
+        format!(
+            " If the person approves it, it runs with a time limit of {MAX_TIMEOUT_SECS} s, since it asked for none."
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "apartado {}: «{}» necesita el visto bueno de la persona{why}. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.",
+        "apartado {}: «{}» necesita el visto bueno de la persona{why}. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.{limit}",
         p.id, p.class
     )
 }
@@ -340,6 +347,23 @@ fn destination(s: &str) -> Option<clio_vault::Dest> {
     (tool_ok && host_ok).then(|| clio_vault::Dest::new(tool, &host))
 }
 
+/// A command that asked for no time limit.
+fn unlimited(p: &Pending) -> bool {
+    p.tool == "exec" && !p.args.get("timeout").is_some_and(Value::is_u64)
+}
+
+/// What an approved action runs with: as saved, but a command with no limit gets the longest,
+/// since nobody in the chat can stop it.
+fn run_args(p: &Pending) -> Value {
+    let mut args = p.args.clone();
+    if unlimited(p)
+        && let Some(a) = args.as_object_mut()
+    {
+        a.insert("timeout".into(), Value::from(MAX_TIMEOUT_SECS));
+    }
+    args
+}
+
 fn tail(s: &str) -> String {
     let mut i = s.len().saturating_sub(TAIL_BYTES);
     while !s.is_char_boundary(i) {
@@ -451,7 +475,7 @@ impl ToolHost {
         let req = Request {
             id: id.into(),
             tool: p.tool.clone(),
-            args: p.args.clone(),
+            args: run_args(&p),
             session: p.session.clone(),
             call_id: "approve".into(),
             tainted: false,
@@ -591,5 +615,37 @@ impl ToolHost {
             tainted,
             external: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_approved_command_without_a_limit_gets_the_longest_and_the_model_is_told() {
+        let mut p = Pending {
+            id: "ab12".into(),
+            class: Class::Borrar,
+            tool: "exec".into(),
+            args: json!({"command": "rm -rf ~/x"}),
+            hash: String::new(),
+            what: String::new(),
+            run: "r".into(),
+            session: "s".into(),
+            created_ms: 0,
+            expires_ms: 1,
+            ask: true,
+            state: State::Waiting,
+            reason: None,
+        };
+        assert_eq!(run_args(&p)["timeout"], MAX_TIMEOUT_SECS);
+        assert!(aside_text(&p).contains("time limit of 3600 s"));
+        p.args = json!({"command": "rm -rf ~/x", "timeout": 20});
+        assert_eq!(run_args(&p)["timeout"], 20);
+        assert!(!aside_text(&p).contains("time limit"));
+        p.tool = "fs_write".into();
+        p.args = json!({"path": "/x", "content": ""});
+        assert!(run_args(&p).get("timeout").is_none());
     }
 }
