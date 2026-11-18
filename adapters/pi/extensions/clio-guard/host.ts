@@ -19,7 +19,8 @@ const MAX_RESPONSE = 8 * 1024 * 1024;
 export function callHost(
 	socket: string,
 	request: Record<string, unknown>,
-	timeoutMs: number,
+	/** `undefined`: no time limit (a host command the model gave none); an abort still ends it. */
+	timeoutMs: number | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<HostResponse> {
 	return new Promise((resolve, reject) => {
@@ -39,7 +40,7 @@ export function callHost(
 		};
 		const unknown = (why: string) =>
 			new Error(`the tool host ${why}; the call may or may not have run, check before repeating it`);
-		const timer = setTimeout(() => finish(unknown(`did not answer in ${timeoutMs} ms`)), timeoutMs);
+		const timer = timeoutMs === undefined ? undefined : setTimeout(() => finish(unknown(`did not answer in ${timeoutMs} ms`)), timeoutMs);
 		const onAbort = () => finish(new Error("the call was aborted"));
 		signal?.addEventListener("abort", onAbort, { once: true });
 		conn.on("connect", () => {

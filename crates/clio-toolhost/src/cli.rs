@@ -136,11 +136,13 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
         Ok(()) => eprintln!("clio-toolhost: exec ({where_} passed its self-test) is available"),
         Err(why) => eprintln!("clio-toolhost: exec (bash) is NOT offered: {why}"),
     }
-    let server = Server::start(host, &dir)?;
+    let server = Server::start(host.clone(), &dir)?;
     println!("READY {}", server.path().display());
     // Runs until the parent closes our stdin or dies.
     let mut sink = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut sink);
+    // A command still running is stopped, and its log line written, before the process goes.
+    host.stop(std::time::Duration::from_secs(2));
     drop(server);
     Ok(())
 }

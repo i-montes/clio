@@ -943,6 +943,10 @@ impl RpcClient {
         let start = Instant::now();
         let mut last = start;
         let mut abort_sent: Option<Instant> = None;
+        // Tools running now, and since when: a host command may run as long as it needs (the
+        // model gave it no limit), silently; the person's abort, not these deadlines, stops it.
+        // The run's deadline counts only the time outside tools.
+        let (mut running, mut tools_since, mut in_tools) = (0usize, start, Duration::ZERO);
         loop {
             // A cap that moves by itself (time) is checked on every pass, events or not.
             if let Some(s) = guard.as_deref_mut().and_then(|g| g.tick()) {
@@ -961,8 +965,11 @@ impl RpcClient {
                     None => PiError::Cancelled,
                 });
             }
-            if start.elapsed() > self.timeouts.run || last.elapsed() > self.timeouts.silence {
-                let (what, secs) = if start.elapsed() > self.timeouts.run {
+            let outside = start.elapsed().saturating_sub(in_tools);
+            if running == 0
+                && (outside > self.timeouts.run || last.elapsed() > self.timeouts.silence)
+            {
+                let (what, secs) = if outside > self.timeouts.run {
                     ("la corrida completa", self.timeouts.run.as_secs())
                 } else {
                     ("silencio sin eventos", self.timeouts.silence.as_secs())
@@ -992,7 +999,19 @@ impl RpcClient {
                         }
                     }
                 }
-                Event::ToolStart { .. } => sum.tool_calls += 1,
+                Event::ToolStart { .. } => {
+                    sum.tool_calls += 1;
+                    if running == 0 {
+                        tools_since = Instant::now();
+                    }
+                    running += 1;
+                }
+                Event::ToolEnd { .. } if running > 0 => {
+                    running -= 1;
+                    if running == 0 {
+                        in_tools += tools_since.elapsed();
+                    }
+                }
                 _ => {}
             }
             if let Some(s) = guard.as_deref_mut().and_then(|g| g.observe(&ev)) {

@@ -2,6 +2,7 @@
 // tests/pi_rpc.rs. The prompt text picks the behavior:
 //   "ok"      message and tool events, a U+2028 inside text, an unknown event, an extension dialog
 //   "slow"    answers the prompt, then stays silent for 5 s
+//   "longtool" starts a bash tool that stays silent for 1.5 s, then ends it and settles
 //   "hang"    never settles by itself; `abort` settles it with aborted:true
 //   "fail"    the prompt response is success:false
 //   "crash"   exits with code 3 after writing escape sequences to stderr
@@ -87,6 +88,14 @@ function prompt(id, raw) {
     });
   }
   if (msg === "slow") { setTimeout(() => settle(false), 5000); return; }
+  if (msg === "longtool") {
+    out({ type: "tool_execution_start", toolCallId: "l1", toolName: "bash", args: { command: "du -sh /" } });
+    setTimeout(() => {
+      out({ type: "tool_execution_end", toolCallId: "l1", toolName: "bash", result: { content: [] }, isError: false, durationMs: 1500 });
+      settle(false);
+    }, 1500);
+    return;
+  }
   if (msg === "flood") process.stderr.write("x".repeat(200000));
   if (msg === "evil") out({ type: "tool_execution_start", toolCallId: "c9", toolName: "bash", args: { command: "id" } });
   out({ type: "message_start", message: { role: "assistant", content: [] } });

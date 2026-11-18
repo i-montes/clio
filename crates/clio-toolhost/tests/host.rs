@@ -985,3 +985,107 @@ fn the_host_mode_cases_are_active_and_refused() {
     assert!(report.ok(), "{}", report.line());
     eprintln!("{}", report.line());
 }
+
+// ---------------------------------------------------------------------------------------------
+// The model decides the time limit; without one a command runs until it ends or is stopped
+// ---------------------------------------------------------------------------------------------
+
+fn procs_with(marker: &str) -> usize {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            std::fs::read(e.path().join("cmdline"))
+                .is_ok_and(|c| String::from_utf8_lossy(&c).contains(marker))
+        })
+        .count()
+}
+
+fn wait_for(what: &str, f: impl Fn() -> bool) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(f(), "{what}");
+}
+
+#[test]
+fn a_command_without_a_time_limit_has_none_and_one_with_it_is_cut() {
+    let e = env();
+    if !exec_ok(&e) {
+        return;
+    }
+    // Past the two minutes of before would take too long here: the answer says it has no limit.
+    let r = call(&e, "s", "exec", json!({"command": "echo ok"}));
+    assert!(r.ok && r.data["timeout_secs"].is_null(), "{r:?}");
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": "sleep 30", "timeout": 1}),
+    );
+    assert_eq!(r.data["timed_out"], true, "{r:?}");
+    assert_eq!(r.data["timeout_secs"], 1, "{r:?}");
+}
+
+// The person aborts (Pi drops the connection) while a command with no limit runs: it is stopped,
+// everything it started dies, and the log's closing line says so.
+#[test]
+fn a_running_command_stops_when_its_caller_goes_away() {
+    use std::io::Write;
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let host = Arc::new(ToolHost::new(cfg(&r)).unwrap());
+    if let Err(why) = host.exec_available() {
+        eprintln!("SKIPPED (the host launcher cannot run here, exec was not tested): {why}");
+        return;
+    }
+    let dir = r.join("sock");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = clio_toolhost::Server::start(host.clone(), &dir).unwrap();
+    let m = format!("clio-stop-test-{}", std::process::id());
+    let mut c = std::os::unix::net::UnixStream::connect(server.path()).unwrap();
+    let req = json!({"id": "i1", "tool": "exec", "args": {"command": format!("(sleep 300; echo {m}) & sleep 300; echo {m}")}, "session": "s", "call_id": "c1"});
+    writeln!(c, "{req}").unwrap();
+    wait_for("the command started", || procs_with(&m) > 0);
+    drop(c);
+    wait_for("everything it started is gone", || procs_with(&m) == 0);
+    let state = r.join("clio/data/host/actions.jsonl");
+    wait_for("the log's closing line says stopped", || {
+        std::fs::read_to_string(&state)
+            .is_ok_and(|t| t.lines().last().is_some_and(|l| l.contains("\"stopped\"")))
+    });
+}
+
+// Quitting, a signal or the end of the session stop the service: the command it runs stops too.
+#[test]
+fn stopping_the_service_stops_the_command_it_runs() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let host = Arc::new(ToolHost::new(cfg(&r)).unwrap());
+    if let Err(why) = host.exec_available() {
+        eprintln!("SKIPPED (the host launcher cannot run here, exec was not tested): {why}");
+        return;
+    }
+    let m = format!("clio-quit-test-{}", std::process::id());
+    let h = host.clone();
+    let cmd = format!("sleep 300; echo {m}");
+    let run = std::thread::spawn(move || {
+        h.handle(Request {
+            id: "i1".into(),
+            tool: "exec".into(),
+            args: json!({ "command": cmd }),
+            session: "s".into(),
+            call_id: "c1".into(),
+            tainted: false,
+        })
+    });
+    wait_for("the command started", || procs_with(&m) > 0);
+    host.stop(std::time::Duration::from_secs(5));
+    let resp = run.join().unwrap();
+    assert_eq!(resp.data["stopped"], true, "{resp:?}");
+    assert_eq!(procs_with(&m), 0);
+    let log = std::fs::read_to_string(r.join("clio/data/host/actions.jsonl")).unwrap();
+    assert!(log.lines().last().unwrap().contains("\"stopped\""), "{log}");
+}

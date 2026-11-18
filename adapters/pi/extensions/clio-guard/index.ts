@@ -102,8 +102,14 @@ const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
 const HOST_BASH_RULE =
-	"bash runs on the person's machine, in the home folder, with a time limit; it has no network unless you set `network: true`, which marks the session. Clio's own folders are not visible.";
+	"bash runs on the person's machine, in the home folder, with the time limit you give in `timeout` (none if you give none); it has no network unless you set `network: true`, which marks the session. Clio's own folders are not visible.";
 const NETWORK = { type: "boolean", description: "la orden necesita red; marca la sesión" };
+// Host mode: the model decides the time limit, and none means none.
+const HOST_TIMEOUT = {
+	type: "number",
+	description:
+		"Time limit in seconds. Give it when you expect the command to end by then; it is killed past it. Leave it out for long jobs (a build, du over big folders): the command then runs with no time limit until it ends or the person stops it. Never leave a server or a watcher running in the foreground.",
+};
 
 /** The place for the memory layer (task: memory connected to Pi). Not implemented here. */
 function memoryLayer(): string | undefined {
@@ -152,7 +158,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		args: Record<string, unknown>,
 		callId: string,
 		signal: AbortSignal | undefined,
-		timeoutMs = 15_000,
+		timeoutMs: number | undefined = 15_000,
 	): Promise<HostResponse> {
 		const socket = process.env.CLIO_TOOLHOST_SOCKET;
 		if (!socket) throw new Error("the tool host is not configured: nothing was run");
@@ -212,7 +218,10 @@ export default function clioGuard(pi: ExtensionAPI) {
 			const secs = o.timeout && o.timeout > 0 ? Math.ceil(o.timeout) : undefined;
 			const args: Record<string, unknown> = secs ? { command, timeout: secs } : { command };
 			if (network) args.network = true;
-			const res = await host("exec", args, id, o.signal, ((secs ?? 120) + 30) * 1000);
+			// Host mode without a limit: none here either; an abort still stops it (the host sees the
+			// connection close and stops the command).
+			const wait = secs ? (secs + 30) * 1000 : HOST ? undefined : 150_000;
+			const res = await host("exec", args, id, o.signal, wait);
 			if (res.content) o.onData(Buffer.from(res.content));
 			if (res.data.timed_out === true) throw new Error(`timeout:${o.timeout}`);
 			const code = res.data.exit_code as number | null;
@@ -278,7 +287,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 	});
 	register({
 		...bash,
-		...(HOST ? { parameters: { ...bash.parameters, properties: { ...bash.parameters.properties, network: NETWORK } } } : {}),
+		...(HOST ? { parameters: { ...bash.parameters, properties: { ...bash.parameters.properties, timeout: HOST_TIMEOUT, network: NETWORK } } } : {}),
 		promptGuidelines: rule(bash, `bash: ${HOST ? HOST_BASH_RULE : BASH_RULE} ${DATA_RULE}`),
 		execute: (id: string, params: any, signal: any, onUpdate: any, ctx: any) => {
 			// Pi's own bash does not know `network`: it goes to the host, not to Pi.

@@ -139,6 +139,24 @@ fn every_wait_has_a_deadline() {
     assert!(t.elapsed() < Duration::from_secs(4));
 }
 
+// A tool may run longer than the run's deadlines, silently (a host command without a time
+// limit): the person stops it, not these clocks. Once it ends the deadlines count again.
+#[test]
+fn a_running_tool_is_not_cut_by_the_silence_or_run_deadlines() {
+    if need("a_running_tool", false).is_none() {
+        return;
+    }
+    let mut c = fake(None);
+    c.timeouts = Timeouts {
+        request: Duration::from_secs(5),
+        silence: Duration::from_millis(300),
+        run: Duration::from_millis(600),
+        grace: Duration::from_millis(300),
+    };
+    let r = run(&c, "longtool").0.unwrap();
+    assert!(!r.aborted && r.tool_calls == 1, "{r:?}");
+}
+
 #[test]
 fn cancel_sends_abort_and_the_run_ends_aborted() {
     if need("cancel", false).is_none() {

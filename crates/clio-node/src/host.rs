@@ -52,7 +52,8 @@ pub struct HostJob {
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub network: bool,
-    pub timeout: Duration,
+    /// `None`: no time limit; it runs until it ends or is stopped (`run_until`).
+    pub timeout: Option<Duration>,
     /// Bytes kept per stream (the tail).
     pub max_output: usize,
     /// Clio's folders: shown empty and read-only. Absolute; one that does not exist is skipped.
@@ -258,13 +259,15 @@ impl HostJail {
                     format!("--uid={}", self.uid),
                     format!("--gid={}", self.gid),
                     format!("--working-directory={cwd}"),
-                    // A backstop past our own deadline (which kills first and reports it), for
-                    // when this process dies and nobody stops the unit.
-                    "-p".into(),
-                    format!("RuntimeMaxSec={}", job.timeout.as_secs() + 10),
                     "-p".into(),
                     "KillMode=control-group".into(),
                 ]);
+                // A backstop past our own deadline (which kills first and reports it), for when
+                // this process dies and nobody stops the unit. No limit asked: none here either;
+                // whoever started it stops its units (`stop_units_of`).
+                if let Some(t) = job.timeout {
+                    a.extend(["-p".into(), format!("RuntimeMaxSec={}", t.as_secs() + 10)]);
+                }
                 if !job.network {
                     a.extend(["-p".into(), "PrivateNetwork=yes".into()]);
                 }
@@ -285,6 +288,16 @@ impl HostJail {
     /// Runs the job and waits for it. `Err` means the launcher could not be built or started;
     /// a command that fails or is killed is an `Ok` with its outcome.
     pub fn run(&self, job: &HostJob) -> Result<JailOutput, String> {
+        self.run_until(job, &|| false)
+    }
+
+    /// `run`, but stopped as soon as `cancel` says so (asked every 10 ms): the process group is
+    /// killed and, with `Systemd`, the unit stopped. The output then says `stopped`.
+    pub fn run_until(
+        &self,
+        job: &HostJob,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<JailOutput, String> {
         let unit = unit_name();
         let (program, args) = self.build(job, &unit)?;
         // Killing the `sudo` client does not stop the unit: systemd has to.
@@ -306,6 +319,7 @@ impl HostJail {
             job.max_output,
             self.kill.as_deref(),
             (!stop.is_empty()).then_some(&stop[..]),
+            cancel,
         )
     }
 
@@ -348,7 +362,7 @@ impl HostJail {
                 cwd: scratch.to_path_buf(),
                 home: scratch.to_path_buf(),
                 network,
-                timeout: Duration::from_secs(20),
+                timeout: Some(Duration::from_secs(20)),
                 max_output: 4096,
                 masks: vec![mask.clone()],
             })?;

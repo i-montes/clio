@@ -388,6 +388,7 @@ impl ToolHost {
             format!("approve:{id}"),
             "host/approved",
             real.as_deref(),
+            &|| false,
         );
         // It did not run (its line before could not be logged): it still waits.
         let (_, content, data, _) = ran.inspect_err(|_| {

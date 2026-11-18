@@ -87,6 +87,8 @@ pub struct JailOutput {
     pub timed_out: bool,
     /// Stopped because it wrote far more than `max_output`.
     pub flooded: bool,
+    /// Stopped because the caller asked (the person aborted, the session ended).
+    pub stopped: bool,
     pub stdout: String,
     pub stderr: String,
     /// Some output was dropped (only the tail is kept).
@@ -401,18 +403,28 @@ impl Jail {
         let args = self.bwrap_args(job)?;
         let mut cmd = Command::new(&self.bwrap);
         cmd.args(&args);
-        run_command(cmd, lim.timeout, lim.max_output, self.kill.as_deref(), None)
+        run_command(
+            cmd,
+            Some(lim.timeout),
+            lim.max_output,
+            self.kill.as_deref(),
+            None,
+            &|| false,
+        )
     }
 }
 
 /// Runs `cmd` (its program and arguments already set) and waits for it, keeping the tails of
 /// its output. `Err` means it could not start; a command that fails or is killed is an `Ok`.
+/// Runs `cmd` to its end, or until `timeout` (none: no limit), a flood of output, or `cancel`
+/// says so (asked every 10 ms); then kills everything it started.
 pub(crate) fn run_command(
     mut cmd: Command,
-    timeout: Duration,
+    timeout: Option<Duration>,
     max_output: usize,
     kill: Option<&Path>,
     stop: Option<&[String]>,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<JailOutput, String> {
     let program = PathBuf::from(cmd.get_program());
     cmd.env_clear()
@@ -466,17 +478,19 @@ pub(crate) fn run_command(
             None => tail.done.store(true, Ordering::SeqCst),
         }
     }
-    let (mut timed_out, mut flooded) = (false, false);
+    let (mut timed_out, mut flooded, mut stopped) = (false, false, false);
     let status = loop {
         if let Some(s) = reaper.child.try_wait().map_err(|e| e.to_string())? {
             break s;
         }
-        if started.elapsed() >= timeout {
+        if timeout.is_some_and(|t| started.elapsed() >= t) {
             timed_out = true;
         } else if over.load(Ordering::SeqCst) {
             flooded = true;
+        } else if cancel() {
+            stopped = true;
         }
-        if timed_out || flooded {
+        if timed_out || flooded || stopped {
             reaper.kill_all();
             break reaper.child.wait().map_err(|e| e.to_string())?;
         }
@@ -501,6 +515,7 @@ pub(crate) fn run_command(
         signal: status.signal(),
         timed_out,
         flooded,
+        stopped,
         stdout: text(&so),
         stderr: text(&se),
         truncated,

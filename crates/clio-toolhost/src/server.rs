@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -94,34 +94,63 @@ fn serve(host: &ToolHost, conn: UnixStream) {
     {
         return;
     }
-    let Ok(mut out) = conn.try_clone() else {
+    let (Ok(mut out), Ok(probe)) = (conn.try_clone(), conn.try_clone()) else {
         return;
     };
     let mut input = BufReader::new(conn);
+    // One request at a time: what the client sends while one runs is read here, at most one
+    // byte, and given back to the next request.
+    let early: Mutex<Vec<u8>> = Mutex::default();
     loop {
-        let mut line = String::new();
+        let mut line = std::mem::take(&mut *early.lock().unwrap_or_else(PoisonError::into_inner));
         let n = match input
             .by_ref()
             .take(MAX_REQUEST_BYTES as u64 + 1)
-            .read_line(&mut line)
+            .read_until(b'\n', &mut line)
         {
             Ok(n) => n,
             Err(_) => return,
         };
-        if n == 0 {
+        if n == 0 && line.is_empty() {
             return;
         }
-        let reply = if !line.ends_with('\n') {
-            // Too long (or cut by the end of the stream): refuse and close.
-            let r = host.handle_line("{");
-            let _ = writeln!(out, "{r}");
-            return;
-        } else {
-            host.handle_line(line.trim_end())
+        let reply = match String::from_utf8(line) {
+            Ok(l) if l.ends_with('\n') => {
+                host.handle_line_until(l.trim_end(), &|| client_gone(&probe, &early))
+            }
+            // Too long, cut by the end of the stream, or not text: refuse and close.
+            _ => {
+                let r = host.handle_line("{");
+                let _ = writeln!(out, "{r}");
+                return;
+            }
         };
         if writeln!(out, "{reply}").and_then(|()| out.flush()).is_err() {
             return;
         }
+    }
+}
+
+/// While a request runs: has the client closed its end (it aborted, or it died)? A read that
+/// would wait means it is still there. A byte it sent early is kept for the next request.
+fn client_gone(probe: &UnixStream, early: &Mutex<Vec<u8>>) -> bool {
+    let mut kept = early.lock().unwrap_or_else(PoisonError::into_inner);
+    if !kept.is_empty() || probe.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut b = [0u8; 1];
+    let r = (&*probe).read(&mut b);
+    let _ = probe.set_nonblocking(false);
+    match r {
+        Ok(0) => true,
+        Ok(_) => {
+            kept.push(b[0]);
+            false
+        }
+        Err(e) => !matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ),
     }
 }
 

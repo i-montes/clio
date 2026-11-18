@@ -41,7 +41,7 @@ pub(crate) struct Host {
 pub(crate) const CONTROL: &str = "eso es de Clio: solo la persona lo toca";
 /// Tools that change something: they are logged, and set aside when the list says so.
 pub(crate) const LOGGED: [&str; 3] = ["exec", "fs_write", "fs_mkdir"];
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// The longest time limit a command may ask for; without one it has none.
 const MAX_TIMEOUT_SECS: u64 = 3600;
 
 pub(crate) fn now_ms() -> i64 {
@@ -303,6 +303,7 @@ impl ToolHost {
         action_id: String,
         rule: &str,
         real: Option<&Path>,
+        cancel: &dyn Fn() -> bool,
     ) -> Result<(bool, String, Value, bool), String> {
         let tool = req.tool.as_str();
         let args = req.args.as_object().cloned().unwrap_or_default();
@@ -319,7 +320,7 @@ impl ToolHost {
             ));
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            self.host_effect(h, tool, &args, real, action_id)
+            self.host_effect(h, tool, &args, real, action_id, cancel)
         }))
         .unwrap_or_else(|_| Err("the tool panicked".into()));
         let (ok, content, data, external) = match ran {
@@ -333,7 +334,12 @@ impl ToolHost {
         };
         if logged {
             let code = data.get("exit_code").and_then(Value::as_i64);
-            if let Err(e) = h.log(&req.session, tool, &what, network, "done", rule, code) {
+            let end = if data.get("stopped") == Some(&Value::Bool(true)) {
+                "stopped"
+            } else {
+                "done"
+            };
+            if let Err(e) = h.log(&req.session, tool, &what, network, end, rule, code) {
                 eprintln!("clio-toolhost: the action log lost a line: {e}");
             }
         }
@@ -362,15 +368,17 @@ impl ToolHost {
         args: &Map<String, Value>,
         real: Option<&Path>,
         action_id: String,
+        cancel: &dyn Fn() -> bool,
     ) -> Result<Value, String> {
         if tool == "exec" {
             let jail = h.jail.as_ref().ok_or("there is no host launcher")?;
+            // The model decides: a limit when it gave one, none when it did not.
             let secs = args
                 .get("timeout")
                 .and_then(Value::as_u64)
-                .unwrap_or(DEFAULT_TIMEOUT_SECS)
-                .clamp(1, MAX_TIMEOUT_SECS);
-            let out = jail.run(&HostJob {
+                .map(|s| s.clamp(1, MAX_TIMEOUT_SECS));
+            let stop = || cancel() || self.stopping.load(std::sync::atomic::Ordering::SeqCst);
+            let job = HostJob {
                 command: args
                     .get("command")
                     .and_then(Value::as_str)
@@ -379,10 +387,11 @@ impl ToolHost {
                 cwd: h.cfg.home.clone(),
                 home: h.cfg.home.clone(),
                 network: args.get("network").and_then(Value::as_bool) == Some(true),
-                timeout: Duration::from_secs(secs),
+                timeout: secs.map(Duration::from_secs),
                 max_output: Limits::default().max_output,
                 masks: h.cfg.control.clone(),
-            })?;
+            };
+            let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));
         }
         let real = real.ok_or("a file tool needs a path")?;

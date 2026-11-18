@@ -295,11 +295,12 @@ fn exec(s: &Sandbox, a: &Value) -> Result<Value> {
             ..Job::default()
         })
         .map_err(Error::Jail)?;
-    Ok(exec_result(&out, secs))
+    Ok(exec_result(&out, Some(secs)))
 }
 
 /// What a command returns to the model, in either mode.
-pub fn exec_result(out: &JailOutput, secs: u64) -> Value {
+/// `secs`: its time limit, `None` when it had none.
+pub fn exec_result(out: &JailOutput, secs: Option<u64>) -> Value {
     let mut output = out.stdout.clone();
     if !out.stderr.is_empty() {
         if !output.is_empty() && !output.ends_with('\n') {
@@ -313,11 +314,15 @@ pub fn exec_result(out: &JailOutput, secs: u64) -> Value {
     if out.truncated {
         output.push_str("\n[output truncated: only the tail is shown]");
     }
+    if out.stopped {
+        output.push_str("\n[stopped: the person stopped it or the session ended]");
+    }
     json!({
         "output": output,
         "exit_code": out.exit_code,
         "signal": out.signal,
         "timed_out": out.timed_out,
+        "stopped": out.stopped,
         "timeout_secs": secs,
     })
 }

@@ -227,6 +227,8 @@ pub struct ToolHost {
     host: Option<host::Host>,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
+    /// The service is stopping: a running command is stopped, and nothing new runs.
+    stopping: std::sync::atomic::AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -384,6 +386,7 @@ impl ToolHost {
             run_dir: cfg.run_dir,
             host,
             to_judge: Mutex::new(HashMap::new()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -406,6 +409,19 @@ impl ToolHost {
         self.exec_status.as_ref().copied().map_err(String::as_str)
     }
 
+    /// The service is stopping: the command that runs is stopped (its log line says so) and
+    /// this returns once it has; waits at most `grace`.
+    pub fn stop(&self, grace: Duration) {
+        self.stopping.store(true, Ordering::SeqCst);
+        let until = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < until {
+            if self.busy.try_lock().is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     pub fn telemetry(&self) -> Telemetry {
         self.gateway.telemetry()
     }
@@ -419,8 +435,13 @@ impl ToolHost {
 
     /// One request line in, one response line out. Never panics, never executes on a bad line.
     pub fn handle_line(&self, line: &str) -> String {
+        self.handle_line_until(line, &|| false)
+    }
+
+    /// `handle_line` with `handle_until`'s `cancel`.
+    pub fn handle_line_until(&self, line: &str, cancel: &dyn Fn() -> bool) -> String {
         let resp = match serde_json::from_str::<Request>(line) {
-            Ok(req) => self.handle(req),
+            Ok(req) => self.handle_until(req, cancel),
             Err(e) => self.refuse(
                 "",
                 "protocol",
@@ -526,7 +547,13 @@ impl ToolHost {
         }
     }
 
-    pub fn handle(&self, mut req: Request) -> Response {
+    pub fn handle(&self, req: Request) -> Response {
+        self.handle_until(req, &|| false)
+    }
+
+    /// `handle`, but a host-mode command stops as soon as `cancel` says so (the caller went away:
+    /// the person aborted, the session ended). Its log line then says `stopped`.
+    pub fn handle_until(&self, mut req: Request, cancel: &dyn Fn() -> bool) -> Response {
         let _one_at_a_time = lock(&self.busy);
         if req.tool == memory::OLD_SAVE {
             req.tool = "memory_save".into();
@@ -756,7 +783,7 @@ impl ToolHost {
                 }
             }
             let (ok, content, data, external) = self
-                .host_run(h, &req, action_id, &out.rule, real.as_deref())
+                .host_run(h, &req, action_id, &out.rule, real.as_deref(), cancel)
                 .unwrap_or_else(|e| (false, e, Value::Null, false));
             return Response {
                 id: req.id,
@@ -852,6 +879,7 @@ impl ToolHost {
                         "exit_code": result["exit_code"],
                         "signal": result["signal"],
                         "timed_out": result["timed_out"],
+                        "stopped": result["stopped"],
                         "timeout_secs": result["timeout_secs"],
                         "masked": masked,
                     })

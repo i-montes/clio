@@ -28,7 +28,7 @@ fn job(dir: &Path, command: &str) -> HostJob {
         cwd: dir.into(),
         home: dir.into(),
         network: false,
-        timeout: Duration::from_secs(20),
+        timeout: Some(Duration::from_secs(20)),
         max_output: 64 * 1024,
         masks: vec![],
     }
@@ -104,7 +104,7 @@ fn systemd_args_run_as_this_user_with_masks_no_network_a_deadline_and_a_fixed_en
     let (mask, missing) = masked(&d);
     let mut j = job(d.path(), "echo hi");
     j.masks = vec![mask.clone(), missing];
-    j.timeout = Duration::from_secs(90);
+    j.timeout = Some(Duration::from_secs(90));
     let (prog, a) = h.args(&j).unwrap();
     assert!(prog.ends_with("sudo"), "{prog:?}");
     assert_eq!(a[0], "-n");
@@ -154,6 +154,15 @@ fn systemd_args_run_as_this_user_with_masks_no_network_a_deadline_and_a_fixed_en
     j.network = true;
     let (_, b) = h.args(&j).unwrap();
     assert!(!after(&b, "-p").contains(&"PrivateNetwork=yes"));
+    // No time limit asked: no backstop either.
+    j.timeout = None;
+    let (_, c) = h.args(&j).unwrap();
+    assert!(
+        !after(&c, "-p")
+            .iter()
+            .any(|p| p.starts_with("RuntimeMaxSec")),
+        "{c:?}"
+    );
     let other = b.iter().find(|x| x.starts_with("--unit=")).unwrap();
     assert_ne!(unit, other, "every run gets its own unit");
 }
@@ -242,16 +251,35 @@ fn real(h: &HostJail) {
         d.path(),
         &format!("(sleep 300; echo {m}) & sleep 300; echo {m}"),
     );
-    j.timeout = Duration::from_secs(2);
+    j.timeout = Some(Duration::from_secs(2));
     let t = Instant::now();
     let o = h.run(&j).unwrap();
     assert!(o.timed_out && !o.success(), "{o:?}");
     assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    gone(&m, "the timeout");
+
+    // No time limit: it runs until it is stopped, and stopping it kills all it started.
+    let m = marker();
+    let mut j = job(
+        d.path(),
+        &format!("(sleep 300; echo {m}) & sleep 300; echo {m}"),
+    );
+    j.timeout = None;
+    let t = Instant::now();
+    let o = h
+        .run_until(&j, &|| t.elapsed() > Duration::from_millis(500))
+        .unwrap();
+    assert!(o.stopped && !o.timed_out && !o.success(), "{o:?}");
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    gone(&m, "a stop");
+}
+
+fn gone(m: &str, what: &str) {
     let until = Instant::now() + Duration::from_secs(5);
-    while host_procs_with(&m) > 0 && Instant::now() < until {
+    while host_procs_with(m) > 0 && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(host_procs_with(&m), 0, "a child outlived the timeout");
+    assert_eq!(host_procs_with(m), 0, "a child outlived {what}");
 }
 
 #[test]
