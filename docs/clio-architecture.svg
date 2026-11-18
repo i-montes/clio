@@ -74,7 +74,7 @@
 <text class="s11" x="46" y="82">any language; Clio answers in it</text>
 <rect class="box" x="276" y="50" width="228" height="44" rx="8"/>
 <text class="h2" x="288" y="66">Answers</text>
-<text class="s11" x="288" y="82">ask_person: one question, a few options</text>
+<text class="s11" x="288" y="82">ask_person: a question, a few options</text>
 <rect class="box" x="518" y="50" width="228" height="44" rx="8"/>
 <text class="h2" x="530" y="66">Approves or rejects</text>
 <text class="s11" x="530" y="82">what was set aside, one by one</text>
