@@ -67,7 +67,7 @@ Pi corre el bucle del agente, los proveedores y las sesiones; Clio no reconstruy
 
 - El **proceso de Pi y la extensión corren como la persona, pero dentro de una jaula `bwrap`** (ADR 0009): no ven el vault ni tus archivos, la copia de trabajo les es de solo lectura (todo cambio pasa por el servicio de herramientas) y su red es propia: solo alcanzan la dirección del proveedor del modelo, a través de un proxy del anfitrión que niega todo lo demás, y no alcanzan el loopback ni los sockets abstractos del anfitrión. Lo que queda: Pi conserva la llave del proveedor y puede enviar lo que leyó a esa única dirección (que ya recibe todo el contexto del modelo). Si la jaula o el proxy no arrancan, o la autoprueba falla, Pi no arranca. Lo que niega la jaula se muestra en el chat.
 - **La regla `S-12/bash` no lee el comando**: lo que un comando puede hacer lo limita la jaula, no una lista de palabras. Una denegación `S-12/bash` no cuenta para el cortacircuito (no pasa por la cuenta de la pasarela).
-- **La contaminación no cierra aún ninguna salida**: ninguna herramienta tiene red, así que S-06 todavía no se ejercita; la marca existe, persiste y se informa, para cuando haya herramientas con salida.
+- **La contaminación no cierra aún ninguna salida**: en el modo copia ninguna herramienta tiene red, así que S-06 todavía no se ejercita; la marca existe, persiste y se informa, para cuando haya herramientas con salida. En el modo anfitrión una orden sí puede pedir red, y la marca tampoco la cierra: lo que se aparta (enviar, entre otras) se aparta con marca o sin ella (sección siguiente).
 - **El aviso de contaminación en el prompt de sistema** se arma al empezar cada ejecución, no entre turnos de una misma ejecución; dentro de una, lo que protege es el envoltorio de datos en cada resultado.
 - **Una vez abierto el cortacircuito** (10 negadas seguidas) la sesión no vuelve a ejecutar nada por sí sola: hace falta que la persona decida (no hay diálogo todavía); el remedio actual es empezar otra sesión.
 - **Lo que las herramientas de memoria leen sale del equipo** (S-60, ADR 0010):
@@ -82,6 +82,29 @@ Pi corre el bucle del agente, los proveedores y las sesiones; Clio no reconstruy
 - `grep` queda fuera mientras Pi no permita confinar su búsqueda; `bash grep` dentro de la jaula lo reemplaza.
 
 **Hecho (ADR 0009):** Pi corre dentro de `bwrap` con el sistema de archivos mínimo (fase 3a) y red propia con el proveedor como único destino (fase 3b).
+
+### El modo anfitrión: las herramientas en la máquina real (ADR 0012)
+
+Con `"mode": "host"` (o `clio --host`) no hay copia: las herramientas actúan sobre la máquina de la persona, con red cuando una orden la pide y con `sudo` si hay `sudo` sin contraseña. El modo copia sigue siendo el de fábrica y no cambia. Lo que deja de estar contenido y lo que sigue:
+
+**Lo que ya no está contenido:**
+- **Tus archivos y tus servicios.** Las herramientas leen y escriben en `/` con tus permisos, y una orden corre en tu carpeta personal con todo el sistema a la vista. No hay `diff` ni `apply`: lo que cambia, cambia ya.
+- **La red.** Una orden con `network: true` sale a donde quiera. La marca la sesión, pero no la frena.
+- **`sudo`.** Con el lanzador `systemd` (`sudo -n systemd-run`, cuando hay `sudo` sin contraseña) una orden puede hacerse root, y entonces nada de lo de abajo la detiene: ni las carpetas de Clio tapadas ni la lista.
+- **La lista de lo que se aparta es una lista, no un muro.** Un script, una variable o un alias la evitan. Contra eso quedan el registro de acciones y la regla del prompt.
+- **Lo que cambia una orden no tiene copia ni deshacer.** Solo `write`/`edit` (y `fs_mkdir`) dejan copia antes de cambiar y se deshacen exactos con `clio undo`.
+- **Con el lanzador `systemd`, aun sin `sudo`, una orden alcanza los archivos de Clio por `/proc/<pid de Clio>/root/…`** (mismo usuario; systemd 255 no tiene un espacio de procesos propio para la unidad). Comprobado a mano en el VPS el 2026-11-17. Con `bwrap` no pasa: la orden tiene su propio espacio de procesos.
+
+**Lo que sigue contenido:**
+- **Pi sigue en su jaula** (ADR 0009): en el modo anfitrión su carpeta de trabajo es una carpeta vacía; no ve tus archivos, ni el vault, ni la red salvo el proveedor. Solo el servicio de herramientas actúa.
+- **Las carpetas de Clio** (configuración, datos, runtime, la memoria): las herramientas de archivos las niegan por ruta directa, por enlace y por `..` (`host/control`), una orden que las nombra se aparta (`control`) y una orden las ve vacías y de solo lectura (salvo lo dicho arriba).
+- **Falla cerrada.** Sin un lanzador que pase su autoprueba (lo de Clio tapado, red cortada sin `network`) no hay `exec`; nunca corre sin tapar.
+- **Cuatro clases se apartan** (`borrar`, `gastar`, `enviar`, `control`): no corren hasta que la persona dice sí (`clio approve`, o la pregunta al final del turno), corren una sola vez y tal como se guardaron (mismo hash), y vencen a las 24 horas. Como mucho 3 preguntas al día; las demás van al resumen del día.
+- **Todo queda registrado** (`actions.jsonl`, 0600): una línea antes y otra después de cada orden y cada escritura, sin llaves conocidas; sin la línea de antes, no corre.
+- **La marca.** Leer una carpeta ajena (`/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas` y las que sume `host.json`), una orden con red o que lee registros (`journalctl`, `docker logs`…) marca la sesión; una sesión marcada no cambia los bloques de la persona (`memory_block_edit`). La salida sigue llegando limpia y envuelta como datos. Caso 62 de la batería.
+- **Presupuesto por día** (costo y pasos, entre sesiones), además del tope de costo por mensaje y el antibucle.
+
+**Límites que conviene saber:** dos sesiones anfitrión a la vez pueden contar de menos el presupuesto del día (cada una guarda su cuenta y gana la última); lo aprobado corre en otro proceso (un servicio de herramientas nuevo sobre la carpeta de esa sesión), no en el de la sesión; y un `rm -r` bajo `/tmp/` no se aparta (se mira la ruta escrita).
 
 ### La memoria como superficie (persistencia de inyecciones)
 

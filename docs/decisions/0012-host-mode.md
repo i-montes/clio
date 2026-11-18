@@ -1,0 +1,49 @@
+# 0012: Host mode, the tools on the real machine under a few fixed rules
+
+Status: accepted (2026-11-17). Built on the branch `feat/manos-reales` (plan `docs/superpowers/plans/2026-11-17-manos-reales.md`; design `docs/specs/2026-11-17-clio-asistente-autonomo-design.md`, section 2). Copy mode stays the factory one and does not change.
+
+## Context
+
+Until now the agent worked on a copy of one project: `bash` ran in a `bwrap` jail with no network and only the copy visible, and the person brought changes back with `diff` and `apply`. The design of Clio as an autonomous assistant asks for the opposite: the agent acts on the person's machine, with the network and with `sudo`, and the person approves only a few kinds of action, without the task stopping to wait. Two facts shaped how:
+
+- **`sudo` does not run inside `bwrap`.** `bwrap` sets `no_new_privs`, so `sudo` refuses (checked on the VPS on 2026-11-17). A jail that hides Clio's folders and a free `sudo` cannot both come from `bwrap`.
+- **A list of program names cannot decide what reaches the network** (`curl`, `wget`, …): any script gets around it without meaning to.
+
+## Decision
+
+**Pi stays in its jail** (ADR 0009). In host mode its working folder is the person's home path, but inside its jail that path is an empty folder: nothing of the person is mounted. The guard (`CLIO_GUARD_HOST=1`) sends absolute paths and lets the service decide. Only the toolhost's tools reach the real machine (`Config.host`): the file tools work on `/`, a relative path is taken from the home folder, and `exec` runs through a host launcher of `clio-node` (`crates/clio-node/src/host.rs`).
+
+**Clio's own folders** (`Dirs.config`, `Dirs.data`, `Dirs.runtime`, and clio-memory's data folder when it lives elsewhere) are refused by the file tools wherever the path really lands (canonical, through links and `..`; rule `host/control`), and a command sees them empty and read-only.
+
+**Two launchers**, chosen by `HostJail::detect`:
+
+- **`Systemd`**, when `sudo -n true` works and `systemd-run` exists: `sudo -n systemd-run --wait --pipe --collect` starts a transient system unit that drops to the person's uid and gid, in the home folder, with `TemporaryFileSystem=<folder>:ro` over each of Clio's folders, `PrivateNetwork=yes` unless asked, `KillMode=control-group`, `RuntimeMaxSec` as a backstop, and an environment emptied down to `HOME`, `USER`, `LOGNAME`, `LANG`, `PATH` and `XDG_RUNTIME_DIR`. Inside, `sudo` works. On timeout the client is killed and the unit stopped with `sudo -n systemctl stop`. A folder whose path systemd would split (spaces, colons, quotes) is refused, not passed unmasked.
+- **`Bwrap`** otherwise: `bwrap --bind / /` with a read-only `tmpfs` over each of Clio's folders, `--unshare-net` unless asked, `--clearenv` and the same environment, and its own pid namespace (`--unshare-pid`, `--die-with-parent`): when the command ends or is killed, everything it started dies with it. No `sudo` here, and none needed.
+
+Both **fail closed**: at start the launcher runs a self-test (a decoy in a masked folder is not visible, the mask cannot be written, the network is cut unless asked for and reachable when asked, and with `Systemd` `sudo -n true` works inside). If it does not pass, host mode has no `exec`; it never falls back to running unmasked. `clio doctor` shows the launcher and its self-test, and warns `la consola de Clio no tendrá sudo` when it is `Bwrap`.
+
+**The network is asked for per command** (`network: true`). A command without it has none. A command with it **marks the session** (source `web`), so the mark comes from the core, not from a list of program names. The cost: checking `localhost` also needs the network, and marks.
+
+**What marks a session in host mode:** reading (`fs_read`, `fs_list`, `fs_glob`) under a foreign folder (factory: `/var/log`, `/var/mail`, `/var/spool`, and any folder named `uploads`, `Downloads` or `Descargas`; the person adds more in `host.json`); a command with `network: true`; a command that names a foreign folder or reads logs (`journalctl`, `docker logs`, `docker compose logs`, `kubectl logs`); and, as in copy mode, memory of the agent's or outside origin, and a mark restored from the run folder. Reading the person's own files does not mark. Output is still scrubbed and wrapped as data. A marked session cannot use `memory_block_edit` (S-60).
+
+**Four classes are set aside** for the person: `borrar` (what cannot be recovered: `rm -r` of anything but `node_modules`, `target`, `dist` or `/tmp/…`, backups, `find -delete`, `mkfs`, `dd of=/dev/…`, `DROP`/`TRUNCATE`, volumes, `terraform destroy`…), `gastar` (cloud resources that cost money), `enviar` (mail, a push to a shared branch or a forced one, `gh pr merge`/`comment`/`review`, publishing a package, `curl`/`wget` sending data to a host that is not local) and `control` (Clio's own setup and folders, its services, `sudoers`, `visudo`, turning the machine off). The table lives in `crates/clio-toolhost/src/ask.rs`; `host.json` can only add to it. A command is cut into simple commands (`;`, `&&`, `||`, `|`, `$(…)`, wrappers like `sudo`, `env`, `xargs`, `bash -c`) and each is classified. **The list is a list, not a wall:** a script, a variable or an alias gets around it. What is left against that is the action log and the prompt's rule (`prompts/system/clio-host@1.md`: do not try it another way), not this module.
+
+**Set aside, not stopped.** The action does not run; the model gets a fixed answer (`apartado {id}: «{clase}» necesita el visto bueno de la persona. …`, rule `host/aside`) and goes on with the rest. The pending action is saved in `Dirs.data/host/pending/<id>.json` (0600) with a hash over the tool and its arguments; the same action again in the same session gets the same id. The person answers with `clio pending`, `clio approve ID`, `clio reject ID`, or at the end of a chat turn (`¿Lo ejecuto? [s/N]`). An approved action runs once, exactly as saved (the hash is checked), without being classified again. **A pending action expires after 24 hours**: approving it later runs nothing and says `venció el {fecha}: no se ejecutó`. **At most 3 questions a local day** (`questions_per_day`): past that, a pending action is born with `ask: false` and goes to the day's summary; the ones the person answered at the terminal do not count.
+
+**Copy before change, and exact undo only for the file tools.** `fs_write` and `fs_mkdir` copy the file they replace (`runs/<id>/toolhost/backups/<n>`) and write a line in `changes.jsonl` (path, backup, mode, the hash of what was written) before they change anything. `clio undo ID` on a host session walks it back, last first: it restores content and mode, removes what was new, and leaves alone a file that changed after Clio wrote it. What a command changes has no copy and no undo; the prompt asks the model to change files with `edit`/`write`.
+
+**The action log** (`Dirs.data/host/actions.jsonl`, 0600): a line before and a line after every `exec`, `fs_write` and `fs_mkdir`, and one for what is set aside or denied (`at_ms`, `run`, `session`, `tool`, `what` scrubbed of known keys, `network`, `outcome`, `rule`, `exit_code`). If the line before cannot be written, the action does not run. `clio actions` shows it.
+
+**A budget per day, not per task.** In host mode `max_steps` and `max_seconds` do not cap a prompt; `limits.day_cost_micro_usd` (factory 3,000,000) and `limits.day_steps` (factory 1000) cap all sessions of one UTC day together, kept in `Dirs.data/host/day.json`. The cost cap per prompt and the anti-loop stay. Spent: `presupuesto del día agotado: sigo mañana`.
+
+## Known limits
+
+- **With `sudo` the masks are not a wall.** Under `Systemd` a command can `sudo` and read or change anything, Clio's folders included. The masks keep them out of an ordinary command's sight, not out of root's reach.
+- **Under `Systemd`, even without `sudo`, a command of the same user reaches Clio's files through `/proc/<clio pid>/root/…`**: the unit runs as the person, and the toolhost is a process of the person. Checked by hand on the VPS on 2026-11-17: a decoy in a masked folder was read that way. `bwrap`'s own pid namespace closes this (the command sees only its own processes); systemd 255 has no equivalent (`PrivatePIDs=` came later).
+- **Two host sessions at once can undercount the day's budget**: each loads `day.json`, counts on its own, and the last save wins.
+- **An approved action runs in a separate process**: `clio approve` (and the chat's question) build a new host-mode toolhost on that session's run folder, with a fresh launcher self-test. It does not go through the session's own toolhost; when the chat feeds the result to the model, the brain marks the session itself.
+- The `/tmp/…` exemption of `rm -r` is by the literal path: a scratch folder there is deleted without asking.
+
+## Tests
+
+`crates/clio-node/tests/host.rs` (the arguments of both launchers; `Bwrap` for real; `Systemd` for real only with `CLIO_TEST_SUDO=1`), `crates/clio-toolhost/tests/host.rs` (paths, `control`, copy and undo, the log, the marks, set aside, approve, reject, expiry, the cap) with `Bwrap` only, never `sudo`; the table in `ask.rs`; attack 62 of the battery in `crates/clio-toolhost/tests/host.rs`. The `Systemd` launcher end to end through the real toolhost was exercised by hand on the VPS on 2026-11-17, in temporary folders only.

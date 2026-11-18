@@ -623,6 +623,28 @@ clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo
 - **Borrar sesiones:** `clio pi sessions rm ID…` (el id o el nombre del archivo; `--all` para todas) o la tecla `x` en el selector de sesiones de la TUI. Se borra el archivo de la conversación y, si la sesión es de Clio, su copia de trabajo (`runs/<id>`); antes dice qué se va y, si la copia tiene cambios que no aplicaste a tu carpeta, lo avisa y pide confirmar. Tu memoria no se toca. Una sesión que se está cerrando (guardando su resumen) se borra cuando termina.
 - `clio pi sessions` lee solo la cabecera y lo mínimo de cada archivo (abre al instante con cientos); los títulos y nombres se limpian de secuencias de escape; un archivo roto se ignora con un aviso. El número de mensajes lleva `~` cuando es una estimación (archivos grandes).
 
+## El modo anfitrión: Clio en tu máquina real
+
+De fábrica Clio trabaja en una copia (lo de arriba). En el modo anfitrión (ADR 0012) no hay copia: las herramientas actúan sobre tu máquina, en tu carpeta personal, con red cuando una orden la pide y con `sudo` si tienes `sudo` sin contraseña. Pi sigue en su jaula; lo que actúa es el servicio de herramientas. Solo con Pi (el arnés propio no tiene modo anfitrión).
+
+- **Encenderlo.** `"mode": "host"` en `~/.config/clio/config.json` (de fábrica `"copy"`), o por vez: `clio --host` / `clio run --host "…"`; `--copy` manda sobre la configuración en sentido contrario. Una sesión anfitrión se reabre como anfitrión.
+- **La consola.** Con `sudo` sin contraseña y `systemd-run`, cada orden corre en una unidad transitoria del sistema, como tu usuario y con `sudo` disponible; si no, en `bwrap --bind / /`, sin `sudo`. En los dos casos las carpetas de Clio se ven vacías y la orden no tiene red salvo que pida `network: true` (y entonces marca la sesión). `clio doctor` dice cuál hay y si pasa su autoprueba; sin una que pase, no hay consola.
+- **Lo de Clio es tuyo.** `~/.config/clio`, `~/.local/share/clio`, la carpeta de runtime y la de clio-memory: las herramientas se niegan (`eso es de Clio: solo la persona lo toca`).
+- **Lo que espera tu visto bueno.** Borrar lo que no se recupera, gastar dinero, enviar algo en tu nombre y tocar la configuración de Clio, `sudoers` o apagar la máquina se apartan: no corren, la tarea sigue, y en el chat al final del turno Clio pregunta `¿Lo ejecuto? [s/N]` (`clio run` termina diciendo qué apartó). Como mucho 3 preguntas al día; lo demás va al resumen del día. Un apartado vence a las 24 horas. Es una lista, no un muro: un script la evita; por eso todo queda registrado.
+
+```sh
+clio pending [--json]          # lo que espera tu visto bueno
+clio approve <id>              # lo ejecuta una vez, tal cual se apartó
+clio reject <id>               # lo descarta
+clio actions [--run <id>] [--json]   # el registro: cada orden y escritura, antes y después
+clio undo <id>                 # en una sesión anfitrión: deshace los archivos que cambió
+```
+
+- **Deshacer** sirve para lo que Clio cambió con `write`/`edit` (guarda una copia antes): devuelve contenido y permisos, borra lo que creó y no toca un archivo que cambió después. Lo que cambió una orden de consola no tiene copia.
+- **Presupuesto por día**, no por tarea: `limits.day_cost_micro_usd` (3.000.000 de fábrica) y `limits.day_steps` (1000) en `config.json`, contados entre sesiones en `~/.local/share/clio/host/day.json`. Agotado: `presupuesto del día agotado: sigo mañana`.
+- **`~/.config/clio/host.json`** (opcional, solo suma, no quita nada de fábrica): `{"questions_per_day": 3, "foreign": ["/srv/buzon", "adjuntos"], "ask": [{"class": "enviar", "pattern": "^rsync .*prod:"}]}`. `foreign` son carpetas ajenas (leerlas marca la sesión; de fábrica `/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas`); `ask` suma patrones a una de las cuatro clases (`borrar`, `gastar`, `enviar`, `control`).
+- **Lo que no cubre:** con `sudo`, una orden puede todo, también leer lo de Clio; con la consola de `systemd`, incluso sin `sudo`, una orden puede llegar a los archivos de Clio por `/proc/<pid>/root`. Detalle en `docs/threat-model.md`.
+
 ## Comprobar la máquina
 
 ```sh
@@ -633,7 +655,7 @@ Revisa: Node y Pi (ver «Pi, el arnés del agente»), la jaula (autoprueba, una 
 
 ## Qué NO hace Clio todavía
 
-- **No ejecuta comandos libres.** Con Pi, `bash` existe pero corre siempre dentro de la jaula (sin red, sin tu HOME, con las carpetas protegidas de solo lectura). Con el arnés propio, solo `run_tests` (unittest o pytest), y solo con la jaula probada. Sin jaula (otro sistema, sin `bwrap`, núcleo sin espacios de nombres, autoprueba fallida) el agente solo lee, lista, escribe y crea carpetas, y dice que no pudo correr nada: ejecuta tú los tests antes de `apply`. Tampoco corre `cargo test` (ver la jaula).
+- **No ejecuta comandos libres** en el modo copia (el de fábrica; el anfitrión es otra cosa, ver arriba). Con Pi, `bash` existe pero corre siempre dentro de la jaula (sin red, sin tu HOME, con las carpetas protegidas de solo lectura). Con el arnés propio, solo `run_tests` (unittest o pytest), y solo con la jaula probada. Sin jaula (otro sistema, sin `bwrap`, núcleo sin espacios de nombres, autoprueba fallida) el agente solo lee, lista, escribe y crea carpetas, y dice que no pudo correr nada: ejecuta tú los tests antes de `apply`. Tampoco corre `cargo test` (ver la jaula).
 - **No hay red para el agente** más que el modelo. Con Pi, solo la dirección del proveedor, a través de un proxy que rechaza lo demás; con el arnés propio, solo el adaptador del modelo habla con internet (con tu clave): exige `https` (o `http` a `localhost`) y no sigue redirecciones.
 - **No ejecuta tareas largas con aprobación interactiva del contrato**: como escribiste tú la instrucción en la terminal, se toma como aprobación.
 - **No borra archivos** (el agente no tiene herramienta para eso); `apply` sí sabría aplicar un borrado si apareciera en la copia.

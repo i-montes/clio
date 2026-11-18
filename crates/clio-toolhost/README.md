@@ -18,6 +18,26 @@ clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--
 - `--memory-data D [--memory-model M]` ofrece `memory_search`/`memory_get`/`memory_propose` sobre lo que la fábrica del binario (`cli::run_with`) haga de las dos carpetas; `clio toolhost` crea el `LinkPort` de `clio-brain` (lee en solo lectura y propone abriendo la memoria para escribir solo durante la llamada). `clio-toolhost` suelto no tiene memoria y rechaza `--memory-data`. `M` (el modelo de vectores) lo pasa el padre: este proceso corre con otro `HOME`.
 - `CLIO_TOOLHOST_SCRUB_JSON='{"nombre":"valor"}'` enseña valores al limpiador; `--vault-socket` añade el filtro del vault (si no contesta, la salida se retiene). El enlace real con el vault de la sesión está por hacer.
 
+### Modo anfitrión (ADR 0012)
+
+```
+clio-toolhost --socket-dir D --scratch S --run-dir R --host-home H --host-state E --host-run ID [--host-control P]... [--host-rules FILE] [--jail auto|off]
+```
+
+- Las herramientas actúan sobre la máquina real (`/`) en vez de una copia; `--work` no hace falta. Una ruta absoluta se usa tal cual y una relativa se toma de `H`; las órdenes arrancan en `H`.
+- `--host-control P` (repetible): las carpetas de Clio. Las herramientas de archivos las niegan donde de verdad caiga la ruta (canonizada; enlaces y `..` incluidos), regla `host/control`, texto `eso es de Clio: solo la persona lo toca`; una orden las ve vacías y de solo lectura; `fs_glob` no entra en ellas.
+- `--host-state E` (`Dirs.data/host`): el registro de acciones `actions.jsonl` (0600, una línea antes y otra después de cada `exec`, `fs_write` y `fs_mkdir`, y una por lo negado o apartado; si la de antes no se puede escribir, no corre), lo apartado en `pending/<id>.json` y la cuenta de preguntas del día `questions.json`.
+- `--host-run ID`: el id del run, para el registro y lo apartado. `--host-rules FILE`: el `host.json` de la persona (solo suma: `questions_per_day`, `foreign`, `ask`).
+- `exec` corre con el lanzador anfitrión de `clio-node` (`systemd` con `sudo -n systemd-run` si hay `sudo` sin contraseña, si no `bwrap --bind / /`), solo si su autoprueba pasó al arrancar; si no, no se ofrece. Tiempo de 120 s si no se dice, hasta 3600.
+- `fs_write` y `fs_mkdir` dejan copia y una línea en `R/changes.jsonl` antes de cambiar; `host::undo(R)` lo deshace.
+
+| Operación | Argumentos en modo anfitrión |
+|---|---|
+| `exec` | `command`, `timeout?` (s, hasta 3600), `network?` (bool: sin él la orden no tiene red; con él marca la sesión, fuente `web`) |
+
+- **Marca**: en este modo no marca leer tus archivos ni correr una orden; marca leer bajo una carpeta ajena (fuente `foreign`: `/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas` y las de `host.json`), una orden con `network: true` (`web`) y una orden que nombra una carpeta ajena o lee registros (`journalctl`, `docker logs`, `docker compose logs`, `kubectl logs`).
+- **Apartado** (regla `host/aside`, `ok: false`): una orden o escritura que la lista de `src/ask.rs` clasifica (`borrar`, `gastar`, `enviar`, `control`) no corre; se guarda y se contesta `apartado {id}: «{clase}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.` La misma acción otra vez en la misma sesión da el mismo `id`. `ToolHost::approve(id, ahora)` la ejecuta una vez, tal como se guardó (mismo hash), y no después de vencer (24 h: `venció el {fecha}: no se ejecutó`); `pending::reject` la descarta.
+
 ## Protocolo
 
 JSON por línea, varias peticiones por conexión, tope de 4 MiB por línea y 30 s de lectura.
@@ -56,7 +76,7 @@ Las rutas son relativas a la copia de trabajo. Cada operación (menos `filter`) 
 
 ## Pruebas
 
-`cargo test -p clio-toolhost`. `tests/toolhost.rs` y `tests/hardening.rs` prueban el servicio solo.
+`cargo test -p clio-toolhost`. `tests/toolhost.rs` y `tests/hardening.rs` prueban el servicio solo; `tests/host.rs`, el modo anfitrión (solo con `bwrap`, nunca `sudo`, en carpetas temporales; también el caso 62 de la batería).
 Las pruebas con el Pi real están en `clio-brain` (`cargo test -p clio-brain --test pi_stack`, carpeta
 `crates/clio-brain/tests/pi_stack/`): lanzan Pi por `pi::launch::build`, dentro de su jaula, con las
 banderas endurecidas y `clio toolhost`, contra un modelo falso OpenAI-compatible
