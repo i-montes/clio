@@ -9,14 +9,16 @@ use cli::chat;
 use cli::home::{Dirs, Mode};
 use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pending, pi, runs, tui, vault};
 
-const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
+const USAGE: &str = "clio: un agente personal que trabaja en tu máquina (o en una copia de tu proyecto)
 
   clio [--debug] [--harness pi|builtin] [--host|--copy]
                                               abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
-                                              con Pi instalado abre el selector de sesiones y el chat (CLIO_HARNESS=builtin lo apaga);
-                                              --host: las herramientas actúan en la máquina real, --copy: en una copia (manda sobre \"mode\" de config.json)
+                                              con Pi instalado abre las sesiones junto al chat (CLIO_HARNESS=builtin lo apaga);
+                                              --host: las herramientas actúan en la máquina real (de fábrica), --copy: en una copia
+                                              (mandan sobre \"mode\" de config.json)
   clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
   clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instrucción\"
+                                              --workspace DIR: en una copia de DIR (no va con --host)
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply;
@@ -153,7 +155,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             home::init(&dirs)?;
         }
         "run" => {
-            let workspace = args.value("--workspace")?.map_or_else(
+            let asked = args.value("--workspace")?;
+            let workspace = asked.clone().map_or_else(
                 || std::env::current_dir().map_err(|e| e.to_string()),
                 |w| Ok(w.into()),
             )?;
@@ -166,7 +169,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             // Pi when it is installed (the bench: 57/66 against 55/66 for the builtin loop, and no
             // JSON-in-text protocol failures), the builtin loop otherwise or with --harness builtin.
             let harness = args.value("--harness")?;
-            let mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
+            let mut mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
+            // A folder named is a request for a copy of it: host mode has no folder.
+            if asked.is_some() {
+                if mode == Some(Mode::Host) {
+                    return Err("--workspace es una copia de esa carpeta: no va con --host".into());
+                }
+                mode = Some(Mode::Copy);
+            }
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(

@@ -52,6 +52,8 @@ impl Env {
         let mut cfg: Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
         cfg["model"]["command"] = json!(["python3", e.path("script/adapter.py")]);
+        // The builtin loop works on a copy; host is the factory mode.
+        cfg["mode"] = json!("copy");
         std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
         e
     }
@@ -1936,4 +1938,33 @@ fn doctor_says_a_key_file_already_in_the_vault_can_go() {
         all_text(&o)
     );
     assert!(!all_text(&o).contains("oc-decoy-key"));
+}
+
+// Host is the factory mode (ADR 0012), and `clio run --workspace DIR` still asks for a copy of
+// that folder; without a folder the builtin loop, which has no host mode, says so.
+#[test]
+fn a_named_workspace_is_a_copy_under_the_host_default() {
+    let e = Env::new();
+    let cfg_path = e.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg.as_object_mut().unwrap().remove("mode");
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    e.run_fix();
+    assert_eq!(
+        e.read("app.py"),
+        OLD_APP,
+        "a copy: the original is untouched"
+    );
+    let proj = e.path("proj");
+    let o = e.try_clio(&["run", "--host", "--workspace", &proj, "x"]);
+    assert!(
+        !o.status.success() && text(&o.stderr).contains("no va con --host"),
+        "{o:?}"
+    );
+    let o = e.try_clio(&["run", "x"]);
+    assert!(
+        !o.status.success() && text(&o.stderr).contains("modo anfitrión necesita Pi"),
+        "{o:?}"
+    );
 }

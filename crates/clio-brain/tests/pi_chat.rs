@@ -62,6 +62,8 @@ impl World {
         cfg["model"]["base_url"] = json!(w._provider.base_url);
         cfg["model"]["price_in_micro_per_mtok"] = json!(1_000_000);
         cfg["model"]["price_out_micro_per_mtok"] = json!(2_000_000);
+        // These tests are about sessions on a copy; the host ones say `--host`.
+        cfg["mode"] = json!("copy");
         std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
         // "Install" Pi: the pinned version's folder is the checkout's adapters/pi (it has
         // node_modules and the guard).

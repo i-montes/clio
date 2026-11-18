@@ -1,6 +1,6 @@
 # 0012: Host mode, the tools on the real machine under a few fixed rules
 
-Status: accepted (2026-11-17). Built on the branch `feat/manos-reales` (plan `docs/superpowers/plans/2026-11-17-manos-reales.md`; design `docs/specs/2026-11-17-clio-asistente-autonomo-design.md`, section 2). Copy mode stays the factory one and does not change.
+Status: accepted (2026-11-17). Built on the branch `feat/manos-reales` (plan `docs/superpowers/plans/2026-11-17-manos-reales.md`; design `docs/specs/2026-11-17-clio-asistente-autonomo-design.md`, section 2). Copy mode stayed the factory one until 2026-11-18 (see «Factory mode» below).
 
 ## Context
 
@@ -35,6 +35,8 @@ Both **fail closed**: at start the launcher runs a self-test (a decoy in a maske
 **The action log** (`Dirs.data/host/actions.jsonl`, 0600): a line before and a line after every `exec`, `fs_write` and `fs_mkdir`, and one for what is set aside or denied (`at_ms`, `run`, `session`, `tool`, `what` scrubbed of known keys, `network`, `outcome`, `rule`, `exit_code`). If the line before cannot be written, the action does not run. `clio actions` shows it.
 
 **A budget per day, not per task.** In host mode `max_steps` and `max_seconds` do not cap a prompt; `limits.day_cost_micro_usd` (factory 3,000,000) and `limits.day_steps` (factory 1000) cap all sessions of one UTC day together, kept in `Dirs.data/host/day.json`. The cost cap per prompt and the anti-loop stay. Spent: `presupuesto del día agotado: sigo mañana`.
+
+**Factory mode (2026-11-18).** By the owner's decision, host is now the factory mode: a `config.json` without `"mode"`, and the one `clio init` writes, mean host. The reason: an agent that only sees a copy cannot manage the server it lives on, and that is what Clio is for. `"mode": "copy"` and `--copy` keep copy mode. `clio run --workspace DIR` names a folder, so it is a copy of that folder (with `--host` it is an error); without `--workspace`, `clio run` follows the configuration. The builtin loop has no host mode, so without Pi a host configuration asks for `--copy` (or `clio pi install`). The test worlds and the suites that test copy behaviour say `copy` explicitly.
 
 ## Known limits
 

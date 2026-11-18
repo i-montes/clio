@@ -44,6 +44,8 @@ impl Env {
             let mut cfg: Value =
                 serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
             cfg["model"]["command"] = json!(["python3", e.path("script/adapter.py")]);
+            // The builtin loop works on a copy; host is the factory mode.
+            cfg["mode"] = json!("copy");
             std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
         }
         e

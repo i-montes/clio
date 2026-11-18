@@ -85,7 +85,7 @@ Pi corre el bucle del agente, los proveedores y las sesiones; Clio no reconstruy
 
 ### El modo anfitrión: las herramientas en la máquina real (ADR 0012)
 
-Con `"mode": "host"` (o `clio --host`) no hay copia: las herramientas actúan sobre la máquina de la persona, con red cuando una orden la pide y con `sudo` si hay `sudo` sin contraseña. El modo copia sigue siendo el de fábrica y no cambia. Lo que deja de estar contenido y lo que sigue:
+En el modo anfitrión (`"mode": "host"`, `clio --host`, y el de fábrica desde el 2026-11-18 por decisión del dueño: un agente que solo ve una copia no puede administrar el servidor en el que vive) no hay copia: las herramientas actúan sobre la máquina de la persona, con red cuando una orden la pide y con `sudo` si hay `sudo` sin contraseña. El modo copia (`"mode": "copy"`, `--copy`, `clio run --workspace DIR`) no cambia. Lo que deja de estar contenido y lo que sigue:
 
 **Lo que ya no está contenido:**
 - **Tus archivos y tus servicios.** Las herramientas leen y escriben en `/` con tus permisos, y una orden corre en tu carpeta personal con todo el sistema a la vista. No hay `diff` ni `apply`: lo que cambia, cambia ya.

@@ -445,7 +445,11 @@ pub fn draw_help(f: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled("atajos ", t.bold()),
             Span::styled(
-                "· Clio trabaja en una copia; tú decides qué vuelve al original",
+                if app.host {
+                    "· Clio trabaja en esta máquina; cada cambio queda registrado (clio actions, clio undo)"
+                } else {
+                    "· Clio trabaja en una copia; tú decides qué vuelve al original"
+                },
                 t.dim(),
             ),
         ]),

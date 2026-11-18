@@ -4,6 +4,8 @@ Clio corre en tu propia máquina (ADR 0006): sin servidor, sin puertos públicos
 
 ## La regla central
 
+De fábrica (desde el 2026-11-18) Clio trabaja en tu máquina real: es el **modo anfitrión**, más abajo, con lo que borra, gasta o envía apartado para tu visto bueno y todo registrado. Lo que sigue es el **modo copia** (`"mode": "copy"` en `config.json`, `--copy`, o `clio run --workspace DIR`), donde la regla es esta:
+
 **El agente nunca toca tu proyecto.** `clio run` hace una COPIA del proyecto y el agente trabaja solo en esa copia. Al terminar, tú ves el diff y decides con `clio apply` qué vuelve al original. Si no te gusta, no pasa nada: el original sigue igual. Si aplicas y te arrepientes, `clio undo` lo deja como estaba.
 
 ## La interfaz: escribe `clio`
@@ -625,9 +627,9 @@ clio pi sessions rm <id>…  # borra sesiones (o --all); con su copia de trabajo
 
 ## El modo anfitrión: Clio en tu máquina real
 
-De fábrica Clio trabaja en una copia (lo de arriba). En el modo anfitrión (ADR 0012) no hay copia: las herramientas actúan sobre tu máquina, en tu carpeta personal, con red cuando una orden la pide y con `sudo` si tienes `sudo` sin contraseña. Pi sigue en su jaula; lo que actúa es el servicio de herramientas. Solo con Pi (el arnés propio no tiene modo anfitrión).
+Es el modo de fábrica desde el 2026-11-18 (antes lo era la copia, lo de arriba). En el modo anfitrión (ADR 0012) no hay copia: las herramientas actúan sobre tu máquina, en tu carpeta personal, con red cuando una orden la pide y con `sudo` si tienes `sudo` sin contraseña. Pi sigue en su jaula; lo que actúa es el servicio de herramientas. Solo con Pi: el arnés propio no tiene modo anfitrión, así que sin Pi `clio` pide `--copy` (o `clio pi install`).
 
-- **Encenderlo.** `"mode": "host"` en `~/.config/clio/config.json` (de fábrica `"copy"`), o por vez: `clio --host` / `clio run --host "…"`; `--copy` manda sobre la configuración en sentido contrario. Una sesión anfitrión se reabre como anfitrión.
+- **Encenderlo y apagarlo.** Está encendido de fábrica: un `config.json` sin `"mode"` (y el que escribe `clio init`) es `"host"`. `"mode": "copy"` lo apaga; por vez, `clio --copy` / `clio run --copy "…"` y `clio --host` / `clio run --host "…"` mandan sobre la configuración. `clio run --workspace DIR` nombra una carpeta, así que trabaja en una copia de ella (con `--host` es un error). Una sesión anfitrión se reabre como anfitrión.
 - **La consola.** Con `sudo` sin contraseña y `systemd-run`, cada orden corre en una unidad transitoria del sistema, como tu usuario y con `sudo` disponible; si no, en `bwrap --bind / /`, sin `sudo`. En los dos casos las carpetas de Clio se ven vacías y la orden no tiene red salvo que pida `network: true` (y entonces marca la sesión). `clio doctor` dice cuál hay y si pasa su autoprueba; sin una que pase, no hay consola.
 - **Lo de Clio es tuyo.** `~/.config/clio`, `~/.local/share/clio`, la carpeta de runtime y la de clio-memory: las herramientas se niegan (`eso es de Clio: solo la persona lo toca`).
 - **Lo que espera tu visto bueno.** Borrar lo que no se recupera, gastar dinero, enviar algo en tu nombre y tocar la configuración de Clio, `sudoers` o apagar la máquina se apartan: no corren, la tarea sigue, y en el chat al final del turno Clio pregunta `¿Lo ejecuto?`: `s` y luego Enter lo ejecuta, `n` o Esc lo rechaza, y otra tecla no decide nada, por si estabas escribiendo (`clio run` termina diciendo qué apartó). Como mucho 3 preguntas al día; lo demás va al resumen del día. Un apartado vence a las 24 horas. Es una lista, no un muro: un script la evita; por eso todo queda registrado.

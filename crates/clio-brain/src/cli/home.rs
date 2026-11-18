@@ -120,12 +120,13 @@ fn day_steps() -> u64 {
     1000
 }
 
-/// Where the tools act: on a copy of the project (the factory one), or on the real machine.
+/// Where the tools act: on the real machine (the factory one since 2026-11-18, ADR 0012), or on
+/// a copy of the project.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    #[default]
     Copy,
+    #[default]
     Host,
 }
 
@@ -236,7 +237,7 @@ impl ModelCfg {
 impl Config {
     pub fn default_with(command: Vec<String>) -> Self {
         Self {
-            mode: Mode::Copy,
+            mode: Mode::Host,
             model: ModelCfg {
                 provider: "opencode-go".into(),
                 model: "beam-free".into(),
@@ -552,10 +553,10 @@ mod tests {
 
     #[test]
     #[allow(clippy::unwrap_used)]
-    fn the_mode_is_copy_by_default_and_the_flags_decide_over_the_file() {
-        assert_eq!(Config::default_with(vec![]).mode, Mode::Copy);
+    fn the_mode_is_host_by_default_and_the_flags_decide_over_the_file() {
+        assert_eq!(Config::default_with(vec![]).mode, Mode::Host);
         let mut v = serde_json::to_value(Config::default_with(vec![])).unwrap();
-        // A file from before the mode and the day's limits existed still loads, as copy.
+        // A file from before the mode and the day's limits existed still loads, as host.
         v.as_object_mut().unwrap().remove("mode");
         v["limits"].as_object_mut().unwrap().remove("day_steps");
         v["limits"]
@@ -563,14 +564,14 @@ mod tests {
             .unwrap()
             .remove("day_cost_micro_usd");
         let old: Config = serde_json::from_value(v.clone()).unwrap();
-        assert_eq!(old.mode, Mode::Copy);
+        assert_eq!(old.mode, Mode::Host);
         assert_eq!(
             (old.limits.day_cost_micro_usd, old.limits.day_steps),
             (3_000_000, 1000)
         );
-        v["mode"] = serde_json::json!("host");
-        let host: Config = serde_json::from_value(v).unwrap();
-        assert_eq!(host.mode, Mode::Host);
+        v["mode"] = serde_json::json!("copy");
+        let copy: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(copy.mode, Mode::Copy);
         assert_eq!(Mode::from_flags(false, false).unwrap(), None);
         assert_eq!(Mode::from_flags(true, false).unwrap(), Some(Mode::Host));
         assert_eq!(Mode::from_flags(false, true).unwrap(), Some(Mode::Copy));
