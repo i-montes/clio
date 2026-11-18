@@ -531,8 +531,11 @@ fn aside_id(r: &Response, class: &str) -> String {
         .unwrap()
         .0
         .to_owned();
+    // A command that asked for no time limit is told the one it gets if approved.
+    let limit =
+        " If the person approves it, it runs with a time limit of 3600 s, since it asked for none.";
     assert_eq!(
-        r.content,
+        r.content.strip_suffix(limit).unwrap_or(&r.content),
         format!(
             "apartado {id}: «{class}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final."
         )
