@@ -219,9 +219,11 @@ fn record_change(run_dir: &Path, path: &Path, content: Option<&[u8]>) -> std::io
 /// Undoes a host session's file changes, last first: a replaced file gets its content and mode
 /// back, a new file and a new empty folder go. A file that changed after Clio wrote it (its
 /// `sha256` is no longer the written one) is left as it is. Returns, for the person, what was done
-/// and what was not.
+/// and what was not; empty when there is nothing (left) to undo. The journal is then set aside
+/// as `changes.undone.jsonl`, so a second undo does not go over it again.
 pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
-    let text = match fs::read_to_string(run_dir.join("changes.jsonl")) {
+    let journal = run_dir.join("changes.jsonl");
+    let text = match fs::read_to_string(&journal) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(format!("changes.jsonl: {e}")),
@@ -254,6 +256,8 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
         };
         said.push(done.unwrap_or_else(|e| format!("no se pudo deshacer {p}: {e}")));
     }
+    fs::rename(&journal, run_dir.join("changes.undone.jsonl"))
+        .map_err(|e| format!("changes.jsonl: {e}"))?;
     Ok(said)
 }
 
@@ -363,6 +367,15 @@ impl ToolHost {
             "path".into(),
             Value::from(rel.to_string_lossy().into_owned()),
         );
+        if tool == "fs_glob" {
+            let skip: Vec<Value> = h
+                .cfg
+                .control
+                .iter()
+                .map(|c| Value::from(c.to_string_lossy().into_owned()))
+                .collect();
+            args.insert("skip".into(), Value::Array(skip));
+        }
         let action = Action {
             id: action_id,
             tool: tool.into(),

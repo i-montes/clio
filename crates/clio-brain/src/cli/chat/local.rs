@@ -4,7 +4,9 @@
 //!
 //! 1. the working copy: a NEW session is a `runs::prepare` run (the project copied to
 //!    `runs/<id>/sandbox` with its manifest, so `clio diff|apply|undo <id>` work on it); a listed
-//!    one must be a session whose folder is exactly that copy;
+//!    one must be a session whose folder is exactly that copy. In host mode there is no copy: the
+//!    run folder holds `meta.json` (`host: true`), the folder is the person's home, and the
+//!    toolhost acts on the real machine;
 //! 2. `clio toolhost` (this same executable) on that copy, with `HOME` set to Clio's own Pi home
 //!    (the jail self-test plants its decoy there, never in the person's home), a 0700 socket
 //!    folder under `$XDG_RUNTIME_DIR/clio`, and the API key taught to its output filter;
@@ -31,13 +33,15 @@ use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, 
 use clio_brain::pi::level::{Assessor, run_assessed};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
-use clio_brain::pi::session::{GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, guard_env};
+use clio_brain::pi::session::{
+    GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
+};
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use serde_json::{Value, json};
 
 use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
 use crate::cli::Res;
-use crate::cli::home::{Config, Dirs, Limits};
+use crate::cli::home::{Config, Dirs, Limits, Mode};
 use crate::cli::jev;
 use crate::cli::runs::{self, RunOpts};
 use crate::cli::usage;
@@ -61,6 +65,8 @@ pub struct LocalSource {
     dirs: Arc<Dirs>,
     /// A conversation: Clio introduces herself to a person the memory does not know.
     presentation: bool,
+    /// `--host` or `--copy`, over the configuration, for a new session.
+    mode: Option<Mode>,
 }
 
 impl LocalSource {
@@ -68,7 +74,14 @@ impl LocalSource {
         Self {
             dirs,
             presentation: true,
+            mode: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_mode(mut self, mode: Option<Mode>) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// One instruction (`clio run`), not a conversation: nobody is there to answer.
@@ -87,6 +100,20 @@ impl LocalSource {
     /// copy it names must sit inside `runs/` (`Path::join` with an absolute id, or one with `..`,
     /// would point anywhere).
     fn is_ours(&self, s: &SessionInfo) -> bool {
+        self.is_copy(s) || self.is_host(s)
+    }
+
+    /// A host-mode session: its run says so, and its folder is the person's home.
+    fn is_host(&self, s: &SessionInfo) -> bool {
+        let home = self.dirs.home.canonicalize().ok();
+        valid_id(&s.id)
+            && runs::read_json::<runs::Meta>(&self.dirs.runs.join(&s.id).join("meta.json"))
+                .is_ok_and(|m| m.host && Path::new(&m.workspace).canonicalize().ok() == home)
+            && home.is_some()
+            && s.cwd_path.as_ref().and_then(|c| c.canonicalize().ok()) == home
+    }
+
+    fn is_copy(&self, s: &SessionInfo) -> bool {
         if !valid_id(&s.id) {
             return false;
         }
@@ -135,8 +162,14 @@ impl SessionSource for LocalSource {
             connector::by_provider(&cfg.model.provider).expect("a connector"),
         )?;
         // 1. the working copy
-        let (id, session) = match target {
+        let (id, session, host) = match target {
+            Target::New { .. } if self.mode.unwrap_or(cfg.mode) == Mode::Host => {
+                clean_old_runs(d);
+                let id = runs::prepare_host(d, "sesión de Pi")?;
+                (id.clone(), SessionTarget::New { id: Some(id) }, true)
+            }
             Target::New { project } => {
+                clean_old_runs(d);
                 let p = runs::prepare(
                     d,
                     &RunOpts {
@@ -147,7 +180,7 @@ impl SessionSource for LocalSource {
                         adapter_key: false,
                     },
                 )?;
-                (p.id.clone(), SessionTarget::New { id: Some(p.id) })
+                (p.id.clone(), SessionTarget::New { id: Some(p.id) }, false)
             }
             Target::Existing { reference } => {
                 // Only a listed session, and only one whose folder is its own copy.
@@ -160,11 +193,20 @@ impl SessionSource for LocalSource {
                 if !self.is_ours(s) {
                     return Err("la sesión no es una copia de trabajo de Clio: no se abre".into());
                 }
-                (s.id.clone(), SessionTarget::Open(reference.clone()))
+                (
+                    s.id.clone(),
+                    SessionTarget::Open(reference.clone()),
+                    self.is_host(s),
+                )
             }
         };
         let run_dir = d.runs.join(&id);
-        let work = self.copy_of(&id);
+        let work = if host {
+            d.home.clone()
+        } else {
+            self.copy_of(&id)
+        };
+        let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
         // The project of the session, for the memory: decided here from the person's own folder
         // (the copy has no history), never by the model.
         let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))
@@ -192,13 +234,20 @@ impl SessionSource for LocalSource {
                 // Jev, if the person turned it on (the service that handles the model's proposals
                 // asks it what to do with each; the key stays in the vault), and the project.
                 extra_env: &service_env,
+                host: host.then(|| HostOpts {
+                    home: &d.home,
+                    state: &state,
+                    control: &control,
+                    rules: rules.as_deref(),
+                    run: &id,
+                }),
             },
         )?;
         // 3. Pi
         let launch = Launch {
             guard: Some(ensure_guard(&install)?),
             guard_tools: GUARD_TOOLS.map(String::from).to_vec(),
-            extra_env: guard_env(&paths, &toolhost)?,
+            extra_env: guard_env(&paths, &toolhost, host)?,
             provider: provider_of(d, &cfg),
             api_key: Some(key),
             cwd: work.clone(),
@@ -243,9 +292,22 @@ impl SessionSource for LocalSource {
             pi,
             toolhost,
             down: Mutex::new(false),
-            budget: task_budget(&cfg.limits),
-            // The configuration has no daily cap yet, like the builtin loop: no cap.
-            day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
+            budget: if host {
+                host_budget(task_budget(&cfg.limits))
+            } else {
+                task_budget(&cfg.limits)
+            },
+            // Copy mode has no daily cap, like the builtin loop; host mode has one per day,
+            // kept between sessions.
+            day: Arc::new(Mutex::new(if host {
+                DayBudget::kept(
+                    &state.join("day.json"),
+                    cfg.limits.day_cost_micro_usd,
+                    cfg.limits.day_steps,
+                )
+            } else {
+                DayBudget::new(u64::MAX)
+            })),
             prompts: AtomicU64::new(0),
             assessor: Assessor::new(Arc::new(SystemClock)),
             pre,
@@ -293,6 +355,31 @@ fn task_budget(limits: &Limits) -> Budget {
     b.max_ms = i64::try_from(limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
     b.max_cost_micro = limits.max_cost_micro_usd;
     b
+}
+
+/// Host mode: no cap of steps or time per prompt (the day's budget holds instead); the cost per
+/// prompt and the anti-loop stay.
+fn host_budget(mut b: Budget) -> Budget {
+    b.max_steps = u32::MAX;
+    b.max_ms = i64::MAX;
+    b
+}
+
+/// Old run folders go when a new session opens; what could not go is written to
+/// `cleanup.log` (the screen may be the TUI's), and the session opens anyway.
+fn clean_old_runs(d: &Dirs) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let failed = runs::clean_old(d, crate::cli::now_ms());
+    if failed.is_empty() {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(d.data.join("cleanup.log"))
+        .and_then(|mut f| f.write_all(format!("{}\n", failed.join("\n")).as_bytes()));
 }
 
 struct ChatSession {
@@ -465,6 +552,8 @@ mod tests {
             max_steps: 40,
             max_seconds: 600,
             max_cost_micro_usd: 100_000,
+            day_cost_micro_usd: 0,
+            day_steps: 0,
         });
         assert_eq!(
             (b.max_steps, b.max_ms, b.max_cost_micro, b.max_repeats),
@@ -551,6 +640,8 @@ mod tests {
             max_steps: 1,
             max_seconds: u64::MAX,
             max_cost_micro_usd: 1,
+            day_cost_micro_usd: 0,
+            day_steps: 0,
         });
         assert_eq!(b.max_ms, i64::MAX);
     }

@@ -8,7 +8,9 @@
 //! - Pi's own `agent/`, `sessions/` and `home/`, read-write;
 //! - the prompt file, read-only, and the folder of the toolhost's socket (made for it alone),
 //!   the only way out to an effect;
-//! - the working copy, **read-only**: every change goes through the toolhost.
+//! - the working copy, **read-only**: every change goes through the toolhost. In host mode
+//!   (`CLIO_GUARD_HOST=1`) the working folder is the person's home, and Pi sees it EMPTY and
+//!   read-only: nothing of the person is mounted, the toolhost does it all.
 //! - with the claude connector, the copy's `.claude/`, `.pi/` and `.mcp.json` covered read-only
 //!   (a copy where one is a link does not start), and Clio's
 //!   managed settings for Claude Code at `/etc/claude-code/managed-settings.json`, read-only.
@@ -89,7 +91,8 @@ pub fn prepare(l: &Launch) -> Result<Option<PiJail>, PiError> {
         return Ok(None);
     }
     let bridge = l.provider.extension.is_some();
-    if bridge {
+    // In host mode nothing of the working folder is mounted, so there is nothing of it to mask.
+    if bridge && !host_mode(l) {
         refuse_odd_claude_paths(&l.cwd)?;
     }
     let refuse = |why: String| {
@@ -131,6 +134,13 @@ fn unjailed(l: &Launch, off: bool, linux: bool) -> Result<bool, PiError> {
     } else {
         "el conector claude necesita la jaula de Pi, que solo existe en Linux con bubblewrap: usa otro conector en este sistema, por ejemplo `clio connect opencode` (ADR 0009)".into()
     }))
+}
+
+/// A host-mode session (the guard reads the same variable).
+fn host_mode(l: &Launch) -> bool {
+    l.extra_env
+        .iter()
+        .any(|(k, v)| k == super::session::HOST_ENV && v == "1")
 }
 
 /// What the bridge's Claude Code (and the bridge) load from the working copy.
@@ -246,6 +256,13 @@ impl PiJail {
         a.extend(strings(&[
             "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         ]));
+        let host = host_mode(l);
+        let cwd = l.cwd.display().to_string();
+        if host {
+            // Before anything that may sit under the home (Node, Pi, Clio's data): those are
+            // mounted on top; the empty folder is made read-only at the end.
+            a.extend(["--tmpfs".into(), cwd.clone()]);
+        }
         // From here on, mounts that may sit under /tmp (the tmpfs above comes first).
         let mut seen = BTreeSet::new();
         let mut bind = |a: &mut Vec<String>, flag: &str, p: &Path| {
@@ -293,11 +310,15 @@ impl PiJail {
         ] {
             bind(&mut a, "--bind", &rw);
         }
-        bind(&mut a, "--ro-bind", &l.cwd);
-        if l.provider.extension.is_some() {
-            claude_masks(&mut a, l);
+        if host {
+            a.extend(["--remount-ro".into(), cwd.clone()]);
+        } else {
+            bind(&mut a, "--ro-bind", &l.cwd);
         }
-        a.extend(["--chdir".into(), l.cwd.display().to_string()]);
+        if l.provider.extension.is_some() {
+            claude_masks(&mut a, l, host);
+        }
+        a.extend(["--chdir".into(), cwd]);
         a
     }
 
@@ -418,10 +439,12 @@ impl PiJail {
 /// (`bwrap` would have to create it in the read-only copy); the copy is read-only in here and
 /// the toolhost does not write `.claude` or `.pi` (S-16). Claude Code also gets Clio's managed
 /// settings, read-only: no hook runs, whatever any other source says.
-fn claude_masks(a: &mut Vec<String>, l: &Launch) {
+fn claude_masks(a: &mut Vec<String>, l: &Launch, host: bool) {
+    // Host mode: the folder is empty in here, there is nothing of it to cover.
     let kind = |name: &str| {
         std::fs::symlink_metadata(l.cwd.join(name))
             .ok()
+            .filter(|_| !host)
             .map(|m| m.file_type())
     };
     for d in [".claude", ".pi"] {
@@ -660,5 +683,55 @@ mod tests {
             .output()
             .unwrap_or_else(|e| panic!("sh: {e}"));
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    // Host mode: Pi's working folder is the person's home, and in the jail it is an empty,
+    // read-only folder: nothing of the person is mounted (the toolhost does every file call).
+    #[test]
+    fn in_host_mode_the_jail_mounts_nothing_of_the_home() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".mcp.json"), "{}").unwrap();
+        // Clio's data under the home, as on a real machine.
+        let data = home.join(".local/share/clio");
+        let s = |p: &Path| p.display().to_string();
+        for connector in ["opencode", "claude"] {
+            let mut l = launch_for(connector, &home, &data);
+            l.extra_env = vec![(crate::pi::session::HOST_ENV.into(), "1".into())];
+            let j = PiJail {
+                bwrap: "/usr/bin/bwrap".into(),
+                proxy: EgressProxy::start(t.path(), "api.anthropic.com:443").unwrap(),
+            };
+            let a = j.args(&l);
+            let at = |want: &[String]| a.windows(want.len()).position(|w| w == want);
+            assert!(
+                !a.windows(2)
+                    .any(|w| w[0].ends_with("bind") && w[1] == s(&home)),
+                "{connector}: the home is mounted: {a:?}"
+            );
+            let empty = at(&["--tmpfs".into(), s(&home)]).expect("an empty home");
+            let ro = at(&["--remount-ro".into(), s(&home)]).expect("read-only");
+            // Everything else is mounted between the two: on top of the empty folder, before it
+            // turns read-only.
+            let agent = at(&[
+                "--bind".into(),
+                s(&l.paths.agent_dir()),
+                s(&l.paths.agent_dir()),
+            ])
+            .unwrap();
+            assert!(empty < agent && agent < ro, "{connector}: {a:?}");
+            assert_eq!(at(&["--chdir".into(), s(&home)]), Some(a.len() - 2));
+            // Nothing of the person's `.claude` or `.mcp.json` to cover: it is not there.
+            assert!(
+                !a.iter()
+                    .any(|x| x.contains(".claude") || x.contains(".mcp.json")),
+                "{connector}: {a:?}"
+            );
+            assert_eq!(
+                a.iter().any(|x| x == CLAUDE_POLICY_IN_JAIL),
+                connector == "claude"
+            );
+        }
     }
 }

@@ -53,6 +53,26 @@ impl Dirs {
         self.config.join("config.json")
     }
 
+    /// Clio's own folders (canonical when they exist): in host mode the file tools refuse them and
+    /// commands see them empty. clio-memory's folder is Clio's too when it lives elsewhere.
+    pub fn control(&self) -> Vec<PathBuf> {
+        let mut v = vec![self.config.clone(), self.data.clone()];
+        v.extend(self.runtime.clone());
+        v.extend(clio_memory::agent::default_data().filter(|m| !m.starts_with(&self.data)));
+        for p in &mut v {
+            if let Ok(c) = p.canonicalize() {
+                *p = c;
+            }
+        }
+        v.dedup();
+        v
+    }
+
+    /// `host.json`, the person's additions to the host-mode rules, when there is one.
+    pub fn host_rules(&self) -> Option<PathBuf> {
+        Some(self.config.join("host.json")).filter(|p| p.is_file())
+    }
+
     pub fn need_runtime(&self) -> Res<&Path> {
         self.runtime
             .as_deref()
@@ -85,6 +105,40 @@ pub struct Limits {
     pub max_steps: u32,
     pub max_seconds: u64,
     pub max_cost_micro_usd: u64,
+    /// Host mode: what all sessions of one UTC day may spend and do together.
+    #[serde(default = "day_cost")]
+    pub day_cost_micro_usd: u64,
+    #[serde(default = "day_steps")]
+    pub day_steps: u64,
+}
+
+fn day_cost() -> u64 {
+    3_000_000
+}
+
+fn day_steps() -> u64 {
+    1000
+}
+
+/// Where the tools act: on a copy of the project (the factory one), or on the real machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Copy,
+    Host,
+}
+
+impl Mode {
+    /// What `--host` or `--copy` say, which decides over the configuration; `None`: neither.
+    pub fn from_flags(host: bool, copy: bool) -> Res<Option<Mode>> {
+        match (host, copy) {
+            (true, true) => Err("--host y --copy no van juntas".into()),
+            (true, false) => Ok(Some(Mode::Host)),
+            (false, true) => Ok(Some(Mode::Copy)),
+            (false, false) => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +183,8 @@ impl Default for JevCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub mode: Mode,
     pub model: ModelCfg,
     pub limits: Limits,
     pub workspace: WorkspaceLimits,
@@ -180,6 +236,7 @@ impl ModelCfg {
 impl Config {
     pub fn default_with(command: Vec<String>) -> Self {
         Self {
+            mode: Mode::Copy,
             model: ModelCfg {
                 provider: "opencode-go".into(),
                 model: "beam-free".into(),
@@ -193,6 +250,8 @@ impl Config {
                 max_steps: 40,
                 max_seconds: 600,
                 max_cost_micro_usd: 100_000,
+                day_cost_micro_usd: day_cost(),
+                day_steps: day_steps(),
             },
             workspace: WorkspaceLimits {
                 max_files: 5000,
@@ -489,6 +548,33 @@ mod tests {
         let p = builtin_adapter(&dirs, c).unwrap();
         assert!(p.is_file() && !a.join("anthropic_oauth.py").exists());
         assert!(a.join("notas.txt").exists() && a.join("mine.py").exists());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_mode_is_copy_by_default_and_the_flags_decide_over_the_file() {
+        assert_eq!(Config::default_with(vec![]).mode, Mode::Copy);
+        let mut v = serde_json::to_value(Config::default_with(vec![])).unwrap();
+        // A file from before the mode and the day's limits existed still loads, as copy.
+        v.as_object_mut().unwrap().remove("mode");
+        v["limits"].as_object_mut().unwrap().remove("day_steps");
+        v["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("day_cost_micro_usd");
+        let old: Config = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(old.mode, Mode::Copy);
+        assert_eq!(
+            (old.limits.day_cost_micro_usd, old.limits.day_steps),
+            (3_000_000, 1000)
+        );
+        v["mode"] = serde_json::json!("host");
+        let host: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(host.mode, Mode::Host);
+        assert_eq!(Mode::from_flags(false, false).unwrap(), None);
+        assert_eq!(Mode::from_flags(true, false).unwrap(), Some(Mode::Host));
+        assert_eq!(Mode::from_flags(false, true).unwrap(), Some(Mode::Copy));
+        assert!(Mode::from_flags(true, true).is_err());
     }
 
     #[test]

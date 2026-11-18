@@ -471,6 +471,51 @@ fn clio_run_with_pi_prints_the_answer_and_the_change_shows_in_diff() {
     w.assert_key_nowhere();
 }
 
+// Host mode: no copy; the file tools act on the person's home through the toolhost, which keeps
+// a copy and a line in the log first. `CLIO_JAIL=off`: no command, so no launcher is looked for.
+#[test]
+fn clio_run_in_host_mode_writes_in_the_home_and_keeps_a_copy_first() {
+    if can_run("run_host", false).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"tool_calls":[{"name":"write","arguments":{"reason":"probar","path":"nota.txt","content":"hola\n"}}]},{"text":"listo","usage":[100,5]}]"#,
+    );
+    let o = w
+        .clio(&["run", "--harness", "pi", "--host", "escribe una nota"])
+        .env("CLIO_JAIL", "off")
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        o.status.success() && out.contains("[write] ok"),
+        "{out}{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(w.home().join("nota.txt")).unwrap(),
+        "hola\n"
+    );
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("run: "))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let run = w.home().join(".local/share/clio/runs").join(&id);
+    let meta: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["host"], json!(true));
+    assert!(!run.join("sandbox").exists());
+    assert!(run.join("toolhost/changes.jsonl").is_file());
+    let log =
+        std::fs::read_to_string(w.home().join(".local/share/clio/host/actions.jsonl")).unwrap();
+    // Before and after the write (Pi also makes sure of the folder: two lines of `fs_mkdir`).
+    let writes = log.lines().filter(|l| l.contains("\"fs_write\"")).count();
+    assert_eq!(writes, 2, "{log}");
+    w.assert_key_nowhere();
+}
+
 // The key is never in a file: with no variable and no vault the run says what to do.
 #[test]
 fn a_chat_without_key_or_vault_says_what_to_do() {

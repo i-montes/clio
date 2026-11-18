@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clio_core::Effect;
@@ -21,6 +21,9 @@ use crate::PROTECTED_PATHS;
 const MAX_FILE_BYTES: u64 = 8 << 20;
 const BASH: &str = "/usr/bin/bash";
 const MAX_TIMEOUT_SECS: u64 = 120;
+/// shortcut: a glob stops after this many folders (a glob on `/` would run for minutes), so a
+/// match past it is not found; raise it or add a time limit if real searches hit it.
+const MAX_GLOB_DIRS: usize = 20_000;
 
 fn text<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
     a.get(k)
@@ -170,7 +173,18 @@ pub fn glob_match(pat: &[u8], txt: &[u8]) -> bool {
     }
 }
 
-fn walk(base: &Path, dir: &Path, pat: &str, limit: usize, out: &mut Vec<String>) {
+/// What a glob walk carries: the folders it never enters (host mode: Clio's own) and how many
+/// folders it may still visit.
+struct Walk<'a> {
+    skip: &'a [PathBuf],
+    dirs_left: usize,
+}
+
+fn walk(base: &Path, dir: &Path, pat: &str, limit: usize, w: &mut Walk, out: &mut Vec<String>) {
+    if w.dirs_left == 0 || w.skip.iter().any(|s| dir.starts_with(s)) {
+        return;
+    }
+    w.dirs_left -= 1;
     let Ok(rd) = fs::read_dir(dir) else { return };
     let mut items: Vec<_> = rd.flatten().collect();
     items.sort_by_key(|e| e.file_name());
@@ -189,7 +203,7 @@ fn walk(base: &Path, dir: &Path, pat: &str, limit: usize, out: &mut Vec<String>)
         // gives its own glob.
         if ft.is_dir() && !ft.is_symlink() {
             if name != ".git" && name != "node_modules" {
-                walk(base, &e.path(), pat, limit, out);
+                walk(base, &e.path(), pat, limit, w, out);
             }
         } else if (pat.contains('/') && glob_match(pat.as_bytes(), rel.as_bytes()))
             || (!pat.contains('/') && glob_match(pat.as_bytes(), name.as_bytes()))
@@ -207,8 +221,21 @@ fn fs_glob(s: &Sandbox, a: &Value) -> Result<Value> {
         .and_then(Value::as_u64)
         .map_or(1000, |l| usize::try_from(l).unwrap_or(1000))
         .clamp(1, 10_000);
+    // Host mode puts Clio's own folders here (`skip`): never walked into.
+    let skip: Vec<PathBuf> = a
+        .get("skip")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .collect();
+    let mut w = Walk {
+        skip: &skip,
+        dirs_left: MAX_GLOB_DIRS,
+    };
     let mut out = Vec::new();
-    walk(&dir, &dir, pat, limit, &mut out);
+    walk(&dir, &dir, pat, limit, &mut w, &mut out);
     Ok(json!({ "paths": out }))
 }
 
@@ -291,8 +318,26 @@ pub fn exec_result(out: &JailOutput, secs: u64) -> Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::glob_match;
+    use super::{Walk, glob_match, walk};
+
+    #[test]
+    fn a_glob_stops_after_its_folder_budget() {
+        let t = tempfile::tempdir().unwrap();
+        for d in ["a", "b", "c"] {
+            std::fs::create_dir(t.path().join(d)).unwrap();
+            std::fs::write(t.path().join(d).join("x.txt"), "").unwrap();
+        }
+        let mut w = Walk {
+            skip: &[],
+            dirs_left: 3,
+        };
+        let mut out = Vec::new();
+        walk(t.path(), t.path(), "**/*.txt", 100, &mut w, &mut out);
+        // The root and two folders: the third is never read.
+        assert_eq!(out, ["a/x.txt", "b/x.txt"]);
+    }
 
     #[test]
     fn globs() {

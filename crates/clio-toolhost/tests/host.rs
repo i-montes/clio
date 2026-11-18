@@ -625,3 +625,61 @@ fn three_questions_a_day_then_the_summary_and_the_terminals_do_not_count() {
     std::fs::write(&q, v.to_string()).unwrap();
     assert!(ask("7").0);
 }
+
+#[test]
+fn a_second_undo_says_there_is_nothing_left() {
+    let e = env();
+    let f = e.r.join("outside/u.txt");
+    std::fs::write(&f, "antes").unwrap();
+    assert!(
+        call(
+            &e,
+            "s",
+            "fs_write",
+            json!({"path": p(&f), "content": "después"})
+        )
+        .ok
+    );
+    let first = host::undo(&e.run).unwrap();
+    assert!(first.iter().any(|l| l.contains("restaurado")), "{first:?}");
+    // The person writes the file again: a second undo does not go over the old journal.
+    std::fs::write(&f, "de la persona").unwrap();
+    assert_eq!(host::undo(&e.run).unwrap(), Vec::<String>::new());
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "de la persona");
+}
+
+#[test]
+fn a_glob_never_walks_into_clios_folders() {
+    let e = env();
+    std::fs::write(e.home.join("mio.json"), "{}").unwrap();
+    std::fs::create_dir_all(e.r.join("clio/data/sub")).unwrap();
+    std::fs::write(e.r.join("clio/data/sub/oculto.json"), "{}").unwrap();
+    let g = call(
+        &e,
+        "s",
+        "fs_glob",
+        json!({"path": p(&e.r), "pattern": "**/*.json"}),
+    );
+    assert!(g.ok, "{g:?}");
+    let found: Vec<&str> = g.data["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(found.contains(&"home/mio.json"), "{found:?}");
+    assert!(
+        found.iter().all(|f| !f.starts_with("clio/")),
+        "it walked into Clio's folders: {found:?}"
+    );
+    // Listing the folder that holds them shows their names, never what is inside.
+    let l = call(&e, "s", "fs_list", json!({"path": p(&e.r.join("clio"))}));
+    assert!(l.ok, "{l:?}");
+    let in_data = call(
+        &e,
+        "s",
+        "fs_list",
+        json!({"path": p(&e.r.join("clio/data"))}),
+    );
+    assert_eq!(in_data.decision.rule, "host/control", "{in_data:?}");
+}

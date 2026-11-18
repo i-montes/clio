@@ -234,3 +234,41 @@ fn settle_with_huge_costs_halts_and_never_wraps() {
     c.settle(0, u64::MAX, &mut day);
     assert_eq!(c.begin_step("b", 0, &mut day), Err(Stop::Cost));
 }
+
+// Host mode: the day's steps and cost count across sessions (the file), and a new day starts at zero.
+#[test]
+fn the_day_counts_steps_and_cost_across_two_loads_and_resets_the_next_day() {
+    let t = tempfile::tempdir().unwrap();
+    let file = t.path().join("host/day.json");
+    let (clock, day0) = (Arc::new(FixedClock::new(1_000_000)), 1_000_000);
+    let big = Budget {
+        max_steps: 1_000,
+        ..budget()
+    };
+    let mut first = DayBudget::kept(&file, 10_000, 3);
+    let mut c = Controller::new(clock.clone(), "t1", Level::Simple, big);
+    c.begin_step("a", 0, &mut first).unwrap();
+    c.begin_step("b", 0, &mut first).unwrap();
+    c.settle(0, 600, &mut first);
+    first.save();
+
+    let mut second = DayBudget::kept(&file, 10_000, 3);
+    assert_eq!(second.spent(day0), 600);
+    assert_eq!(second.steps(), 2);
+    let mut c = Controller::new(clock.clone(), "t2", Level::Simple, big);
+    c.begin_step("c", 0, &mut second).unwrap();
+    assert_eq!(c.begin_step("d", 0, &mut second), Err(Stop::DaySteps));
+    assert_eq!(
+        Stop::DaySteps.reason(),
+        "presupuesto del día agotado: sigo mañana"
+    );
+    second.save();
+
+    // The next UTC day: nothing spent, nothing done.
+    clock.advance(86_400_000);
+    let mut third = DayBudget::kept(&file, 10_000, 3);
+    let mut c = Controller::new(clock, "t3", Level::Simple, big);
+    c.begin_step("e", 0, &mut third).unwrap();
+    assert_eq!(third.steps(), 1);
+    assert_eq!(third.spent(day0 + 86_400_000), 0);
+}

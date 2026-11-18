@@ -12,12 +12,12 @@ use clio_brain::pi::rpc::{Cancel, Event};
 use super::local::LocalSource;
 use super::{SessionSource, Target};
 use crate::cli::Res;
-use crate::cli::home::Dirs;
+use crate::cli::home::{Dirs, Mode};
 use crate::cli::tui::sanitize;
 use crate::cli::usage;
 
-pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str) -> Res<i32> {
-    let source = LocalSource::new(Arc::new(dirs)).one_shot();
+pub fn run(dirs: Dirs, workspace: PathBuf, instruction: &str, mode: Option<Mode>) -> Res<i32> {
+    let source = LocalSource::new(Arc::new(dirs)).one_shot().with_mode(mode);
     let opened = source.open(&Target::New { project: workspace })?;
     println!("run: {}", opened.id);
     let mut out = std::io::stdout();

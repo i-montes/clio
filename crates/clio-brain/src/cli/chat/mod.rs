@@ -19,7 +19,7 @@ use clio_brain::pi::rpc::{Cancel, Event, RunSummary, SessionStats};
 use serde_json::Value;
 
 use super::Res;
-use super::home::Dirs;
+use super::home::{Dirs, Mode};
 
 /// Which agent runs under the interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,10 +155,11 @@ impl SessionSource for RemoteSource {
     }
 }
 
-/// The sources of this process: this machine, and the remote placeholder.
-pub fn sources(dirs: Arc<Dirs>) -> Vec<Box<dyn SessionSource>> {
+/// The sources of this process: this machine, and the remote placeholder. `mode`: `--host` or
+/// `--copy`, over the configuration.
+pub fn sources(dirs: Arc<Dirs>, mode: Option<Mode>) -> Vec<Box<dyn SessionSource>> {
     vec![
-        Box::new(local::LocalSource::new(dirs)),
+        Box::new(local::LocalSource::new(dirs).with_mode(mode)),
         Box::new(RemoteSource),
     ]
 }

@@ -41,6 +41,9 @@ pub struct Meta {
     pub workspace: String,
     pub instruction: String,
     pub created_ms: i64,
+    /// A host-mode session: no copy, the tools acted on the machine (`workspace` is the home).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host: bool,
 }
 
 impl Run {
@@ -380,6 +383,68 @@ fn random_u16() -> u16 {
     u16::try_from(mixed).unwrap_or(0)
 }
 
+/// A host-mode session's run folder: `meta.json` only, no copy and no manifest. Returns its id.
+pub fn prepare_host(dirs: &Dirs, instruction: &str) -> Res<String> {
+    let started = now_ms();
+    let id = unique_id(started, &|c| dirs.runs.join(c).exists())?;
+    let path = dirs.runs.join(&id);
+    mkdir_private(&path)?;
+    write_json(
+        &path.join("meta.json"),
+        &Meta {
+            id: id.clone(),
+            workspace: dirs.home.display().to_string(),
+            instruction: instruction.into(),
+            created_ms: started,
+            host: true,
+        },
+    )?;
+    Ok(id)
+}
+
+/// How old a run folder may get before a new session clears it away.
+const KEEP_MS: i64 = 14 * 24 * 3600 * 1000;
+
+/// Removes the run folders untouched for 14 days that hold nothing pending: a copy that was
+/// applied or has no differences, a host session with no action waiting for the person. Best
+/// effort: what cannot be checked or removed stays, and is said in what this returns.
+pub fn clean_old(dirs: &Dirs, now: i64) -> Vec<String> {
+    let waiting: Vec<String> = clio_toolhost::pending::list(&dirs.data.join("host"))
+        .into_iter()
+        .filter(|p| p.state == clio_toolhost::pending::State::Waiting)
+        .map(|p| p.run)
+        .collect();
+    let mut failed = Vec::new();
+    for id in run_ids(dirs).unwrap_or_default() {
+        let run = Run {
+            path: dirs.runs.join(&id),
+            id,
+        };
+        // Its newest top-level file: a reopened session writes its log there.
+        let last = std::fs::read_dir(&run.path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.metadata().ok()?.modified().ok())
+            .max()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(now, |d| i64::try_from(d.as_millis()).unwrap_or(now));
+        if now - last < KEEP_MS {
+            continue;
+        }
+        let Ok(meta) = run.meta() else { continue };
+        let done = if meta.host {
+            !waiting.contains(&run.id)
+        } else {
+            super::sessions::unapplied_changes(&run) == Some(0)
+        };
+        if done && let Err(e) = std::fs::remove_dir_all(&run.path) {
+            failed.push(format!("no pude borrar {}: {e}", run.path.display()));
+        }
+    }
+    failed
+}
+
 /// Validates the workspace, scans it and makes the copy. Nothing of the original is touched.
 pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
     let mut cfg = Config::load(dirs)?;
@@ -418,6 +483,7 @@ pub fn prepare(dirs: &Dirs, o: &RunOpts) -> Res<Prepared> {
             workspace: ws.display().to_string(),
             instruction: o.instruction.clone(),
             created_ms: started,
+            host: false,
         },
     )?;
     let (window, window_known) = usage::window_for(dirs, &cfg.model.provider, &cfg.model.model);
@@ -1235,5 +1301,94 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(calls.get(), 16, "a bounded number of tries");
+    }
+
+    /// Every top-level entry of `run` last touched `days` ago.
+    #[allow(clippy::unwrap_used)]
+    fn age(run: &Path, days: u64) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        for e in std::fs::read_dir(run).unwrap().flatten() {
+            std::fs::File::open(e.path())
+                .unwrap()
+                .set_modified(then)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_cleanup_removes_old_runs_with_nothing_pending_and_keeps_the_rest() {
+        use clio_toolhost::ask::Class;
+        use clio_toolhost::pending::{Pending, State};
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let dirs = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data: data.clone(),
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        // A copy run: `changed` leaves a difference in its copy.
+        let copy = |id: &str, applied: bool, changed: bool| {
+            let run = dirs.runs.join(id);
+            std::fs::create_dir_all(run.join("sandbox")).unwrap();
+            std::fs::write(run.join("sandbox/a.txt"), "a").unwrap();
+            let m: BTreeMap<String, String> =
+                [("a.txt".to_owned(), crate::cli::sha_hex(b"a"))].into();
+            write_json(&run.join("manifest.json"), &m).unwrap();
+            write_json(
+                &run.join("meta.json"),
+                &Meta {
+                    id: id.into(),
+                    workspace: "/w".into(),
+                    instruction: "x".into(),
+                    created_ms: 0,
+                    host: false,
+                },
+            )
+            .unwrap();
+            if applied {
+                std::fs::write(run.join("applied.json"), "{}").unwrap();
+            }
+            if changed {
+                std::fs::write(run.join("sandbox/a.txt"), "b").unwrap();
+            }
+            run
+        };
+        let applied = copy("r-applied", true, true);
+        let same = copy("r-same", false, false);
+        let unapplied = copy("r-unapplied", false, true);
+        let recent = copy("r-recent", false, false);
+        let host_free = dirs.runs.join(prepare_host(&dirs, "x").unwrap());
+        let host_waiting = dirs.runs.join(prepare_host(&dirs, "y").unwrap());
+        let waiting_id = host_waiting.file_name().unwrap().to_string_lossy();
+        let p = Pending {
+            id: "abcd1234".into(),
+            class: Class::Borrar,
+            tool: "exec".into(),
+            args: json!({"command": "rm -r x"}),
+            hash: String::new(),
+            what: "rm -r x".into(),
+            run: waiting_id.into_owned(),
+            session: "s".into(),
+            created_ms: 0,
+            expires_ms: 1,
+            ask: true,
+            state: State::Waiting,
+        };
+        std::fs::create_dir_all(data.join("host/pending")).unwrap();
+        write_json(&data.join("host/pending/abcd1234.json"), &p).unwrap();
+        for r in [&applied, &same, &unapplied, &host_free, &host_waiting] {
+            age(r, 15);
+        }
+        age(&recent, 13);
+        assert!(clean_old(&dirs, now_ms()).is_empty());
+        for gone in [&applied, &same, &host_free] {
+            assert!(!gone.exists(), "{} was kept", gone.display());
+        }
+        for kept in [&unapplied, &recent, &host_waiting] {
+            assert!(kept.exists(), "{} was removed", kept.display());
+        }
     }
 }

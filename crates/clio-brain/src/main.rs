@@ -6,15 +6,17 @@ mod cli;
 use std::io::IsTerminal;
 
 use cli::chat;
-use cli::home::Dirs;
+use cli::home::{Dirs, Mode};
 use cli::{Args, Res, apply, connect, debug, doctor, home, memory, pi, runs, tui, vault};
 
 const USAGE: &str = "clio: un agente personal que trabaja en una copia de tu proyecto
 
-  clio [--debug] [--harness pi|builtin]       abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
-                                              con Pi instalado abre el selector de sesiones y el chat (CLIO_HARNESS=builtin lo apaga)
+  clio [--debug] [--harness pi|builtin] [--host|--copy]
+                                              abre la interfaz (en una terminal); --debug o CLIO_DEBUG=1: modo debug;
+                                              con Pi instalado abre el selector de sesiones y el chat (CLIO_HARNESS=builtin lo apaga);
+                                              --host: las herramientas actúan en la máquina real, --copy: en una copia (manda sobre \"mode\" de config.json)
   clio init                                   crea ~/.config/clio, ~/.local/share/clio y la carpeta de runtime
-  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] \"instrucción\"
+  clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instrucción\"
   clio diff <id>                              qué cambió el agente, contra el original
   clio apply <id> [--force]                   pone los cambios en el original (pregunta antes)
   clio undo <id> [--force]                    devuelve el original a como estaba antes de apply
@@ -38,23 +40,38 @@ fn id_arg(args: Args) -> Res<String> {
     Ok(rest.remove(0))
 }
 
+/// The harness, and host mode (asked for, or the configuration's) only with Pi: the builtin loop
+/// has no host mode.
+fn harness_for(flag: Option<&str>, mode: Option<Mode>, dirs: &Dirs) -> Res<chat::Harness> {
+    let h = chat::resolve(flag, dirs)?;
+    let host = match mode {
+        Some(m) => m == Mode::Host,
+        None => home::Config::load(dirs).is_ok_and(|c| c.mode == Mode::Host),
+    };
+    if host && h == chat::Harness::Builtin {
+        return Err("el modo anfitrión necesita Pi (clio pi install), o usa --copy".into());
+    }
+    Ok(h)
+}
+
 fn dispatch(argv: Vec<String>) -> Res<i32> {
     let mut it = argv.into_iter().peekable();
     // `clio` alone, or with only its own flags, opens the interface.
     if it
         .peek()
-        .is_none_or(|a| matches!(a.as_str(), "--debug" | "--harness"))
+        .is_none_or(|a| matches!(a.as_str(), "--debug" | "--harness" | "--host" | "--copy"))
     {
         let mut args = Args::new(it.collect());
         let dbg = args.flag("--debug") || debug::env_enabled();
         let harness = args.value("--harness")?;
+        let mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
         if !args.rest()?.is_empty() {
-            return Err("--debug y --harness van solos (abren la interfaz) o después de un comando: clio run --debug \"...\"".into());
+            return Err("--debug, --harness, --host y --copy van solos (abren la interfaz) o después de un comando: clio run --debug \"...\"".into());
         }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let dirs = Dirs::from_env()?;
-            let h = chat::resolve(harness.as_deref(), &dirs)?;
-            return tui::run(dirs, dbg, h);
+            let h = harness_for(harness.as_deref(), mode, &dirs)?;
+            return tui::run(dirs, dbg, h, mode);
         }
         println!("{USAGE}");
         return Ok(0);
@@ -133,14 +150,15 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             // Pi when it is installed (the bench: 57/66 against 55/66 for the builtin loop, and no
             // JSON-in-text protocol failures), the builtin loop otherwise or with --harness builtin.
             let harness = args.value("--harness")?;
+            let mode = Mode::from_flags(args.flag("--host"), args.flag("--copy"))?;
             let instruction = args.rest()?.join(" ");
             if instruction.trim().is_empty() {
                 return Err(
                     "falta la instrucción: clio run [--workspace DIR] \"qué hacer\"".into(),
                 );
             }
-            if chat::resolve(harness.as_deref(), &dirs)? == chat::Harness::Pi {
-                return chat::run::run(dirs, workspace, &instruction);
+            if harness_for(harness.as_deref(), mode, &dirs)? == chat::Harness::Pi {
+                return chat::run::run(dirs, workspace, &instruction, mode);
             }
             return runs::run(
                 &dirs,

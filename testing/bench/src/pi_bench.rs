@@ -137,7 +137,7 @@ impl PiBench {
         let launch = Launch {
             guard: Some(ensure_guard(&self.install)?),
             guard_tools: GUARD_TOOLS.map(String::from).to_vec(),
-            extra_env: guard_env(&self.paths, &toolhost)?,
+            extra_env: guard_env(&self.paths, &toolhost, false)?,
             provider: self.provider.clone(),
             api_key: Some(self.key.clone()),
             cwd: work.to_path_buf(),

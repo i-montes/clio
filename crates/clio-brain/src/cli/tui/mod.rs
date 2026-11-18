@@ -57,7 +57,7 @@ use self::new_run::Preview;
 use super::apply;
 use super::chat::{Harness, Session, SessionSource, Target};
 use super::debug::DebugCtl;
-use super::home::{Config, Dirs};
+use super::home::{Config, Dirs, Mode};
 use super::runs::{self, RunOpts};
 use super::usage::{self, RunLimits, RunUsage};
 use super::{Res, work};
@@ -155,7 +155,7 @@ impl Drop for Guard {
 }
 
 /// Opens the TUI and returns the exit code.
-pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
+pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>) -> Res<i32> {
     install_panic_hook();
     // SIGTERM and SIGHUP (the window closes, `kill`) leave through the normal way out, so the
     // guard gives the terminal back; a handler cannot do that itself, it only sets this.
@@ -168,7 +168,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness) -> Res<i32> {
     let (tx, rx) = channel::<Input>();
     let dirs = Arc::new(dirs);
     let ctx = Ctx {
-        sources: Arc::new(super::chat::sources(dirs.clone())),
+        sources: Arc::new(super::chat::sources(dirs.clone(), mode)),
         chat: Arc::default(),
         chat_cancel: Mutex::new(Cancel::new()),
         dirs,

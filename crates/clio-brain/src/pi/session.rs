@@ -43,6 +43,9 @@ pub const GUARD_TOOLS: [&str; 19] = [
 ];
 pub const PROMPT_NAME: &str = "clio-agent@19";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@19.md");
+/// The prompt of a host-mode session: the tools act on the person's real machine.
+pub const HOST_PROMPT_NAME: &str = "clio-host@1";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@1.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -105,29 +108,49 @@ pub fn ensure_guard(install: &PiInstall) -> Result<PathBuf, String> {
 }
 
 pub fn write_prompt(paths: &PiPaths) -> Result<PathBuf, String> {
+    write_named_prompt(paths, PROMPT_NAME, PROMPT)
+}
+
+fn write_named_prompt(paths: &PiPaths, name: &str, body: &str) -> Result<PathBuf, String> {
     let dir = paths.root.join("prompts");
     private_dir(&dir).map_err(text)?;
-    let p = dir.join(format!("{PROMPT_NAME}.md"));
-    write_private(&p, PROMPT.as_bytes()).map_err(text)?;
+    let p = dir.join(format!("{name}.md"));
+    write_private(&p, body.as_bytes()).map_err(text)?;
     Ok(p)
 }
 
 /// The guard's own variables (prompt file and version, toolhost socket) for `Launch::extra_env`.
-pub fn guard_env(paths: &PiPaths, toolhost: &Toolhost) -> Result<Vec<(String, String)>, String> {
-    Ok(vec![
+/// `host`: the host-mode prompt and `CLIO_GUARD_HOST=1`, which the guard and Pi's jail read.
+pub fn guard_env(
+    paths: &PiPaths,
+    toolhost: &Toolhost,
+    host: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let (name, body) = if host {
+        (HOST_PROMPT_NAME, HOST_PROMPT)
+    } else {
+        (PROMPT_NAME, PROMPT)
+    };
+    let mut env = vec![
         (
             "CLIO_GUARD_PROMPT_FILE".into(),
-            write_prompt(paths)?.display().to_string(),
+            write_named_prompt(paths, name, body)?.display().to_string(),
         ),
-        ("CLIO_GUARD_PROMPT_VERSION".into(), PROMPT_NAME.into()),
+        ("CLIO_GUARD_PROMPT_VERSION".into(), name.into()),
         (
             "CLIO_TOOLHOST_SOCKET".into(),
             toolhost.socket.display().to_string(),
         ),
-    ])
+    ];
+    if host {
+        env.push((HOST_ENV.into(), "1".into()));
+    }
+    Ok(env)
 }
 
-/// `clio toolhost` running on the session's copy.
+/// Set in Pi's environment for a host-mode session.
+pub const HOST_ENV: &str = "CLIO_GUARD_HOST";
+
 /// What a tool host may be given besides its folders.
 #[derive(Default, Clone, Copy)]
 pub struct ToolhostOpts<'a> {
@@ -135,6 +158,21 @@ pub struct ToolhostOpts<'a> {
     pub memory: Option<(&'a Path, &'a [PathBuf])>,
     /// Extra variables for the service (what it needs to judge proposals with Jev).
     pub extra_env: &'a [(String, String)],
+    /// Host mode: the tools act on the real machine (`clio toolhost --host-*`).
+    pub host: Option<HostOpts<'a>>,
+}
+
+/// The `--host-*` options of `clio toolhost`.
+#[derive(Clone, Copy)]
+pub struct HostOpts<'a> {
+    pub home: &'a Path,
+    /// `Dirs.data/host`.
+    pub state: &'a Path,
+    /// Clio's own folders.
+    pub control: &'a [PathBuf],
+    /// The person's `host.json`, when there is one.
+    pub rules: Option<&'a Path>,
+    pub run: &'a str,
 }
 
 pub struct Toolhost {
@@ -164,7 +202,11 @@ impl Toolhost {
         key: &Secret,
         opts: ToolhostOpts<'_>,
     ) -> Result<Self, String> {
-        let ToolhostOpts { memory, extra_env } = opts;
+        let ToolhostOpts {
+            memory,
+            extra_env,
+            host,
+        } = opts;
         private_dir(runtime).map_err(text)?;
         let sock_dir = runtime.join(format!(
             "th-{}-{}",
@@ -202,6 +244,20 @@ impl Toolhost {
             cmd.arg("--memory-data").arg(data);
             for model in model {
                 cmd.arg("--memory-model").arg(model);
+            }
+        }
+        if let Some(h) = host {
+            cmd.arg("--host-home")
+                .arg(h.home)
+                .arg("--host-state")
+                .arg(h.state)
+                .arg("--host-run")
+                .arg(h.run);
+            for c in h.control {
+                cmd.arg("--host-control").arg(c);
+            }
+            if let Some(r) = h.rules {
+                cmd.arg("--host-rules").arg(r);
             }
         }
         let mut child = cmd

@@ -49,7 +49,7 @@ impl RunGuard {
             return Some(s);
         }
         let mut day = self.day.lock().unwrap_or_else(|e| e.into_inner());
-        match event {
+        let stop = match event {
             // A step is a tool call, as in the builtin loop (one action per step); the key is the
             // same, so the same call with the same arguments is the same action.
             Event::ToolStart { name, args, .. } => self
@@ -64,8 +64,10 @@ impl RunGuard {
                 self.ctl.settle(0, spent, &mut day);
                 self.ctl.halted()
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        day.save();
+        stop
     }
 
     /// The caps that move without events (time). Call it on every pass of the wait loop.

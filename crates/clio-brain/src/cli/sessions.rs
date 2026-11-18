@@ -106,7 +106,7 @@ fn clio_copy(dirs: &Dirs, s: &SessionInfo) -> Option<Run> {
 }
 
 /// Changed files of the copy not applied yet; 0 once applied; `None` when it cannot be told.
-fn unapplied_changes(run: &Run) -> Option<usize> {
+pub(super) fn unapplied_changes(run: &Run) -> Option<usize> {
     if run.path.join("applied.json").exists() {
         return Some(0);
     }

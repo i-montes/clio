@@ -3,6 +3,7 @@
 use clio_core::{Clock, Level};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -13,6 +14,7 @@ pub enum Stop {
     Time,
     Cost,
     DayCost,
+    DaySteps,
     Repeats,
     Retries,
 }
@@ -24,7 +26,7 @@ impl Stop {
             Self::Steps => "tope de pasos de la tarea",
             Self::Time => "tope de tiempo de la tarea",
             Self::Cost => "tope de costo de la tarea",
-            Self::DayCost => "tope de costo del día",
+            Self::DayCost | Self::DaySteps => "presupuesto del día agotado: sigo mañana",
             Self::Repeats => "la misma acción se repitió demasiadas veces (posible bucle)",
             Self::Retries => "tope de reintentos de la tarea",
         }
@@ -41,21 +43,74 @@ pub struct Budget {
     pub max_retries: u32,
 }
 
-/// Spend per UTC day, shared by every task. Resets when the day changes.
+/// Spend and steps per UTC day, shared by every task. Resets when the day changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DayBudget {
     pub max_cost_micro: u64,
+    #[serde(default = "unlimited")]
+    pub max_steps: u64,
     day: i64,
     spent_micro: u64,
+    #[serde(default)]
+    steps: u64,
+    /// Where the day is kept between sessions (`kept`); `None`: in this process only.
+    #[serde(skip)]
+    file: Option<PathBuf>,
+}
+
+fn unlimited() -> u64 {
+    u64::MAX
 }
 
 impl DayBudget {
     pub fn new(max_cost_micro: u64) -> Self {
         Self {
             max_cost_micro,
+            max_steps: u64::MAX,
             day: i64::MIN,
             spent_micro: 0,
+            steps: 0,
+            file: None,
         }
+    }
+
+    /// The day as `file` keeps it, with these caps, saved there by `save`. A file that cannot be
+    /// read starts the day from zero.
+    /// shortcut: two sessions open at once each keep their own count and the last save wins; a
+    /// lock around load-add-save if they ever run side by side for long.
+    pub fn kept(file: &Path, max_cost_micro: u64, max_steps: u64) -> Self {
+        let mut d = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Self>(&t).ok())
+            .unwrap_or_else(|| Self::new(0));
+        d.max_cost_micro = max_cost_micro;
+        d.max_steps = max_steps;
+        d.file = Some(file.to_path_buf());
+        d
+    }
+
+    /// Best effort: a day that cannot be saved still counts in this process.
+    pub fn save(&self) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(file) = &self.file else { return };
+        let Ok(text) = serde_json::to_string(self) else {
+            return;
+        };
+        let tmp = file.with_extension("tmp");
+        let _ = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)
+            })
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .and_then(|()| std::fs::rename(&tmp, file));
     }
 
     pub fn spent(&mut self, now_ms: i64) -> u64 {
@@ -63,8 +118,14 @@ impl DayBudget {
         if d != self.day {
             self.day = d;
             self.spent_micro = 0;
+            self.steps = 0;
         }
         self.spent_micro
+    }
+
+    /// The steps of the day so far (after `spent` saw the time).
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 }
 
@@ -174,6 +235,9 @@ impl<C: Clock> Controller<C> {
         if day.spent(now).saturating_add(est_cost_micro) > day.max_cost_micro {
             return self.stop(Stop::DayCost);
         }
+        if day.steps >= day.max_steps {
+            return self.stop(Stop::DaySteps);
+        }
         Ok(())
     }
 
@@ -193,6 +257,7 @@ impl<C: Clock> Controller<C> {
         }
         *n += 1;
         self.state.steps += 1;
+        day.steps += 1;
         // Charge the reservation now; `settle` corrects it when the real cost is known.
         self.state.cost_micro += est_cost_micro;
         day.spent_micro += est_cost_micro;
