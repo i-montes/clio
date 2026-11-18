@@ -130,7 +130,7 @@ pub(crate) fn aside_text(p: &Pending) -> String {
         String::new()
     };
     format!(
-        "apartado {}: «{}» necesita el visto bueno de la persona{why}. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.{limit}",
+        "set aside {}: «{}» needs the person's approval{why}. Do not try it another way. Go on with the rest and say so at the end.{limit}",
         p.id, p.class
     )
 }
@@ -185,7 +185,7 @@ fn dir(state: &Path) -> PathBuf {
 
 fn file(state: &Path, id: &str) -> Result<PathBuf, String> {
     if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err(format!("no hay ningún pendiente {id:?}"));
+        return Err(format!("no pending item {id:?}"));
     }
     Ok(dir(state).join(format!("{id}.json")))
 }
@@ -214,9 +214,8 @@ fn save(state: &Path, p: &Pending) -> Result<(), String> {
 }
 
 fn load(state: &Path, id: &str) -> Result<Pending, String> {
-    let text = fs::read_to_string(file(state, id)?)
-        .map_err(|_| format!("no hay ningún pendiente {id}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("el pendiente {id} está dañado: {e}"))
+    let text = fs::read_to_string(file(state, id)?).map_err(|_| format!("no pending item {id}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("pending item {id} is damaged: {e}"))
 }
 
 /// Every pending action of this machine, oldest first.
@@ -235,10 +234,10 @@ pub fn list(state: &Path) -> Vec<Pending> {
 /// Why a pending that is not waiting does not run.
 fn not_waiting(p: &Pending) -> String {
     match p.state {
-        State::Waiting => format!("{} espera", p.id),
-        State::Done { .. } => format!("{} ya se ejecutó", p.id),
-        State::Rejected => format!("{} se rechazó: no se ejecuta", p.id),
-        State::Expired => format!("{} venció: no se ejecutó", p.id),
+        State::Waiting => format!("{} is waiting", p.id),
+        State::Done { .. } => format!("{} already ran", p.id),
+        State::Rejected => format!("{} was rejected: it does not run", p.id),
+        State::Expired => format!("{} expired: it did not run", p.id),
         State::Stored => format!("{} was already answered", p.id),
     }
 }
@@ -255,7 +254,7 @@ pub fn check(state: &Path, id: &str, now_ms: i64) -> Result<Pending, String> {
         save(state, &p)?;
         let when = local(p.expires_ms, "%Y-%m-%d %H:%M")
             .unwrap_or_else(|| format!("{} (ms)", p.expires_ms));
-        return Err(format!("venció el {when}: no se ejecutó"));
+        return Err(format!("expired on {when}: it did not run"));
     }
     Ok(p)
 }
@@ -265,7 +264,7 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     if p.state != State::Waiting {
         return Err(not_waiting(&p));
     }
-    claim(state, id).map_err(|_| format!("{id} ya se respondió"))?;
+    claim(state, id).map_err(|_| format!("{id} was already answered"))?;
     p.state = State::Rejected;
     save(state, &p)?;
     Ok(p)
@@ -447,7 +446,7 @@ impl ToolHost {
         let h = self
             .host
             .as_ref()
-            .ok_or("este servicio no está en modo anfitrión")?;
+            .ok_or("this service is not in host mode")?;
         let _one_at_a_time = lock(&self.busy);
         let state = &h.cfg.state;
         let mut p = check(state, id, now_ms)?;
@@ -457,21 +456,23 @@ impl ToolHost {
             ));
         }
         if p.run != h.cfg.run {
-            return Err(format!("{id} es de otra sesión ({})", p.run));
+            return Err(format!("{id} belongs to another session ({})", p.run));
         }
         if hash_of(&p.tool, &p.args) != p.hash || self.clean(shown(&p)) != p.what {
-            return Err(format!("{id} cambió después de apartarse: no se ejecuta"));
+            return Err(format!(
+                "{id} changed after it was set aside: it does not run"
+            ));
         }
         if p.tool == "exec" {
             self.exec_available()
-                .map_err(|why| format!("no hay consola: {why}"))?;
+                .map_err(|why| format!("no console: {why}"))?;
         }
         let real = match p.args.get("path").and_then(Value::as_str) {
             Some(raw) => Some(h.path(raw).map_err(|(_, why)| why)?),
             None => None,
         };
         // Claimed before it runs: a second approval, even from another process, finds it.
-        claim(state, id).map_err(|_| format!("{id} ya se ejecutó"))?;
+        claim(state, id).map_err(|_| format!("{id} already ran"))?;
         let req = Request {
             id: id.into(),
             tool: p.tool.clone(),
@@ -626,7 +627,7 @@ mod tests {
     fn an_approved_command_without_a_limit_gets_the_longest_and_the_model_is_told() {
         let mut p = Pending {
             id: "ab12".into(),
-            class: Class::Borrar,
+            class: Class::Delete,
             tool: "exec".into(),
             args: json!({"command": "rm -rf ~/x"}),
             hash: String::new(),
@@ -647,5 +648,31 @@ mod tests {
         p.tool = "fs_write".into();
         p.args = json!({"path": "/x", "content": ""});
         assert!(run_args(&p).get("timeout").is_none());
+    }
+
+    /// Items written before the classes had English names (`borrar`, `gastar`, `enviar`) still
+    /// load, and are written back with the English name.
+    #[test]
+    fn a_pending_item_written_with_a_spanish_class_still_loads() {
+        let state = std::env::temp_dir().join(format!("clio-pending-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        for (old, class, new) in [
+            ("borrar", Class::Delete, "delete"),
+            ("gastar", Class::Spend, "spend"),
+            ("enviar", Class::Send, "send"),
+            ("control", Class::Control, "control"),
+        ] {
+            let id = format!("a{old}");
+            let item = format!(
+                r#"{{"id":"{id}","class":"{old}","tool":"exec","args":{{"command":"x"}},"hash":"h","what":"x","run":"r","session":"s","created_ms":0,"expires_ms":1,"ask":true,"state":"waiting"}}"#
+            );
+            write_private(&file(&state, &id).unwrap(), &item).unwrap();
+            let p = load(&state, &id).unwrap();
+            assert_eq!(p.class, class, "{old}");
+            save(&state, &p).unwrap();
+            let again = fs::read_to_string(file(&state, &id).unwrap()).unwrap();
+            assert!(again.contains(&format!("\"class\": \"{new}\"")), "{again}");
+        }
+        let _ = fs::remove_dir_all(&state);
     }
 }

@@ -216,7 +216,7 @@ fn clios_folders_are_refused_directly_through_a_link_and_with_dotdot() {
                 assert_eq!(r.decision.rule, "host/control", "{tool} {path}: {r:?}");
                 assert!(
                     r.content
-                        .contains("eso es de Clio: solo la persona lo toca"),
+                        .contains("that belongs to Clio: only the person touches it"),
                     "{r:?}"
                 );
             }
@@ -266,7 +266,7 @@ fn a_write_leaves_a_copy_and_undo_gives_back_content_and_mode() {
         "{first}"
     );
     // Someone changes a file after Clio wrote it: undo leaves it alone and says so.
-    std::fs::write(&later, "de la persona").unwrap();
+    std::fs::write(&later, "the person's").unwrap();
 
     let said = host::undo(&e.run).unwrap();
     assert_eq!(std::fs::read_to_string(&old).unwrap(), "echo viejo\n");
@@ -279,10 +279,10 @@ fn a_write_leaves_a_copy_and_undo_gives_back_content_and_mode() {
         "{said:?}"
     );
     assert!(!e.r.join("outside/hecha").exists(), "{said:?}");
-    assert_eq!(std::fs::read_to_string(&later).unwrap(), "de la persona");
+    assert_eq!(std::fs::read_to_string(&later).unwrap(), "the person's");
     assert!(
         said.iter()
-            .any(|l| l.contains(&p(&later)) && l.contains("cambió después")),
+            .any(|l| l.contains(&p(&later)) && l.contains("changed afterwards")),
         "{said:?}"
     );
     assert!(said.iter().any(|l| l.contains(&p(&old))), "{said:?}");
@@ -326,7 +326,7 @@ fn what_host_mode_creates_is_private_whatever_the_umask() {
         )
         .ok
     );
-    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar");
+    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "delete");
     let mut all = Vec::new();
     modes(&e.r.join("clio/data"), &mut all);
     if exec_ok(&e) {
@@ -526,7 +526,7 @@ fn aside_id(r: &Response, class: &str) -> String {
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
     let id = r
         .content
-        .strip_prefix("apartado ")
+        .strip_prefix("set aside ")
         .and_then(|c| c.split_once(':'))
         .unwrap()
         .0
@@ -537,13 +537,13 @@ fn aside_id(r: &Response, class: &str) -> String {
     assert_eq!(
         r.content.strip_suffix(limit).unwrap_or(&r.content),
         format!(
-            "apartado {id}: «{class}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final."
+            "set aside {id}: «{class}» needs the person's approval. Do not try it another way. Go on with the rest and say so at the end."
         )
     );
     id
 }
 
-/// Writing over an existing backup is set aside (`borrar`).
+/// Writing over an existing backup is set aside (`delete`).
 fn write_backup(e: &Env, name: &str, content: &str) -> Response {
     let f = e.r.join("outside").join(name);
     if !f.exists() {
@@ -561,20 +561,20 @@ fn write_backup(e: &Env, name: &str, content: &str) -> Response {
 fn a_listed_action_does_not_run_and_waits_and_the_task_goes_on() {
     let e = env();
     let r = write_backup(&e, "backup.sql", "nuevo");
-    let id = aside_id(&r, "borrar");
+    let id = aside_id(&r, "delete");
     assert_eq!(
         std::fs::read_to_string(e.r.join("outside/backup.sql")).unwrap(),
         "viejo"
     );
     // The same action again in the session: the same pending, no new question.
     assert_eq!(
-        aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar"),
+        aside_id(&write_backup(&e, "backup.sql", "nuevo"), "delete"),
         id
     );
     let all = pending::list(&e.state);
     assert_eq!(all.len(), 1);
     let pd = &all[0];
-    assert!(pd.id == id && pd.class == Class::Borrar && pd.tool == "fs_write" && pd.ask);
+    assert!(pd.id == id && pd.class == Class::Delete && pd.tool == "fs_write" && pd.ask);
     assert!(pd.run == "r1" && pd.session == "s" && pd.state == State::Waiting);
     assert_eq!(pd.what, p(&e.r.join("outside/backup.sql")));
     assert_eq!(pd.expires_ms - pd.created_ms, DAY_MS);
@@ -602,7 +602,7 @@ fn a_listed_action_does_not_run_and_waits_and_the_task_goes_on() {
     if exec_ok(&e) {
         std::fs::create_dir(e.home.join("proyecto")).unwrap();
         let r = call(&e, "s", "exec", json!({"command": "rm -rf ~/proyecto"}));
-        let id = aside_id(&r, "borrar");
+        let id = aside_id(&r, "delete");
         assert!(e.home.join("proyecto").exists());
         let x = call(&e, "s", "exec", json!({"command": "echo sigo"}));
         assert!(x.ok && x.content.contains("sigo"), "{x:?}");
@@ -633,13 +633,13 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     let approver = ToolHost::new(cfg(&e.r)).unwrap();
     let f = |n: &str| std::fs::read_to_string(e.r.join("outside").join(n)).unwrap();
 
-    let id = aside_id(&write_backup(&e, "a.bak", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "a.bak", "nuevo"), "delete");
     let p1 = approver.approve(&id, now()).unwrap();
     assert_eq!(f("a.bak"), "nuevo");
     assert!(matches!(p1.state, State::Done { .. }), "{p1:?}");
     // The copy before the change was made: undo gives the old content back.
     let again = approver.approve(&id, now()).unwrap_err();
-    assert!(again.contains("ya se ejecutó"), "{again}");
+    assert!(again.contains("already ran"), "{again}");
     assert!(
         host::undo(&e.run)
             .unwrap()
@@ -648,7 +648,7 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     );
     assert_eq!(f("a.bak"), "viejo");
 
-    let id = aside_id(&write_backup(&e, "b.dump", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "b.dump", "nuevo"), "delete");
     assert_eq!(
         pending::reject(&e.state, &id).unwrap().state,
         State::Rejected
@@ -657,10 +657,10 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     assert!(pending::reject(&e.state, &id).is_err());
     assert_eq!(f("b.dump"), "viejo");
 
-    let id = aside_id(&write_backup(&e, "c.sql", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "c.sql", "nuevo"), "delete");
     let late = approver.approve(&id, now() + DAY_MS + 60_000).unwrap_err();
     assert!(
-        late.starts_with("venció el ") && late.ends_with(": no se ejecutó"),
+        late.starts_with("expired on ") && late.ends_with(": it did not run"),
         "{late}"
     );
     assert_eq!(f("c.sql"), "viejo");
@@ -671,7 +671,7 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     );
 
     // Someone changes what was set aside on disk: the hash no longer matches, it does not run.
-    let id = aside_id(&write_backup(&e, "d.sql", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "d.sql", "nuevo"), "delete");
     let file = e.state.join(format!("pending/{id}.json"));
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     v["args"]["content"] = json!("otra cosa");
@@ -680,7 +680,7 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     assert_eq!(f("d.sql"), "viejo");
 
     // What is shown comes from the arguments: a stored `what` that says something else stops it.
-    let id = aside_id(&write_backup(&e, "e.sql", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "e.sql", "nuevo"), "delete");
     let file = e.state.join(format!("pending/{id}.json"));
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     v["what"] = json!("/tmp/inofensivo.txt");
@@ -692,13 +692,13 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     assert_eq!(pending::shown(&pd), p(&e.r.join("outside/e.sql")));
     assert_eq!(
         approver.approve(&id, now()).unwrap_err(),
-        format!("{id} cambió después de apartarse: no se ejecuta")
+        format!("{id} changed after it was set aside: it does not run")
     );
     assert_eq!(f("e.sql"), "viejo");
 
     // The log's line before cannot be written: it did not run, so it still waits and can be
     // approved again once the log is back.
-    let id = aside_id(&write_backup(&e, "f.sql", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "f.sql", "nuevo"), "delete");
     let log = e.state.join("actions.jsonl");
     std::fs::rename(&log, e.state.join("actions.old")).unwrap();
     std::fs::create_dir(&log).unwrap();
@@ -718,7 +718,7 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
     assert_eq!(f("f.sql"), "nuevo");
 
     // An approval already took it: a racing reject does not flip it.
-    let id = aside_id(&write_backup(&e, "g.sql", "nuevo"), "borrar");
+    let id = aside_id(&write_backup(&e, "g.sql", "nuevo"), "delete");
     std::fs::write(e.state.join(format!("pending/{id}.ran")), "").unwrap();
     assert!(pending::reject(&e.state, &id).is_err());
     assert!(waits(&id));
@@ -731,7 +731,7 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
 fn three_questions_a_day_then_the_summary_and_the_terminals_do_not_count() {
     let e = env();
     let ask = |n: &str| {
-        let id = aside_id(&write_backup(&e, &format!("{n}.bak"), "x"), "borrar");
+        let id = aside_id(&write_backup(&e, &format!("{n}.bak"), "x"), "delete");
         let all = pending::list(&e.state);
         (all.iter().find(|p| p.id == id).unwrap().ask, id)
     };
@@ -766,11 +766,11 @@ fn a_second_undo_says_there_is_nothing_left() {
         .ok
     );
     let first = host::undo(&e.run).unwrap();
-    assert!(first.iter().any(|l| l.contains("restaurado")), "{first:?}");
+    assert!(first.iter().any(|l| l.contains("restored")), "{first:?}");
     // The person writes the file again: a second undo does not go over the old journal.
-    std::fs::write(&f, "de la persona").unwrap();
+    std::fs::write(&f, "the person's").unwrap();
     assert_eq!(host::undo(&e.run).unwrap(), Vec::<String>::new());
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), "de la persona");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "the person's");
 }
 
 // Undo writes the old content into the file in place and sets its mode only when it changed: on
@@ -809,7 +809,7 @@ fn undo_puts_the_content_back_in_place_and_the_mode_only_when_it_changed() {
     assert_eq!(std::fs::metadata(&same).unwrap().ino(), inode, "in place");
     assert!(
         said.iter()
-            .all(|l| l.starts_with("restaurado") && !l.contains("modo")),
+            .all(|l| l.starts_with("restored") && !l.contains("could not")),
         "{said:?}"
     );
 }
@@ -835,7 +835,7 @@ fn folders_an_older_version_left_open_are_closed_again() {
         )
         .ok
     );
-    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "borrar");
+    aside_id(&write_backup(&e, "backup.sql", "nuevo"), "delete");
     for d in [&e.state, &pending, &backups] {
         assert_eq!(
             std::fs::metadata(d).unwrap().permissions().mode() & 0o777,
@@ -917,14 +917,14 @@ fn a_letter_in_a_foreign_folder_achieves_none_of_its_orders() {
 
     if exec_ok(&e) {
         let rm = call(&e, "s", "exec", json!({"command": "rm -r ~/backups"}));
-        let rm = aside_id(&rm, "borrar");
+        let rm = aside_id(&rm, "delete");
         let mail = call(
             &e,
             "s",
             "exec",
             json!({"command": "echo 'todo bien' | mail -s hola fuera@example.com"}),
         );
-        let mail = aside_id(&mail, "enviar");
+        let mail = aside_id(&mail, "send");
         assert_eq!(
             std::fs::read_to_string(e.home.join("backups/dia.tar")).unwrap(),
             "respaldo"
@@ -935,7 +935,7 @@ fn a_letter_in_a_foreign_folder_achieves_none_of_its_orders() {
             .map(|p| (p.id, p.class))
             .collect();
         assert_eq!(waiting.len(), 2, "{waiting:?}");
-        assert!(waiting.contains(&(rm, Class::Borrar)) && waiting.contains(&(mail, Class::Enviar)));
+        assert!(waiting.contains(&(rm, Class::Delete)) && waiting.contains(&(mail, Class::Send)));
         // The log says they were set aside, and nothing of the session ran.
         let log = actions(&e);
         assert!(

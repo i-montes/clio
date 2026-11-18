@@ -244,7 +244,7 @@ fn a_token_inside_a_file_reaches_the_model_masked_with_a_guide() {
         "the rest of the file stays: {}",
         r.content
     );
-    for want in ["[secreto:patrón tachado", "baúl", "persona"] {
+    for want in ["[secreto:patrón tachado", "vault", "person"] {
         assert!(
             r.content.contains(want),
             "the mark lacks {want:?}: {}",

@@ -1888,7 +1888,7 @@ fn a_near_duplicate_save_says_so() {
     assert!(r.ok, "{r:?}");
     assert!(
         r.content.contains(
-            "muy parecida a m5: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m5 la muestra)"
+            "very similar to m5: if it corrects or contradicts it, use memory_update or memory_consolidate (memory_get m5 shows it)"
         ),
         "{r:?}"
     );
@@ -2028,7 +2028,7 @@ fn a_write_refused_on_its_own_arguments_spends_no_save_but_one_with_a_secret_doe
 
 // ---------------------------------------------------------------- the person's blocks
 
-const OUTSIDE: &str = "esta sesión leyó contenido de fuera: la identidad y lo que se vigila solo se cambian en una sesión limpia. Abre una sesión nueva y pídelo ahí.";
+const OUTSIDE: &str = "this session read content from outside: identity and what is watched are only changed in a clean session. Open a new session and ask for it there.";
 
 fn edit(e: &Env, session: &str, args: Value) -> Response {
     call(e, session, "memory_block_edit", args)
@@ -2126,14 +2126,14 @@ fn an_edit_without_what_it_needs_is_refused() {
     let e = env(&port);
     let long = "x".repeat(1201);
     for args in [
-        json!({"name": "identidad", "action": "replace", "text": "sin id"}),
+        json!({"name": "identidad", "action": "replace", "text": "no id"}),
         json!({"name": "identidad", "action": "remove"}),
         json!({"name": "identidad", "action": "add"}),
         json!({"name": "identidad", "action": "add", "text": "  "}),
         json!({"name": "identidad", "action": "add", "text": long}),
         json!({"name": "identidad", "action": "replace", "id": 0, "text": "x"}),
-        json!({"name": "identidad", "action": "borrar", "id": 3}),
-        json!({"action": "add", "text": "sin bloque"}),
+        json!({"name": "identidad", "action": "delete", "id": 3}),
+        json!({"action": "add", "text": "no block"}),
     ] {
         let r = edit(&e, "s1", args.clone());
         assert!(!r.ok, "{args}: {r:?}");

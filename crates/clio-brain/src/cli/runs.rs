@@ -1366,7 +1366,7 @@ mod tests {
         let waiting_id = host_waiting.file_name().unwrap().to_string_lossy();
         let p = Pending {
             id: "abcd1234".into(),
-            class: Class::Borrar,
+            class: Class::Delete,
             tool: "exec".into(),
             args: json!({"command": "rm -r x"}),
             hash: String::new(),

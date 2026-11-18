@@ -563,7 +563,7 @@ fn clio_run_in_host_mode_ends_saying_what_it_set_aside() {
         "datos\n"
     );
     assert!(
-        out.contains("apartó 1 acción(es)") && out.contains("«borrar»"),
+        out.contains("apartó 1 acción(es)") && out.contains("«delete»"),
         "{out}"
     );
     assert!(out.contains("clio approve <id>"), "{out}");

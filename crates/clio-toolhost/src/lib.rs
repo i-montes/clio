@@ -816,7 +816,7 @@ impl ToolHost {
                 let network = map.get("network").and_then(Value::as_bool) == Some(true);
                 let rules = &h.cfg.rules;
                 if network || rules.reaches_out(command) || rules.uses_sudo(command) {
-                    return self.aside(h, &req, ask::Class::Enviar, Some(SUSPECT_REASON));
+                    return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON));
                 }
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {

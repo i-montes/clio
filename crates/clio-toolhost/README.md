@@ -1,84 +1,84 @@
 # clio-toolhost
 
-El servicio por sesión que ejecuta las operaciones primitivas de las herramientas de Pi (ADR 0007:
-Pi trae `read`, `write`, `edit`, `bash`, `find`, `ls`; Clio solo cambia dónde corren). Es lo único que
-toca la máquina: la extensión `clio-guard` de Pi solo le manda peticiones.
+The per-session service that runs the primitive operations of Pi's tools (ADR 0007: Pi brings `read`,
+`write`, `edit`, `bash`, `find`, `ls`; Clio only changes where they run). It is the only thing that
+touches the machine: Pi's `clio-guard` extension only sends it requests.
 
 ```
 clio-toolhost --socket-dir D --work W --scratch S --run-dir R [--rules FILE] [--jail auto|off] [--vault-socket P] [--memory-data D [--memory-model M]]
 ```
 
 - `clio toolhost ...` (hidden subcommand of the `clio` binary) takes the same arguments and is what the interface starts for a Pi session: no second binary to install.
-- `D` debe existir con modo 0700 y ser del usuario; el socket es `D/toolhost.sock` (0600). Si no, no arranca.
-- `W` es la copia de trabajo de la sesión; `S` (instantáneas) y `R` (registro de efectos) van fuera de `W`.
-- Imprime `READY <ruta del socket>` y corre hasta que se cierra su stdin (así no sobrevive a quien lo lanzó).
-- Necesita `HOME`: la autoprueba de la jaula planta ahí su señuelo y comprueba que no se ve.
-- `--jail auto` ofrece `exec` (el `bash` de Pi) solo si `bwrap` arranca y la autoprueba de la jaula pasa; si no, `exec` no está declarada y la pasarela la niega (S-02): `bash` falla cerrado. `--jail off` no la ofrece.
-- `--rules` es un JSON de reglas de la pasarela: solo se toman de ahí el umbral del cortacircuito y rutas protegidas extra. La carpeta de trabajo, las herramientas declaradas y las rutas protegidas obligatorias (`extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer`) son siempre las del servicio.
-- `--memory-data D [--memory-model M]` ofrece `memory_search`/`memory_get`/`memory_propose` sobre lo que la fábrica del binario (`cli::run_with`) haga de las dos carpetas; `clio toolhost` crea el `LinkPort` de `clio-brain` (lee en solo lectura y propone abriendo la memoria para escribir solo durante la llamada). `clio-toolhost` suelto no tiene memoria y rechaza `--memory-data`. `M` (el modelo de vectores) lo pasa el padre: este proceso corre con otro `HOME`.
-- `CLIO_TOOLHOST_SCRUB_JSON='{"nombre":"valor"}'` enseña valores al limpiador; `--vault-socket` añade el filtro del vault (si no contesta, la salida se retiene). El enlace real con el vault de la sesión está por hacer.
+- `D` must exist with mode 0700 and belong to the user; the socket is `D/toolhost.sock` (0600). Otherwise it does not start.
+- `W` is the session's working copy; `S` (snapshots) and `R` (effects log) go outside `W`.
+- It prints `READY <socket path>` and runs until its stdin is closed (so it does not outlive whoever started it).
+- It needs `HOME`: the jail's self-test plants its decoy there and checks that it is not visible.
+- `--jail auto` offers `exec` (Pi's `bash`) only if `bwrap` starts and the jail's self-test passes; otherwise `exec` is not declared and the gateway denies it (S-02): `bash` fails closed. `--jail off` does not offer it.
+- `--rules` is a JSON of gateway rules: only the circuit breaker threshold and extra protected paths are taken from it. The working folder, the declared tools and the mandatory protected paths (`extensions`, `skills`, `.pi`, `.claude`, `.git`, `.agents`, `.vscode`, `.husky`, `.githooks`, `.cargo`, `.devcontainer`) are always the service's own.
+- `--memory-data D [--memory-model M]` offers `memory_search`/`memory_get`/`memory_propose` over whatever the binary's factory (`cli::run_with`) makes of the two folders; `clio toolhost` creates `clio-brain`'s `LinkPort` (it reads read-only and proposes by opening the memory for writing only during the call). A bare `clio-toolhost` has no memory and rejects `--memory-data`. `M` (the vector model) is passed by the parent: this process runs with another `HOME`.
+- `CLIO_TOOLHOST_SCRUB_JSON='{"name":"value"}'` teaches values to the scrubber; `--vault-socket` adds the vault's filter (if it does not answer, the output is withheld). The real link with the session's vault is still to do.
 
-### Modo anfitrión (ADR 0012)
+### Host mode (ADR 0012)
 
 ```
 clio-toolhost --socket-dir D --scratch S --run-dir R --host-home H --host-state E --host-run ID [--host-control P]... [--host-rules FILE] [--jail auto|off]
 ```
 
-- Las herramientas actúan sobre la máquina real (`/`) en vez de una copia; `--work` no hace falta. Una ruta absoluta se usa tal cual y una relativa se toma de `H`; las órdenes arrancan en `H`.
-- `--host-control P` (repetible): las carpetas de Clio. Las herramientas de archivos las niegan donde de verdad caiga la ruta (canonizada; enlaces y `..` incluidos), regla `host/control`, texto `eso es de Clio: solo la persona lo toca`; una orden las ve vacías y de solo lectura; `fs_glob` no entra en ellas.
-- `--host-state E` (`Dirs.data/host`): el registro de acciones `actions.jsonl` (0600, una línea antes y otra después de cada `exec`, `fs_write` y `fs_mkdir`, y una por lo negado o apartado; si la de antes no se puede escribir, no corre), lo apartado en `pending/<id>.json` y la cuenta de preguntas del día `questions.json`.
-- `--host-run ID`: el id del run, para el registro y lo apartado. `--host-rules FILE`: el `host.json` de la persona (solo suma: `questions_per_day`, `foreign`, `ask`).
-- `exec` corre con el lanzador anfitrión de `clio-node` (`systemd` con `sudo -n systemd-run` si hay `sudo` sin contraseña, si no `bwrap --bind / /`), solo si su autoprueba pasó al arrancar; si no, no se ofrece. Tiempo de 120 s si no se dice, hasta 3600.
-- `fs_write` y `fs_mkdir` dejan copia y una línea en `R/changes.jsonl` antes de cambiar; `host::undo(R)` lo deshace.
+- The tools act on the real machine (`/`) instead of a copy; `--work` is not needed. An absolute path is used as it is and a relative one is taken from `H`; commands start in `H`.
+- `--host-control P` (repeatable): Clio's folders. The file tools deny them wherever the path really lands (canonicalized; links and `..` included), rule `host/control`, text `that belongs to Clio: only the person touches it`; a command sees them empty and read-only; `fs_glob` does not enter them.
+- `--host-state E` (`Dirs.data/host`): the action log `actions.jsonl` (0600, one line before and one after each `exec`, `fs_write` and `fs_mkdir`, and one for what is denied or set aside; if the one before cannot be written, the action does not run), what is set aside in `pending/<id>.json` and the day's question count `questions.json`.
+- `--host-run ID`: the run's id, for the log and for what is set aside. `--host-rules FILE`: the person's `host.json` (it only adds: `questions_per_day`, `foreign`, `ask`). In `ask`, the classes are `delete`, `spend`, `send` and `control`; a `host.json` written with `borrar`, `gastar` and `enviar` is still read.
+- `exec` runs with `clio-node`'s host launcher (`systemd` with `sudo -n systemd-run` if there is passwordless `sudo`, otherwise `bwrap --bind / /`), only if its self-test passed at start; otherwise it is not offered. Time limit of 120 s if none is given, up to 3600.
+- `fs_write` and `fs_mkdir` leave a copy and a line in `R/changes.jsonl` before changing anything; `host::undo(R)` undoes it.
 
-| Operación | Argumentos en modo anfitrión |
+| Operation | Arguments in host mode |
 |---|---|
-| `exec` | `command`, `timeout?` (s, hasta 3600), `network?` (bool: sin él la orden no tiene red; con él marca la sesión, fuente `web`) |
+| `exec` | `command`, `timeout?` (s, up to 3600), `network?` (bool: without it the command has no network; with it the session is marked, source `web`) |
 
-- **Marca**: en este modo no marca leer tus archivos ni correr una orden; marca leer bajo una carpeta ajena (fuente `foreign`: `/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas` y las de `host.json`), una orden con `network: true` (`web`) y una orden que nombra una carpeta ajena o lee registros (`journalctl`, `docker logs`, `docker compose logs`, `kubectl logs`).
-- **Apartado** (regla `host/aside`, `ok: false`): una orden o escritura que la lista de `src/ask.rs` clasifica (`borrar`, `gastar`, `enviar`, `control`) no corre; se guarda y se contesta `apartado {id}: «{clase}» necesita el visto bueno de la persona. No lo intentes de otra forma. Sigue con lo demás y cuéntalo al final.` La misma acción otra vez en la misma sesión da el mismo `id`. `ToolHost::approve(id, ahora)` la ejecuta una vez, tal como se guardó (mismo hash), y no después de vencer (24 h: `venció el {fecha}: no se ejecutó`); `pending::reject` la descarta.
+- **Mark**: in this mode, reading your files or running a command does not mark the session; reading under a foreign folder does (source `foreign`: `/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas` and those of `host.json`), and so does a command with `network: true` (`web`) and a command that names a foreign folder or reads logs (`journalctl`, `docker logs`, `docker compose logs`, `kubectl logs`).
+- **Set aside** (rule `host/aside`, `ok: false`): a command or write that the list in `src/ask.rs` classifies (`delete`, `spend`, `send`, `control`) does not run; it is saved and the answer is `set aside {id}: «{class}» needs the person's approval. Do not try it another way. Go on with the rest and say so at the end.` The same action again in the same session gets the same `id`. `ToolHost::approve(id, now)` runs it once, as it was saved (same hash), and not after it expires (24 h: `expired on {date}: it did not run`); `pending::reject` discards it. Pending items saved with the old class names (`borrar`, `gastar`, `enviar`) are still read.
 
-## Protocolo
+## Protocol
 
-JSON por línea, varias peticiones por conexión, tope de 4 MiB por línea y 30 s de lectura.
+One JSON per line, several requests per connection, a cap of 4 MiB per line and 30 s to read.
 
 ```
 → {"id","tool","args":{...},"session","call_id","tainted":false}
 ← {"id","ok","content","data","decision":{"outcome","rule","reason"},"tainted","external"}
 ```
 
-`tool` es una operación primitiva de las herramientas de Pi (la extensión `clio-guard` las arma con `operations`):
+`tool` is a primitive operation of Pi's tools (the `clio-guard` extension builds them with `operations`):
 
-| Operación | Argumentos | Resultado |
+| Operation | Arguments | Result |
 |---|---|---|
-| `fs_read` | `path`, `raw?` | `content` (limpio; con `raw` los bytes tal cual, solo para `edit`) |
-| `fs_stat` | `path`, `mode?` (`exists`, `r`, `rw`) | `data.exists`, `data.is_dir`; con `r`/`rw` falla si no hay acceso |
+| `fs_read` | `path`, `raw?` | `content` (cleaned; with `raw` the bytes as they are, only for `edit`) |
+| `fs_stat` | `path`, `mode?` (`exists`, `r`, `rw`) | `data.exists`, `data.is_dir`; with `r`/`rw` it fails if there is no access |
 | `fs_list` | `path` | `data.entries` |
-| `fs_glob` | `path`, `pattern`, `limit?` | `data.paths` (no sigue enlaces; ignora `.git` y `node_modules`) |
-| `fs_write` | `path`, `content` | reemplazo atómico, crea las carpetas |
+| `fs_glob` | `path`, `pattern`, `limit?` | `data.paths` (does not follow links; ignores `.git` and `node_modules`) |
+| `fs_write` | `path`, `content` | atomic replacement, creates the folders |
 | `fs_mkdir` | `path` | |
-| `exec` | `command`, `timeout?` (s, tope 120) | `content` = salida (stdout y stderr), `data.exit_code`, `data.signal`, `data.timed_out`; siempre en la jaula, solo si la autoprueba pasó |
-| `memory_search` | `query` (hasta 200 caracteres), `limit?` (1 a 8, por defecto 5) | `content` = una línea por recuerdo activo, `[m{id}] {tipo} · {persona\|agente\|externo} · {fecha}: {texto}`, envuelta como dato (`UNTRUSTED-DATA memory`); `data.ids`, `data.count`, `data.masked`. Solo si el servicio recibió un `MemoryPort` |
-| `memory_get` | `id` (entero > 0) | lo mismo para un recuerdo activo. Sin `MemoryPort` las tres se niegan (S-02) |
-| `memory_propose` | `text` (1 a 400 caracteres, tras limpiar), `kind` (`semantic` o `procedural`) | `content` = una línea fija («proposed: …»). El servicio limpia el texto con el vault (si tenía un secreto no se propone), lo deja en una línea y el puerto lo guarda como candidato en cuarentena, actor `agente`, origen externo, ámbito `clio`; no hay argumentos para eso. Efecto `LocalReversible`, sin salida de red. Cinco por sesión (`R/memory-proposals.json`, `S-47/memory`; cuentan aunque fallen); no marca la sesión (S-61) |
-| `filter` | `items: [{text, wrap?: "file"\|"tool-result"}]` | `data.items`: cada texto saneado, limpiado y, si pide `wrap`, envuelto como dato externo. Sin efectos: no pasa por la pasarela |
+| `exec` | `command`, `timeout?` (s, cap 120) | `content` = output (stdout and stderr), `data.exit_code`, `data.signal`, `data.timed_out`; always in the jail, only if the self-test passed |
+| `memory_search` | `query` (up to 200 characters), `limit?` (1 to 8, default 5) | `content` = one line per active memory, `[m{id}] {kind} · {persona\|agente\|externo} · {date}: {text}`, wrapped as data (`UNTRUSTED-DATA memory`); `data.ids`, `data.count`, `data.masked`. Only if the service received a `MemoryPort` |
+| `memory_get` | `id` (integer > 0) | the same for one active memory. Without a `MemoryPort` all three are denied (S-02) |
+| `memory_propose` | `text` (1 to 400 characters, after cleaning), `kind` (`semantic` or `procedural`) | `content` = a fixed line («proposed: …»). The service cleans the text with the vault (if it had a secret it is not proposed), puts it on one line and the port saves it as a candidate in quarantine, actor `agente`, origin external, scope `clio`; there are no arguments for that. Effect `LocalReversible`, no network egress. Five per session (`R/memory-proposals.json`, `S-47/memory`; they count even if they fail); it does not mark the session (S-61) |
+| `filter` | `items: [{text, wrap?: "file"\|"tool-result"}]` | `data.items`: each text sanitized, cleaned and, if it asks for `wrap`, wrapped as external data. No effects: it does not go through the gateway |
 
-Las rutas son relativas a la copia de trabajo. Cada operación (menos `filter`) pasa por: `Gateway::decide_or_deny` (reglas propias, negar por defecto, falla cerrada) → regla `S-12/bash` para `exec` (no vacío, sin NUL, hasta 8 KiB) → `clio_node::Executor` en la copia (rutas canonizadas, enlaces hacia fuera rechazados, rutas protegidas) o la jaula para `exec` → saneado y limpiador del vault.
+Paths are relative to the working copy. Every operation (except `filter`) goes through: `Gateway::decide_or_deny` (its own rules, deny by default, fails closed) → rule `S-12/bash` for `exec` (not empty, no NUL, up to 8 KiB) → `clio_node::Executor` on the copy (canonicalized paths, links that point outside rejected, protected paths) or the jail for `exec` → sanitizing and the vault's scrubber.
 
-- **Contaminación (S-05)**: por sesión, solo sube. La marca la pone leer un archivo, listar, buscar o ejecutar un comando; `tainted` en la petición la sube (no la baja); `tainted` va en toda respuesta.
-- **Memoria (S-60)**: solo lectura, por el `MemoryPort` de `Config`. Sale limpia (el limpiador antes del corte), en una línea por recuerdo (600 caracteres como máximo) y de 4 KiB como máximo en total, envuelta como dato y `external`; pero marca la sesión solo si algún recuerdo no es de la persona, a diferencia de archivos y comandos, que marcan siempre. El puerto corre en otro hilo con plazo de 10 s y red contra pánicos; un fallo es un error corto de esa llamada.
-- **Presupuesto de memoria (S-47, regla `S-47/memory`)**: 20 llamadas y 24 KiB de texto devuelto por servicio (por carpeta `R`), con corte duro. Va después de la pasarela y antes de validar y de llamar al puerto; cuenta toda llamada que la pasarela dejó pasar (también las inválidas o con el puerto en error, no las que la pasarela negó). Cada respuesta se limita a lo que queda (`min(4 KiB, 24 KiB - gastado)`); con menos de 1 KiB o 20 llamadas gastadas, se niega con `S-47/memory`, sin tocar el puerto. Esa negación no cuenta para el cortacircuito de la pasarela (igual que `S-12/bash`). El gasto está en `R/memory-budget.json` (`{"calls","bytes"}`, 0600, escrito con archivo temporal y `rename`): sobrevive a un reinicio del servicio. Si no se puede leer, entender o escribir, la llamada se niega: nunca queda sin tope.
-- **Registro de hechos**: `R/memory.jsonl` (0600, solo añadir), una línea por llamada que pasó el presupuesto (en `memory_propose`, `ids` es el id del candidato): `at` (ms), `tool`, `results`, `ids`, `bytes`, `tainted` (esta llamada marcó la sesión) y `query_hash` (8 hex de SHA-256 de la consulta limpia; `null` en `memory_get`). Nunca el texto de la consulta ni el de un recuerdo. Si no se puede escribir, la llamada se niega.
-- **«Preguntar»** de la pasarela se niega (`NobodyHome`); `with_asker` permite poner otro. A las 10 negadas seguidas de una sesión, lo que iba a pasar «pregunta» y por tanto se niega.
-- **`exec` y las carpetas protegidas**: las que no existen se crean vacías durante el comando (la jaula las monta de solo lectura) y se quitan después.
-- Archivos de más de 8 MiB no se leen; salidas de más de 2 MiB se retienen enteras (no se cortan antes de limpiar).
-- Una línea inválida, una sesión con caracteres raros o un campo desconocido no ejecutan nada.
+- **Taint (S-05)**: per session, it only goes up. Reading a file, listing, searching or running a command sets the mark; `tainted` in the request raises it (it does not lower it); `tainted` is in every answer.
+- **Memory (S-60)**: read-only, through `Config`'s `MemoryPort`. It comes out clean (the scrubber before the cut), one line per memory (600 characters at most) and 4 KiB at most in total, wrapped as data and `external`; but it marks the session only if some memory is not the person's, unlike files and commands, which always mark. The port runs on another thread with a 10 s deadline and a net against panics; a failure is a short error for that call.
+- **Memory budget (S-47, rule `S-47/memory`)**: 20 calls and 24 KiB of returned text per service (per `R` folder), with a hard cut. It comes after the gateway and before validating and calling the port; it counts every call the gateway let through (also invalid ones or ones with the port in error, not those the gateway denied). Each answer is limited to what is left (`min(4 KiB, 24 KiB - spent)`); with less than 1 KiB left or 20 calls spent, it is denied with `S-47/memory`, without touching the port. That denial does not count toward the gateway's circuit breaker (like `S-12/bash`). The spend is in `R/memory-budget.json` (`{"calls","bytes"}`, 0600, written with a temporary file and `rename`): it survives a restart of the service. If it cannot be read, understood or written, the call is denied: it is never left without a cap.
+- **Fact log**: `R/memory.jsonl` (0600, append-only), one line per call that passed the budget (in `memory_propose`, `ids` is the candidate's id): `at` (ms), `tool`, `results`, `ids`, `bytes`, `tainted` (this call marked the session) and `query_hash` (8 hex of the SHA-256 of the cleaned query; `null` in `memory_get`). Never the text of the query nor of a memory. If it cannot be written, the call is denied.
+- The gateway's **«ask»** is denied (`NobodyHome`); `with_asker` allows setting another one. After 10 denials in a row in a session, what was going to «ask» is therefore denied.
+- **`exec` and protected folders**: those that do not exist are created empty during the command (the jail mounts them read-only) and removed afterwards.
+- Files over 8 MiB are not read; outputs over 2 MiB are withheld whole (they are not cut before cleaning).
+- An invalid line, a session with odd characters or an unknown field run nothing.
 
-## Pruebas
+## Tests
 
-`cargo test -p clio-toolhost`. `tests/toolhost.rs` y `tests/hardening.rs` prueban el servicio solo; `tests/host.rs`, el modo anfitrión (solo con `bwrap`, nunca `sudo`, en carpetas temporales; también el caso 62 de la batería).
-Las pruebas con el Pi real están en `clio-brain` (`cargo test -p clio-brain --test pi_stack`, carpeta
-`crates/clio-brain/tests/pi_stack/`): lanzan Pi por `pi::launch::build`, dentro de su jaula, con las
-banderas endurecidas y `clio toolhost`, contra un modelo falso OpenAI-compatible
-(`common/fake_model.rs`, solo 127.0.0.1). Sin `node` o sin `npm ci` dicen `SKIPPED`; con
-`CLIO_REQUIRE_PI=1` fallan. Los procesos hijos tienen guardias `Drop`.
+`cargo test -p clio-toolhost`. `tests/toolhost.rs` and `tests/hardening.rs` test the service alone; `tests/host.rs`, host mode (only with `bwrap`, never `sudo`, in temporary folders; also case 62 of the battery); `tests/judge.rs`, the judge at the door (cases 63 and 64).
+The tests with the real Pi are in `clio-brain` (`cargo test -p clio-brain --test pi_stack`, folder
+`crates/clio-brain/tests/pi_stack/`): they launch Pi through `pi::launch::build`, inside its jail, with the
+hardened flags and `clio toolhost`, against a fake OpenAI-compatible model
+(`common/fake_model.rs`, 127.0.0.1 only). Without `node` or without `npm ci` they say `SKIPPED`; with
+`CLIO_REQUIRE_PI=1` they fail. The child processes have `Drop` guards.

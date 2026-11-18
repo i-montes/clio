@@ -76,7 +76,7 @@ impl World {
         });
         assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
         r.content
-            .strip_prefix("apartado ")
+            .strip_prefix("set aside ")
             .and_then(|c| c.split(':').next())
             .unwrap()
             .to_owned()
@@ -105,7 +105,7 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
 
     let o = w.clio(&["pending"]);
     assert!(o.status.success() && out(&o).contains(&id), "{}", out(&o));
-    assert!(out(&o).contains("«borrar»") && out(&o).contains("backup.sql"));
+    assert!(out(&o).contains("«delete»") && out(&o).contains("backup.sql"));
     let o = w.clio(&["pending", "--json"]);
     let list: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -120,7 +120,7 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
     assert!(!q.contains(&id), "{q}");
     let o = w.clio(&["approve", &id]);
     assert!(
-        !o.status.success() && out(&o).contains("ya se ejecutó"),
+        !o.status.success() && out(&o).contains("already ran"),
         "{}",
         out(&o)
     );
@@ -142,7 +142,7 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
     // The session's changes go back; a second undo has nothing left.
     let o = w.clio(&["undo", "20261117-120000-abcd"]);
     assert!(
-        o.status.success() && out(&o).contains("restaurado"),
+        o.status.success() && out(&o).contains("restored"),
         "{}",
         out(&o)
     );
@@ -169,14 +169,14 @@ fn a_rejected_action_never_runs() {
     );
     let o = w.clio(&["approve", &id]);
     assert!(
-        !o.status.success() && out(&o).contains("se rechazó"),
+        !o.status.success() && out(&o).contains("was rejected"),
         "{}",
         out(&o)
     );
     assert_eq!(read(&f), "viejo");
     let o = w.clio(&["approve", "nada"]);
     assert!(
-        !o.status.success() && out(&o).contains("no hay ningún pendiente"),
+        !o.status.success() && out(&o).contains("no pending item"),
         "{}",
         out(&o)
     );
@@ -219,7 +219,7 @@ fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_b
     assert!(out(&o).contains("no hay nada esperando"), "{}", out(&o));
     let o = w.clio(&["approve", &id]);
     assert!(
-        !o.status.success() && out(&o).contains("venció el"),
+        !o.status.success() && out(&o).contains("expired on"),
         "{}",
         out(&o)
     );

@@ -38,7 +38,7 @@ pub(crate) struct Host {
     pub(crate) jail: Option<HostJail>,
 }
 
-pub(crate) const CONTROL: &str = "eso es de Clio: solo la persona lo toca";
+pub(crate) const CONTROL: &str = "that belongs to Clio: only the person touches it";
 /// Tools that change something: they are logged, and set aside when the list says so.
 pub(crate) const LOGGED: [&str; 3] = ["exec", "fs_write", "fs_mkdir"];
 /// The longest time limit a command may ask for; without one it has none.
@@ -276,8 +276,8 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
         let Some(written) = c.sha256 else {
             if c.path.is_dir() {
                 said.push(match fs::remove_dir(&c.path) {
-                    Ok(()) => format!("borrada la carpeta {p}"),
-                    Err(_) => format!("no se tocó la carpeta {p}: no está vacía"),
+                    Ok(()) => format!("deleted the folder {p}"),
+                    Err(_) => format!("left the folder {p} alone: it is not empty"),
                 });
             }
             continue;
@@ -286,19 +286,19 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
             continue; // already gone: nothing to give back over
         };
         if sha256(&now) != written {
-            said.push(format!("no se tocó {p}: cambió después"));
+            said.push(format!("left {p} alone: it changed afterwards"));
             continue;
         }
         let done = match (&c.backup, c.mode) {
             (Some(b), Some(mode)) => restore(b, &c.path, mode).map(|warn| match warn {
-                None => format!("restaurado {p}"),
+                None => format!("restored {p}"),
                 Some(e) => {
-                    format!("restaurado {p}, pero no se pudo devolverle el modo {mode:o}: {e}")
+                    format!("restored {p}, but its mode {mode:o} could not be given back: {e}")
                 }
             }),
-            _ => fs::remove_file(&c.path).map(|()| format!("borrado {p}")),
+            _ => fs::remove_file(&c.path).map(|()| format!("deleted {p}")),
         };
-        said.push(done.unwrap_or_else(|e| format!("no se pudo deshacer {p}: {e}")));
+        said.push(done.unwrap_or_else(|e| format!("could not undo {p}: {e}")));
     }
     fs::rename(&journal, run_dir.join("changes.undone.jsonl"))
         .map_err(|e| format!("changes.jsonl: {e}"))?;

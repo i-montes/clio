@@ -51,10 +51,11 @@ pub fn sanitize(text: &str) -> String {
     }
     // The envelope the brain puts in front of a message (time, memories, suggestions) is the
     // brain's alone: text from outside cannot carry a copy that looks like it.
-    if out.contains("clio-contexto") {
+    // `clio-context` is a prefix of the tag's current spelling (`clio-contexto`) and of an English one.
+    if out.contains("clio-context") {
         out = out
-            .replace("<clio-contexto", "‹clio-contexto")
-            .replace("</clio-contexto", "‹/clio-contexto");
+            .replace("<clio-context", "‹clio-context")
+            .replace("</clio-context", "‹/clio-context");
     }
     out
 }

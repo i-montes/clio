@@ -1,5 +1,5 @@
-//! Host mode: which actions are set aside for the person (four classes: `borrar`, `gastar`,
-//! `enviar`, `control`) and what counts as foreign text.
+//! Host mode: which actions are set aside for the person (four classes: `delete`, `spend`,
+//! `send`, `control`) and what counts as foreign text.
 //!
 //! A command is cut into simple commands (at `;`, `&&`, `||`, `|`, new lines, `$(…)`, backticks,
 //! outside quotes, and past shell keywords, `sudo`, `env`, `nohup`, `time`, `xargs`, `exec`,
@@ -13,14 +13,18 @@ use std::path::{Component, Path, PathBuf};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use Class::{Borrar, Control, Enviar, Gastar};
+use Class::{Control, Delete, Send, Spend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Class {
-    Borrar,
-    Gastar,
-    Enviar,
+    // The aliases read what older versions wrote (pending items, `host.json`).
+    #[serde(alias = "borrar")]
+    Delete,
+    #[serde(alias = "gastar")]
+    Spend,
+    #[serde(alias = "enviar")]
+    Send,
     Control,
     /// Not an action: a secret the model asked the person for (`request_secret`). It is answered
     /// with the value, which goes to the vault, never run.
@@ -30,9 +34,9 @@ pub enum Class {
 impl fmt::Display for Class {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Borrar => "borrar",
-            Gastar => "gastar",
-            Enviar => "enviar",
+            Delete => "delete",
+            Spend => "spend",
+            Send => "send",
             Control => "control",
             Class::Secret => "secret",
         })
@@ -45,35 +49,35 @@ const BACKUP: &str = r"(?i:backup|respaldo|snapshot|\.bak\b|\.dump\b|\.sql\b)";
 /// Matched against each simple command, normalized: no quotes, no wrappers, the program by its
 /// bare name, words one space apart. The rest of the table is in `by_code`.
 const FACTORY: &[(Class, &str)] = &[
-    (Borrar, r"^(rm|truncate) .*{B}"),
-    (Borrar, r"^find .*(-delete|-exec(dir)? (rm|shred))\b"),
-    (Borrar, r"^(shred|wipefs|mkfs|dropdb)\b"),
-    (Borrar, r"^dd .*\bof=/dev/"),
+    (Delete, r"^(rm|truncate) .*{B}"),
+    (Delete, r"^find .*(-delete|-exec(dir)? (rm|shred))\b"),
+    (Delete, r"^(shred|wipefs|mkfs|dropdb)\b"),
+    (Delete, r"^dd .*\bof=/dev/"),
     (
-        Borrar,
+        Delete,
         r"(?i)^(psql|mysql|mariadb|sqlite3)\b.*\b(drop|truncate|delete from)\b",
     ),
-    (Borrar, r"^docker (volume (rm|prune)|system prune)\b"),
-    (Borrar, r"^docker(-| )compose down\b.* (-v|--volumes)\b"),
-    (Borrar, r"(?i)^redis-cli\b.*\bflush(all|db)\b"),
+    (Delete, r"^docker (volume (rm|prune)|system prune)\b"),
+    (Delete, r"^docker(-| )compose down\b.* (-v|--volumes)\b"),
+    (Delete, r"(?i)^redis-cli\b.*\bflush(all|db)\b"),
     (
-        Borrar,
+        Delete,
         r"^(kubectl delete|terraform destroy|zfs destroy|apt(-get)? purge|gh repo delete)\b",
     ),
-    (Borrar, r"^apt(-get)? (remove|autoremove)\b.* --purge\b"),
-    (Borrar, r"^userdel\b.* (-[a-zA-Z]*r[a-zA-Z]*|--remove)\b"),
+    (Delete, r"^apt(-get)? (remove|autoremove)\b.* --purge\b"),
+    (Delete, r"^userdel\b.* (-[a-zA-Z]*r[a-zA-Z]*|--remove)\b"),
     (
-        Gastar,
+        Spend,
         r"^(aws|gcloud|oci|doctl|hcloud)\b.* (create|launch|run-instances)\b",
     ),
-    (Gastar, r"^(terraform apply|pulumi up|fly(ctl)? scale)\b"),
-    (Enviar, r"^(mail|mailx|sendmail|msmtp|swaks)\b"),
+    (Spend, r"^(terraform apply|pulumi up|fly(ctl)? scale)\b"),
+    (Send, r"^(mail|mailx|sendmail|msmtp|swaks)\b"),
     (
-        Enviar,
+        Send,
         r"^gh (pr (merge|comment|review)|issue (create|comment)|release create)\b",
     ),
     (
-        Enviar,
+        Send,
         r"^((npm|yarn|pnpm|cargo) publish|twine upload|(docker|gem) push)\b",
     ),
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
@@ -301,7 +305,7 @@ impl HostRules {
             let name = matches!((c.next(), c.next()), (Some(Component::Normal(_)), None));
             if !f.is_absolute() && !name {
                 return Err(format!(
-                    "host.json: la carpeta ajena «{}» tiene que ser una ruta absoluta o un nombre de carpeta",
+                    "host.json: the foreign folder «{}» must be an absolute path or a folder name",
                     f.display()
                 ));
             }
@@ -312,7 +316,7 @@ impl HostRules {
                 return Err("host.json: «secret» is not a class of action".into());
             }
             let re = Regex::new(&a.pattern)
-                .map_err(|e| format!("host.json: patrón inválido «{}»: {e}", a.pattern))?;
+                .map_err(|e| format!("host.json: invalid pattern «{}»: {e}", a.pattern))?;
             self.rules.push((a.class, re));
         }
         if let Some(n) = file.questions_per_day {
@@ -349,7 +353,7 @@ impl HostRules {
                 .file_name()
                 .is_some_and(|n| self.backup.is_match(&n.to_string_lossy()))
         {
-            Some(Borrar)
+            Some(Delete)
         } else {
             None
         }
@@ -399,7 +403,7 @@ impl HostRules {
     /// The rows a pattern says badly: they look at the arguments one by one.
     fn by_code(&self, w: &[&str], line: &str) -> Option<Class> {
         match w {
-            ["rm", args @ ..] if rm_recursive(args) => Some(Borrar),
+            ["rm", args @ ..] if rm_recursive(args) => Some(Delete),
             // Moving a backup away is losing it; making one (`mv x x.bak`) is not.
             ["mv", args @ ..]
                 if args
@@ -409,12 +413,12 @@ impl HostRules {
                     .skip(1)
                     .any(|a| self.backup.is_match(a)) =>
             {
-                Some(Borrar)
+                Some(Delete)
             }
-            ["git", "push", args @ ..] if push_shared(args) => Some(Enviar),
-            ["curl", args @ ..] if sends_out(args, true) => Some(Enviar),
-            ["wget", args @ ..] if sends_out(args, false) => Some(Enviar),
-            _ if self.overwrite.is_match(line) && !makes_backup(w, line) => Some(Borrar),
+            ["git", "push", args @ ..] if push_shared(args) => Some(Send),
+            ["curl", args @ ..] if sends_out(args, true) => Some(Send),
+            ["wget", args @ ..] if sends_out(args, false) => Some(Send),
+            _ if self.overwrite.is_match(line) && !makes_backup(w, line) => Some(Delete),
             _ => None,
         }
     }
@@ -726,7 +730,7 @@ mod tests {
     /// The plan's table (Task 3), row by row.
     const TABLE: &[(Option<Class>, &[&str])] = &[
         (
-            Some(Borrar),
+            Some(Delete),
             &["rm -rf ~/proyecto", "rm -r datos", "sudo rm -fR /srv/x"],
         ),
         (
@@ -735,11 +739,11 @@ mod tests {
                 "rm -rf node_modules",
                 "rm -rf target dist",
                 "rm -rf /tmp/x",
-                "rm archivo.txt",
+                "rm file.txt",
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "rm backup.sql",
                 "mv /var/backups/a /tmp",
@@ -748,7 +752,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "find . -name '*.log' -delete",
                 "find /srv -exec rm {} +",
@@ -756,7 +760,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "mkfs.ext4 /dev/sdb",
                 "dd if=x of=/dev/sda",
@@ -764,7 +768,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "psql -c 'DROP TABLE t'",
                 "mysql -e \"truncate table t\"",
@@ -773,7 +777,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "docker volume rm v",
                 "docker system prune -af",
@@ -781,7 +785,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "redis-cli flushall",
                 "kubectl delete ns x",
@@ -801,7 +805,7 @@ mod tests {
             ],
         ),
         (
-            Some(Gastar),
+            Some(Spend),
             &[
                 "aws ec2 run-instances --image-id ami-1",
                 "gcloud compute instances create x",
@@ -822,7 +826,7 @@ mod tests {
             ],
         ),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "mail -s x a@b.c",
                 "sendmail a@b.c",
@@ -831,7 +835,7 @@ mod tests {
             ],
         ),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "git push",
                 "git push origin main",
@@ -847,7 +851,7 @@ mod tests {
         ),
         // Global options before the subcommand do not hide it.
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "git -C dir push origin main",
                 "git -c k=v push",
@@ -856,7 +860,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "docker -H h volume rm v",
                 "docker --context x system prune -af",
@@ -875,7 +879,7 @@ mod tests {
             ],
         ),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "gh pr merge 3",
                 "gh pr comment 3 -b x",
@@ -885,9 +889,9 @@ mod tests {
             ],
         ),
         (None, &["gh pr create --fill", "gh pr list", "gh run view"]),
-        (Some(Borrar), &["gh repo delete x"]),
+        (Some(Delete), &["gh repo delete x"]),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "npm publish",
                 "cargo publish",
@@ -897,7 +901,7 @@ mod tests {
             ],
         ),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "curl -X POST https://api.x.com -d a=1",
                 "curl -F f=@x https://x.com",
@@ -964,7 +968,7 @@ mod tests {
         ),
         // Ordinary spellings: shell keywords, more wrappers, options before the subcommand.
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "if [ -d x ]; then rm -rf x; fi",
                 "for d in a b; do rm -rf \"$d\"; done",
@@ -983,9 +987,9 @@ mod tests {
                 "userdel -rf bob",
             ],
         ),
-        (Some(Gastar), &["terraform -chdir=infra apply"]),
+        (Some(Spend), &["terraform -chdir=infra apply"]),
         (
-            Some(Enviar),
+            Some(Send),
             &[
                 "curl -sd a=1 https://x.com",
                 "curl -sSX POST https://x.com",
@@ -1007,7 +1011,7 @@ mod tests {
             ],
         ),
         (
-            Some(Borrar),
+            Some(Delete),
             &[
                 "cat x > backup.sql",
                 "mv backup.sql /tmp/x",
@@ -1087,7 +1091,7 @@ mod tests {
             let p = d.path().join(name);
             assert_eq!(r.classify_write(&p), None, "{name} does not exist yet");
             std::fs::write(&p, "x").unwrap();
-            assert_eq!(r.classify_write(&p), Some(Borrar), "{name}");
+            assert_eq!(r.classify_write(&p), Some(Delete), "{name}");
         }
         let p = d.path().join("notes.txt");
         std::fs::write(&p, "x").unwrap();
@@ -1204,16 +1208,13 @@ mod tests {
     #[test]
     fn the_persons_file_only_adds() {
         let r = HostRules::factory()
-            .with_file(r#"{"questions_per_day": 5, "foreign": ["/srv/inbox", "buzon"], "ask": [{"class": "enviar", "pattern": "^rsync .*prod:"}]}"#)
+            .with_file(r#"{"questions_per_day": 5, "foreign": ["/srv/inbox", "mailbox"], "ask": [{"class": "send", "pattern": "^rsync .*prod:"}]}"#)
             .unwrap();
         assert_eq!(r.questions_per_day(), 5);
-        assert!(r.is_foreign(Path::new("/srv/inbox/a")) && r.is_foreign(Path::new("/a/buzon/b")));
+        assert!(r.is_foreign(Path::new("/srv/inbox/a")) && r.is_foreign(Path::new("/a/mailbox/b")));
         assert!(r.is_foreign(Path::new("/var/log/x")));
-        assert_eq!(
-            r.classify_command("sudo rsync -a x prod:/srv"),
-            Some(Enviar)
-        );
-        assert_eq!(r.classify_command("rm -rf ~/x"), Some(Borrar));
+        assert_eq!(r.classify_command("sudo rsync -a x prod:/srv"), Some(Send));
+        assert_eq!(r.classify_command("rm -rf ~/x"), Some(Delete));
         assert_eq!(
             HostRules::factory()
                 .with_file("{}")
@@ -1224,10 +1225,10 @@ mod tests {
 
         for (json, says) in [
             (r#"{"remove": ["/var/log"]}"#, "unknown field"),
-            (r#"{"foreign": ["a/b"]}"#, "ruta absoluta"),
+            (r#"{"foreign": ["a/b"]}"#, "absolute path"),
             (
-                r#"{"ask": [{"class": "enviar", "pattern": "("}]}"#,
-                "patrón inválido «(»",
+                r#"{"ask": [{"class": "send", "pattern": "("}]}"#,
+                "invalid pattern «(»",
             ),
             (
                 r#"{"ask": [{"class": "otra", "pattern": "x"}]}"#,
@@ -1242,12 +1243,25 @@ mod tests {
         }
     }
 
+    /// A `host.json` written before the classes had English names still loads.
+    #[test]
+    fn the_old_spanish_class_names_still_load() {
+        for (old, class) in [("borrar", Delete), ("gastar", Spend), ("enviar", Send)] {
+            let r = HostRules::factory()
+                .with_file(&format!(
+                    r#"{{"ask": [{{"class": "{old}", "pattern": "^frobnicate\\b"}}]}}"#
+                ))
+                .unwrap();
+            assert_eq!(r.classify_command("frobnicate x"), Some(class), "{old}");
+        }
+    }
+
     #[test]
     fn class_names() {
         for (c, n) in [
-            (Borrar, "borrar"),
-            (Gastar, "gastar"),
-            (Enviar, "enviar"),
+            (Delete, "delete"),
+            (Spend, "spend"),
+            (Send, "send"),
             (Control, "control"),
         ] {
             assert_eq!(c.to_string(), n);

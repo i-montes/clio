@@ -301,7 +301,7 @@ fn pending(e: &Env) -> Vec<clio_toolhost::pending::Pending> {
 }
 
 // S-05 S-14: a session that read text the judge flagged sets aside every command that reaches
-// out (asked for the network, or a program that goes out by itself), as «enviar», with the reason.
+// out (asked for the network, or a program that goes out by itself), as «send», with the reason.
 // The rest runs as in any marked session.
 #[test]
 fn a_suspect_session_asks_before_it_reaches_out() {
@@ -335,7 +335,7 @@ fn a_suspect_session_asks_before_it_reaches_out() {
     ] {
         let r = call(&e, "s", "c1", "exec", args);
         assert!(!r.ok && r.decision.outcome == "ask", "{why}: {r:?}");
-        assert!(r.content.contains("«enviar»"), "{why}: {r:?}");
+        assert!(r.content.contains("«send»"), "{why}: {r:?}");
         assert!(
             r.content.contains(clio_toolhost::SUSPECT_REASON),
             "{why}: {r:?}"
@@ -346,7 +346,7 @@ fn a_suspect_session_asks_before_it_reaches_out() {
     assert!(
         waiting
             .iter()
-            .all(|p| p.class == clio_toolhost::ask::Class::Enviar
+            .all(|p| p.class == clio_toolhost::ask::Class::Send
                 && p.reason.as_deref() == Some(clio_toolhost::SUSPECT_REASON))
     );
     // What stays on the machine runs.

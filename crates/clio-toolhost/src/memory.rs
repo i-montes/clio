@@ -86,7 +86,7 @@ const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
 const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. Refused in a session that read outside content";
 /// What a session that read outside content hears when it tries to change a block: the person's
 /// own words only enter from a clean session (S-05).
-pub const BLOCK_TAINTED: &str = "esta sesión leyó contenido de fuera: la identidad y lo que se vigila solo se cambian en una sesión limpia. Abre una sesión nueva y pídelo ahí.";
+pub const BLOCK_TAINTED: &str = "this session read content from outside: identity and what is watched are only changed in a clean session. Open a new session and ask for it there.";
 
 /// Changes a session may make through forget, pin, revert and consolidate (S-47, S-65).
 pub(crate) const MAX_CHANGES: u32 = 10;
@@ -1044,7 +1044,7 @@ impl ToolHost {
                 // Only its number: this answer is not framed as data, so no memory text goes in it.
                 if let (Some(twin), false) = (&done.similar, done.saved == Saved::Known) {
                     content.push_str(&format!(
-                        " · muy parecida a m{0}: si la corrige o la contradice, usa memory_update o memory_consolidate (memory_get m{0} la muestra)",
+                        " · very similar to m{0}: if it corrects or contradicts it, use memory_update or memory_consolidate (memory_get m{0} shows it)",
                         twin.id
                     ));
                 }
