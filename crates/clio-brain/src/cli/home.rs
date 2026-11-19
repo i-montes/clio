@@ -22,6 +22,7 @@ const DEFAULT_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent
 pub const JAIL_PROMPT_NAME: &str = "clio-agent@3";
 const JAIL_PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@3.md");
 
+#[derive(Clone)]
 pub struct Dirs {
     pub config: PathBuf,
     pub data: PathBuf,

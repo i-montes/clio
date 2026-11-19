@@ -276,7 +276,7 @@ pub fn host_of(h: &str) -> &str {
     h.rsplit_once(':').map_or(h, |(host, _)| host)
 }
 
-fn valid_env(e: &str) -> bool {
+pub(crate) fn valid_env(e: &str) -> bool {
     !e.is_empty()
         && e.len() <= 64
         && e.as_bytes()[0].is_ascii_uppercase()
@@ -409,6 +409,80 @@ fn tree_refused(top: &Path) -> Option<String> {
     None
 }
 
+/// The grants of a manifest (a service's or an MCP server's): its hosts by name, its secrets
+/// each for one of them, at most `MAX_WRITES` declared paths, and its limits within `max`.
+pub(crate) fn check_grants(
+    network: &[String],
+    secrets: &[SecretUse],
+    paths: usize,
+    l: Limits,
+    max: Limits,
+) -> Result<(), String> {
+    if network.len() > MAX_HOSTS {
+        return Err(format!("network: at most {MAX_HOSTS} hosts"));
+    }
+    for h in network {
+        let Some(hp) = host_port(h) else {
+            return Err(format!(
+                "network: {:?} is not a host name (lowercase, like api.example.com or api.example.com:8443)",
+                one_line(h)
+            ));
+        };
+        if (hp != *h && hp != format!("{h}:443")) || (hp.ends_with(":443") && h.contains(':')) {
+            return Err(format!(
+                "network: write {:?} as {:?}",
+                one_line(h),
+                hp.trim_end_matches(":443")
+            ));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    if network.iter().any(|h| !seen.insert(h)) {
+        return Err("network: a host is given twice".into());
+    }
+    if secrets.len() > MAX_SECRETS {
+        return Err(format!("secrets: at most {MAX_SECRETS}"));
+    }
+    let (mut names, mut envs) = (
+        std::collections::HashSet::new(),
+        std::collections::HashSet::new(),
+    );
+    for s in secrets {
+        if !clio_vault::valid_name(&s.name) || !names.insert(&s.name) {
+            return Err(format!(
+                "secrets: {:?} is not a vault name (lowercase letters, digits, '-', '_', '.'), or it is given twice",
+                one_line(&s.name)
+            ));
+        }
+        if !valid_env(&s.env) || !envs.insert(&s.env) {
+            return Err(format!(
+                "secrets: env {:?} must be UPPER_CASE, not one the shell or Clio sets (PATH, HOME, LD_*, *_PROXY, CLIO_*...), and given once",
+                one_line(&s.env)
+            ));
+        }
+        if !network.iter().any(|h| host_of(h) == s.host) {
+            return Err(format!(
+                "secrets: {:?} goes to {:?}, which is not one of the hosts in network",
+                one_line(&s.name),
+                one_line(&s.host)
+            ));
+        }
+    }
+    if paths > MAX_WRITES {
+        return Err(format!("writes, reads: at most {MAX_WRITES} paths each"));
+    }
+    if !(1..=max.cpu_percent).contains(&l.cpu_percent)
+        || !(16..=max.memory_mb).contains(&l.memory_mb)
+        || !(10..=max.seconds).contains(&l.seconds)
+    {
+        return Err(format!(
+            "limits: cpu_percent 1 to {}, memory_mb 16 to {}, seconds 10 to {}",
+            max.cpu_percent, max.memory_mb, max.seconds
+        ));
+    }
+    Ok(())
+}
+
 /// The manifest's own shape (everything but the writes against a home): `Ok(())` or why not.
 pub fn check(m: &Manifest) -> Result<(), String> {
     if !skills::valid_name(&m.name) {
@@ -456,69 +530,13 @@ pub fn check(m: &Manifest) -> Result<(), String> {
                 .into(),
         );
     }
-    if m.network.len() > MAX_HOSTS {
-        return Err(format!("network: at most {MAX_HOSTS} hosts"));
-    }
-    for h in &m.network {
-        let Some(hp) = host_port(h) else {
-            return Err(format!(
-                "network: {:?} is not a host name (lowercase, like api.example.com or api.example.com:8443)",
-                one_line(h)
-            ));
-        };
-        if (hp != *h && hp != format!("{h}:443")) || (hp.ends_with(":443") && h.contains(':')) {
-            return Err(format!(
-                "network: write {:?} as {:?}",
-                one_line(h),
-                hp.trim_end_matches(":443")
-            ));
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    if m.network.iter().any(|h| !seen.insert(h)) {
-        return Err("network: a host is given twice".into());
-    }
-    if m.secrets.len() > MAX_SECRETS {
-        return Err(format!("secrets: at most {MAX_SECRETS}"));
-    }
-    let (mut names, mut envs) = (
-        std::collections::HashSet::new(),
-        std::collections::HashSet::new(),
-    );
-    for s in &m.secrets {
-        if !clio_vault::valid_name(&s.name) || !names.insert(&s.name) {
-            return Err(format!(
-                "secrets: {:?} is not a vault name (lowercase letters, digits, '-', '_', '.'), or it is given twice",
-                one_line(&s.name)
-            ));
-        }
-        if !valid_env(&s.env) || !envs.insert(&s.env) {
-            return Err(format!(
-                "secrets: env {:?} must be UPPER_CASE, not one the shell or Clio sets (PATH, HOME, LD_*, *_PROXY, CLIO_*...), and given once",
-                one_line(&s.env)
-            ));
-        }
-        if !m.network.iter().any(|h| host_of(h) == s.host) {
-            return Err(format!(
-                "secrets: {:?} goes to {:?}, which is not one of the hosts in network",
-                one_line(&s.name),
-                one_line(&s.host)
-            ));
-        }
-    }
-    if m.writes.len() > MAX_WRITES || m.reads.len() > MAX_WRITES {
-        return Err(format!("writes, reads: at most {MAX_WRITES} paths each"));
-    }
-    let l = m.limits;
-    if !(1..=MAX_LIMITS.cpu_percent).contains(&l.cpu_percent)
-        || !(16..=MAX_LIMITS.memory_mb).contains(&l.memory_mb)
-        || !(10..=MAX_LIMITS.seconds).contains(&l.seconds)
-    {
-        return Err(format!(
-            "limits: cpu_percent 1 to {}, memory_mb 16 to {}, seconds 10 to {}",
-            MAX_LIMITS.cpu_percent, MAX_LIMITS.memory_mb, MAX_LIMITS.seconds
-        ));
-    }
+    check_grants(
+        &m.network,
+        &m.secrets,
+        m.writes.len().max(m.reads.len()),
+        m.limits,
+        MAX_LIMITS,
+    )?;
     if [&m.description, &m.command, &m.verify]
         .iter()
         .any(|t| t.chars().any(skills::hidden))
@@ -615,10 +633,10 @@ pub fn current_manifest(root: &Path, rec: &Value) -> Option<Manifest> {
     serde_json::from_str(&t).ok()
 }
 
-/// What `limits` of a manifest is: the given ones over the defaults.
-fn limits_of(v: Option<&Value>) -> Result<Limits, String> {
+/// What `limits` of a manifest is: the given ones over the defaults (`d`).
+pub(crate) fn limits_of(v: Option<&Value>, d: Limits) -> Result<Limits, String> {
     let Some(v) = v.filter(|v| !v.is_null()) else {
-        return Ok(DEFAULT_LIMITS);
+        return Ok(d);
     };
     let o = v.as_object().ok_or("limits: an object")?;
     if o.keys()
@@ -631,14 +649,13 @@ fn limits_of(v: Option<&Value>) -> Result<Limits, String> {
         Some(x) => x.as_u64().ok_or(format!("limits.{k}: a whole number")),
     };
     Ok(Limits {
-        cpu_percent: u32::try_from(n("cpu_percent", u64::from(DEFAULT_LIMITS.cpu_percent))?)
-            .unwrap_or(u32::MAX),
-        memory_mb: n("memory_mb", DEFAULT_LIMITS.memory_mb)?,
-        seconds: n("seconds", DEFAULT_LIMITS.seconds)?,
+        cpu_percent: u32::try_from(n("cpu_percent", u64::from(d.cpu_percent))?).unwrap_or(u32::MAX),
+        memory_mb: n("memory_mb", d.memory_mb)?,
+        seconds: n("seconds", d.seconds)?,
     })
 }
 
-fn strings(v: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
+pub(crate) fn strings(v: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
     match v {
         None | Some(Value::Null) => Ok(vec![]),
         Some(Value::Array(a)) => a
@@ -653,17 +670,9 @@ fn strings(v: Option<&Value>, what: &str) -> Result<Vec<String>, String> {
     }
 }
 
-/// The manifest the model's arguments describe (not checked yet).
-pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
-    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
-    let sched = args
-        .get("schedule")
-        .and_then(Value::as_object)
-        .ok_or("schedule: {\"every\": \"15m\"}, or {\"every\": \"1d\", \"at\": \"03:00\"}")?;
-    if sched.keys().any(|k| k != "every" && k != "at") {
-        return Err("schedule: only every and at".into());
-    }
-    let secrets = match args.get("secrets") {
+/// `secrets` of a manifest: `{name, env, host}` each, nothing else.
+pub(crate) fn secrets_of(v: Option<&Value>) -> Result<Vec<SecretUse>, String> {
+    Ok(match v {
         None | Some(Value::Null) => vec![],
         Some(Value::Array(a)) => a
             .iter()
@@ -680,7 +689,20 @@ pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
             })
             .collect::<Result<_, _>>()?,
         Some(_) => return Err("secrets: a list of {name, env, host}".into()),
-    };
+    })
+}
+
+/// The manifest the model's arguments describe (not checked yet).
+pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let sched = args
+        .get("schedule")
+        .and_then(Value::as_object)
+        .ok_or("schedule: {\"every\": \"15m\"}, or {\"every\": \"1d\", \"at\": \"03:00\"}")?;
+    if sched.keys().any(|k| k != "every" && k != "at") {
+        return Err("schedule: only every and at".into());
+    }
+    let secrets = secrets_of(args.get("secrets"))?;
     Ok(Manifest {
         name: s("name"),
         description: s("description").trim().to_owned(),
@@ -698,7 +720,7 @@ pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
         secrets,
         writes: strings(args.get("writes"), "writes")?,
         reads: strings(args.get("reads"), "reads")?,
-        limits: limits_of(args.get("limits"))?,
+        limits: limits_of(args.get("limits"), DEFAULT_LIMITS)?,
     })
 }
 

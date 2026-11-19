@@ -94,7 +94,7 @@ fn with_notices<T>(root: &Path, f: impl FnOnce(&mut Vec<Notice>) -> T) -> Res<T>
     Ok(out)
 }
 
-fn notice(root: &Path, name: &str, text: &str) {
+pub(crate) fn notice(root: &Path, name: &str, text: &str) {
     let n = Notice {
         at_ms: now_ms(),
         name: name.into(),
@@ -106,29 +106,33 @@ fn notice(root: &Path, name: &str, text: &str) {
     }
 }
 
-fn notice_line(n: &Notice) -> String {
-    super::tui::sanitize::line(&format!("service «{}»: {}", n.name, n.text))
+fn notice_line(n: &Notice, word: &str) -> String {
+    super::tui::sanitize::line(&format!("{word} «{}»: {}", n.name, n.text))
 }
 
 /// The notices no chat has shown yet, as quiet notes, now marked seen.
 pub fn take_notices(d: &Dirs) -> Vec<String> {
-    let root = root(d);
+    take_notices_in(&root(d), "service")
+}
+
+/// `take_notices` of a folder whose notices are about a `word` (`service`, `MCP server`).
+pub(crate) fn take_notices_in(root: &Path, word: &str) -> Vec<String> {
     if !root.join("notices.json").is_file() {
         return vec![];
     }
-    with_notices(&root, |all| {
+    with_notices(root, |all| {
         all.iter_mut()
             .filter(|n| !n.seen)
             .map(|n| {
                 n.seen = true;
-                notice_line(n)
+                notice_line(n, word)
             })
             .collect()
     })
     .unwrap_or_default()
 }
 
-fn recent_notices(root: &Path, k: usize) -> Vec<Notice> {
+pub(crate) fn recent_notices(root: &Path, k: usize) -> Vec<Notice> {
     let all: Vec<Notice> = fs::read_to_string(root.join("notices.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -323,7 +327,7 @@ fn pause(root: &Path, name: &str, why: &str) {
 }
 
 /// `'…'` for bash, whatever `s` holds.
-fn quote(s: &str) -> String {
+pub(crate) fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -507,134 +511,39 @@ impl<'a> Runner<'a> {
 
     /// Secrets, the proxy, the launcher: fills `run`; `Err` is a failure and why.
     fn launch(&self, root: &Path, r: &Record, m: &Manifest, run: &mut Run) -> Res<()> {
-        if self.jail.launcher() != clio_node::Launcher::Bwrap {
-            return Err(NOT_SYSTEMD.into());
-        }
-        let d = self.dirs;
-        let control = d.control();
-        let mut writable = vec![state_dir(root, &r.name)];
-        mkdir_private(&writable[0])?;
-        // Checked again before each run: what is there now, not what was there at approval.
-        for w in &m.writes {
-            if let Some(why) = sv::write_refused(w, &d.home, &control) {
-                return Err(format!("writes: {why}"));
-            }
-            writable.push(PathBuf::from(w));
-        }
+        let state = state_dir(root, &r.name);
+        mkdir_private(&state)?;
         let vdir = skills::version_dir(root, &r.name, r.current);
-        let mut shows = vec![vdir.clone()];
-        for p in &m.reads {
-            if let Some(why) = sv::read_refused(p, &d.home, &control) {
-                return Err(format!("reads: {why}"));
-            }
-            shows.push(PathBuf::from(p));
-        }
-        // The forwarder (`clio pi-net`) runs inside: the binary is shown when the home hides it.
-        if self.exe.starts_with(&d.home) {
-            shows.push(self.exe.clone());
-        }
-        // The secrets: only from the vault, only when it lets each go to every declared host (the
-        // run can send it to any of them), only as their variable.
-        let scrub = Scrubber::default();
-        let mut input = Vec::new();
-        let mut prefix = String::new();
-        if !m.secrets.is_empty() {
-            let Some(g) = &self.gateway else {
-                run.outcome = "waiting".into();
-                run.why = "waiting for the vault (it is not running)".into();
-                return Ok(());
-            };
-            let vault = VaultClient::new(g);
-            let trace = format!("service:{}", r.name);
-            let wait = |e: &VaultError, name: &str, host: &str| match e {
-                VaultError::Locked => "waiting for the vault (it is locked)".to_owned(),
-                VaultError::Io(_) => "waiting for the vault (it is not running)".into(),
-                _ => format!(
-                    "waiting for the secret {name} to be allowed to reach {host} (clio vault put {name} --dest service:{host})"
-                ),
-            };
-            for s in &m.secrets {
-                if !m.network.iter().any(|h| sv::host_of(h) == s.host) {
-                    return Err(format!("the secret {} is for an undeclared host", s.name));
-                }
-                for h in &m.network {
-                    if let Err(e) = vault.check(&s.name, "service", Some(sv::host_of(h)), &trace) {
-                        run.outcome = "waiting".into();
-                        run.why = wait(&e, &s.name, sv::host_of(h));
-                        return Ok(());
-                    }
-                }
-            }
-            for s in &m.secrets {
-                match vault.resolve(&s.name, "service", &s.host, &trace) {
-                    Ok(v) => {
-                        scrub.add(&s.name, v.expose());
-                        input.extend_from_slice(v.expose().as_bytes());
-                        input.push(0);
-                        prefix.push_str(&format!(
-                            "IFS= read -r -d '' {e} || exit 75; export {e}; ",
-                            e = s.env
-                        ));
-                    }
-                    Err(e) => {
-                        input.fill(0);
-                        run.outcome = "waiting".into();
-                        run.why = wait(&e, &s.name, &s.host);
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        // What it writes is its own: private, as everything of Clio's (S-23).
-        let prefix = format!("umask 077; {prefix}");
-        let mut env = vec![
-            (
-                "CLIO_STATE_DIR".to_owned(),
-                writable[0].display().to_string(),
-            ),
-            ("CLIO_SERVICE".to_owned(), r.name.clone()),
-        ];
-        let mut command = format!("{prefix}exec </dev/null; {}", m.command);
-        let proxy = if m.network.is_empty() {
-            None
-        } else {
-            let allow: Vec<String> = m.network.iter().filter_map(|h| sv::host_port(h)).collect();
-            let p = clio_brain::pi::net::EgressProxy::start_service(&self.proxy_parent, &allow)?;
-            shows.push(p.dir().to_path_buf());
-            for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
-                env.push((k.into(), clio_brain::pi::net::PROXY_URL.into()));
-            }
-            command = format!(
-                "{prefix}exec </dev/null; exec {} pi-net --listen {} --upstream {} -- bash -c {}",
-                quote(&self.exe.display().to_string()),
-                clio_brain::pi::net::FORWARD_ADDR,
-                quote(&p.socket().display().to_string()),
-                quote(&m.command)
-            );
-            Some(p)
-        };
-        let mut masks = control;
-        // The whole home: its sockets (what starts programs: a process manager, a terminal
-        // multiplexer) and its credentials; and `/run`: the person's D-Bus (`systemd-run --user`
-        // would start something outside the jail), Docker's socket and the vault's sockets. The
-        // version folder, the declared paths and the proxy folder are windows.
-        masks.extend([d.home.clone(), PathBuf::from("/run")]);
-        let job = ServiceRun {
-            job: HostJob {
-                command,
-                cwd: vdir,
-                home: d.home.clone(),
-                network: false,
-                timeout: Some(Duration::from_secs(m.limits.seconds)),
-                max_output: sv::TAIL_BYTES * 4,
-                masks,
-                shows,
-                read_only: false,
-            },
-            writable,
+        let spec = Spec {
+            tool: "service",
+            name: &r.name,
+            command: &m.command,
+            stdin: false,
+            cwd: vdir.clone(),
+            home: self.dirs.home.clone(),
+            network: &m.network,
+            secrets: &m.secrets,
+            reads: &m.reads,
+            writes: &m.writes,
+            own: vec![state.clone()],
+            shows: vec![vdir],
+            env: vec![("CLIO_SERVICE".to_owned(), r.name.clone())],
             cpu_percent: m.limits.cpu_percent,
             memory_mb: m.limits.memory_mb,
-            env,
+            seconds: m.limits.seconds,
+        };
+        let (job, input, scrub, proxy) = match self.prepare(&spec)? {
+            Prepared::Wait(why) => {
+                run.outcome = "waiting".into();
+                run.why = why;
+                return Ok(());
+            }
+            Prepared::Ready {
+                job,
+                input,
+                scrub,
+                proxy,
+            } => (job, input, scrub, proxy),
         };
         let out = self.jail.run_service(&job, input, &|| false);
         drop(proxy);
@@ -677,6 +586,190 @@ impl<'a> Runner<'a> {
             }
         };
         Ok(())
+    }
+}
+
+/// What a program in a service's jail declared (a service's run, an MCP server, npm for one):
+/// the same checks, secrets, proxy and launcher for all (S-69, S-70).
+pub struct Spec<'s> {
+    /// The vault's tool its secrets are bound to: `service` or `mcp` (`<tool>:<host>`).
+    pub tool: &'s str,
+    pub name: &'s str,
+    /// Run by `bash -c` after the secrets are read into their variables.
+    pub command: &'s str,
+    /// Its standard input stays open after the secrets (an MCP server talks over it); else
+    /// `/dev/null`.
+    pub stdin: bool,
+    pub cwd: PathBuf,
+    /// Its `HOME` (a service: the person's, hidden; an MCP server: its own folder).
+    pub home: PathBuf,
+    pub network: &'s [String],
+    pub secrets: &'s [sv::SecretUse],
+    pub reads: &'s [String],
+    pub writes: &'s [String],
+    /// Clio's folders it may write (the first is `$CLIO_STATE_DIR`): private, existing.
+    pub own: Vec<PathBuf>,
+    /// Clio's folders (or the home's) it may read.
+    pub shows: Vec<PathBuf>,
+    pub env: Vec<(String, String)>,
+    pub cpu_percent: u32,
+    pub memory_mb: u64,
+    /// A service's time limit; a long-lived program's processor-time budget.
+    pub seconds: u64,
+}
+
+/// A program ready to start, or why it waits (the vault, a secret not allowed to a host).
+// One lives for a moment before a start: boxing the large variant would buy nothing.
+#[allow(clippy::large_enum_variant)]
+pub enum Prepared {
+    Wait(String),
+    Ready {
+        job: ServiceRun,
+        /// Its secrets, NUL-terminated, for its standard input.
+        input: Vec<u8>,
+        /// Its secrets' values.
+        scrub: Scrubber,
+        /// Its hosts' proxy: alive as long as the program.
+        proxy: Option<clio_brain::pi::net::EgressProxy>,
+    },
+}
+
+impl Runner<'_> {
+    /// The paths checked again (what is there now, not what was there at approval), the secrets
+    /// from the vault only when it lets each go to every declared host (the program can send it
+    /// to any of them), only as their variable; the proxy of its hosts; the masks.
+    pub fn prepare(&self, s: &Spec<'_>) -> Res<Prepared> {
+        if self.jail.launcher() != clio_node::Launcher::Bwrap {
+            return Err(NOT_SYSTEMD.into());
+        }
+        let d = self.dirs;
+        let control = d.control();
+        let mut writable = s.own.clone();
+        for w in s.writes {
+            if let Some(why) = sv::write_refused(w, &d.home, &control) {
+                return Err(format!("writes: {why}"));
+            }
+            writable.push(PathBuf::from(w));
+        }
+        let mut shows = s.shows.clone();
+        for p in s.reads {
+            if let Some(why) = sv::read_refused(p, &d.home, &control) {
+                return Err(format!("reads: {why}"));
+            }
+            shows.push(PathBuf::from(p));
+        }
+        // The forwarder (`clio pi-net`) runs inside: the binary is shown when the home hides it.
+        if self.exe.starts_with(&d.home) {
+            shows.push(self.exe.clone());
+        }
+        let scrub = Scrubber::default();
+        let mut input = Vec::new();
+        let mut prefix = String::new();
+        if !s.secrets.is_empty() {
+            let Some(g) = &self.gateway else {
+                return Ok(Prepared::Wait(
+                    "waiting for the vault (it is not running)".into(),
+                ));
+            };
+            let vault = VaultClient::new(g);
+            let trace = format!("{}:{}", s.tool, s.name);
+            let wait = |e: &VaultError, name: &str, host: &str| match e {
+                VaultError::Locked => "waiting for the vault (it is locked)".to_owned(),
+                VaultError::Io(_) => "waiting for the vault (it is not running)".into(),
+                _ => format!(
+                    "waiting for the secret {name} to be allowed to reach {host} (clio vault put {name} --dest {}:{host})",
+                    s.tool
+                ),
+            };
+            for sec in s.secrets {
+                if !s.network.iter().any(|h| sv::host_of(h) == sec.host) {
+                    return Err(format!("the secret {} is for an undeclared host", sec.name));
+                }
+                for h in s.network {
+                    if let Err(e) = vault.check(&sec.name, s.tool, Some(sv::host_of(h)), &trace) {
+                        return Ok(Prepared::Wait(wait(&e, &sec.name, sv::host_of(h))));
+                    }
+                }
+            }
+            for sec in s.secrets {
+                match vault.resolve(&sec.name, s.tool, &sec.host, &trace) {
+                    Ok(v) => {
+                        scrub.add(&sec.name, v.expose());
+                        input.extend_from_slice(v.expose().as_bytes());
+                        input.push(0);
+                        prefix.push_str(&format!(
+                            "IFS= read -r -d '' {e} || exit 75; export {e}; ",
+                            e = sec.env
+                        ));
+                    }
+                    Err(e) => {
+                        input.fill(0);
+                        return Ok(Prepared::Wait(wait(&e, &sec.name, &sec.host)));
+                    }
+                }
+            }
+        }
+        // What it writes is its own: private, as everything of Clio's (S-23).
+        let mut prefix = format!("umask 077; {prefix}");
+        if !s.stdin {
+            prefix.push_str("exec </dev/null; ");
+        }
+        let mut env = vec![(
+            "CLIO_STATE_DIR".to_owned(),
+            writable
+                .first()
+                .map(|w| w.display().to_string())
+                .unwrap_or_default(),
+        )];
+        env.extend(s.env.iter().cloned());
+        let mut command = format!("{prefix}{}", s.command);
+        let proxy = if s.network.is_empty() {
+            None
+        } else {
+            let allow: Vec<String> = s.network.iter().filter_map(|h| sv::host_port(h)).collect();
+            let p = clio_brain::pi::net::EgressProxy::start_service(&self.proxy_parent, &allow)?;
+            shows.push(p.dir().to_path_buf());
+            for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
+                env.push((k.into(), clio_brain::pi::net::PROXY_URL.into()));
+            }
+            command = format!(
+                "{prefix}exec {} pi-net --listen {} --upstream {} -- bash -c {}",
+                quote(&self.exe.display().to_string()),
+                clio_brain::pi::net::FORWARD_ADDR,
+                quote(&p.socket().display().to_string()),
+                quote(s.command)
+            );
+            Some(p)
+        };
+        let mut masks = control;
+        // The whole home: its sockets (what starts programs: a process manager, a terminal
+        // multiplexer) and its credentials; and `/run`: the person's D-Bus (`systemd-run --user`
+        // would start something outside the jail), Docker's socket and the vault's sockets. The
+        // version folder, the declared paths and the proxy folder are windows.
+        masks.extend([d.home.clone(), PathBuf::from("/run")]);
+        let job = ServiceRun {
+            job: HostJob {
+                command,
+                cwd: s.cwd.clone(),
+                home: s.home.clone(),
+                network: false,
+                timeout: Some(Duration::from_secs(s.seconds)),
+                max_output: sv::TAIL_BYTES * 4,
+                masks,
+                shows,
+                read_only: false,
+            },
+            writable,
+            cpu_percent: s.cpu_percent,
+            memory_mb: s.memory_mb,
+            env,
+        };
+        Ok(Prepared::Ready {
+            job,
+            input,
+            scrub,
+            proxy,
+        })
     }
 }
 
@@ -957,11 +1050,13 @@ fn list_lines(d: &Dirs) -> Vec<String> {
     if !notices.is_empty() {
         out.push(String::new());
         out.push("recent notices:".into());
-        out.extend(
-            notices
-                .iter()
-                .map(|n| format!("{} UTC {}", super::stamp(n.at_ms), notice_line(n))),
-        );
+        out.extend(notices.iter().map(|n| {
+            format!(
+                "{} UTC {}",
+                super::stamp(n.at_ms),
+                notice_line(n, "service")
+            )
+        }));
     }
     if !skills::records(&root).is_empty() && !timer_files_exist(&d.home) {
         out.push(String::new());
@@ -1032,7 +1127,7 @@ vault's sockets through another process's /proc/<pid>/root";
 
 /// The launcher a service runs under: bwrap, whose own pid namespace and /proc hide every other
 /// process, or a refusal that says why.
-fn service_jail() -> Res<HostJail> {
+pub(crate) fn service_jail() -> Res<HostJail> {
     HostJail::with(clio_node::Launcher::Bwrap)
         .map(HostJail::with_user_scopes)
         .map_err(|e| format!("{NOT_SYSTEMD}; and bwrap: {e}"))

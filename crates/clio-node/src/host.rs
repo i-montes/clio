@@ -8,6 +8,7 @@
 //! folders out of an ordinary command's sight, not out of root's reach.
 
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -628,6 +629,26 @@ impl HostJail {
         let scoped = self.scope_starts(run);
         self.run_inner_with(&run.job, cancel, None, Some(run), Some(input), scoped)
             .map(|o| (o, scoped))
+    }
+
+    /// Starts a service's `run` and does not wait for it (an MCP server, stage 4): the same jail
+    /// and limits as `run_service`, its standard input, output and error piped, in a process
+    /// group of its own, with an empty environment. The caller writes the secrets first on its
+    /// input (as `run_service` does), talks to it, and kills it (`kill_group`); `job.timeout` only
+    /// sizes the per-process processor limit. With it, whether its limits were a cgroup's.
+    pub fn spawn_service(&self, run: &ServiceRun) -> Result<(std::process::Child, bool), String> {
+        let scoped = self.scope_starts(run);
+        let (program, args) = self.build(&run.job, &unit_name(), Some(run), scoped)?;
+        Command::new(&program)
+            .args(args)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map(|c| (c, scoped))
+            .map_err(|e| format!("could not start {}: {e}", program.display()))
     }
 
     fn run_inner(
