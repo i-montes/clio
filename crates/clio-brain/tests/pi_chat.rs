@@ -1758,3 +1758,24 @@ fn a_clean_reviewers_findings_leave_the_conversation_unmarked() {
     assert!(!run.join("reviews/1/toolhost/tainted.json").exists());
     assert!(!run.join("toolhost/tainted.json").exists());
 }
+
+// Quitting, or `/new`, while a review runs: its Pi and its tool host go with it.
+#[test]
+fn quitting_or_a_new_session_during_a_review_leaves_no_reviewer_behind() {
+    if can_run("review_quit", true).is_none() {
+        return;
+    }
+    for scenario in ["review_quit", "review_new"] {
+        let w = review_world(&[
+            json!({"tool_calls": [{"name": "bash", "arguments": {"reason": "esperar", "command": "sleep 60"}}]}),
+            json!({"text": FAILS}),
+        ]);
+        let v = w.pty_with(scenario, json!({}), &[], &decoy());
+        ok(&v, &["opened", "answered", "reviewing", "reviewer_up"]);
+        if scenario == "review_new" {
+            ok(&v, &["new", "gone_after_new"]);
+        }
+        assert_eq!(v["code"], json!(0), "{scenario}: {v:#}");
+        assert_eq!(v["procs_after_quit"], json!(0), "{scenario}: {v:#}");
+    }
+}

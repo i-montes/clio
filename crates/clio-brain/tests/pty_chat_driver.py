@@ -332,6 +332,30 @@ elif scenario == "review":
     send(fd, CTRL_C)  # idle: Ctrl-C leaves
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario in ("review_quit", "review_new"):
+    # A turn that writes a file, `/review`, and while the reviewer runs (its model has it run a
+    # long command) the person leaves, or starts a new session: no reviewer Pi or tool host stays.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, "escribe out.txt", "wrote it")
+    type_text(fd, "/review")
+    send(fd, ENTER)
+    out["reviewing"] = wait_screen(fd, "reviewing", 30)
+    # The conversation's Pi and tool host, and the reviewer's.
+    end = time.time() + 30
+    while time.time() < end and len(pi_procs()) < 4:
+        pump(fd)
+    out["reviewer_up"] = len(pi_procs()) >= 4
+    if scenario == "review_new":
+        type_text(fd, "/new")
+        send(fd, ENTER)
+        out["new"] = wait_screen(fd, "How can I help?", 30)
+        # A new session starts its Pi with its first message: nothing of the old one is left.
+        out["gone_after_new"] = gone(20)
+        if not out["gone_after_new"]:
+            out["left"] = pi_procs()
+    send(fd, CTRL_C)
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "summary":
     # Four messages, the keys to the list, and leave at once: leaving asks for the summary of the
     # open session and waits for it.
