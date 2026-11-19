@@ -1145,6 +1145,11 @@ impl Ctx {
                         if !asks.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
                         }
+                        // Skills: the drafts the turn wrote are reviewed; the reports counted.
+                        let (drafts, notes) = session.skill_news();
+                        if !drafts.is_empty() || !notes.is_empty() {
+                            let _ = tx.send(Input::Bg(Bg::SkillNews(drafts, notes)));
+                        }
                         (result, session.refresh().ok())
                     },
                     |r| match r {
@@ -1256,6 +1261,38 @@ impl Ctx {
                     },
                 );
             }
+            Cmd::SkillReview {
+                session: sid,
+                id,
+                name,
+            } => {
+                let Some(s) = self.current_chat() else {
+                    self.send(Bg::Reviewed {
+                        session: sid,
+                        result: Err("no session is open".into()),
+                    });
+                    return;
+                };
+                let cancel = Cancel::new();
+                if let Ok(mut c) = self.review_cancel.lock() {
+                    *c = cancel.clone();
+                }
+                self.spawn(
+                    move |_, _| {
+                        s.review_skill(&id, &cancel)
+                            .map(Box::new)
+                            .map_err(|e| format!("the skill «{name}»: {e}"))
+                    },
+                    move |r| Bg::Reviewed {
+                        session: sid,
+                        result: r.and_then(|x| x),
+                    },
+                );
+            }
+            Cmd::Skills(args) => self.spawn(
+                move |d, _| super::skills::chat_command(d, &args),
+                |r| Bg::Modal(r.and_then(|x| x)),
+            ),
             Cmd::ReviewStop => {
                 if let Ok(c) = self.review_cancel.lock() {
                     c.cancel();

@@ -177,6 +177,9 @@ fn each_command_asks_for_its_own_work() {
             }],
         ),
         ("/actions", vec![Cmd::LoadActions { run: "sid".into() }]),
+        ("/skills", vec![Cmd::Skills(String::new())]),
+        ("/skills off demo", vec![Cmd::Skills("off demo".into())]),
+        ("/skills remove demo", vec![]),
         ("/undo", vec![]),
         ("/memory", vec![Cmd::LoadMemory]),
         ("/doctor", vec![Cmd::RunDoctor]),
@@ -206,6 +209,15 @@ fn each_command_asks_for_its_own_work() {
                 assert!(a.chat.compacting);
             }
             "/new" | "/clear" => assert!(a.chat.is_draft()),
+            // S-68: a removal asks first; only then is it done.
+            "/skills" if typed.contains("remove") => {
+                assert_eq!(a.confirm.as_ref().unwrap().action, Action::RemoveSkill);
+                let (_, no) = feed(run(open(), typed).0, vec![ch('n')]);
+                assert!(no.is_empty(), "{no:?}");
+                let (_, cmds) = feed(a, vec![ch('y')]);
+                assert_eq!(cmds, vec![Cmd::Skills("remove demo --yes".into())]);
+                continue;
+            }
             "/undo" => {
                 assert_eq!(a.confirm.as_ref().unwrap().action, Action::UndoSession);
                 let (_, cmds) = feed(a, vec![ch('y')]);

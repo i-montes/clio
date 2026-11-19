@@ -1,7 +1,7 @@
 //! The bench with Pi as the harness (`clio-bench agent --harness pi`): the same lifecycle as
 //! `clio run --harness pi` (`clio toolhost` on the working copy, hardened Pi with the guard, the
 //! twelve tools, `--thinking low`), driven to `agent_settled` under the task's limits. The task's
-//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@22`).
+//! prompt is sent as is; the system prompt is the one the guard checks (`clio-agent@23`).
 //! The API key comes only from `OPENCODE_API_KEY`; it is
 //! handed to Pi and the toolhost through their environment and never printed or written.
 
@@ -150,6 +150,7 @@ impl PiBench {
             },
             // Pi runs in its jail (ADR 0009); inside it `clio pi-net` forwards to the proxy.
             helper: self.clio.clone(),
+            skills: None,
         };
         let mut pi = start(&launch).map_err(|e| e.to_string())?;
         pi.client.timeouts.run = Duration::from_millis(u64::try_from(max_ms).unwrap_or(0));

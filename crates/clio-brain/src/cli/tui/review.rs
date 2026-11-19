@@ -7,7 +7,7 @@ use clio_brain::pi::rpc::{Cancel, Usage};
 
 use super::app::{App, Cmd};
 use super::chat::Item;
-use crate::cli::chat::{ReviewRequest, Reviewed, Session, TurnWork};
+use crate::cli::chat::{ReviewRequest, Reviewed, Session, SkillOutcome, TurnWork};
 use crate::cli::usage;
 
 /// Findings shown in the chat (the rest are in the full text); what each shows at most.
@@ -40,6 +40,8 @@ pub struct Review {
     /// What the reviews of this session spent.
     pub usage: Usage,
     pub count: u32,
+    /// Skill drafts waiting for their review (id, name), oldest first: one at a time.
+    pub skills: std::collections::VecDeque<(String, String)>,
 }
 
 /// The review settings, from the header (the defaults before it loaded).
@@ -158,6 +160,84 @@ pub fn job(
     Ok(s.review(&ReviewRequest::of_work(what, work), cancel))
 }
 
+/// A skill draft waits and no review runs: its review starts (S-68). It runs beside the chat, as
+/// any review; the draft's own registration rules decide what comes of it.
+pub fn next_skill(app: &mut App) -> Vec<Cmd> {
+    let r = &app.chat.review;
+    if r.running.is_some() || r.judging || app.chat.session_id.is_empty() {
+        return vec![];
+    }
+    let Some((id, name)) = app.chat.review.skills.pop_front() else {
+        return vec![];
+    };
+    app.chat.review.running = Some(app.now_ms);
+    app.chat.items.push(Item::Note(format!(
+        "reviewing the skill «{}» before it is registered…",
+        super::app::clean(&name)
+    )));
+    vec![Cmd::SkillReview {
+        session: app.chat.session_id.clone(),
+        id,
+        name,
+    }]
+}
+
+/// What came of a skill draft's review, for the person (one line, the Approval box) and the
+/// model (the findings, as a review's).
+fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
+    let verdict = match rv.answer.verdict {
+        Verdict::CouldNotCheck => "could not check",
+        v => v.word(),
+    };
+    let clean = super::app::clean;
+    match outcome {
+        SkillOutcome::Registered {
+            name,
+            description,
+            n,
+        } => app.chat.items.push(Item::Note(format!(
+            "skill registered: «{}»{}: {} · review: {verdict} · available from the next session (or when this one is reopened)",
+            clean(name),
+            if *n > 1 { format!(" (version {n})") } else { String::new() },
+            cap(description, 200)
+        ))),
+        SkillOutcome::Waits { id, what, ask } => {
+            app.chat.items.push(Item::Note(format!(
+                "a skill waits for your approval ({id}) · review: {verdict}"
+            )));
+            let mut c = super::app::Confirm::new(
+                super::app::Action::Approve,
+                id.clone(),
+                0,
+                what.clone(),
+            );
+            c.session.clone_from(&app.chat.session_id);
+            c.block = (**ask).clone();
+            app.asks.push_back(c);
+            super::app::next_ask(app);
+        }
+        SkillOutcome::Rejected {
+            name,
+            attempt,
+            dropped,
+            to_model,
+        } => {
+            app.chat.review.findings = Some((to_model.clone(), rv.marked));
+            app.chat.items.push(Item::Note(if *dropped {
+                format!(
+                    "skill «{}» not registered: review {verdict}, the third time in a row; the draft is dropped",
+                    clean(name)
+                )
+            } else {
+                format!(
+                    "skill «{}» not registered: review {verdict} (attempt {attempt} of 3); the findings go to Clio when the chat is idle",
+                    clean(name)
+                )
+            }));
+        }
+    }
+}
+
 /// Findings waiting go to the model once the chat is idle and the person is not typing: an
 /// automatic turn, shown as the review's. A message of the person's waiting goes first.
 pub fn deliver(app: &mut App) -> Vec<Cmd> {
@@ -219,7 +299,7 @@ pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>
     u.total_tokens += rv.usage.total_tokens;
     u.cost += rv.usage.cost;
     r.count += 1;
-    if rv.answer.goes_to_model() {
+    if rv.answer.goes_to_model() && rv.skill.is_none() {
         r.findings = Some((rv.answer.for_model(), rv.marked));
     }
     let a = &rv.answer;
@@ -263,10 +343,13 @@ pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>
         }
         items.push(Item::Note(block.join("\n")));
     }
-    if rv.answer.goes_to_model() {
+    if rv.answer.goes_to_model() && rv.skill.is_none() {
         items.push(Item::Note(
             "the findings go to Clio when the chat is idle".into(),
         ));
+    }
+    if let Some(o) = &rv.skill {
+        skill_ended(app, &rv, o);
     }
 }
 

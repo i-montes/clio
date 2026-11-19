@@ -230,12 +230,48 @@ pub struct BlockAsk {
     /// can `y` arm it.
     pub max: std::cell::Cell<usize>,
     pub seen_end: std::cell::Cell<bool>,
+    /// A skill to register (S-68) instead of a block change: drawn whole the same way.
+    pub skill: Option<SkillAsk>,
+}
+
+/// A skill set aside for the person: what it is for, why it waits, its SKILL.md whole and each
+/// other file's name and size, all from the stored item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillAsk {
+    pub description: String,
+    pub reason: String,
+    pub update: bool,
+    pub skill_md: String,
+    pub files: Vec<(String, usize)>,
 }
 
 impl BlockAsk {
     pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
-        let b = clio_toolhost::pending::block_of(p)?;
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
+        if let Some((name, description, md, files)) = clio_toolhost::pending::skill_of(p) {
+            return Some(Self {
+                name: clean(name),
+                action: "register".into(),
+                id: None,
+                text: None,
+                old: None,
+                suspect,
+                scroll: 0,
+                max: std::cell::Cell::new(0),
+                seen_end: std::cell::Cell::new(false),
+                skill: Some(SkillAsk {
+                    description: clean(description),
+                    reason: clean(p.reason.as_deref().unwrap_or("")),
+                    update: p.args["update"].as_bool() == Some(true),
+                    skill_md: sanitize::multiline(md),
+                    files: files
+                        .iter()
+                        .map(|(path, content)| (clean(path), content.len()))
+                        .collect(),
+                }),
+            });
+        }
+        let b = clio_toolhost::pending::block_of(p)?;
         Some(Self {
             name: clean(b.name),
             action: clean(b.action),
@@ -246,12 +282,68 @@ impl BlockAsk {
             scroll: 0,
             max: std::cell::Cell::new(0),
             seen_end: std::cell::Cell::new(false),
+            skill: None,
         })
+    }
+
+    /// What `y` does, for the keys under the box.
+    pub fn yes(&self) -> &'static str {
+        if self.skill.is_some() {
+            " yes, register it"
+        } else {
+            " yes, write it"
+        }
+    }
+
+    /// A skill's rows: what it is, why it waits, SKILL.md line by line, its files, the warning.
+    fn skill_parts(&self, s: &SkillAsk) -> Vec<(Part, String)> {
+        let mut out = vec![
+            (
+                Part::Head,
+                format!(
+                    "Clio wants to register {} «{}».",
+                    if s.update {
+                        "a new version of the skill"
+                    } else {
+                        "the skill"
+                    },
+                    self.name
+                ),
+            ),
+            (Part::Label, format!("what it is for: {}", s.description)),
+            (Part::Warn, format!("why it waits for you: {}", s.reason)),
+            (Part::Label, "SKILL.md, whole:".into()),
+        ];
+        // An empty line still takes a row: the text is shown as it is.
+        out.extend(s.skill_md.lines().map(|l| {
+            (
+                Part::Text,
+                if l.is_empty() {
+                    " ".into()
+                } else {
+                    l.to_owned()
+                },
+            )
+        }));
+        out.push((Part::Label, "its other files:".into()));
+        if s.files.is_empty() {
+            out.push((Part::Text, "none".into()));
+        }
+        for (path, size) in &s.files {
+            out.push((Part::Text, format!("{path} ({size} bytes)")));
+        }
+        if self.suspect {
+            out.push((Part::Warn, SUSPECT_LINE.into()));
+        }
+        out
     }
 
     /// Its rows, in order: that it is written as said by the person, the block, the action, the
     /// text whole, the entry it replaces or removes, and the warning of a suspect session.
     pub fn parts(&self) -> Vec<(Part, String)> {
+        if let Some(s) = &self.skill {
+            return self.skill_parts(s);
+        }
         let id = self.id.map_or_else(String::new, |n| format!(" m{n}"));
         let mut out = vec![
             (

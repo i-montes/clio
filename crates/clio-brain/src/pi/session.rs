@@ -20,7 +20,7 @@ use super::launch::Secret;
 use super::{PiPaths, private_dir, write_private};
 
 /// EXACTLY what `clio-guard` registers (see `adapters/pi/README.md`).
-pub const GUARD_TOOLS: [&str; 22] = [
+pub const GUARD_TOOLS: [&str; 24] = [
     "read",
     "write",
     "edit",
@@ -43,21 +43,23 @@ pub const GUARD_TOOLS: [&str; 22] = [
     "ask_person",
     "request_secret",
     "todo_write",
+    "skill_write",
+    "skill_report",
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
 pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@22";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@22.md");
+pub const PROMPT_NAME: &str = "clio-agent@23";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@23.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@6";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@6.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@7";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@7.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@2";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@2.md");
@@ -220,6 +222,9 @@ pub struct ToolhostOpts<'a> {
     pub secrets: Option<(&'a Path, &'a str, &'a Path)>,
     /// A review: nothing is set aside for the person (`clio toolhost --review`).
     pub review: bool,
+    /// Clio's skills folder (`clio toolhost --skills`): `skill_write`, `skill_report`, and a
+    /// registered skill read as Clio's own text. Only a chat.
+    pub skills: Option<&'a Path>,
 }
 
 /// The `--host-*` options of `clio toolhost`.
@@ -270,6 +275,7 @@ impl Toolhost {
             host,
             secrets,
             review,
+            skills,
         } = opts;
         // Units a `clio` killed before it could stop them do not run forever as the person.
         // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
@@ -339,6 +345,9 @@ impl Toolhost {
         }
         if review {
             cmd.arg("--review");
+        }
+        if let Some(s) = skills {
+            cmd.arg("--skills").arg(s);
         }
         let mut child = cmd
             .arg("--socket-dir")
@@ -475,6 +484,10 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 22\n"));
+        assert!(PROMPT.starts_with("version: 23\n"));
+        assert!(HOST_PROMPT.starts_with("version: 7\n"));
+        for t in ["skill_write", "skill_report"] {
+            assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
+        }
     }
 }

@@ -190,6 +190,14 @@ pub enum Cmd {
         work: Option<crate::cli::chat::TurnWork>,
         auto: bool,
     },
+    /// The review of skill draft `id` (`name`) the model wrote in `session` (S-68).
+    SkillReview {
+        session: String,
+        id: String,
+        name: String,
+    },
+    /// `/skills [off|on|undo|remove <name>]`: the person's (a removal was confirmed already).
+    Skills(String),
     /// `/review stop`.
     ReviewStop,
     /// The automatic turn that gives a review's findings to the model (as data), and the
@@ -276,6 +284,8 @@ pub enum Bg {
     Modal(Result<Modal, String>),
     /// What the turn about to settle changed (it changed something).
     TurnWork(Box<crate::cli::chat::TurnWork>),
+    /// Skills, after a turn: the drafts to review (id, name) and notes for the person.
+    SkillNews(Vec<(String, String)>, Vec<String>),
     /// A review of `session` started (`auto`: the judge asked for it, `why` its reason).
     ReviewStarted {
         session: String,
@@ -363,6 +373,8 @@ pub enum Action {
     Approve,
     /// `/undo`: what the chat's session changed goes back. `Confirm::id` is the session.
     UndoSession,
+    /// `/skills remove`: `Confirm::id` is the skill's name.
+    RemoveSkill,
 }
 
 /// A question that needs a `y`.
@@ -701,6 +713,7 @@ pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
     // The judge's question about a turn and a review's findings wait for the chat to be idle:
     // whatever made it so, they go now.
     if app.pi {
+        cmds.extend(super::review::next_skill(&mut app));
         cmds.extend(super::review::after_turn(&mut app));
         cmds.extend(super::review::deliver(&mut app));
     }
@@ -904,6 +917,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::Archive => vec![Cmd::MemoryArchive { id: c.id }],
         Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
         Action::UndoSession => vec![Cmd::UndoSession { id: c.id }],
+        Action::RemoveSkill => vec![Cmd::Skills(format!("remove {} --yes", c.id))],
         Action::Approve => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -1435,6 +1449,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.chat.review.changed = true;
             vec![]
         }
+        Bg::SkillNews(drafts, notes) => {
+            for n in notes {
+                app.chat.items.push(super::chat::Item::Note(n));
+            }
+            app.chat.review.skills.extend(drafts);
+            vec![]
+        }
         Bg::ReviewStarted { session, auto, why } => {
             super::review::started(app, &session, auto, &why);
             vec![]
@@ -1861,6 +1882,10 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         }
         Action::Approve => format!("Clio set aside {}. Run it?", c.id),
         Action::UndoSession => "Undo this session's file changes in".to_owned(),
+        Action::RemoveSkill => format!(
+            "Remove the skill «{}»? Pi stops loading it from the next session; its versions are kept.",
+            clean(&c.id)
+        ),
     };
     let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
     // A set-aside action (`«delete» …`): its class in the warning color, the command under it.
@@ -1971,7 +1996,7 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
     let d = format!("   {}   ", t.dot());
     let hint = Line::from(vec![
         Span::styled(if c.armed { "Enter" } else { "y then Enter" }, t.key()),
-        Span::styled(" yes, write it", t.dim()),
+        Span::styled(b.yes(), t.dim()),
         Span::styled(d, t.dim()),
         Span::styled(if c.armed { "other key" } else { "n or Esc" }, t.key()),
         Span::styled(

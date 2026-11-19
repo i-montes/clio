@@ -105,6 +105,40 @@ fn new_folder(run_dir: &Path) -> Result<(u32, PathBuf), String> {
     Err("too many reviews in this run".into())
 }
 
+/// What a skill draft's reviewer is asked (S-68): the skill as text (SKILL.md whole and the list
+/// of its files; the files are in `folder`, which is all the reviewer needs to read), and its
+/// check, run from that folder.
+pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewRequest {
+    let mut subject = format!(
+        "A skill for Clio{}: instructions an agent will follow, and scripts it may run. Its folder is {}: read every file there. SKILL.md:\n\n{}\n\nIts other files:\n",
+        if d.update {
+            " (a new version of one already registered)"
+        } else {
+            ""
+        },
+        folder.display(),
+        d.skill_md
+    );
+    if d.files.is_empty() {
+        subject.push_str("- none\n");
+    }
+    for f in &d.files {
+        subject.push_str(&format!("- {} ({} bytes)\n", f.path, f.content.len()));
+    }
+    subject.push_str(
+        "\nCheck too that its description says what it does and when to use it, that its steps can be followed by an agent that never saw this conversation, and that it does nothing beyond what it says.",
+    );
+    ReviewRequest {
+        what: format!("the skill «{}», before it is registered", d.name),
+        subject,
+        paths: vec![folder.display().to_string()],
+        check: format!(
+            "In {}, run the commands of the `## How to verify` section of its SKILL.md, as written; they must succeed.",
+            folder.display()
+        ),
+    }
+}
+
 /// Runs one review to its end (or its limit, or `cancel`). Never fails: what kept it from
 /// running is a `could_not_check` that says why.
 pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
@@ -118,6 +152,7 @@ pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
         marked: None,
         full: None,
         usage: Usage::default(),
+        skill: None,
     };
     let dir = match started(p, req, cancel, &mut out) {
         Ok(dir) => Some(dir),
@@ -182,6 +217,7 @@ fn started(
             }),
             secrets: None,
             review: true,
+            skills: None,
         },
     )
     .map_err(fail)?;
@@ -203,6 +239,7 @@ fn started(
             id: Some(id.clone()),
         },
         helper: exe,
+        skills: None,
     };
     let pi = start(&launch).map_err(|e| fail(e.to_string()))?;
     pi.client.set_interactive(false);

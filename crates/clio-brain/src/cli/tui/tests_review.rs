@@ -75,6 +75,7 @@ pub(super) fn reviewed(text: &str, marked: Option<bool>) -> Input {
                 cost: 0.05,
                 ..Usage::default()
             },
+            skill: None,
         })),
     })
 }
@@ -583,4 +584,120 @@ fn a_review_stopped_while_the_judge_is_asked_never_starts() {
     );
     assert!(a.reviews_at.is_empty() && notes(&a).is_empty());
     assert!(!a.chat.review.judging && a.chat.review.running.is_none());
+}
+
+fn skill_reviewed(text: &str, outcome: crate::cli::chat::SkillOutcome) -> Input {
+    let Input::Bg(Bg::Reviewed {
+        result: Ok(mut rv), ..
+    }) = reviewed(text, None)
+    else {
+        unreachable!()
+    };
+    rv.skill = Some(outcome);
+    Input::Bg(Bg::Reviewed {
+        session: "sid".into(),
+        result: Ok(rv),
+    })
+}
+
+// S-68: a draft the turn wrote is reviewed once no other review runs; what comes of it is one
+// line when it is registered, the Approval box when it waits, and the findings to the model (as
+// a review's) when it is not registered.
+#[test]
+fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() {
+    use crate::cli::chat::SkillOutcome;
+    let news = Input::Bg(Bg::SkillNews(
+        vec![("d1".into(), "hello".into()), ("d2".into(), "bye".into())],
+        vec!["the skill «x» failed 3 times in a row and was turned off".into()],
+    ));
+    let (a, cmds) = feed(idle(), vec![news]);
+    assert_eq!(
+        cmds.iter()
+            .filter(|c| matches!(c, Cmd::SkillReview { .. }))
+            .count(),
+        1,
+        "one at a time: {cmds:?}"
+    );
+    assert!(cmds.contains(&Cmd::SkillReview {
+        session: "sid".into(),
+        id: "d1".into(),
+        name: "hello".into()
+    }));
+    assert!(notes(&a).iter().any(|n| n.contains("turned off")));
+    assert!(super::review::status(&a).unwrap().starts_with("reviewing"));
+    // Registered: one line; then the next draft's review starts.
+    let (a, cmds) = feed(
+        a,
+        vec![skill_reviewed(
+            PASSES,
+            SkillOutcome::Registered {
+                name: "hello".into(),
+                description: "Says hello. Use when greeting.".into(),
+                n: 1,
+            },
+        )],
+    );
+    assert!(
+        notes(&a)
+            .iter()
+            .any(|n| n.starts_with("skill registered: «hello»")
+                && n.contains("review: passes")
+                && n.contains("available from the next session"))
+    );
+    assert!(reviews(&cmds).is_empty(), "nothing for the model: {cmds:?}");
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, Cmd::SkillReview { id, .. } if id == "d2"))
+    );
+    // Not registered: the findings go to the model as a review's, once the chat is idle.
+    let (a, cmds) = feed(
+        a,
+        vec![skill_reviewed(
+            FAILS,
+            SkillOutcome::Rejected {
+                name: "bye".into(),
+                attempt: 1,
+                dropped: false,
+                to_model: "Your draft d2 of the skill «bye» was not registered".into(),
+            },
+        )],
+    );
+    assert!(
+        notes(&a)
+            .iter()
+            .any(|n| n.contains("skill «bye» not registered") && n.contains("attempt 1 of 3"))
+    );
+    assert!(
+        matches!(
+            reviews(&cmds).as_slice(),
+            [Cmd::ReviewTurn { findings, .. }] if findings.starts_with("Your draft d2")
+        ),
+        "{cmds:?}"
+    );
+    // Waits: its box, with the whole skill.
+    let b = super::tests_gallery::skill_ask(
+        &super::tests_gallery::skill_md("1. Say hello."),
+        &[],
+        "this session read content from outside",
+        false,
+    );
+    let (a, _) = feed(
+        idle(),
+        vec![skill_reviewed(
+            PASSES,
+            SkillOutcome::Waits {
+                id: "e5f6".into(),
+                what: "«skill · this session read content from outside» register the skill «disk-report» (1 file)".into(),
+                ask: Box::new(Some(b)),
+            },
+        )],
+    );
+    let c = a.confirm.as_ref().unwrap();
+    assert_eq!((c.action, c.id.as_str()), (Action::Approve, "e5f6"));
+    assert!(c.block.as_ref().unwrap().skill.is_some());
+    let s = screen_text(&a, 100, 30);
+    assert!(
+        s.contains("Clio wants to register the skill «disk-report»."),
+        "{s}"
+    );
 }

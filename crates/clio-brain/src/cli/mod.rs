@@ -18,6 +18,7 @@ pub mod pending;
 pub mod pi;
 pub mod runs;
 pub mod sessions;
+pub mod skills;
 pub mod sleep;
 pub mod tui;
 pub mod ui;

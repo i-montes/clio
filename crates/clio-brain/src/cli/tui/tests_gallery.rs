@@ -154,6 +154,58 @@ pub(super) fn block_ask(args: serde_json::Value, suspect: bool) -> super::ask::B
     super::ask::BlockAsk::new(&p, suspect).unwrap()
 }
 
+/// A skill set aside for the person (S-68), as the box gets it: `md` is SKILL.md whole.
+pub(super) fn skill_ask(
+    md: &str,
+    files: &[(&str, &str)],
+    reason: &str,
+    suspect: bool,
+) -> super::ask::BlockAsk {
+    let files: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(p, c)| serde_json::json!({"path": p, "content": c}))
+        .collect();
+    let p = clio_toolhost::pending::Pending {
+        id: "e5f6a7b8".into(),
+        class: clio_toolhost::ask::Class::Skill,
+        tool: "skill_write".into(),
+        args: serde_json::json!({"name": "disk-report", "description": SKILL_DESCRIPTION,
+            "skill_md": md, "files": files, "update": false}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        ask: true,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: Some(reason.into()),
+    };
+    super::ask::BlockAsk::new(&p, suspect).unwrap()
+}
+
+pub(super) const SKILL_DESCRIPTION: &str =
+    "Reports which folders take the disk. Use when the person asks what fills the disk.";
+
+/// A skill as `skill_write` composes it, with these steps.
+pub(super) fn skill_md(steps: &str) -> String {
+    clio_toolhost::skills::compose(
+        "disk-report",
+        SKILL_DESCRIPTION,
+        steps,
+        "bash scripts/report.sh samples | grep -q big",
+    )
+}
+
+/// A skill's approval box on screen, after the quiet second, scrolled `scroll` rows.
+fn approve_skill(a: &mut App, b: super::ask::BlockAsk, scroll: usize) {
+    approve_block(a, b);
+    let c = a.confirm.as_mut().unwrap();
+    c.id = "e5f6a7b8".into();
+    c.workspace = "«skill» register the skill «disk-report» (2 files)".into();
+    c.block.as_mut().unwrap().scroll = scroll;
+}
+
 /// Its approval box on screen, after the quiet second.
 fn approve_block(a: &mut App, b: super::ask::BlockAsk) {
     let mut c = Confirm::new(
@@ -346,6 +398,77 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         approve_block(&mut a, block_ask(args, suspect));
         out.push((name, a));
     }
+    let short = skill_md(
+        "1. Run `bash scripts/report.sh /`.\n2. Say the five biggest folders and their size.",
+    );
+    let long = skill_md(
+        &(1..=40)
+            .map(|i| format!("{i}. Step {i}: measure the folders of level {i} with `du -xh --max-depth=1` and keep the result."))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let script = [(
+        "scripts/report.sh",
+        "#!/bin/bash\ndu -xh --max-depth=1 \"$1\" | sort -rh | head -n 5\n",
+    )];
+    let outside = "this session read content from outside";
+    for (name, md, reason, suspect, scroll) in [
+        (
+            "skill waits for approval, marked session",
+            &short,
+            outside,
+            false,
+            0,
+        ),
+        (
+            "skill waits for approval, a long text scrolled",
+            &long,
+            outside,
+            false,
+            12,
+        ),
+        (
+            "skill waits for approval, its check could not run",
+            &short,
+            "its check could not be run here: it needs the network, which a review does not have",
+            false,
+            0,
+        ),
+        (
+            "skill waits for approval, suspect session",
+            &short,
+            "this session read content that tried to give orders",
+            true,
+            0,
+        ),
+    ] {
+        let mut a = conversation(true);
+        approve_skill(&mut a, skill_ask(md, &script, reason, suspect), scroll);
+        out.push((name, a));
+    }
+    let mut a = conversation(true);
+    super::review::ended(
+        &mut a,
+        "sid",
+        Ok(Box::new(crate::cli::chat::Reviewed {
+            answer: clio_brain::pi::review::parse(
+                "```review\nverdict: passes\nran: bash scripts/report.sh samples | grep -q big (exit 0)\nfindings: none\n```",
+            ),
+            model: "claude-opus-5-5".into(),
+            fallback: None,
+            secs: 41,
+            commands: 2,
+            marked: None,
+            full: None,
+            usage: clio_brain::pi::rpc::Usage::default(),
+            skill: Some(crate::cli::chat::SkillOutcome::Registered {
+                name: "disk-report".into(),
+                description: SKILL_DESCRIPTION.into(),
+                n: 1,
+            }),
+        })),
+    );
+    out.push(("skill registered", a));
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;
@@ -508,6 +631,20 @@ fn command_states() -> Vec<(&'static str, App)> {
     m.foot = Some("and 1 from other sessions: clio pending in a terminal".into());
     a.modal = Some(m);
     out.push(("/pending", a));
+    let mut a = conversation(true);
+    let mut m = Modal::text(
+        "skills",
+        vec![
+            "«disk-report» is off: from the next session".into(),
+            String::new(),
+            "disk-report [off (turned off by the person)] · v2 passes 20261118: Reports which folders take the disk. Use when the person asks what fills the disk.".into(),
+            "skill-creator [on] · v1 shipped with Clio 20261118: How to write or fix one of Clio's skills with skill_write. Use when the person asks for a skill.".into(),
+            "pdf-to-text [on] · v3 passes, approved 20261117 · 2 failed in a row: Converts PDF files to plain text. Use when the person wants the text of a PDF.".into(),
+        ],
+    );
+    m.foot = Some("/skills off|on|undo|remove <name>".into());
+    a.modal = Some(m);
+    out.push(("/skills", a));
     out
 }
 

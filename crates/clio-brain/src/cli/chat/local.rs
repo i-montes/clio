@@ -257,6 +257,13 @@ impl SessionSource for LocalSource {
             crate::cli::mkdir_private(&state)?;
         }
         let person = crate::cli::vault::person_socket(d)?;
+        // Skills (S-68): a chat's, with the shipped one installed when it never was there.
+        let skills = if self.presentation {
+            crate::cli::skills::ensure(d)?;
+            Some(crate::cli::skills::root(d))
+        } else {
+            None
+        };
         // The project of the session, for the memory: decided here from the person's own folder
         // (the copy has no history), never by the model.
         let project = runs::read_json::<runs::Meta>(&run_dir.join("meta.json"))
@@ -298,6 +305,7 @@ impl SessionSource for LocalSource {
                     person.as_path(),
                 )),
                 review: false,
+                skills: skills.as_deref(),
             },
         )?;
         // 3. Pi
@@ -318,6 +326,7 @@ impl SessionSource for LocalSource {
             paths,
             session,
             helper: exe,
+            skills: skills.is_some().then(|| crate::cli::skills::live(d)),
         };
         let pi = start(&launch).map_err(text)?;
         // A conversation: the person answers the guard's questions (`ask_person`).
@@ -403,6 +412,8 @@ impl SessionSource for LocalSource {
             model: Mutex::new(cfg.model.clone()),
             turn: Mutex::default(),
             findings: Mutex::default(),
+            skills,
+            skill_fails: Mutex::default(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -517,6 +528,10 @@ struct ChatSession {
     turn: Mutex<super::review::Turn>,
     /// A review's findings for the next message, and the reviewer's mark.
     findings: Mutex<Option<(String, Option<bool>)>>,
+    /// Clio's skills folder: a chat's (S-68).
+    skills: Option<PathBuf>,
+    /// Failed reviews in a row of each skill's drafts, by name.
+    skill_fails: Mutex<std::collections::HashMap<String, u32>>,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -530,6 +545,147 @@ struct HostSide {
     /// What the person answered to the secrets the model asked for (never a value), for the
     /// model's next message.
     notes: Mutex<Vec<String>>,
+}
+
+/// A draft id as the tool host makes them: 8 hex characters.
+fn valid_draft_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// What a skill draft's review leads to (S-68).
+#[derive(Debug, PartialEq, Eq)]
+enum SkillNext {
+    Register,
+    /// It waits for the person, and why.
+    Wait(String),
+    Reject,
+}
+
+/// `passes` with no findings registers it, unless the session (or the reviewer) is marked:
+/// then it waits; `could_not_check` always waits; anything else is rejected.
+fn skill_next(a: &clio_brain::pi::review::Answer, marked: bool, suspect: bool) -> SkillNext {
+    use clio_brain::pi::review::Verdict;
+    match a.verdict {
+        Verdict::CouldNotCheck => SkillNext::Wait(format!(
+            "its check could not be run here: {}",
+            clio_brain::pi::text::line(&a.ran, 300)
+        )),
+        Verdict::Passes if a.findings.is_empty() && a.dropped == 0 => match (marked, suspect) {
+            (_, true) => {
+                SkillNext::Wait("this session read content that tried to give orders".to_owned())
+            }
+            (true, false) => SkillNext::Wait("this session read content from outside".to_owned()),
+            (false, false) => SkillNext::Register,
+        },
+        _ => SkillNext::Reject,
+    }
+}
+
+/// Failed reviews of a skill's drafts, in a row, after which the draft is dropped.
+const SKILL_ATTEMPTS: u32 = 3;
+
+impl ChatSession {
+    /// What a skill draft's review leads to (S-68): `passes` with no findings registers it in a
+    /// clean session and sets it aside for the person in a marked one; `could_not_check` always
+    /// waits for the person; anything else gives the findings back to the model, and the third
+    /// failure in a row drops it. Registering happens here, in the person's `clio`.
+    fn after_skill_review(
+        &self,
+        root: &Path,
+        h: &HostSide,
+        d: &clio_toolhost::skills::Draft,
+        rv: &super::Reviewed,
+    ) -> Result<super::SkillOutcome, String> {
+        let a = &rv.answer;
+        let name = d.name.clone();
+        let suspect = self.suspect() || rv.marked == Some(true);
+        let marked = self.taint_file.is_file() || rv.marked.is_some();
+        let wait = match skill_next(a, marked, suspect) {
+            SkillNext::Register => None,
+            SkillNext::Wait(why) => Some(why),
+            SkillNext::Reject => {
+                let mut fails = locked(&self.skill_fails);
+                let attempt = fails.entry(name.clone()).or_insert(0);
+                *attempt += 1;
+                let attempt = *attempt;
+                let dropped = attempt >= SKILL_ATTEMPTS;
+                if dropped {
+                    fails.remove(&name);
+                }
+                let next = if dropped {
+                    "It is dropped: do not write it again unless the person asks for it."
+                } else {
+                    "Fix what the findings say and call skill_write again with the whole skill."
+                };
+                return Ok(super::SkillOutcome::Rejected {
+                    to_model: format!(
+                        "Your draft {} of the skill «{name}» was not registered: its review did not pass (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
+                        d.id,
+                        a.for_model()
+                    ),
+                    name,
+                    attempt,
+                    dropped,
+                });
+            }
+        };
+        locked(&self.skill_fails).remove(&name);
+        let verdict = a.verdict.word();
+        let Some(reason) = wait else {
+            let n = crate::cli::skills::register(
+                root,
+                &crate::cli::skills::New {
+                    name: &d.name,
+                    description: &d.description,
+                    skill_md: &d.skill_md,
+                    files: &d.files,
+                    by: "review",
+                    verdict,
+                },
+            )
+            .inspect_err(|e| {
+                locked(&h.notes).push(format!(
+                    "the skill «{name}» passed its review but could not be registered: {e}"
+                ));
+            })?;
+            locked(&h.notes).push(format!(
+                "Clio registered your skill «{name}» (version {n}) after its review passed; it is available from the next session."
+            ));
+            return Ok(super::SkillOutcome::Registered {
+                name,
+                description: d.description.clone(),
+                n,
+            });
+        };
+        let args = json!({
+            "name": d.name,
+            "description": d.description,
+            "skill_md": d.skill_md,
+            "files": d.files,
+            "sha256": d.sha256,
+            "draft": d.id,
+            "update": d.update,
+            "verdict": verdict,
+        });
+        let p = clio_toolhost::pending::set_aside_skill(
+            &pending::state(&self.dirs),
+            &self.id,
+            &self.pi.session_id,
+            args,
+            &reason,
+            pending::per_day(&self.dirs),
+        )?;
+        locked(&h.asked).insert(p.id.clone());
+        locked(&h.notes).push(format!(
+            "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({}); do not write it again meanwhile.",
+            p.id
+        ));
+        Ok(super::SkillOutcome::Waits {
+            what: format!("{} {}", pending::label(&p), pending::what(&p)),
+            ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
+            id: p.id,
+        })
+    }
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -671,6 +827,91 @@ impl Session for ChatSession {
         *locked(&self.findings) = Some((findings.to_owned(), marked));
     }
 
+    fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
+        let Some(root) = &self.skills else {
+            return (vec![], vec![]);
+        };
+        let th = self.run_dir.join("toolhost");
+        let notes = crate::cli::skills::apply_reports(root, &th);
+        let dir = clio_toolhost::skills::drafts_dir(&th);
+        let taken = dir.join("taken");
+        let mut out = vec![];
+        for d in clio_toolhost::skills::drafts(&th) {
+            if d.session != self.pi.session_id || !valid_draft_id(&d.id) {
+                continue;
+            }
+            // Taken once: a draft is reviewed once, whatever happens next.
+            let from = dir.join(format!("{}.json", d.id));
+            if crate::cli::mkdir_private(&taken).is_ok()
+                && std::fs::rename(&from, taken.join(format!("{}.json", d.id))).is_ok()
+            {
+                out.push((d.id, d.name));
+            }
+        }
+        (out, notes)
+    }
+
+    fn review_skill(&self, id: &str, cancel: &Cancel) -> Result<super::Reviewed, String> {
+        let root = self
+            .skills
+            .as_deref()
+            .ok_or("skills are not available in this session")?;
+        let h = self.host.as_ref().ok_or("nobody to ask in this session")?;
+        if !valid_draft_id(id) {
+            return Err(format!("{id:?} is not a draft"));
+        }
+        let th = self.run_dir.join("toolhost");
+        let file = clio_toolhost::skills::drafts_dir(&th)
+            .join("taken")
+            .join(format!("{id}.json"));
+        let d: clio_toolhost::skills::Draft = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or_else(|| format!("draft {id} is gone or damaged"))?;
+        // What is reviewed, shown and registered is exactly what the judge read.
+        if d.id != id
+            || d.session != self.pi.session_id
+            || clio_toolhost::skills::digest(&d.skill_md, &d.files) != d.sha256
+        {
+            return Err(format!("draft {id} changed after it was stored: dropped"));
+        }
+        clio_toolhost::skills::check_stored(&d.name, &d.skill_md, &d.files)?;
+        // Its own folder for the reviewer: inside the run in copy mode (the review's copy), under
+        // /tmp in host mode (the one place a review's commands may write).
+        let stage = if self.host_mode {
+            PathBuf::from(format!("/tmp/clio-skill-{id}"))
+        } else {
+            self.run_dir.join(format!("skills/review-{id}"))
+        };
+        let _ = std::fs::remove_dir_all(&stage);
+        let folder = stage.join(&d.name);
+        crate::cli::skills::write_tree(&folder, &d.skill_md, &d.files)?;
+        let marked = std::fs::read_to_string(&self.taint_file)
+            .ok()
+            .map(|t| t.contains("\"suspect\""));
+        let model = locked(&self.model).clone();
+        let work = if self.host_mode {
+            self.work.clone()
+        } else {
+            folder.clone()
+        };
+        let parent = super::review::Parent {
+            dirs: &self.dirs,
+            run: &self.id,
+            run_dir: &self.run_dir,
+            work: &work,
+            host: self.host_mode,
+            marked,
+            day: self.day.clone(),
+            model: &model,
+        };
+        let req = super::review::skill_request(&d, &folder);
+        let mut rv = super::review::run(&parent, &req, cancel);
+        let _ = std::fs::remove_dir_all(&stage);
+        rv.skill = Some(self.after_skill_review(root, h, &d, &rv)?);
+        Ok(rv)
+    }
+
     fn new_pending(&self) -> Vec<Pending> {
         let Some(h) = &self.host else {
             return Vec::new();
@@ -701,12 +942,20 @@ impl Session for ChatSession {
         {
             return Err(format!("{id} asks for a secret: answer it in its own box"));
         }
-        // A block change: the model hears what came of it with the next message, as of a secret.
+        // A block change or a skill: the model hears what came of it with the next message, as
+        // of a secret.
         let block = pending::waiting(&h.dirs)
             .iter()
             .find(|p| p.id == id)
-            .and_then(|p| clio_toolhost::pending::block_of(p).map(|b| b.name.to_owned()));
-        if let Some(name) = block {
+            .and_then(|p| {
+                clio_toolhost::pending::block_of(p)
+                    .map(|b| format!("nothing was written to «{}»", b.name))
+                    .or_else(|| {
+                        clio_toolhost::pending::skill_of(p)
+                            .map(|s| format!("the skill «{}» is not registered", s.0))
+                    })
+            });
+        if let Some(refused) = block {
             let note = if yes {
                 match pending::approve(&h.dirs, id) {
                     Ok(p) => match &p.state {
@@ -724,7 +973,7 @@ impl Session for ChatSession {
                 }
             } else {
                 pending::reject(&h.dirs, id)?;
-                format!("rejected {id}: nothing was written to «{name}»")
+                format!("rejected {id}: {refused}")
             };
             locked(&h.notes).push(format!("the person {note}"));
             return Ok(note);
@@ -1031,6 +1280,46 @@ fn is_taint(e: &Value) -> bool {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // S-68: only a review that passes with no findings registers a skill by itself, and only in a
+    // clean session; a check that could not run, or a marked session, waits for the person.
+    #[test]
+    fn a_skill_registers_by_itself_only_when_it_passed_cleanly_in_a_clean_session() {
+        use clio_brain::pi::review::parse;
+        let a = |verdict: &str, findings: &str| {
+            parse(&format!(
+                "```review\nverdict: {verdict}\nran: bash check.sh (exit 0)\nfindings:{findings}\n```"
+            ))
+        };
+        let clean = a("passes", " none");
+        let found = a(
+            "passes",
+            "\n- what: it breaks on spaces\n  evidence: ran it on 'a b'",
+        );
+        assert_eq!(skill_next(&clean, false, false), SkillNext::Register);
+        assert!(
+            matches!(skill_next(&clean, true, false), SkillNext::Wait(w) if w.contains("outside"))
+        );
+        assert!(
+            matches!(skill_next(&clean, true, true), SkillNext::Wait(w) if w.contains("orders"))
+        );
+        assert_eq!(skill_next(&found, false, false), SkillNext::Reject);
+        assert_eq!(
+            skill_next(&a("fails", " none"), false, false),
+            SkillNext::Reject
+        );
+        for marked in [false, true] {
+            assert!(matches!(
+                skill_next(&a("could_not_check", " none"), marked, false),
+                SkillNext::Wait(w) if w.starts_with("its check could not be run")
+            ));
+        }
+        // An answer that is not the fixed shape is `could_not_check`: it never registers.
+        assert!(matches!(
+            skill_next(&parse("looks fine to me"), false, false),
+            SkillNext::Wait(_)
+        ));
+    }
 
     // S-47: the Pi path gets the same caps as the builtin loop, from the same configuration.
     #[test]

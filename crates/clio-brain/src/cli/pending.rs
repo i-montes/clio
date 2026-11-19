@@ -33,6 +33,14 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
+    if let Some((name, description, _, files)) = pending::skill_of(p) {
+        let n = files.len();
+        return format!(
+            "register the skill «{name}» ({} file{}): {description}",
+            n + 1,
+            if n == 0 { "" } else { "s" }
+        );
+    }
     if let Some(b) = pending::block_of(p) {
         let id = b.id.map_or_else(String::new, |n| format!(" m{n}"));
         let text = b.text.map_or_else(String::new, |t| format!(": {t}"));
@@ -63,6 +71,15 @@ fn block_text(dirs: &Dirs, p: &Pending) -> Option<String> {
         })
         .collect();
     Some(rows.join("\n"))
+}
+
+/// How many set-aside items a day are asked about: the person's `host.json`, or the factory's.
+pub fn per_day(dirs: &Dirs) -> u32 {
+    dirs.host_rules()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| HostRules::factory().with_file(&t).ok())
+        .unwrap_or_else(HostRules::factory)
+        .questions_per_day()
 }
 
 /// The person's answer to secret request `id`: the value (`Some`) goes to the vault, `None`
@@ -205,7 +222,10 @@ pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     // Before the toolhost is built (folders, the launcher's self-test): one that does not wait
     // stops here.
     let p = pending::check(&state(dirs), id, now_ms())?;
-    let done = if pending::block_of(&p).is_some() {
+    let done = if pending::skill_of(&p).is_some() {
+        // Registered here, by the person's own `clio`: never from the jail (S-68).
+        pending::approve_skill(&state(dirs), id, now_ms(), |p| register_skill(dirs, p))?
+    } else if pending::block_of(&p).is_some() {
         // The same port a clean session's tool host writes the person's blocks with.
         let models = clio_brain::memory_link::MemoryLink::model_dirs(&dirs.home);
         let port = clio_brain::memory_port::LinkPort::new(&dirs.data, &models);
@@ -215,6 +235,45 @@ pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     };
     let _ = pending::answered_at_terminal(&state(dirs), id);
     Ok(done)
+}
+
+/// Registers skill `p` exactly as it was set aside (and shown): its SKILL.md and files must still
+/// be what was reviewed (`sha256`).
+fn register_skill(dirs: &Dirs, p: &Pending) -> Res<String> {
+    let (name, description, md, files) =
+        pending::skill_of(p).ok_or_else(|| format!("{} is not a skill", p.id))?;
+    let files: Vec<clio_toolhost::skills::SkillFile> = files
+        .into_iter()
+        .map(|(path, content)| clio_toolhost::skills::SkillFile {
+            path: path.into(),
+            content: content.into(),
+        })
+        .collect();
+    if p.args["sha256"].as_str() != Some(&clio_toolhost::skills::digest(md, &files)) {
+        return Err(format!(
+            "{} is not what was reviewed: nothing was registered",
+            p.id
+        ));
+    }
+    let verdict = p.args["verdict"].as_str().unwrap_or("");
+    let n = super::skills::register(
+        &super::skills::root(dirs),
+        &super::skills::New {
+            name,
+            description,
+            skill_md: md,
+            files: &files,
+            by: "person",
+            verdict: if verdict == "passes" {
+                "passes, approved"
+            } else {
+                "not checked, approved"
+            },
+        },
+    )?;
+    Ok(format!(
+        "the skill «{name}» is registered (version {n}): available from the next session"
+    ))
 }
 
 pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
@@ -254,6 +313,14 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = reject(dirs, id)?;
     if let Some((name, ..)) = pending::secret_of(&p) {
         println!("declined {}: {name} is not stored", p.id);
+        return Ok(());
+    }
+    if let Some((name, ..)) = pending::skill_of(&p) {
+        println!(
+            "rejected {}: the skill «{}» is not registered",
+            p.id,
+            sanitize::line(name)
+        );
         return Ok(());
     }
     if let Some(b) = pending::block_of(&p) {
@@ -470,6 +537,82 @@ mod tests {
             )),
             "add in your block «vigilancia»: el disco"
         );
+    }
+
+    // S-68: a skill set aside is registered, when the person approves it, byte for byte as it was
+    // reviewed and shown; changed on disk meanwhile, or rejected, nothing is registered.
+    #[test]
+    fn an_approved_skill_is_registered_exactly_as_it_was_shown() {
+        use clio_toolhost::skills::{SkillFile, compose, digest};
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let md = compose(
+            "hi",
+            "Says hello. Use when greeting.",
+            "1. Run it.",
+            "bash a.sh",
+        );
+        let files = vec![SkillFile {
+            path: "a.sh".into(),
+            content: "#!/bin/bash\necho hi\n".into(),
+        }];
+        let args = |md: &str| {
+            json!({"name": "hi", "description": "Says hello. Use when greeting.", "skill_md": md,
+                "files": files, "sha256": digest(md, &files), "verdict": "could_not_check"})
+        };
+        let aside = |a: Value| {
+            pending::set_aside_skill(
+                &state(&d),
+                "r1",
+                "s1",
+                a,
+                "its check could not be run here",
+                3,
+            )
+            .unwrap()
+        };
+        let p = aside(args(&md));
+        assert!(what(&p).starts_with("register the skill «hi» (2 files)"));
+        let shown = block_text(&d, &p).unwrap();
+        for l in md.lines().filter(|l| !l.is_empty()) {
+            assert!(shown.contains(l), "{l}\n{shown}");
+        }
+        assert!(shown.contains("a.sh (20 bytes)"), "{shown}");
+        approve(&d, &p.id).unwrap();
+        let live = super::super::skills::live(&d).join("hi");
+        assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
+        assert_eq!(
+            std::fs::read_to_string(live.join("a.sh")).unwrap(),
+            files[0].content
+        );
+        let rec = super::super::skills::record(&super::super::skills::root(&d), "hi").unwrap();
+        assert_eq!(rec.versions[0].by, "person");
+        assert!(approve(&d, &p.id).is_err(), "once");
+        // Rewritten on disk after it was set aside: refused, nothing registered.
+        let md2 = compose(
+            "hi",
+            "Says hello. Use when greeting.",
+            "2. Other.",
+            "bash a.sh",
+        );
+        let p2 = aside(args(&md2));
+        let f = state(&d).join(format!("pending/{}.json", p2.id));
+        let text = std::fs::read_to_string(&f)
+            .unwrap()
+            .replace("2. Other.", "3. Evil.");
+        std::fs::write(&f, text).unwrap();
+        assert!(approve(&d, &p2.id).is_err());
+        // A sha256 that is not the text's: refused too.
+        let mut bad = args(&md2);
+        bad["sha256"] = json!("00");
+        let p3 = aside(bad);
+        assert!(
+            approve(&d, &p3.id)
+                .unwrap_err()
+                .contains("not what was reviewed")
+        );
+        reject(&d, &aside(args(&md2)).id).unwrap();
+        assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
     }
 
     fn dirs_in(root: &Path) -> Dirs {

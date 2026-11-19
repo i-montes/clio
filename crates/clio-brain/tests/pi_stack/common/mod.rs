@@ -179,6 +179,17 @@ impl Toolhost {
         scrub: Option<(&str, &str)>,
         memory: Option<&Path>,
     ) -> Self {
+        Self::start_full(w, jail, scrub, memory, None)
+    }
+
+    /// With `skills`, Clio's skills folder (`clio toolhost --skills`).
+    pub fn start_full(
+        w: &World,
+        jail: bool,
+        scrub: Option<(&str, &str)>,
+        memory: Option<&Path>,
+        skills: Option<&Path>,
+    ) -> Self {
         let _ = std::fs::remove_file(w.sock_dir.join("toolhost.sock")); // a killed one leaves it
         // The product starts the service as `clio toolhost` (the same code as `clio-toolhost`).
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_clio"));
@@ -190,6 +201,9 @@ impl Toolhost {
         cmd.args(["--jail", if jail { "auto" } else { "off" }]);
         if let Some(data) = memory {
             cmd.args(["--memory-data"]).arg(data);
+        }
+        if let Some(s) = skills {
+            cmd.args(["--skills"]).arg(s);
         }
         // HOME matters: the jail's self-test plants its decoy there and checks it is invisible.
         cmd.env_clear().env("HOME", &w.home);
@@ -263,6 +277,8 @@ pub struct Opts {
     pub prompt_file: Option<PathBuf>,
     /// A person is there to answer the guard's questions (the chat), as `CLIO_GUARD_PERSON`.
     pub person: bool,
+    /// Clio's skills folder (`<root>/live` is what Pi loads): the chat's (S-68).
+    pub skills: Option<PathBuf>,
 }
 
 impl Default for Opts {
@@ -272,6 +288,7 @@ impl Default for Opts {
             session: None,
             prompt_file: None,
             person: false,
+            skills: None,
         }
     }
 }
@@ -342,6 +359,7 @@ fn launch_of(
         },
         extra_env,
         helper: PathBuf::from(env!("CARGO_BIN_EXE_clio")),
+        skills: o.skills.as_ref().map(|r| r.join("live")),
     })
 }
 
@@ -601,7 +619,7 @@ pub struct Stack {
 }
 
 pub fn stack(node: &Path, w: &World, model: &FakeModel, jail: bool, o: &Opts) -> Stack {
-    let host = Toolhost::start(w, jail, None);
+    let host = Toolhost::start_full(w, jail, None, None, o.skills.as_deref());
     let pi = Pi::start(node, w, model, Some(&host.socket), o);
     Stack { pi, host }
 }

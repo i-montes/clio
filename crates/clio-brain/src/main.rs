@@ -27,6 +27,7 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio pending [--json]                       what waits for your approval (host mode)
   clio approve <id> | clio reject <id>        runs it exactly as it was set aside, or drops it
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
+  clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
                                               picks the model (opencode, your Claude subscription or the Anthropic API) and keeps its key in the vault
@@ -119,6 +120,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "approve"
             | "reject"
             | "actions"
+            | "skills"
             | "vault"
             | "connect"
             | "doctor"
@@ -157,6 +159,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         "init" => {
             args.rest()?;
             home::init(&dirs)?;
+            // The skill that makes skills, when it is missing (S-68).
+            cli::skills::ensure(&dirs)?;
         }
         "run" => {
             let asked = args.value("--workspace")?;
@@ -233,6 +237,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             let (json, run) = (args.flag("--json"), args.value("--run")?);
             args.rest()?;
             pending::actions(&dirs, run.as_deref(), json)?;
+        }
+        "skills" => {
+            let yes = args.flag("--yes");
+            let mut rest = args.rest()?;
+            if yes {
+                rest.push("--yes".into());
+            }
+            cli::skills::cmd(&dirs, &rest)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
         "connect" => return connect::run(&dirs, args.into_raw()),

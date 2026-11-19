@@ -825,3 +825,97 @@ fn a_block_change_queues_with_the_commands_and_the_secrets() {
     assert_eq!(ids, ["a1", "c3d4", "b2"]);
     assert!(a.confirm.is_none() && a.asks.is_empty());
 }
+
+// S-68: a skill waiting for the person is shown whole and clean: what it is for, why it waits,
+// SKILL.md line by line, each other file's name and size, and the suspect line only in a suspect
+// session; it scrolls, never cut, and `y` arms only once its end was on screen.
+#[test]
+fn a_skill_box_shows_the_whole_skill_and_is_approved_only_after_its_end() {
+    use super::tests_gallery::{skill_ask, skill_md};
+    let md = skill_md(
+        &(1..=30)
+            .map(|i| format!("{i}. Step {i} of the job\u{1b}[2J, done by hand."))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let files = [
+        ("scripts/report.sh", "echo hi\n"),
+        ("ref/notes.md", "notes\n"),
+    ];
+    for suspect in [false, true] {
+        let b = skill_ask(
+            &md,
+            &files,
+            "its check could not be run here: no network",
+            suspect,
+        );
+        let mut a = chat();
+        a.host = true;
+        let (mut a, _) = feed(
+            a,
+            vec![Input::Bg(Bg::ChatAsks(vec![(
+                "e5f6".into(),
+                "«skill» register".into(),
+                Some(b),
+            )]))],
+        );
+        let mut seen = String::new();
+        let mut t = 2_000;
+        for _ in 0..80 {
+            let screen = screen_text(&a, 80, 24);
+            super::tests::assert_clean(&screen);
+            assert!(!screen.contains("[2J"), "{screen}");
+            seen.push_str(&box_rows(&screen).join("\n"));
+            seen.push('\n');
+            if a.confirm
+                .as_ref()
+                .unwrap()
+                .block
+                .as_ref()
+                .unwrap()
+                .seen_end
+                .get()
+            {
+                break;
+            }
+            let (n, c) = feed(
+                a,
+                vec![
+                    Input::Tick(t),
+                    ch('y'),
+                    key(KeyCode::Enter),
+                    key(KeyCode::Down),
+                ],
+            );
+            assert!(c.is_empty(), "{c:?}");
+            a = n;
+            assert!(!a.confirm.as_ref().unwrap().armed);
+            t += 2_000;
+        }
+        let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+        for w in md.split_whitespace().filter(|w| !w.contains('\u{1b}')) {
+            assert!(words.contains(w), "{w} never shown");
+        }
+        for want in [
+            "Clio wants to register the skill «disk-report».",
+            "why it waits for you: its check could not be run here: no network",
+            "scripts/report.sh (8 bytes)",
+            "ref/notes.md (6 bytes)",
+            "yes, register it",
+        ] {
+            assert!(words.contains(want), "{want}\n{seen}");
+        }
+        assert_eq!(words.contains("tried to give orders"), suspect, "{seen}");
+        let (_, cmds) = feed(
+            a,
+            vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+        );
+        assert_eq!(
+            cmds,
+            vec![Cmd::ChatAnswer {
+                id: "e5f6".into(),
+                yes: true
+            }]
+        );
+    }
+}

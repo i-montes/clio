@@ -118,6 +118,9 @@ pub struct Launch {
     /// The `clio` binary: inside Pi's jail it runs `clio pi-net`, the forwarder to the egress
     /// proxy (ADR 0009). It must be a binary that has that command.
     pub helper: PathBuf,
+    /// Clio's registered, enabled skills (`<data>/skills/live`, S-68): loaded with `--skill`
+    /// (discovery stays off) and mounted read-only in the jail. `None`: no skills.
+    pub skills: Option<PathBuf>,
 }
 
 /// A session or run id that is safe to use as one path component.
@@ -237,6 +240,10 @@ pub fn hardened_args(l: &Launch, session_args: &[OsString]) -> Vec<OsString> {
         ]
         .map(OsString::from),
     );
+    // Discovery stays off: only Clio's folder, by its path.
+    if let Some(s) = &l.skills {
+        a.extend(["--skill".into(), s.clone().into_os_string()]);
+    }
     a.extend([
         "--provider".into(),
         l.provider.id.clone().into(),
@@ -475,13 +482,23 @@ pub fn verify_startup(c: &RpcClient, l: &Launch, session_id: &str) -> Result<Sta
     if st.is_streaming {
         return fail("Pi started already busy".into());
     }
-    // Extension commands, skills and prompt templates all show up here: only the guard's allowed.
+    // Extension commands, skills and prompt templates all show up here: only the guard's allowed,
+    // and the skills of Clio's own folder.
     for cmd in c.get_commands()? {
-        let ok = cmd["source"] == "extension"
-            && match (&l.guard, cmd["sourceInfo"]["path"].as_str()) {
+        let path = cmd["sourceInfo"]["path"].as_str();
+        let ok = match cmd["source"].as_str() {
+            Some("extension") => match (&l.guard, path) {
                 (Some(g), Some(p)) => same_file(p, g),
                 _ => false,
-            };
+            },
+            Some("skill") => match (&l.skills, path) {
+                (Some(s), Some(p)) => Path::new(p)
+                    .canonicalize()
+                    .is_ok_and(|p| s.canonicalize().is_ok_and(|s| p.starts_with(s))),
+                _ => false,
+            },
+            _ => false,
+        };
         if !ok {
             return fail(format!(
                 "unexpected command /{} (source {})",
@@ -544,6 +561,7 @@ mod tests {
             guard_tools: vec![],
             extra_env: vec![],
             helper: "/p/clio".into(),
+            skills: None,
         }
     }
 
@@ -585,6 +603,17 @@ mod tests {
         let b = hardened_args(&l, &[]);
         let i = b.iter().position(|x| x == "--thinking").unwrap();
         assert_eq!(b[i + 1], "high");
+        // Skills: discovery stays off; only Clio's folder, by its path.
+        assert!(!a.iter().any(|x| x == "--skill"));
+        l.skills = Some("/d/skills/live".into());
+        let s: Vec<String> = hardened_args(&l, &[])
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let i = s.iter().position(|x| x == "--skill").unwrap();
+        assert_eq!(s[i + 1], "/d/skills/live");
+        assert!(s.iter().any(|x| x == "--no-skills"));
+        assert_eq!(s.iter().filter(|x| *x == "--skill").count(), 1);
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub enum Run {
     Actions,
     Undo,
     Review,
+    Skills,
     Copy,
     Memory,
     Doctor,
@@ -160,6 +161,14 @@ pub const COMMANDS: &[Command] = &[
         "have a second agent check the last change (or what you say)",
         false,
         Run::Review,
+    ),
+    c(
+        "skills",
+        &[],
+        "[off | on | undo | remove <name>]",
+        "Clio's skills: list them, turn one off or on, go back a version",
+        false,
+        Run::Skills,
     ),
     c(
         "copy",
@@ -577,6 +586,18 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
         }
         Run::Pending => vec![Cmd::LoadPending { session: id }],
         Run::Review => super::review::command(app, args),
+        Run::Skills => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["remove", name] => {
+                app.confirm = Some(Confirm::new(
+                    Action::RemoveSkill,
+                    (*name).to_owned(),
+                    0,
+                    String::new(),
+                ));
+                vec![]
+            }
+            _ => vec![Cmd::Skills(args.to_owned())],
+        },
         Run::Actions => vec![Cmd::LoadActions { run: id }],
         Run::Undo => {
             let mut c = Confirm::new(Action::UndoSession, id, 0, app.chat.workspace.clone());
@@ -913,6 +934,13 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             if what.starts_with("«memory»") {
                 app.flash = Some(format!(
                     "{id} changes one of your blocks: answer it with `clio approve {id}` in a terminal"
+                ));
+                return vec![];
+            }
+            // A skill too: its whole text is in its own box, or in `clio approve`.
+            if what.starts_with("«skill") {
+                app.flash = Some(format!(
+                    "{id} registers a skill: answer it with `clio approve {id}` in a terminal"
                 ));
                 return vec![];
             }

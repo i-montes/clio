@@ -310,6 +310,10 @@ impl PiJail {
         ] {
             bind(&mut a, "--bind", &rw);
         }
+        // Clio's enabled skills, read-only: Pi lists them, and nothing in here writes them (S-68).
+        if let Some(s) = &l.skills {
+            bind(&mut a, "--ro-bind", s);
+        }
         if host {
             a.extend(["--remount-ro".into(), cwd.clone()]);
         } else {
@@ -545,6 +549,7 @@ mod tests {
             guard_tools: vec![],
             extra_env: vec![],
             helper: "/p/clio".into(),
+            skills: None,
         }
     }
 
@@ -555,6 +560,29 @@ mod tests {
             proxy: EgressProxy::start(data, "api.anthropic.com:443").unwrap(),
         };
         j.args(&l)
+    }
+
+    // S-68: Pi sees Clio's enabled skills read-only, and nothing else of the skills folder.
+    #[test]
+    fn the_skills_are_mounted_read_only_and_only_the_live_ones() {
+        let t = tempfile::tempdir().unwrap();
+        let cwd = t.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let live = t.path().join("skills/live");
+        std::fs::create_dir_all(&live).unwrap();
+        let mut l = launch_for("opencode", &cwd, t.path());
+        let j = PiJail {
+            bwrap: "/usr/bin/bwrap".into(),
+            proxy: EgressProxy::start(t.path(), "api.anthropic.com:443").unwrap(),
+        };
+        let s = live.display().to_string();
+        assert!(!j.args(&l).contains(&s));
+        l.skills = Some(live.clone());
+        let a = j.args(&l);
+        assert!(a.windows(3).any(|w| w == ["--ro-bind", &s, &s]), "{a:?}");
+        assert_eq!(a.iter().filter(|x| x.starts_with(&s)).count(), 2, "{a:?}");
+        let root = t.path().join("skills").display().to_string();
+        assert!(!a.contains(&root));
     }
 
     // Finding 1 of the claude-bridge review: a working copy's `.claude/settings.json` hooks ran in

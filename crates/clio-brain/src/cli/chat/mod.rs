@@ -203,6 +203,40 @@ pub trait Session: Send + Sync {
     /// (`Some(suspect)`), so they mark this session the same way, and are not given when the
     /// mark cannot be made.
     fn queue_findings(&self, _findings: &str, _marked: Option<bool>) {}
+    /// Skills (S-68), after a turn: the drafts `skill_write` stored since the last call (each
+    /// once: id and name), and what the person is told of the skills' reports (one turned off).
+    fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
+        (Vec::new(), Vec::new())
+    }
+    /// Reviews skill draft `id` (`review::run` on its text and check) and acts on the verdict:
+    /// registers it, sets it aside for the person, or gives the findings back to the model.
+    fn review_skill(&self, id: &str, _cancel: &Cancel) -> Result<Reviewed, String> {
+        Err(format!("{id}: skills are not available in this session"))
+    }
+}
+
+/// What came of a skill draft's review.
+#[derive(Debug, Clone)]
+pub enum SkillOutcome {
+    /// Registered as version `n`: the chat says so in one line.
+    Registered {
+        name: String,
+        description: String,
+        n: u32,
+    },
+    /// Waits for the person (`pending` id): its Approval box.
+    Waits {
+        id: String,
+        what: String,
+        ask: Box<Option<super::tui::ask::BlockAsk>>,
+    },
+    /// Not registered: the findings go to the model (`to_model`); `dropped` after the third.
+    Rejected {
+        name: String,
+        attempt: u32,
+        dropped: bool,
+        to_model: String,
+    },
 }
 
 /// What a turn did that a review can check.
@@ -272,6 +306,8 @@ pub struct Reviewed {
     /// The reviewer's whole answer, kept in the review's folder.
     pub full: Option<String>,
     pub usage: clio_brain::pi::rpc::Usage,
+    /// A skill draft's review: what came of it.
+    pub skill: Option<SkillOutcome>,
 }
 
 pub trait SessionSource: Send + Sync {
