@@ -1,10 +1,7 @@
 //! Host mode: what the list (`ask`) sets aside waits here for the person, in
 //! `state/pending/<id>.json`. Nothing set aside runs until the person approves it, and then it
-//! runs as it was saved (same hash), once, and never after it expired (24 hours).
-//!
-//! Questions: at most `questions_per_day` set-aside actions a local day are asked about
-//! (`ask: true`); the rest go to the day's summary. Ones the person answered at the terminal give
-//! their question back (`answered_at_terminal`).
+//! runs as it was saved (same hash), once, and never after it expired (24 hours). When the chat
+//! asks about them is the brain's (`approvals.every_hours`): every item may be asked.
 
 use std::fs;
 use std::io::Write;
@@ -21,6 +18,12 @@ use crate::host::{Host, MAX_TIMEOUT_SECS, log_line, now_ms};
 use crate::{BlockEdit, DecisionOut, Judging, MemoryPort, Request, Response, ToolHost, lock};
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
+/// How many items of one session may wait for the person at once.
+pub const MAX_WAITING: usize = 20;
+/// What the model is told past it.
+const TOO_MANY: &str = "too many actions wait for the person: wait for their answers";
+/// An item this long past its time (answered or not) is removed when the store is read.
+const KEEP_MS: i64 = 7 * DAY_MS;
 /// What is kept of an approved action's output.
 const TAIL_BYTES: usize = 4000;
 /// How long the reason of a secret request may be.
@@ -42,8 +45,6 @@ pub struct Pending {
     pub session: String,
     pub created_ms: i64,
     pub expires_ms: i64,
-    /// False: past today's questions, it goes to the day's summary.
-    pub ask: bool,
     pub state: State,
     /// Why it waits when its class alone would not say it (a suspect session reaching out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,14 +67,12 @@ pub enum State {
 }
 
 /// `request_secret`: where its requests wait (`state`, as the actions set aside), the run they
-/// belong to, the vault's person socket (only `Status` and `List` are asked, at request time) and
-/// how many questions a day the person gets, shared with the actions.
+/// belong to and the vault's person socket (only `Status` and `List` are asked, at request time).
 #[derive(Debug, Clone)]
 pub struct SecretCfg {
     pub state: PathBuf,
     pub run: String,
     pub person: PathBuf,
-    pub per_day: u32,
 }
 
 /// What a secret request asks for: name, destination (`tool:domain`) and why.
@@ -221,16 +220,15 @@ fn made_of(p: &Pending, class: Class) -> Option<SkillOf<'_>> {
 
 /// The person's `clio` sets aside a reviewed skill draft (S-68): `args` holds the whole draft
 /// (name, description, `skill_md`, `files`, `sha256`, `draft`), `reason` why it waits. Same store
-/// and questions as the rest; the model has no way here.
+/// as the rest; the model has no way here.
 pub fn set_aside_skill(
     state: &Path,
     run: &str,
     session: &str,
     args: Value,
     reason: &str,
-    per_day: u32,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, per_day, Class::Skill)
+    set_aside_made(state, (run, session), args, reason, Class::Skill)
 }
 
 /// A reviewed service draft, as `set_aside_skill` (S-69): it always waits for the person.
@@ -240,9 +238,8 @@ pub fn set_aside_service(
     session: &str,
     args: Value,
     reason: &str,
-    per_day: u32,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, per_day, Class::Service)
+    set_aside_made(state, (run, session), args, reason, Class::Service)
 }
 
 /// An MCP server the model proposed, with npm's facts (S-70): it always waits for the person.
@@ -252,9 +249,8 @@ pub fn set_aside_mcp(
     session: &str,
     args: Value,
     reason: &str,
-    per_day: u32,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, per_day, Class::Mcp)
+    set_aside_made(state, (run, session), args, reason, Class::Mcp)
 }
 
 fn set_aside_made(
@@ -262,7 +258,6 @@ fn set_aside_made(
     (run, session): (&str, &str),
     args: Value,
     reason: &str,
-    per_day: u32,
     class: Class,
 ) -> Result<Pending, String> {
     let (tool, rule) = match class {
@@ -283,11 +278,10 @@ fn set_aside_made(
         session: session.to_owned(),
         created_ms: now,
         expires_ms: now + DAY_MS,
-        ask: false,
         state: State::Waiting,
         reason: Some(reason.to_owned()),
     };
-    let p = set_aside(state, p, per_day)?;
+    let p = set_aside(state, p)?;
     if let Err(e) = log_line(
         state, run, session, &p.tool, &p.what, false, "aside", rule, None,
     ) {
@@ -400,13 +394,6 @@ pub fn answer_secret(
     Ok(p)
 }
 
-/// Today's questions (local day).
-#[derive(Default, Serialize, Deserialize)]
-struct Questions {
-    day: String,
-    ids: Vec<String>,
-}
-
 /// The exact answer to the model.
 pub(crate) fn aside_text(p: &Pending) -> String {
     let why = p
@@ -437,6 +424,12 @@ pub fn shown(p: &Pending) -> &str {
         .or_else(|| p.args.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("")
+}
+
+/// `p` was taken for an answer that never wrote what came of it (Clio ended while it ran): it may
+/// have run in part, so it is not waiting any more and is never offered again.
+pub fn interrupted(state: &Path, p: &Pending) -> bool {
+    p.state == State::Waiting && dir(state).join(format!("{}.ran", p.id)).exists()
 }
 
 /// Takes `id` for one answer: an approval and a rejection racing each other, even from two
@@ -510,14 +503,25 @@ fn load(state: &Path, id: &str) -> Result<Pending, String> {
     serde_json::from_str(&text).map_err(|e| format!("pending item {id} is damaged: {e}"))
 }
 
-/// Every pending action of this machine, oldest first.
+/// Every pending action of this machine, oldest first. One more than 7 days past its time is
+/// removed here (with its claim), best effort.
 pub fn list(state: &Path) -> Vec<Pending> {
+    let now = now_ms();
     let mut all: Vec<Pending> = fs::read_dir(dir(state))
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok())
+        .filter(|p: &Pending| {
+            // Past its time every item is over, answered or not.
+            if now.saturating_sub(p.expires_ms) > KEEP_MS {
+                let _ = fs::remove_file(dir(state).join(format!("{}.json", p.id)));
+                let _ = fs::remove_file(dir(state).join(format!("{}.ran", p.id)));
+                return false;
+            }
+            true
+        })
         .collect();
     all.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
     all
@@ -578,36 +582,21 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     Ok(p)
 }
 
-fn questions(state: &Path) -> Questions {
-    fs::read_to_string(state.join("questions.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_questions(state: &Path, q: &Questions) -> Result<(), String> {
-    let text = serde_json::to_string(q).map_err(|e| e.to_string())?;
-    write_private(&state.join("questions.json"), &text)
-}
-
-/// The person answered `id` at the terminal: it was not one of the day's questions.
-pub fn answered_at_terminal(state: &Path, id: &str) -> Result<(), String> {
-    let mut q = questions(state);
-    q.ids.retain(|x| x != id);
-    save_questions(state, &q)
-}
-
-/// Saves `p` (id, hash and `ask` are filled here), or returns the one already waiting for the
-/// same action in the same session.
-pub(crate) fn set_aside(state: &Path, mut p: Pending, per_day: u32) -> Result<Pending, String> {
+/// Saves `p` (id and hash are filled here), or returns the one already waiting for the same
+/// action in the same session. A session with `MAX_WAITING` items waiting gets no more.
+pub(crate) fn set_aside(state: &Path, mut p: Pending) -> Result<Pending, String> {
     p.hash = hash_of(&p.tool, &p.args);
-    if let Some(old) = list(state).into_iter().find(|o| {
-        o.session == p.session
-            && o.hash == p.hash
-            && o.state == State::Waiting
-            && o.expires_ms > p.created_ms
-    }) {
-        return Ok(old);
+    let waiting: Vec<Pending> = list(state)
+        .into_iter()
+        .filter(|o| {
+            o.session == p.session && o.state == State::Waiting && o.expires_ms > p.created_ms
+        })
+        .collect();
+    if let Some(old) = waiting.iter().find(|o| o.hash == p.hash) {
+        return Ok(old.clone());
+    }
+    if waiting.len() >= MAX_WAITING {
+        return Err(TOO_MANY.into());
     }
     for n in 0u32.. {
         let seed = format!("{}|{}|{}|{n}", p.session, p.hash, p.created_ms);
@@ -616,21 +605,6 @@ pub(crate) fn set_aside(state: &Path, mut p: Pending, per_day: u32) -> Result<Pe
         if !file(state, &p.id)?.exists() {
             break;
         }
-    }
-    // Shortcut: the UTC day number when `date` cannot run, which splits the day elsewhere.
-    let today = local(p.created_ms, "%F")
-        .unwrap_or_else(|| format!("utc-{}", p.created_ms.div_euclid(DAY_MS)));
-    let mut q = questions(state);
-    if q.day != today {
-        q = Questions {
-            day: today,
-            ids: vec![],
-        };
-    }
-    p.ask = q.ids.len() < per_day as usize;
-    if p.ask {
-        q.ids.push(p.id.clone());
-        save_questions(state, &q)?;
     }
     save(state, &p)?;
     Ok(p)
@@ -688,11 +662,7 @@ impl ToolHost {
         class: Class,
         reason: Option<&str>,
     ) -> Response {
-        let at = (
-            h.cfg.state.as_path(),
-            h.cfg.run.as_str(),
-            h.cfg.rules.questions_per_day(),
-        );
+        let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
         self.aside_at(at, req, req.args.clone(), class, reason)
     }
 
@@ -742,11 +712,11 @@ impl ToolHost {
         }
     }
 
-    /// `aside` with where it waits given apart (`state`, `run`, the day's questions) and the
-    /// arguments it keeps: a block change waits in a chat that is not in host mode too.
+    /// `aside` with where it waits given apart (`state`, `run`) and the arguments it keeps: a
+    /// block change waits in a chat that is not in host mode too.
     pub(crate) fn aside_at(
         &self,
-        (state, run, per_day): (&Path, &str, u32),
+        (state, run): (&Path, &str),
         req: &Request,
         args: Value,
         class: Class,
@@ -774,12 +744,11 @@ impl ToolHost {
             session: req.session.clone(),
             created_ms: now,
             expires_ms: now + DAY_MS,
-            ask: false,
             state: State::Waiting,
             reason: reason.map(str::to_owned),
         };
         draft.what = self.clean(shown(&draft));
-        let (content, rule) = match set_aside(state, draft, per_day) {
+        let (content, rule) = match set_aside(state, draft) {
             Ok(p) => {
                 if let Err(e) = log_line(
                     state,
@@ -922,8 +891,8 @@ impl ToolHost {
     }
 
     /// `request_secret`: checks the name, the destination and the vault now, and stores the
-    /// request for the person; the value is asked for when the turn ends, by the chat, and never
-    /// comes through here.
+    /// request for the person; the chat asks for the value (when it opens the boxes, or at once
+    /// with `/pending`), and it never comes through here.
     pub(crate) fn request_secret(
         &self,
         req: &Request,
@@ -1008,18 +977,13 @@ impl ToolHost {
             session: req.session.clone(),
             created_ms: now,
             expires_ms: now + DAY_MS,
-            ask: false,
             state: State::Waiting,
             reason: None,
         };
-        let content = match set_aside(&cfg.state, draft, cfg.per_day) {
-            Ok(p) if p.ask => format!(
-                "requested {}: the person will be asked when the turn ends; go on with what does not need it",
-                p.id
-            ),
+        let content = match set_aside(&cfg.state, draft) {
             Ok(p) => format!(
-                "requested {id}: today's questions to the person are used up, so the chat will not ask; the person can answer with `clio approve {id}`. Go on with what does not need it",
-                id = p.id
+                "requested {}: the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it",
+                p.id
             ),
             Err(e) => return refuse(format!("the request could not be stored ({e})")),
         };
@@ -1056,7 +1020,6 @@ mod tests {
             session: "s".into(),
             created_ms: 0,
             expires_ms: 1,
-            ask: true,
             state: State::Waiting,
             reason: None,
         };
@@ -1094,5 +1057,66 @@ mod tests {
             assert!(again.contains(&format!("\"class\": \"{new}\"")), "{again}");
         }
         let _ = fs::remove_dir_all(&state);
+    }
+
+    fn item(session: &str, n: usize, now: i64) -> Pending {
+        Pending {
+            id: String::new(),
+            class: Class::Delete,
+            tool: "exec".into(),
+            args: json!({"command": format!("rm -r /srv/old{n}")}),
+            hash: String::new(),
+            what: String::new(),
+            run: "r".into(),
+            session: session.into(),
+            created_ms: now,
+            expires_ms: now + DAY_MS,
+            state: State::Waiting,
+            reason: None,
+        }
+    }
+
+    // A session has at most 20 items waiting: the 21st is refused with a text for the model,
+    // the same action again still gets its id, and another session is not counted.
+    #[test]
+    fn at_most_twenty_items_of_a_session_wait() {
+        let t = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let ids: Vec<String> = (0..MAX_WAITING)
+            .map(|n| set_aside(t.path(), item("s", n, now)).unwrap().id)
+            .collect();
+        assert_eq!(
+            set_aside(t.path(), item("s", 99, now)).unwrap_err(),
+            "too many actions wait for the person: wait for their answers"
+        );
+        assert_eq!(set_aside(t.path(), item("s", 3, now)).unwrap().id, ids[3]);
+        assert!(set_aside(t.path(), item("other", 99, now)).is_ok());
+        // One answered makes room.
+        reject(t.path(), &ids[0]).unwrap();
+        assert!(set_aside(t.path(), item("s", 99, now)).is_ok());
+    }
+
+    // Reading the store removes what is more than a week past its time, answered or not, with
+    // its claim; what is younger stays.
+    #[test]
+    fn items_a_week_past_their_time_are_removed_when_the_store_is_read() {
+        let t = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let mut old = item("s", 1, now - 9 * DAY_MS);
+        old.id = "aa11".into();
+        old.state = State::Rejected;
+        save(t.path(), &old).unwrap();
+        fs::write(dir(t.path()).join("aa11.ran"), "").unwrap();
+        let mut stale = item("s", 2, now - 9 * DAY_MS);
+        stale.id = "bb22".into();
+        save(t.path(), &stale).unwrap();
+        let mut recent = item("s", 3, now - 3 * DAY_MS);
+        recent.id = "cc33".into();
+        recent.state = State::Rejected;
+        save(t.path(), &recent).unwrap();
+        let ids: Vec<String> = list(t.path()).into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["cc33"]);
+        assert!(!dir(t.path()).join("aa11.ran").exists());
+        assert!(!dir(t.path()).join("bb22.json").exists());
     }
 }

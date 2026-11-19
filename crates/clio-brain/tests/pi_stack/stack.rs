@@ -1169,3 +1169,53 @@ fn the_battery_passes_through_the_gate() {
         target.skipped.borrow()
     );
 }
+
+// A conversation reopened with its marks restored from its run folder (the brain tells the new
+// tool host before the first message: `taint`, here `suspect` too) carries the notice from its
+// FIRST message, even with no tool call and no mark in its Pi session file: the model never
+// hears that the session is clean.
+#[test]
+fn a_reopened_marked_session_carries_the_notice_from_its_first_message() {
+    let Some(node) = pi_available() else {
+        return;
+    };
+    let w = world();
+    let model = FakeModel::scripted(vec![Turn::Text("hola".into())]);
+    let mut s = stack(&node, &w, &model, false, &Opts::default());
+    let _ = s.pi.prompt("hola");
+    assert!(!system_text(&model.requests()[0]).contains("has read content from outside"));
+    assert_eq!(
+        taint_entries(&s.pi.entries()),
+        0,
+        "no mark in the session file"
+    );
+    let state = s.pi.state();
+    let file = PathBuf::from(state["sessionFile"].as_str().expect("session file"));
+    let session_id = state["sessionId"].as_str().unwrap().to_owned();
+    s.pi.close();
+    drop(s);
+
+    let host2 = Toolhost::start(&w, false, None);
+    let marked = ask_host(
+        &host2.socket,
+        json!({"id":"taint","tool":"taint","args":{"suspect":true},"session":session_id,"call_id":"taint"}),
+    );
+    assert_eq!(marked["tainted"], true, "{marked}");
+    let model2 = FakeModel::scripted(vec![Turn::Text("ok".into())]);
+    let mut pi2 = Pi::start(
+        &node,
+        &w,
+        &model2,
+        Some(&host2.socket),
+        &Opts {
+            session: Some(file),
+            ..Opts::default()
+        },
+    );
+    let ev = pi2.prompt("is this session clean?");
+    assert!(tool_ends(&ev).is_empty(), "no tool call: {ev:?}");
+    assert!(
+        system_text(&model2.requests()[0]).contains("has read content from outside"),
+        "the first request carries the notice"
+    );
+}

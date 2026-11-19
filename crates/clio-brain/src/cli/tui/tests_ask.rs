@@ -487,6 +487,51 @@ fn esc_declines_a_secret_and_a_suspect_session_says_so() {
     assert!(q.typing.is_none() && !q.ready);
 }
 
+// A terminal that sends Shift apart sends Shift+1 as `1` with SHIFT: the secret field, the
+// "Other…" field and the digit shortcuts refuse such a key with a flash instead of taking the
+// wrong character; a shifted letter is its capital, and Shift+Space a space.
+#[test]
+fn a_shifted_non_letter_is_refused_where_the_person_types() {
+    let shifted = |c: char| {
+        Input::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::SHIFT,
+        ))
+    };
+    let (a, _) = feed(chat(), vec![secrets(false), Input::Tick(2_000)]);
+    let (a, _) = feed(a, vec![shifted('1'), shifted('_')]);
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert!(s.value.is_empty());
+    assert_eq!(
+        a.flash.as_deref(),
+        Some("this terminal sends Shift apart: paste the value")
+    );
+    let (a, _) = feed(a, vec![shifted('A'), shifted(' '), ch('!')]);
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(s.value.chars(), 3);
+
+    let (a, cmds) = feed(
+        chat(),
+        vec![
+            select("q1", "Which database?", &OPTIONS),
+            Input::Tick(2_000),
+            shifted('1'),
+        ],
+    );
+    assert!(cmds.is_empty() && a.prompt.is_some(), "{cmds:?}");
+    assert!(a.flash.as_deref().unwrap().contains("Shift apart"));
+    let (a, cmds) = feed(a, vec![ch('4'), shifted('-'), shifted('M'), ch('x')]);
+    assert_eq!(cmds, vec![ui("q1", Some(OTHER))]);
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(q.typing.as_deref(), Some("Mx"));
+}
+
 // A store the vault refused: the worker offers the box again (the request still waits) and the
 // error goes to the chat; the box is empty, ready for the value again.
 #[test]
@@ -500,7 +545,10 @@ fn a_secret_the_vault_refused_comes_back_with_the_error_in_the_chat() {
         a,
         vec![
             secrets(false),
-            Input::Bg(Bg::ChatAnswered(Err("linear: the vault is locked".into()))),
+            Input::Bg(Bg::ChatAnswered(
+                Err("linear: the vault is locked".into()),
+                true,
+            )),
         ],
     );
     let Some(Prompt::Secret(s)) = &a.prompt else {
@@ -1173,7 +1221,7 @@ fn an_mcp_server_box_shows_what_it_grants_and_is_approved_only_after_its_end() {
 
 /// Feeds quiet seconds and the keys of an impatient person (`y`, Enter, then one row down) until
 /// the box on screen has shown its end: nothing may answer it meanwhile. What the box showed.
-fn read_to_the_end(mut a: App, w: u16, h: u16, mut t: u64) -> (App, String, u64) {
+pub(super) fn read_to_the_end(mut a: App, w: u16, h: u16, mut t: u64) -> (App, String, u64) {
     let mut seen = String::new();
     for _ in 0..400 {
         seen.push_str(&box_rows(&screen_text(&a, w, h)).join("\n"));
@@ -1209,6 +1257,27 @@ fn read_to_the_end(mut a: App, w: u16, h: u16, mut t: u64) -> (App, String, u64)
     (a, seen, t)
 }
 
+/// A call of an MCP tool set aside (S-70), as the box gets it from the pending store.
+pub(super) fn mcp_call_ask(arguments: &serde_json::Value) -> super::ask::BlockAsk {
+    let p = clio_toolhost::pending::Pending {
+        id: "c1d2e3f4".into(),
+        class: clio_toolhost::ask::Class::Send,
+        tool: "mcp_call".into(),
+        args: serde_json::json!({"server": "github", "tool": "create_issue",
+            "arguments": arguments, "version": "1.4.2",
+            "call": clio_toolhost::mcp::call_text("github", "create_issue", arguments)}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: Some("this tool of the server may change something".into()),
+    };
+    super::ask::BlockAsk::new(&p, false).unwrap()
+}
+
 // S-70: an MCP tool's call set aside shows the server, the tool and its WHOLE arguments
 // (pretty-printed, cleaned) in the scrolling box, even when they are long and the terminal small:
 // keys are sorted, so a field that comes last must still be read, and `y` arms only once the end
@@ -1223,25 +1292,7 @@ fn an_mcp_call_shows_its_whole_arguments_and_is_approved_only_after_its_end() {
         "zz_last".into(),
         serde_json::json!(format!("{} the hidden end \u{1b}[2J", "x".repeat(600))),
     );
-    let arguments = serde_json::Value::Object(args);
-    let p = clio_toolhost::pending::Pending {
-        id: "c1d2e3f4".into(),
-        class: clio_toolhost::ask::Class::Send,
-        tool: "mcp_call".into(),
-        args: serde_json::json!({"server": "github", "tool": "create_issue",
-            "arguments": arguments, "version": "1.4.2",
-            "call": clio_toolhost::mcp::call_text("github", "create_issue", &arguments)}),
-        hash: String::new(),
-        what: String::new(),
-        run: "r1".into(),
-        session: "sid".into(),
-        created_ms: 0,
-        expires_ms: 1,
-        ask: true,
-        state: clio_toolhost::pending::State::Waiting,
-        reason: Some("this tool of the server may change something".into()),
-    };
-    let b = super::ask::BlockAsk::new(&p, false).unwrap();
+    let b = mcp_call_ask(&serde_json::Value::Object(args));
     let (a, cmds) = feed(
         chat(),
         vec![Input::Bg(Bg::ChatAsks(vec![(

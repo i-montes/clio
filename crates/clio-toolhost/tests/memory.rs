@@ -2270,7 +2270,6 @@ fn env_asking(port: &Arc<FakePort>) -> (Env, PathBuf) {
             state: state.clone(),
             run: "r1".into(),
             person: state.join("no-vault.sock"),
-            per_day: 3,
         });
     });
     (e, state)
@@ -2344,8 +2343,6 @@ fn a_marked_session_sets_a_block_change_aside_and_writes_nothing() {
         && p.state == State::Waiting
         && p.session == "s1"
         && p.expires_ms - p.created_ms == 24 * 3600 * 1000));
-    // Within the day's three questions: all three are asked.
-    assert!(items.iter().all(|p| p.ask));
     let log = actions_of(&state);
     assert_eq!(log.len(), 3);
     assert!(

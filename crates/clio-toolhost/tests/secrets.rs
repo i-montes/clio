@@ -34,7 +34,6 @@ fn env() -> Env {
         state: state.clone(),
         run: "run1".into(),
         person: person.clone(),
-        per_day: 3,
     });
     let host = ToolHost::new(cfg).unwrap();
     Env {
@@ -190,14 +189,14 @@ fn a_stopped_or_locked_vault_and_a_name_it_has_are_refused_at_request_time() {
 }
 
 #[test]
-fn a_request_waits_for_the_person_once_and_counts_toward_the_days_questions() {
+fn a_request_waits_for_the_person_once_and_is_told_it_is_answered_later() {
     let e = env();
     serve(&e, true);
     let r = ask(&e, "s1", req("linear"));
     assert!(r.ok, "{}", r.content);
     assert!(
         r.content.ends_with(
-            ": the person will be asked when the turn ends; go on with what does not need it"
+            ": the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it"
         ),
         "{}",
         r.content
@@ -209,8 +208,8 @@ fn a_request_waits_for_the_person_once_and_counts_toward_the_days_questions() {
     assert_eq!(list.len(), 1);
     let p = &list[0];
     assert_eq!(
-        (p.class, p.tool.as_str(), p.ask),
-        (Class::Secret, "request_secret", true)
+        (p.class, p.tool.as_str()),
+        (Class::Secret, "request_secret")
     );
     assert_eq!(
         pending::secret_of(p),
@@ -221,16 +220,16 @@ fn a_request_waits_for_the_person_once_and_counts_toward_the_days_questions() {
         ))
     );
     assert_eq!(pending::shown(p), "linear");
-    // Three questions a day: the fourth request is stored, not asked in the chat.
+    // No daily cap: the fourth request is told the same as the first.
     ask(&e, "s1", req("b"));
     ask(&e, "s1", req("c"));
     let r = ask(&e, "s1", req("d"));
-    assert!(r.ok && r.content.contains("clio approve"), "{}", r.content);
     assert!(
-        !pending::list(&e.state)
-            .iter()
-            .any(|p| p.what == "d" && p.ask)
+        r.ok && r.content.contains("the person will be asked"),
+        "{}",
+        r.content
     );
+    assert!(!e.state.join("questions.json").exists());
 }
 
 #[test]

@@ -237,7 +237,7 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
                 cap(description, 200)
             )));
         }
-        SkillOutcome::Waits { id, what, ask } => {
+        SkillOutcome::Waits { id, ask, .. } => {
             let service = (**ask)
                 .as_ref()
                 .and_then(|b| b.skill.as_ref())
@@ -246,12 +246,8 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
                 "a {} waits for your approval ({id}) · review: {verdict}",
                 if service { "service" } else { "skill" }
             )));
-            let mut c =
-                super::app::Confirm::new(super::app::Action::Approve, id.clone(), 0, what.clone());
-            c.session.clone_from(&app.chat.session_id);
-            c.block = (**ask).clone();
-            app.asks.push_back(c);
-            super::app::next_ask(app);
+            // Its box opens with the rest, when Clio asks (`approvals.every_hours`).
+            app.chat.approvals.check = true;
         }
         SkillOutcome::Rejected {
             name,

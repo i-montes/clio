@@ -155,7 +155,12 @@ pub trait Session: Send + Sync {
     fn new_pending(&self) -> Vec<clio_toolhost::pending::Pending> {
         Vec::new()
     }
-    /// The person's answer at the terminal to one of `new_pending`: yes runs it (its result goes
+    /// Host mode: everything of this session that still waits for the person, oldest first; each
+    /// may be answered here from now on.
+    fn waiting(&self) -> Vec<clio_toolhost::pending::Pending> {
+        Vec::new()
+    }
+    /// The person's answer at the terminal to one of `new_pending` or `waiting`: yes runs it (its result goes
     /// to the model with the next message), no rejects it. Says what happened.
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
         Err(format!("{id} is not of this session"))
@@ -226,10 +231,9 @@ pub enum SkillOutcome {
         n: u32,
         notes: Option<String>,
     },
-    /// Waits for the person (`pending` id): its Approval box.
+    /// Waits for the person (`pending` id): its Approval box, when Clio asks.
     Waits {
         id: String,
-        what: String,
         ask: Box<Option<super::tui::ask::BlockAsk>>,
     },
     /// Not registered (the review failed): the findings go to the model (`to_model`); `dropped`

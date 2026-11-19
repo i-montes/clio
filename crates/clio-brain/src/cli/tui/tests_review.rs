@@ -448,9 +448,10 @@ fn a_turn_that_ended_with_a_question_is_offered_to_the_judge_once_it_is_answered
     assert!(reviews(&cmds).is_empty(), "{cmds:?}");
     let (a, cmds) = feed(
         a,
-        vec![Input::Bg(Bg::ChatAnswered(Ok(
-            "rejected b2: it is not run".into(),
-        )))],
+        vec![Input::Bg(Bg::ChatAnswered(
+            Ok("rejected b2: it is not run".into()),
+            false,
+        ))],
     );
     assert_eq!(
         reviews(&cmds),
@@ -699,23 +700,39 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
     );
     assert!(notes(&a).iter().any(|n| n
         == "skill «bye» not registered: review failed three times in a row; the draft was dropped"));
-    // Waits: its box, with the whole skill.
+    // Waits: the chat is idle, so the runtime is asked whether it is time to ask; when it is,
+    // its box comes with the whole skill.
     let b = super::tests_gallery::skill_ask(
         &super::tests_gallery::skill_md("1. Say hello."),
         &[],
         "this session read content from outside",
         false,
     );
-    let (a, _) = feed(
+    let (a, cmds) = feed(
         idle(),
         vec![skill_reviewed(
             PASSES,
             SkillOutcome::Waits {
                 id: "e5f6".into(),
-                what: "«skill · this session read content from outside» register the skill «disk-report» (1 file)".into(),
-                ask: Box::new(Some(b)),
+                ask: Box::new(Some(b.clone())),
             },
         )],
+    );
+    assert!(a.confirm.is_none());
+    assert!(
+        cmds.contains(&Cmd::CheckApprovals {
+            session: a.chat.session_id.clone()
+        }),
+        "{cmds:?}"
+    );
+    let what = "«skill · this session read content from outside» register the skill «disk-report» (1 file)";
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "e5f6".into(),
+            what.into(),
+            Some(b),
+        )]))],
     );
     let c = a.confirm.as_ref().unwrap();
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "e5f6"));

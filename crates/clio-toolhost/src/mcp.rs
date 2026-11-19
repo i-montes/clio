@@ -1344,7 +1344,6 @@ impl ToolHost {
             &req.session,
             pending_args,
             &self.clean(reason),
-            h.cfg.rules.questions_per_day(),
         ) {
             Ok(p) => p,
             Err(e) => return fail(&format!("it could not be set aside ({e})")),

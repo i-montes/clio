@@ -4,7 +4,7 @@ mod common;
 
 use clio_gateway::{
     Approval, ExecResult, Gateway, ModelOutput, Outcome, SecretPolicy, Session, Source, host_of,
-    wrap_untrusted,
+    untrusted_tail, wrap_untrusted,
 };
 use common::{Counter, Covers, Env, Yes, req};
 use serde_json::json;
@@ -348,6 +348,15 @@ fn s08_external_text_is_delimited_as_data() {
     // The closing line carries a hash of the text, so the text cannot forge it.
     assert!(w.ends_with(&format!("<<<END-UNTRUSTED-DATA {tag}>>>")));
     assert_eq!(w.matches(&format!("END-UNTRUSTED-DATA {tag}")).count(), 1);
+    // Read back: only a whole block of that source whose hash agrees.
+    let s = format!("hi\n\n{w}");
+    assert_eq!(untrusted_tail(Source::Web, &s), Some(("hi\n\n", hostile)));
+    assert_eq!(untrusted_tail(Source::File, &s), None);
+    assert_eq!(untrusted_tail(Source::Web, &format!("{s} ")), None);
+    assert_eq!(
+        untrusted_tail(Source::Web, &s.replace("ignore", "IGNORE")),
+        None
+    );
 }
 
 // S-10: model output becomes HTML only escaped and a command only validated.

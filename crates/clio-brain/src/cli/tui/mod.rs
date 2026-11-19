@@ -7,6 +7,7 @@
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod approvals;
 pub mod ask;
 pub mod chat;
 pub mod commands;
@@ -59,11 +60,14 @@ use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::rpc::Cancel;
 use clio_brain::pi::sessions::{HISTORY_TURNS, read_history};
 use clio_memory::Signal;
-use crossterm::event::{self, Event as Term, KeyEventKind};
+use crossterm::event::{
+    self, Event as Term, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{cursor, execute};
+use crossterm::{cursor, execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -98,14 +102,44 @@ pub fn restore_terminal() {
     if !out.is_terminal() || !IN_TUI.swap(false, Ordering::SeqCst) {
         return;
     }
-    let _ = execute!(
+    let _ = give_back(&mut out);
+    let _ = disable_raw_mode();
+}
+
+/// What the TUI writes when it takes the terminal: the alternate screen, bracketed paste, the
+/// mouse if asked, and the keyboard's legacy mode, pushed on the screen it was on and on the
+/// alternate one (kitty keeps a stack for each): a "report all keys" mode another program left
+/// on would turn Shift+a into `a`. Terminals that do not know the protocol ignore it. And xterm's
+/// "modifyOtherKeys" off (`CSI > 4 ; 0 m`, its default, so nothing is restored at exit): left on
+/// by another program, it sends Ctrl-C, Shift+a and `_` in a form crossterm drops.
+fn take(out: &mut impl std::io::Write, mouse: bool) -> std::io::Result<()> {
+    let legacy = || PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty());
+    queue!(
+        out,
+        crossterm::style::Print("\x1b[>4;0m"),
+        legacy(),
+        EnterAlternateScreen,
+        legacy(),
+        crossterm::event::EnableBracketedPaste
+    )?;
+    if mouse {
+        queue!(out, crossterm::event::EnableMouseCapture)?;
+    }
+    out.flush()
+}
+
+/// Undoes `take`, each stack popped on its own screen.
+fn give_back(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    queue!(
         out,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
+        PopKeyboardEnhancementFlags,
         cursor::Show
-    );
-    let _ = disable_raw_mode();
+    )?;
+    out.flush()
 }
 
 /// A panic on the main thread must not leave the terminal in the alternate screen in raw mode:
@@ -152,22 +186,14 @@ pub fn osc52(text: &str) -> String {
 struct Guard;
 
 impl Guard {
-    /// `mouse`: the Pi harness takes clicks and the wheel (selecting text then needs Shift).
+    /// `mouse`: the chat takes clicks and the wheel (selecting text then needs Shift).
     fn enter(mouse: bool) -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         let e = |x: std::io::Error| format!("terminal: {x}");
         enable_raw_mode().map_err(e)?;
         IN_TUI.store(true, Ordering::SeqCst);
         let guard = Self;
         let mut out = std::io::stdout();
-        execute!(
-            out,
-            EnterAlternateScreen,
-            crossterm::event::EnableBracketedPaste
-        )
-        .map_err(e)?;
-        if mouse {
-            execute!(out, crossterm::event::EnableMouseCapture).map_err(e)?;
-        }
+        take(&mut out, mouse).map_err(e)?;
         let term = Terminal::new(CrosstermBackend::new(out)).map_err(e)?;
         Ok((guard, term))
     }
@@ -189,7 +215,10 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         signal_hook::flag::register_usize(sig, ended.clone(), sig as usize)
             .map_err(|e| format!("signals: {e}"))?;
     }
-    let (_guard, mut term) = Guard::enter(harness == Harness::Pi)?;
+    // The chat takes the mouse only when the person asked (`ui.mouse`): the terminal's own
+    // selection works otherwise.
+    let mouse = harness == Harness::Pi && Config::load(&dirs).is_ok_and(|c| c.ui.mouse);
+    let (_guard, mut term) = Guard::enter(mouse)?;
     let (tx, rx) = channel::<Input>();
     let dirs = Arc::new(dirs);
     let ctx = Ctx {
@@ -203,12 +232,14 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         debug: DebugCtl::new(debug, false),
         closing: Arc::default(),
         answered: AtomicBool::new(false),
+        quick: Arc::default(),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
     app.debug = debug;
+    app.mouse = mouse;
     let mut resume = vec![];
     if harness == Harness::Pi {
         app.use_pi();
@@ -326,6 +357,12 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
             }
         }
     }
+    // A quick answer still at work finishes first (they take moments; 10 s at most), while its
+    // session is still there; only a running command is stopped, below.
+    let t = Instant::now();
+    while ctx.quick.load(Ordering::SeqCst) > 0 && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
     ctx.stop_chat_now();
     // An approval runs in this process, with its own host launcher: its units carry this pid and
@@ -435,10 +472,68 @@ struct Ctx {
     closing: Closing,
     /// An answer to a set-aside action ran here (see the end of `run`).
     answered: AtomicBool,
+    /// Answers that only write (a block, a skill, a service, a secret) still at work: quitting
+    /// waits for them, so none is left claimed and half done.
+    quick: Arc<AtomicUsize>,
+}
+
+/// One quick answer at work, counted in `Ctx::quick` until dropped (a panic too).
+struct Quick(Arc<AtomicUsize>);
+
+impl Quick {
+    fn start(n: &Arc<AtomicUsize>) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        Self(n.clone())
+    }
+}
+
+impl Drop for Quick {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The threads closing a session (and saving its summary).
 type Closing = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+
+/// The box of a waiting item, for `/pending`.
+fn pick(p: &clio_toolhost::pending::Pending, suspect: bool) -> commands::Pick {
+    let what = format!("{} {}", super::pending::label(p), super::pending::what(p));
+    let mut k = commands::Pick::new(&p.id, &what);
+    k.block = ask::BlockAsk::new(p, suspect);
+    k.secret = clio_toolhost::pending::secret_of(p)
+        .map(|(n, d, w)| (n.to_owned(), d.to_owned(), w.to_owned()));
+    k.suspect = suspect;
+    k
+}
+
+/// Clio asks about everything that waits, one box after another: the secrets in their own box,
+/// the rest as approvals (a block change, a skill or a service shown whole).
+fn offer(waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
+    let (secrets, aside): (Vec<_>, Vec<_>) = waiting
+        .iter()
+        .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
+    let secrets: Vec<_> = secrets
+        .into_iter()
+        .filter_map(|p| {
+            let (n, d, w) = clio_toolhost::pending::secret_of(p)?;
+            Some((p.id.clone(), (n.into(), d.into(), w.into())))
+        })
+        .collect();
+    if !secrets.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, suspect)));
+    }
+    let asks: Vec<_> = aside
+        .into_iter()
+        .map(|p| {
+            let k = pick(p, suspect);
+            (k.id, k.what, k.block)
+        })
+        .collect();
+    if !asks.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
+    }
+}
 
 /// The session listed under `file` in Pi's sessions folder (and that folder).
 fn session_by_file(
@@ -1132,37 +1227,8 @@ impl Ctx {
                         if let Some(w) = session.last_work() {
                             let _ = tx.send(Input::Bg(Bg::TurnWork(Box::new(w))));
                         }
-                        // Host mode: what the turn set aside is asked now, one question each;
-                        // and the secrets it asked for (within the day's questions), one box each.
-                        let (secrets, aside): (Vec<_>, Vec<_>) = session
-                            .new_pending()
-                            .into_iter()
-                            .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
-                        let secrets: Vec<(String, (String, String, String))> = secrets
-                            .iter()
-                            .filter(|p| p.ask)
-                            .filter_map(|p| {
-                                let (n, d, w) = clio_toolhost::pending::secret_of(p)?;
-                                Some((p.id.clone(), (n.into(), d.into(), w.into())))
-                            })
-                            .collect();
-                        if !secrets.is_empty() {
-                            let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, session.suspect())));
-                        }
-                        let asks: Vec<_> = aside
-                            .into_iter()
-                            .map(|p| {
-                                let what = super::pending::what(&p);
-                                (
-                                    p.id.clone(),
-                                    format!("{} {what}", super::pending::label(&p)),
-                                    ask::BlockAsk::new(&p, session.suspect()),
-                                )
-                            })
-                            .collect();
-                        if !asks.is_empty() {
-                            let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
-                        }
+                        // What the turn set aside waits: Clio asks about it once the chat is
+                        // idle, if it is time (`Cmd::CheckApprovals`).
                         // Skills: the drafts the turn wrote are reviewed; the reports counted.
                         let (drafts, notes) = session.skill_news();
                         if !drafts.is_empty() || !notes.is_empty() {
@@ -1192,24 +1258,40 @@ impl Ctx {
             }
             Cmd::ChatAnswer { id, yes } => {
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
                     return;
                 };
                 self.answered.store(true, Ordering::SeqCst);
+                let quick = Quick::start(&self.quick);
                 self.spawn(
-                    move |_, _| session.answer(&id, yes),
-                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                    move |d, _| {
+                        // A command may run for an hour: quitting stops it instead of waiting.
+                        let mut quick = Some(quick);
+                        if super::pending::waiting(d)
+                            .iter()
+                            .any(|p| p.id == id && p.tool == "exec")
+                        {
+                            quick = None;
+                        }
+                        let r = session.answer(&id, yes);
+                        drop(quick);
+                        r
+                    },
+                    move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
                 );
             }
             Cmd::ChatSecret { id, name, value } => {
+                let yes = value.is_some();
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
                     return;
                 };
+                let quick = Quick::start(&self.quick);
                 // The value is dropped (and zeroed) when the worker is done with it.
                 self.spawn(
                     move |d, tx| {
                         let r = session.answer_secret(&id, value.as_ref().map(|b| &*b.0));
+                        drop(quick);
                         // The vault refused it (locked, the name taken meanwhile): the request
                         // still waits, so its box comes back, empty, with the error under it.
                         if r.is_err()
@@ -1222,7 +1304,7 @@ impl Ctx {
                         }
                         r.map_err(|e| format!("{name}: {e}"))
                     },
-                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                    move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
                 );
             }
             // One line to Pi's stdin: no worker needed.
@@ -1376,6 +1458,28 @@ impl Ctx {
                 move |d, _| set_connector(d, &name),
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
+            Cmd::SetMouse(on) => {
+                let mut out = std::io::stdout();
+                let _ = if on {
+                    execute!(out, crossterm::event::EnableMouseCapture)
+                } else {
+                    execute!(out, crossterm::event::DisableMouseCapture)
+                };
+                self.spawn(
+                    move |d, _| {
+                        super::connect::edit_section(d, "ui", true, |m| {
+                            m.insert("mouse".into(), on.into());
+                        })
+                        .map(|()| {
+                            format!(
+                                "mouse {}: saved in config.json",
+                                if on { "on" } else { "off" }
+                            )
+                        })
+                    },
+                    |r| Bg::Done(r.and_then(|x| x)),
+                );
+            }
             Cmd::SetEffort(level) => {
                 let session = self.current_chat();
                 self.spawn(
@@ -1429,27 +1533,60 @@ impl Ctx {
                 move |d, _| set_cap(d, cap),
                 |r| Bg::CapSet(r.and_then(|x| x)),
             ),
-            Cmd::LoadPending { session } => self.spawn(
-                move |d, _| {
-                    let now = crate::cli::now_ms();
-                    let all = super::pending::waiting(d);
-                    let others = all.iter().filter(|p| p.session != session).count();
-                    let mine = all
-                        .into_iter()
-                        .filter(|p| !session.is_empty() && p.session == session)
-                        .map(|p| {
-                            let what = format!(
-                                "{} {}",
-                                super::pending::label(&p),
-                                super::pending::what(&p)
-                            );
-                            (p.id.clone(), super::pending::line(&p, now), what)
-                        })
-                        .collect();
-                    (mine, others)
-                },
-                Bg::Pending,
-            ),
+            Cmd::LoadPending { session } => {
+                let open = self.current_chat();
+                self.spawn(
+                    move |d, _| {
+                        let now = crate::cli::now_ms();
+                        let others = super::pending::waiting(d)
+                            .iter()
+                            .filter(|p| p.session != session)
+                            .count();
+                        let Some(s) = open.filter(|_| !session.is_empty()) else {
+                            return (vec![], vec![], others);
+                        };
+                        let suspect = s.suspect();
+                        let mine = s
+                            .waiting()
+                            .iter()
+                            .map(|p| (super::pending::line(p, now), pick(p, suspect)))
+                            .collect();
+                        let cut = super::pending::interrupted(d)
+                            .iter()
+                            .filter(|p| p.session == session)
+                            .map(super::pending::interrupted_line)
+                            .collect();
+                        (mine, cut, others)
+                    },
+                    Bg::Pending,
+                );
+            }
+            Cmd::CheckApprovals { session } => {
+                let Some(s) = self.current_chat() else {
+                    return;
+                };
+                self.spawn(
+                    move |d, tx| {
+                        let waiting = s.waiting();
+                        let every = Config::load(d).map_or_else(
+                            |_| crate::cli::home::ApprovalsCfg::default().every_hours,
+                            |c| c.approvals.every_hours,
+                        );
+                        let opened = !waiting.is_empty()
+                            && super::pending::ask_now(d, every, crate::cli::now_ms());
+                        if opened {
+                            let batch = waiting.len().min(approvals::BATCH);
+                            offer(&waiting[..batch], s.suspect(), tx);
+                        }
+                        Bg::Approvals {
+                            session,
+                            waiting: waiting.len(),
+                            opened,
+                        }
+                    },
+                    |r| r.unwrap_or_else(|e| Bg::Done(Err(e))),
+                );
+            }
             Cmd::LoadActions { run } => self.spawn(
                 move |d, _| {
                     let log = super::pending::action_log(d, Some(&run))?;

@@ -5,7 +5,7 @@
 //! Plain letters are text only in the text fields (new job, the filter); there the table only has
 //! the non-text keys.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -31,6 +31,32 @@ impl Key {
             Self::Code(code) => k.code == code && !ctrl && !alt,
         }
     }
+}
+
+/// The key the person pressed, or `None` for what is not one: a release, or a modifier or lock
+/// key alone. A terminal left in the kitty protocol's "report all keys" mode (by another program;
+/// the TUI asks for the legacy mode, but not every terminal listens) sends those, and sends
+/// Shift+a as `a` with SHIFT: a shifted ASCII lowercase letter is its capital here. Shifted
+/// symbols are not guessed: they depend on the layout.
+pub fn person_key(mut k: KeyEvent) -> Option<KeyEvent> {
+    if k.kind == KeyEventKind::Release
+        || matches!(
+            k.code,
+            KeyCode::Modifier(_) | KeyCode::CapsLock | KeyCode::NumLock | KeyCode::ScrollLock
+        )
+    {
+        return None;
+    }
+    if let KeyCode::Char(c) = k.code
+        && c.is_ascii_lowercase()
+        && k.modifiers.contains(KeyModifiers::SHIFT)
+        && !k
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        k.code = KeyCode::Char(c.to_ascii_uppercase());
+    }
+    Some(k)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

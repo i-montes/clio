@@ -8,7 +8,7 @@
 //! the Pi harness draws its own column under the top bar (`chat::draw_screen`).
 
 use clio_brain::agent::Event;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -159,6 +159,8 @@ pub enum Cmd {
     SetModel(String),
     SetConnector(String),
     SetEffort(String),
+    /// `/mouse on|off`: the terminal at once, `ui.mouse` in `config.json`.
+    SetMouse(bool),
     SessionName(String),
     /// Pi's compaction, with the person's instructions (may be empty).
     Compact(String),
@@ -166,6 +168,11 @@ pub enum Cmd {
     SetCap(u64),
     /// What this session set aside and still waits.
     LoadPending {
+        session: String,
+    },
+    /// What this session has waiting for the person: its boxes open if the window allows it
+    /// (`approvals.every_hours`), and `Bg::Approvals` says what was found.
+    CheckApprovals {
         session: String,
     },
     /// The action log of one run (a host session).
@@ -220,9 +227,9 @@ pub enum Cmd {
     Redraw,
 }
 
-/// This session's actions waiting, (id, line, «class» and what) each, and how many of other
-/// sessions wait.
-pub type Waiting = (Vec<(String, String, String)>, usize);
+/// This session's actions waiting, the line and the box of each; the lines of those an answer
+/// began and never finished; and how many of other sessions wait.
+pub type Waiting = (Vec<(String, super::commands::Pick)>, Vec<String>, usize);
 
 /// What a worker thread reports back.
 pub enum Bg {
@@ -270,8 +277,8 @@ pub enum Bg {
     /// Host mode: what the turn set aside, one question each: (id, «class» and what, and the
     /// change itself when it is one to the person's blocks).
     ChatAsks(Vec<(String, String, Option<super::ask::BlockAsk>)>),
-    /// What came of an answer to one of them.
-    ChatAnswered(Result<String, String>),
+    /// What came of an answer to one of them, and whether the person said yes.
+    ChatAnswered(Result<String, String>, bool),
     /// The secrets this turn asked the person for: (id, (name, destination, why)) each, and
     /// whether the session is suspect.
     ChatSecrets(Vec<(String, (String, String, String))>, bool),
@@ -285,9 +292,14 @@ pub enum Bg {
     Compacted(Result<String, String>, Option<u64>, Option<Refresh>),
     /// The context cap `/compact N` saved.
     CapSet(Result<u64, String>),
-    /// This session's actions waiting: (id, line, «class» and what), and how many of other
-    /// sessions wait too.
+    /// This session's actions waiting, and how many of other sessions wait too.
     Pending(Result<Waiting, String>),
+    /// What `Cmd::CheckApprovals` found: how many wait, and whether their boxes were opened.
+    Approvals {
+        session: String,
+        waiting: usize,
+        opened: bool,
+    },
     /// Lines to show in a box with that title.
     Modal(Result<Modal, String>),
     /// A question that needs a `y`, built from what was read (`/mcp confirm`).
@@ -481,6 +493,10 @@ pub struct App {
     pub answering: usize,
     /// When the last key (or paste) came, for the quiet rule of a set-aside question.
     pub last_key_ms: Option<u64>,
+    /// The chat: the last key was a Ctrl-C that did not quit, so the next one quits.
+    pub quit_armed: bool,
+    /// The chat takes the mouse (`ui.mouse`, `/mouse`); off, the terminal selects text.
+    pub mouse: bool,
     /// When the judge's reviews of the last hour started (`review.max_per_hour`).
     pub reviews_at: Vec<u64>,
     /// A short line of feedback at the bottom.
@@ -522,6 +538,8 @@ impl App {
             prompts: std::collections::VecDeque::new(),
             answering: 0,
             last_key_ms: None,
+            quit_armed: false,
+            mouse: false,
             reviews_at: Vec::new(),
             flash: None,
             notice: None,
@@ -668,6 +686,16 @@ impl App {
             && self.prompt.as_ref().is_none_or(|p| since(p.shown_ms()))
     }
 
+    /// Set-aside item `id` has its box on screen or in line.
+    pub fn asking(&self, id: &str) -> bool {
+        let secret =
+            |p: &super::ask::Prompt| matches!(p, super::ask::Prompt::Secret(s) if s.id == id);
+        self.confirm.as_ref().is_some_and(|c| c.id == id)
+            || self.asks.iter().any(|c| c.id == id)
+            || self.prompt.as_ref().is_some_and(secret)
+            || self.prompts.iter().any(secret)
+    }
+
     /// Something Clio asks: on screen if nothing else is, else in line.
     pub fn offer(&mut self, p: super::ask::Prompt) {
         self.prompts.push_back(p);
@@ -741,6 +769,8 @@ pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
         cmds.extend(super::review::next_skill(&mut app));
         cmds.extend(super::review::after_turn(&mut app));
         cmds.extend(super::review::deliver(&mut app));
+        cmds.extend(super::approvals::deliver(&mut app));
+        cmds.extend(super::approvals::check(&mut app));
     }
     (app, cmds)
 }
@@ -799,55 +829,78 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             app.flash = None;
             super::sessions::mouse(app, &m)
         }
-        Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
-            app.flash = None;
-            // Every key counts for the quiet rule, even one pressed before the question opened;
-            // and the question itself must have been on screen for the quiet second.
-            let quiet = app.quiet();
-            app.last_key_ms = Some(app.now_ms);
-            // The keys that work everywhere, even over a message.
-            match keys::lookup(app.ctx(), &k) {
-                Some(Act::Debug) => {
-                    app.debug = !app.debug;
-                    app.flash = Some(if app.debug {
-                        "debug on (Tab for live; debug.log is written in the run folder)".into()
-                    } else {
-                        "debug off".into()
-                    });
-                    return vec![Cmd::Debug(app.debug)];
-                }
-                Some(Act::Redraw) => return vec![Cmd::Redraw],
-                _ => {}
-            }
-            if app.notice.take().is_some() {
+            // A release, or a modifier alone, is not a key: it must not disarm or answer anything.
+            let Some(k) = keys::person_key(k) else {
+                return vec![];
+            };
+            // The chat: Ctrl-C twice always quits, whatever runs or is on screen (leaving stops
+            // it, as closing does).
+            let ctrl_c = app.pi && keys::Key::Ctrl('c').matches(&k);
+            if ctrl_c && app.quit_armed {
+                app.quit = true;
                 return vec![];
             }
-            if app.confirm.is_some() {
-                let cmds = answer(app, &k, quiet);
-                next_ask(app);
-                return cmds;
+            let cmds = key(app, k);
+            app.quit_armed = ctrl_c && !app.quit;
+            if app.quit_armed {
+                app.flash = Some(match app.flash.take() {
+                    Some(f) => format!("{f} · Ctrl-C again quits"),
+                    None => "Ctrl-C again quits".into(),
+                });
             }
-            if app.prompt.is_some() {
-                let cmds = super::ask::key(app, &k, quiet);
-                next_ask(app);
-                return cmds;
-            }
-            if app.modal.is_some() {
-                return super::commands::modal_key(app, &k);
-            }
-            match app.screen {
-                Screen::Home => super::home::key(app, &k),
-                Screen::NewRun => super::new_run::key(app, &k),
-                Screen::Live => super::live::key(app, &k),
-                Screen::Detail => super::detail::key(app, &k),
-                Screen::Doctor => super::doctor::key(app, &k),
-                Screen::Memory => super::memory::key(app, &k),
-                Screen::Sessions => super::sessions::key(app, &k),
-                Screen::Chat => super::chat::key(app, &k),
-                Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
-            }
+            cmds
         }
+    }
+}
+
+/// A key the person pressed: what it does where they are.
+fn key(app: &mut App, k: KeyEvent) -> Vec<Cmd> {
+    app.flash = None;
+    // Every key counts for the quiet rule, even one pressed before the question opened;
+    // and the question itself must have been on screen for the quiet second.
+    let quiet = app.quiet();
+    app.last_key_ms = Some(app.now_ms);
+    // The keys that work everywhere, even over a message.
+    match keys::lookup(app.ctx(), &k) {
+        Some(Act::Debug) => {
+            app.debug = !app.debug;
+            app.flash = Some(if app.debug {
+                "debug on (Tab for live; debug.log is written in the run folder)".into()
+            } else {
+                "debug off".into()
+            });
+            return vec![Cmd::Debug(app.debug)];
+        }
+        Some(Act::Redraw) => return vec![Cmd::Redraw],
+        _ => {}
+    }
+    if app.notice.take().is_some() {
+        return vec![];
+    }
+    if app.confirm.is_some() {
+        let cmds = answer(app, &k, quiet);
+        next_ask(app);
+        return cmds;
+    }
+    if app.prompt.is_some() {
+        let cmds = super::ask::key(app, &k, quiet);
+        next_ask(app);
+        return cmds;
+    }
+    if app.modal.is_some() {
+        return super::commands::modal_key(app, &k);
+    }
+    match app.screen {
+        Screen::Home => super::home::key(app, &k),
+        Screen::NewRun => super::new_run::key(app, &k),
+        Screen::Live => super::live::key(app, &k),
+        Screen::Detail => super::detail::key(app, &k),
+        Screen::Doctor => super::doctor::key(app, &k),
+        Screen::Memory => super::memory::key(app, &k),
+        Screen::Sessions => super::sessions::key(app, &k),
+        Screen::Chat => super::chat::key(app, &k),
+        Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
     }
 }
 
@@ -1253,6 +1306,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     app.chat
                         .items
                         .extend(info.notes.into_iter().map(super::chat::Item::Note));
+                    // What waits from before: asked about once the chat is idle, if it is time.
+                    app.chat.approvals.check = true;
                     // A new session's first message: the presentation, if any, is asked in
                     // front of it (`PrePrompt`), so Clio introduces herself and answers.
                     if let Some(text) = queued {
@@ -1330,6 +1385,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         // They come before the turn settles, so from the session open now.
         Bg::ChatAsks(asks) => {
             for (id, what, block) in asks {
+                if app.asking(&id) {
+                    continue;
+                }
                 let mut c = Confirm::new(Action::Approve, id, 0, what);
                 c.session.clone_from(&app.chat.session_id);
                 c.block = block;
@@ -1340,6 +1398,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatSecrets(asks, suspect) => {
             for (id, what) in asks {
+                if app.asking(&id) {
+                    continue;
+                }
                 let session = app.chat.session_id.clone();
                 let ask =
                     super::ask::SecretAsk::new(&id, &session, (&what.0, &what.1, &what.2), suspect);
@@ -1347,8 +1408,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
-        Bg::ChatAnswered(r) => {
+        Bg::ChatAnswered(r, yes) => {
             app.answering = app.answering.saturating_sub(1);
+            let a = &mut app.chat.approvals;
+            a.waiting = a.waiting.saturating_sub(1);
+            // Only something done starts a turn; a rejection or a failure rides with the next
+            // message of the person.
+            a.answered |= yes && r.is_ok();
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),
@@ -1452,14 +1518,25 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
+        Bg::Approvals {
+            session,
+            waiting,
+            opened,
+        } => {
+            super::approvals::checked(app, &session, waiting, opened);
+            vec![]
+        }
         Bg::Pending(r) => {
             match r {
-                Ok((rows, others)) => {
-                    let mut lines: Vec<String> = rows.iter().map(|(_, l, _)| l.clone()).collect();
-                    let picks = rows.into_iter().map(|(id, _, what)| (id, what)).collect();
+                Ok((rows, cut, others)) => {
+                    // The count of the status line, from what was just read.
+                    app.chat.approvals.waiting = rows.len();
+                    let (mut lines, picks): (Vec<String>, _) = rows.into_iter().unzip();
                     if lines.is_empty() {
                         lines.push("nothing in this session waits for your approval".into());
                     }
+                    // After the picks: none of them can be picked.
+                    lines.extend(cut);
                     let mut m = Modal::text("Pending", lines);
                     m.picks = picks;
                     if others > 0 {
@@ -1567,6 +1644,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             // The list beside the chat: a new session shows up, a title changes.
             if app.pi {
+                app.chat.approvals.check = true;
                 let mut cmds = vec![Cmd::LoadSessions];
                 // Before the compaction: it would make the chat look busy.
                 cmds.extend(super::review::turn_ended(app));

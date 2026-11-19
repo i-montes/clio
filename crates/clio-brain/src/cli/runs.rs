@@ -1372,7 +1372,6 @@ mod tests {
             session: "s".into(),
             created_ms: 0,
             expires_ms: i64::MAX,
-            ask: true,
             state: State::Waiting,
             reason: None,
         };

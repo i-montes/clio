@@ -115,9 +115,6 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
     assert!(o.status.success(), "{}", out(&o));
     assert!(out(&o).contains(&format!("approved {id}")), "{}", out(&o));
     assert_eq!(read(&backup), "new");
-    // Answered at the terminal: it is not one of the day's questions any more.
-    let q = read(&w.data.join("host/questions.json"));
-    assert!(!q.contains(&id), "{q}");
     let o = w.clio(&["approve", &id]);
     assert!(
         !o.status.success() && out(&o).contains("already ran"),
@@ -216,7 +213,8 @@ fn what_is_shown_comes_from_the_arguments_and_an_expired_one_neither_waits_nor_b
     // Past its time, in a session whose folder is gone: not listed, and approving it says so
     // before any folder is made or launcher looked for.
     edit(&w, &id, |v| {
-        v["expires_ms"] = json!(1);
+        // An hour past its time: still in the store, which drops what is a week past it.
+        v["expires_ms"] = json!(v["created_ms"].as_i64().unwrap() - 3_600_000);
         v["run"] = json!("20261117-130000-ffff");
     });
     let o = w.clio(&["pending"]);

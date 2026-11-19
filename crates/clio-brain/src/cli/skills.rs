@@ -1331,6 +1331,9 @@ mod tests {
         }
     }
 
+    // Linux only: its check runs the service with timeout(1), which macOS lacks, and services
+    // only ever run under bwrap.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_service_creator_ships_and_passes_its_own_check() {
         let t = tempfile::tempdir().unwrap();

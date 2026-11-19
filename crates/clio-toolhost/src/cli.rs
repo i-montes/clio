@@ -155,16 +155,9 @@ pub fn run_with(
         &need(run_dir, "--run-dir")?,
     );
     cfg.secrets = match (secret_state, secret_run, vault_person) {
-        (Some(state), Some(run), Some(person)) => Some(crate::pending::SecretCfg {
-            state,
-            run,
-            person,
-            // The day's questions are the person's: the same cap as the actions set aside.
-            per_day: host.as_ref().map_or_else(
-                || HostRules::factory().questions_per_day(),
-                |h| h.rules.questions_per_day(),
-            ),
-        }),
+        (Some(state), Some(run), Some(person)) => {
+            Some(crate::pending::SecretCfg { state, run, person })
+        }
         (None, None, None) => None,
         _ => return Err("--secret-state, --secret-run and --vault-person go together".into()),
     };

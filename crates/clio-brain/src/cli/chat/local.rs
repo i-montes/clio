@@ -34,7 +34,7 @@ use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
 use clio_brain::pi::level::{self, Assessor, run_assessed_with};
-use clio_brain::pi::preprompt::PrePrompt;
+use clio_brain::pi::preprompt::{APPROVALS_ASK, PrePrompt};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
@@ -800,7 +800,6 @@ impl ChatSession {
             &self.pi.session_id,
             args,
             &reason,
-            pending::per_day(&self.dirs),
         )?;
         locked(&h.asked).insert(p.id.clone());
         locked(&h.notes).push(format!(
@@ -808,7 +807,6 @@ impl ChatSession {
             p.id
         ));
         Ok(super::SkillOutcome::Waits {
-            what: format!("{} {}", pending::label(&p), pending::what(&p)),
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
         })
@@ -882,7 +880,6 @@ impl ChatSession {
             &self.pi.session_id,
             args,
             reason,
-            pending::per_day(&self.dirs),
         )?;
         locked(&h.asked).insert(p.id.clone());
         locked(&h.notes).push(format!(
@@ -890,11 +887,20 @@ impl ChatSession {
             p.id
         ));
         Ok(super::SkillOutcome::Waits {
-            what: format!("{} {}", pending::label(&p), pending::what(&p)),
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
         })
     }
+}
+
+/// A turn with no words of the person, no findings and no presentation is one the approvals
+/// started: it goes with Clio's request (`Some(true)`), or is no turn at all when there is
+/// nothing to give (`None`: the outcomes went with another message). Any other: `Some(false)`.
+fn approvals_turn(text: &str, findings: bool, presenting: bool, data: &str) -> Option<bool> {
+    if !text.is_empty() || findings || presenting {
+        return Some(false);
+    }
+    (!data.is_empty()).then_some(true)
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -956,6 +962,16 @@ impl Session for ChatSession {
             .chain(notes)
             .collect::<Vec<_>>()
             .join("\n\n");
+        match approvals_turn(text, findings.is_some(), self.pre.presenting(), &data) {
+            Some(true) => self.pre.reviewed(APPROVALS_ASK),
+            Some(false) => {}
+            None => {
+                return Ok(RunSummary {
+                    handled: true,
+                    ..RunSummary::default()
+                });
+            }
+        }
         let mut given = Vec::new();
         if !data.is_empty() {
             given.push((Source::ToolResult, data.as_str()));
@@ -1147,6 +1163,20 @@ impl Session for ChatSession {
             .collect()
     }
 
+    fn waiting(&self) -> Vec<Pending> {
+        let Some(h) = &self.host else {
+            return Vec::new();
+        };
+        let mut asked = locked(&h.asked);
+        pending::waiting(&h.dirs)
+            .into_iter()
+            .filter(|p| p.run == h.run && p.session == self.pi.session_id)
+            .inspect(|p| {
+                asked.insert(p.id.clone());
+            })
+            .collect()
+    }
+
     fn answer(&self, id: &str, yes: bool) -> Result<String, String> {
         // One already put to the person, or one of this session still waiting (`/pending`).
         let h = self
@@ -1211,9 +1241,16 @@ impl Session for ChatSession {
         }
         if !yes {
             pending::reject(&h.dirs, id)?;
-            return Ok(format!("rejected {id}: it is not run"));
+            let note = format!("rejected {id}: it is not run");
+            locked(&h.notes).push(format!("the person {note}"));
+            return Ok(note);
         }
-        let p = pending::approve(&h.dirs, id)?;
+        // Said yes, but it could not be done: an outcome too, told as such.
+        let p = pending::approve(&h.dirs, id).inspect_err(|e| {
+            locked(&h.notes).push(format!(
+                "the person approved {id}, but it could not be done: {e}"
+            ));
+        })?;
         // An MCP server's answer is outside text: the session is marked before the model reads it.
         if p.tool == "mcp_call" {
             jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
@@ -1652,6 +1689,20 @@ mod tests {
         ));
         assert_eq!(held(SkillNext::Reject, Some("x".into())), SkillNext::Reject);
         assert_eq!(held(SkillNext::Register, None), SkillNext::Register);
+    }
+
+    // A turn with no words of the person is the approvals' only with what came of them to give;
+    // with nothing, there is no turn. Words, findings or a presentation make it another turn.
+    #[test]
+    fn an_empty_turn_is_the_approvals_only_with_outcomes_to_give() {
+        assert_eq!(
+            approvals_turn("", false, false, "the person approved a1"),
+            Some(true)
+        );
+        assert_eq!(approvals_turn("", false, false, ""), None);
+        assert_eq!(approvals_turn("and now?", false, false, "x"), Some(false));
+        assert_eq!(approvals_turn("", true, false, ""), Some(false));
+        assert_eq!(approvals_turn("", false, true, ""), Some(false));
     }
 
     // S-68: a review's notes on a skill go to the model once an hour per name, so a version

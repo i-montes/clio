@@ -6,7 +6,7 @@
 
 use clio_brain::pi::rpc::Event;
 
-use super::app::{Action, App, Confirm, Screen};
+use super::app::{Action, App, Bg, Confirm, Input, Screen};
 use super::chat::{Chat, Item, ToolState};
 use super::home::{Header, KeyState};
 use super::tests::THEME;
@@ -147,7 +147,6 @@ pub(super) fn block_ask(args: serde_json::Value, suspect: bool) -> super::ask::B
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: None,
     };
@@ -177,7 +176,6 @@ pub(super) fn skill_ask(
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some(reason.into()),
     };
@@ -210,7 +208,6 @@ pub(super) fn service_ask(
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("a service always waits for your approval".into()),
     };
@@ -401,6 +398,28 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     out.push(("review fails, its findings", fails()));
     let (a, _) = super::tests::feed(fails(), vec![super::tests_continuous::settled(Some(1000))]);
     out.push(("the turn started by the review", a));
+    // Not yet time to ask: one quiet line, the count in the status line.
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![Input::Bg(Bg::Approvals {
+            session: "sid".into(),
+            waiting: 2,
+            opened: false,
+        })],
+    );
+    out.push(("actions wait for approval, not asked yet", a));
+    // The person answered both boxes: one turn gives the model what came of them.
+    let mut a = conversation(true);
+    a.answering = 2;
+    let ok = |m: &str| Input::Bg(Bg::ChatAnswered(Ok(m.into()), m.starts_with("approved")));
+    let (a, _) = super::tests::feed(
+        a,
+        vec![
+            ok("approved a1b2: removed 3 volumes, 4.2 GB freed"),
+            ok("rejected c3d4: it is not run"),
+        ],
+    );
+    out.push(("the turn started by the approvals", a));
     for (name, typed, suspect) in [
         ("Clio asks for a secret, empty", 0, false),
         ("Clio asks for a secret, with characters", 23, true),
@@ -708,11 +727,8 @@ fn command_states() -> Vec<(&'static str, App)> {
         ],
     );
     m.picks = vec![
-        (
-            "a1b2".into(),
-            "«delete» sudo rm -r /var/lib/docker/volumes/old".into(),
-        ),
-        ("c3d4".into(), "«control» systemctl restart nginx".into()),
+        commands::Pick::new("a1b2", "«delete» sudo rm -r /var/lib/docker/volumes/old"),
+        commands::Pick::new("c3d4", "«control» systemctl restart nginx"),
     ];
     m.foot = Some("and 1 from other sessions: clio pending in a terminal".into());
     a.modal = Some(m);
@@ -773,7 +789,6 @@ pub(super) fn mcp_ask() -> super::ask::BlockAsk {
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("the person asked for GitHub's tools".into()),
     };
@@ -992,9 +1007,10 @@ fn services_states(out: &mut Vec<(&'static str, App)>) {
     ));
     let (a, _) = super::app::update(
         conversation(true),
-        super::app::Input::Bg(super::app::Bg::ChatAnswered(Ok(
-            "approved s1a2b3c4: the service «disk-check» is registered (version 1): it runs every 1h".into(),
-        ))),
+        super::app::Input::Bg(super::app::Bg::ChatAnswered(
+            Ok("approved s1a2b3c4: the service «disk-check» is registered (version 1): it runs every 1h".into()),
+            true,
+        )),
     );
     out.push(("service registered", a));
     // `/services` from a real folder: one fine, one paused, one waiting for the vault.

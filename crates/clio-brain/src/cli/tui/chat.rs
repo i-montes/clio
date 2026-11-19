@@ -215,6 +215,8 @@ pub struct Chat {
     pub(super) parsed: Cell<usize>,
     /// The reviews of this session.
     pub review: super::review::Review,
+    /// What of this session waits for the person, and when Clio asks.
+    pub approvals: super::approvals::Approvals,
 }
 
 impl Default for Chat {
@@ -271,6 +273,7 @@ impl Chat {
             resume: false,
             parsed: Cell::new(0),
             review: super::review::Review::default(),
+            approvals: super::approvals::Approvals::default(),
         }
     }
 
@@ -285,6 +288,8 @@ impl Chat {
 
     /// A turn starts now.
     pub fn start_turn(&mut self, now_ms: u64) {
+        // Any turn gives the model what came of the approvals.
+        self.approvals.answered = false;
         self.running = true;
         self.aborting = false;
         self.turn_ms = now_ms;
@@ -381,8 +386,17 @@ impl Chat {
                 if typed.trim_start().starts_with(super::review::FINDINGS_MARK) {
                     self.items
                         .push(Item::Note(super::review::REVIEW_TURN.into()));
-                } else if !typed.is_empty() {
-                    self.items.push(Item::User(typed.to_owned()));
+                } else {
+                    // What came of the approvals rode with it: the quiet lines it had live.
+                    let (typed, outcomes) = super::approvals::outcomes(typed);
+                    let started = typed.is_empty() && !outcomes.is_empty();
+                    self.items.extend(outcomes.into_iter().map(Item::Note));
+                    if started {
+                        self.items
+                            .push(Item::Note(super::approvals::APPROVALS_TURN.into()));
+                    } else if !typed.is_empty() {
+                        self.items.push(Item::User(typed.to_owned()));
+                    }
                 }
             }
             Some("assistant") => {
@@ -1342,6 +1356,12 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(r, t.dim()));
     }
+    if let Some(w) = super::approvals::status(app) {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled(w, t.accent_line()));
+    }
     if c.jobs > 0 {
         if spans.len() > 1 {
             spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
@@ -2122,7 +2142,12 @@ mod tests {
         );
         assert!(app.chat.running && app.chat.items.is_empty());
         let (app, cmds) = opened(false);
-        assert!(cmds.is_empty() && !app.chat.running);
+        // Idle: only whether to ask about what waits is checked.
+        assert!(!app.chat.running);
+        assert!(
+            cmds.iter().all(|c| matches!(c, Cmd::CheckApprovals { .. })),
+            "{cmds:?}"
+        );
         // Reopened: the turn's message is only Clio's envelope.
         let mut c = Chat::opening(1, 0);
         let wrapped = clio_brain::pi::envelope::wrap("2026-11-03 18:42 -05:00", "");

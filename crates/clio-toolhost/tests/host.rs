@@ -350,13 +350,7 @@ fn what_host_mode_creates_is_private_whatever_the_umask() {
         ));
         modes(&mask, &mut all);
     }
-    for want in [
-        "actions.jsonl",
-        "changes.jsonl",
-        "backups",
-        "pending",
-        "questions.json",
-    ] {
+    for want in ["actions.jsonl", "changes.jsonl", "backups", "pending"] {
         assert!(
             all.iter().any(|(p, _, _)| p.ends_with(want)),
             "{want}: {all:?}"
@@ -697,7 +691,7 @@ fn a_listed_action_does_not_run_and_waits_and_the_task_goes_on() {
     let all = pending::list(&e.state);
     assert_eq!(all.len(), 1);
     let pd = &all[0];
-    assert!(pd.id == id && pd.class == Class::Delete && pd.tool == "fs_write" && pd.ask);
+    assert!(pd.id == id && pd.class == Class::Delete && pd.tool == "fs_write");
     assert!(pd.run == "r1" && pd.session == "s" && pd.state == State::Waiting);
     assert_eq!(pd.what, p(&e.r.join("outside/backup.sql")));
     assert_eq!(pd.expires_ms - pd.created_ms, DAY_MS);
@@ -848,30 +842,6 @@ fn approve_runs_once_and_reject_expired_or_changed_never_run() {
 
     assert!(approver.approve("../../x", now()).is_err());
     assert!(approver.approve("nada", now()).is_err());
-}
-
-#[test]
-fn three_questions_a_day_then_the_summary_and_the_terminals_do_not_count() {
-    let e = env();
-    let ask = |n: &str| {
-        let id = aside_id(&write_backup(&e, &format!("{n}.bak"), "x"), "delete");
-        let all = pending::list(&e.state);
-        (all.iter().find(|p| p.id == id).unwrap().ask, id)
-    };
-    let first: Vec<(bool, String)> = ["0", "1", "2", "3"].map(ask).into();
-    assert_eq!(
-        first.iter().map(|a| a.0).collect::<Vec<_>>(),
-        [true, true, true, false]
-    );
-    // One the person answered at the terminal gives its question back.
-    pending::answered_at_terminal(&e.state, &first[0].1).unwrap();
-    assert_eq!((ask("5").0, ask("6").0), (true, false));
-    // The next day the questions are back.
-    let q = e.state.join("questions.json");
-    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&q).unwrap()).unwrap();
-    v["day"] = json!("2000-01-01");
-    std::fs::write(&q, v.to_string()).unwrap();
-    assert!(ask("7").0);
 }
 
 #[test]
