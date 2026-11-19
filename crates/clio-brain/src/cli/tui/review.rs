@@ -211,6 +211,14 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
                             .map_or_else(String::new, |f| format!(" (full text: {})", cap(f, 300)))
                     )
                 }
+                // Notes on a version written in answer to notes: the person's only (no loop).
+                None if rv.answer.goes_to_model() => {
+                    let k = rv.answer.findings.len() + rv.answer.dropped;
+                    format!(
+                        " with {k} note{}, shown here only (its notes already went to Clio this hour)",
+                        if k == 1 { "" } else { "s" }
+                    )
+                }
                 None => String::new(),
             };
             app.chat.items.push(Item::Note(format!(

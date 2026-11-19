@@ -225,6 +225,9 @@ pub struct ToolhostOpts<'a> {
     /// Clio's skills folder (`clio toolhost --skills`): `skill_write`, `skill_report`, and a
     /// registered skill read as Clio's own text. Only a chat.
     pub skills: Option<&'a Path>,
+    /// Host mode: a folder inside Clio's data that its commands see read-only (`clio toolhost
+    /// --show`): a skill draft's stage, for its reviewer only.
+    pub show: Option<&'a Path>,
 }
 
 /// The `--host-*` options of `clio toolhost`.
@@ -276,6 +279,7 @@ impl Toolhost {
             secrets,
             review,
             skills,
+            show,
         } = opts;
         // Units a `clio` killed before it could stop them do not run forever as the person.
         // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
@@ -348,6 +352,9 @@ impl Toolhost {
         }
         if let Some(s) = skills {
             cmd.arg("--skills").arg(s);
+        }
+        if let Some(s) = show {
+            cmd.arg("--show").arg(s);
         }
         let mut child = cmd
             .arg("--socket-dir")

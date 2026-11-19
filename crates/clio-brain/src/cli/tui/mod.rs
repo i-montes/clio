@@ -1085,7 +1085,16 @@ impl Ctx {
                             return Err("cancelled".into());
                         }
                         g.session = Some(opened.session.clone());
-                        Ok(Box::new(ChatInfo::from(&opened)))
+                        drop(g);
+                        // Skill drafts of this session whose review never ended (a quit, `/new`,
+                        // a crash) are reviewed again, once the chat is open.
+                        let (drafts, notes) = opened.session.skill_news();
+                        let mut info = ChatInfo::from(&opened);
+                        info.notes.extend(notes);
+                        if !drafts.is_empty() {
+                            let _ = tx.send(Input::Bg(Bg::SkillNews(drafts, vec![])));
+                        }
+                        Ok(Box::new(info))
                     },
                     move |r| Bg::ChatOpened {
                         seq,

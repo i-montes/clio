@@ -105,12 +105,15 @@ fn new_folder(run_dir: &Path) -> Result<(u32, PathBuf), String> {
     Err("too many reviews in this run".into())
 }
 
-/// What a skill draft's reviewer is asked (S-68): the skill as text (SKILL.md whole and the list
-/// of its files; the files are in `folder`, which is all the reviewer needs to read), and its
-/// check, run from that folder.
+/// A skill's request may carry the whole skill (SKILL.md and every file, at most 128 KiB).
+const MAX_SKILL_SUBJECT: usize = 160_000;
+
+/// What a skill draft's reviewer is asked (S-68): the skill whole, every file's content inline
+/// (what is judged is what is registered, whether it opens the folder or not), and its check, run
+/// from `folder`, the staged copy.
 pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewRequest {
     let mut subject = format!(
-        "A skill for Clio{}: instructions an agent will follow, and scripts it may run. Its folder is {}: read every file there. SKILL.md:\n\n{}\n\nIts other files:\n",
+        "A skill for Clio{}: instructions an agent will follow, and scripts it may run. A copy of it is in {} (it may be read-only: copy it under /tmp if its check must write). Every file of it, whole:\n\n--- SKILL.md ---\n{}\n",
         if d.update {
             " (a new version of one already registered)"
         } else {
@@ -119,11 +122,8 @@ pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewR
         folder.display(),
         d.skill_md
     );
-    if d.files.is_empty() {
-        subject.push_str("- none\n");
-    }
     for f in &d.files {
-        subject.push_str(&format!("- {} ({} bytes)\n", f.path, f.content.len()));
+        subject.push_str(&format!("--- {} ---\n{}\n", f.path, f.content));
     }
     subject.push_str(
         "\nCheck too that its description says what it does and when to use it, that its steps can be followed by an agent that never saw this conversation, and that it does nothing beyond what it says.",
@@ -133,15 +133,87 @@ pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewR
         subject,
         paths: vec![folder.display().to_string()],
         check: format!(
-            "In {}, run the commands of the `## How to verify` section of its SKILL.md, as written; they must succeed.",
+            "In {}, run the commands of the `## How to verify` section of its SKILL.md, as written; they must succeed. A check that would succeed whatever the skill does is no check: then design and run your own. The verdict is `fails` if the skill does not do what it says.",
             folder.display()
         ),
     }
 }
 
+/// `<review>/stage/<name>/`: the skill's files for its reviewer, written here by the person's
+/// `clio`. Every level is made new (0700) and every file new, never through a link; nothing that
+/// already exists is reused. Any failure is an error (the review then could not check).
+fn stage(dir: &Path, d: &clio_toolhost::skills::Draft) -> Result<PathBuf, String> {
+    let stage = dir.join("stage");
+    crate::cli::skills::new_dir(&stage)?;
+    let folder = stage.join(&d.name);
+    crate::cli::skills::write_tree(&folder, &d.skill_md, &d.files)?;
+    Ok(folder)
+}
+
+/// After the review: the staged copy must still be the draft, byte for byte (each file read
+/// without following a link); otherwise what was reviewed is not what would be registered, and
+/// the review could not check.
+fn settle(answer: Answer, folder: &Path, d: &clio_toolhost::skills::Draft) -> Answer {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let read = |rel: &str| -> Result<String, String> {
+        let p = folder.join(rel);
+        let mut t = String::new();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            .open(&p)
+            .and_then(|mut f| f.read_to_string(&mut t))
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok(t)
+    };
+    let staged = read("SKILL.md").and_then(|md| {
+        let files = d
+            .files
+            .iter()
+            .map(|f| {
+                Ok(clio_toolhost::skills::SkillFile {
+                    path: f.path.clone(),
+                    content: read(&f.path)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(clio_toolhost::skills::digest(&md, &files))
+    });
+    match staged {
+        Ok(h) if h == d.sha256 => answer,
+        Ok(_) => Answer::could_not_check(
+            "the staged copy of the skill changed during the review: what was reviewed is not the draft",
+            None,
+        ),
+        Err(e) => Answer::could_not_check(
+            &format!("the staged copy of the skill could not be read back after the review: {e}"),
+            None,
+        ),
+    }
+}
+
+/// What a review checks: a turn's work (or what `/review` names), or a skill draft (S-68).
+#[derive(Clone, Copy)]
+enum Subject<'a> {
+    Work(&'a ReviewRequest),
+    Skill(&'a clio_toolhost::skills::Draft),
+}
+
 /// Runs one review to its end (or its limit, or `cancel`). Never fails: what kept it from
 /// running is a `could_not_check` that says why.
 pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
+    review_of(p, Subject::Work(req), cancel)
+}
+
+/// The review of a skill draft (S-68): staged in its own folder (`<run>/reviews/<n>/stage/`,
+/// Clio's data: no jail sees it, and in host mode only the reviewer's commands, read-only), its
+/// whole text in the request, and the staged copy checked against the draft after.
+pub fn run_skill(p: &Parent<'_>, d: &clio_toolhost::skills::Draft, cancel: &Cancel) -> Reviewed {
+    review_of(p, Subject::Skill(d), cancel)
+}
+
+fn review_of(p: &Parent<'_>, what: Subject<'_>, cancel: &Cancel) -> Reviewed {
     let began = Instant::now();
     let mut out = Reviewed {
         answer: Answer::could_not_check("the review did not start", None),
@@ -154,7 +226,11 @@ pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
         usage: Usage::default(),
         skill: None,
     };
-    let dir = match started(p, req, cancel, &mut out) {
+    let mut req = match what {
+        Subject::Work(r) => r.clone(),
+        Subject::Skill(d) => skill_request(d, Path::new("(not staged)")),
+    };
+    let dir = match started(p, what, &mut req, cancel, &mut out) {
         Ok(dir) => Some(dir),
         Err((dir, e)) => {
             out.answer = Answer::could_not_check(&format!("the review did not run: {e}"), None);
@@ -163,15 +239,17 @@ pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
     };
     out.secs = began.elapsed().as_secs();
     if let Some(dir) = dir {
-        keep(&dir, req, &out);
+        keep(&dir, &req, &out);
     }
     out
 }
 
-/// What `run` does once it has a folder; on failure, the folder (if any) and why.
+/// What `run` does once it has a folder; on failure, the folder (if any) and why. A skill's
+/// request (`req`) is made once it is staged.
 fn started(
     p: &Parent<'_>,
-    req: &ReviewRequest,
+    what: Subject<'_>,
+    req: &mut ReviewRequest,
     cancel: &Cancel,
     out: &mut Reviewed,
 ) -> Result<PathBuf, (Option<PathBuf>, String)> {
@@ -185,6 +263,25 @@ fn started(
     out.fallback = fallback;
     let (n, dir) = new_folder(p.run_dir).map_err(|e| (None, e))?;
     let fail = |e: String| (Some(dir.clone()), e);
+    let staged = match what {
+        Subject::Skill(d) => {
+            let folder = stage(&dir, d).map_err(|e| {
+                fail(format!(
+                    "the skill could not be staged for its reviewer: {e}"
+                ))
+            })?;
+            *req = skill_request(d, &folder);
+            Some(folder)
+        }
+        Subject::Work(_) => None,
+    };
+    // Copy mode: the reviewer works in the staged copy. Host mode: in the home, and its commands
+    // see the stage read-only (a window into Clio's masked data folder).
+    let work = match &staged {
+        Some(f) if !p.host => f.clone(),
+        _ => p.work.to_path_buf(),
+    };
+    let show = staged.as_deref().and_then(Path::parent).filter(|_| p.host);
     let id = format!("{}.review-{n}", p.run);
     let main = crate::cli::pi::paths(d);
     let node = install::find_node(&std::env::var("PATH").unwrap_or_default())
@@ -203,7 +300,7 @@ fn started(
         d.need_runtime().map_err(fail)?,
         &paths,
         &dir,
-        p.work,
+        &work,
         &key,
         ToolhostOpts {
             memory: None,
@@ -218,6 +315,7 @@ fn started(
             secrets: None,
             review: true,
             skills: None,
+            show,
         },
     )
     .map_err(fail)?;
@@ -230,7 +328,7 @@ fn started(
         extra_env: review_guard_env(&paths, &toolhost, p.host).map_err(fail)?,
         provider: provider_of(d, &rc),
         api_key: Some(key),
-        cwd: p.work.to_path_buf(),
+        cwd: work.clone(),
         name: None,
         install,
         node,
@@ -257,7 +355,12 @@ fn started(
         review_budget(&cfg),
         p.day.clone(),
     );
-    let ask = review::request(&req.what, &req.subject, &req.check);
+    let ask = match what {
+        Subject::Work(_) => review::request(&req.what, &req.subject, &req.check),
+        Subject::Skill(_) => {
+            review::request_capped(&req.what, &req.subject, &req.check, MAX_SKILL_SUBJECT)
+        }
+    };
     // Its commands, for the note (they are in the action log in host mode).
     let mut commands = 0;
     let ran = pi
@@ -296,6 +399,13 @@ fn started(
     out.answer = answer;
     drop(pi);
     toolhost.stop();
+    if let (Subject::Skill(d), Some(f)) = (what, &staged) {
+        out.answer = settle(
+            std::mem::replace(&mut out.answer, Answer::could_not_check("", None)),
+            f,
+            d,
+        );
+    }
     // The reviewer's own mark, as its tool host left it.
     out.marked = std::fs::read_to_string(dir.join("toolhost/tainted.json"))
         .ok()
@@ -856,6 +966,155 @@ mod tests {
         // Another connector: the session's model unless `review.model` says otherwise.
         cfg.model.provider = "opencode-go".into();
         assert_eq!(model_for(&d, &cfg, "beam-free"), ("beam-free".into(), None));
+    }
+
+    fn skill(files: &[(&str, &str)]) -> clio_toolhost::skills::Draft {
+        let md = clio_toolhost::skills::compose(
+            "demo",
+            "Says hello. Use when greeting.",
+            "1. Run it.",
+            "bash scripts/a.sh",
+        );
+        let files: Vec<_> = files
+            .iter()
+            .map(|(p, c)| clio_toolhost::skills::SkillFile {
+                path: (*p).into(),
+                content: (*c).into(),
+            })
+            .collect();
+        clio_toolhost::skills::Draft {
+            id: "a1".into(),
+            session: "s".into(),
+            name: "demo".into(),
+            description: "Says hello. Use when greeting.".into(),
+            reason: "r".into(),
+            verify: "bash scripts/a.sh".into(),
+            sha256: clio_toolhost::skills::digest(&md, &files),
+            skill_md: md,
+            files,
+            created_ms: 1,
+            update: false,
+            marked: false,
+            suspect: false,
+        }
+    }
+
+    // S-68: the stage is made new, level by level, in the review's own folder: a path planted
+    // there (a link to a decoy `live/`, under a parent that cannot be written) is never followed
+    // or reused, and nothing is written outside the stage.
+    #[test]
+    fn a_planted_stage_is_refused_and_nothing_is_written_through_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let d = skill(&[("scripts/a.sh", "#!/bin/bash\necho hi\n")]);
+        let decoy = t.path().join("decoy-live");
+        std::fs::create_dir(&decoy).unwrap();
+        let review = t.path().join("reviews/1");
+        std::fs::create_dir_all(review.join("stage")).unwrap();
+        std::os::unix::fs::symlink(&decoy, review.join("stage/demo")).unwrap();
+        std::fs::set_permissions(review.join("stage"), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let e = stage(&review, &d).unwrap_err();
+        assert!(e.contains("stage"), "{e}");
+        std::fs::set_permissions(review.join("stage"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert_eq!(std::fs::read_dir(&decoy).unwrap().count(), 0);
+        // Only the link alone: refused too.
+        std::fs::remove_dir_all(review.join("stage")).unwrap();
+        std::fs::create_dir(review.join("stage")).unwrap();
+        std::os::unix::fs::symlink(&decoy, review.join("stage/demo")).unwrap();
+        assert!(stage(&review, &d).is_err());
+        assert_eq!(std::fs::read_dir(&decoy).unwrap().count(), 0);
+        // A clean folder: the stage, private, with the draft's bytes.
+        let clean = t.path().join("reviews/2");
+        std::fs::create_dir(&clean).unwrap();
+        let f = stage(&clean, &d).unwrap();
+        assert_eq!(f, clean.join("stage/demo"));
+        let mode = std::fs::metadata(clean.join("stage"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(
+            std::fs::read_to_string(f.join("scripts/a.sh")).unwrap(),
+            d.files[0].content
+        );
+    }
+
+    // S-68: a staging that fails ends the review as `could_not_check`, before anything starts.
+    #[test]
+    fn a_skill_that_cannot_be_staged_could_not_be_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path(), &Config::default_with(vec![]));
+        let run_dir = d.runs.join("r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let model = Config::default_with(vec![]).model;
+        let p = Parent {
+            dirs: &d,
+            run: "r1",
+            run_dir: &run_dir,
+            work: t.path(),
+            host: true,
+            marked: None,
+            day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
+            model: &model,
+        };
+        // A file where one of its folders must go: it cannot be written.
+        let bad = skill(&[("a", "x"), ("a/b", "y")]);
+        let rv = run_skill(&p, &bad, &Cancel::new());
+        assert_eq!(rv.answer.verdict, review::Verdict::CouldNotCheck);
+        assert!(
+            rv.answer.ran.contains("could not be staged"),
+            "{}",
+            rv.answer.ran
+        );
+    }
+
+    // S-68: what was reviewed must still be the draft when the review ends: a staged file
+    // changed meanwhile turns any verdict into `could_not_check`; one gone or made a link too.
+    #[test]
+    fn a_staged_file_changed_during_the_review_could_not_be_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let d = skill(&[("scripts/a.sh", "#!/bin/bash\necho hi\n")]);
+        let passes = review::parse(
+            "```review\nverdict: passes\nran: bash scripts/a.sh\nfindings: none\n```",
+        );
+        let review = t.path().join("r");
+        std::fs::create_dir(&review).unwrap();
+        let f = stage(&review, &d).unwrap();
+        assert_eq!(settle(passes.clone(), &f, &d), passes);
+        std::fs::write(f.join("scripts/a.sh"), "#!/bin/bash\nrm -rf ~\n").unwrap();
+        let a = settle(passes.clone(), &f, &d);
+        assert_eq!(a.verdict, review::Verdict::CouldNotCheck);
+        assert!(a.ran.contains("changed during the review"), "{}", a.ran);
+        std::fs::remove_file(f.join("scripts/a.sh")).unwrap();
+        std::os::unix::fs::symlink(t.path().join("elsewhere"), f.join("scripts/a.sh")).unwrap();
+        assert_eq!(
+            settle(passes, &f, &d).verdict,
+            review::Verdict::CouldNotCheck
+        );
+    }
+
+    // S-68: the reviewer gets every file whole in the request, and is told a check that cannot
+    // fail is none.
+    #[test]
+    fn a_skills_request_carries_every_file_whole_and_what_a_check_is() {
+        let body = format!("#!/bin/bash\n{}\necho end-of-script\n", "x".repeat(30_000));
+        let d = skill(&[("scripts/a.sh", &body), ("ref.md", "the reference\n")]);
+        let r = skill_request(&d, Path::new("/s/demo"));
+        assert!(r.subject.contains("--- SKILL.md ---\n---\nname: demo"));
+        assert!(r.subject.contains(&format!("--- scripts/a.sh ---\n{body}")));
+        assert!(r.subject.contains("--- ref.md ---\nthe reference"));
+        assert!(
+            r.check
+                .contains("would succeed whatever the skill does is no check")
+        );
+        assert!(
+            r.check
+                .contains("`fails` if the skill does not do what it says")
+        );
+        let asked = review::request_capped(&r.what, &r.subject, &r.check, MAX_SKILL_SUBJECT);
+        assert!(asked.contains("echo end-of-script"), "cut");
     }
 
     #[test]

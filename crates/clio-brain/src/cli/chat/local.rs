@@ -306,6 +306,7 @@ impl SessionSource for LocalSource {
                 )),
                 review: false,
                 skills: skills.as_deref(),
+                show: None,
             },
         )?;
         // 3. Pi
@@ -414,6 +415,8 @@ impl SessionSource for LocalSource {
             findings: Mutex::default(),
             skills,
             skill_fails: Mutex::default(),
+            skill_notes: Mutex::default(),
+            skill_handed: Mutex::default(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -532,6 +535,10 @@ struct ChatSession {
     skills: Option<PathBuf>,
     /// Failed reviews in a row of each skill's drafts, by name.
     skill_fails: Mutex<std::collections::HashMap<String, u32>>,
+    /// When the notes of a skill's review last went to the model, by name: once an hour.
+    skill_notes: Mutex<std::collections::HashMap<String, i64>>,
+    /// The drafts this opening of the session handed out for review.
+    skill_handed: Mutex<HashSet<String>>,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -582,6 +589,69 @@ fn skill_next(a: &clio_brain::pi::review::Answer, marked: bool, suspect: bool) -
     }
 }
 
+/// Not by itself, whatever the review says (S-68): a draft of the skill Clio ships with, or of a
+/// name the person removed (and has not brought back).
+fn kept_for_person(root: &Path, name: &str) -> Option<String> {
+    use crate::cli::skills;
+    if name == skills::BUNDLED {
+        Some("it changes the skill Clio ships with".to_owned())
+    } else if skills::record(root, name).is_none() && skills::was_removed(root, name) {
+        Some("you removed a skill of this name".to_owned())
+    } else {
+        None
+    }
+}
+
+/// `next`, held for the person when `kept` says why.
+fn held(next: SkillNext, kept: Option<String>) -> SkillNext {
+    match (next, kept) {
+        (SkillNext::Register, Some(why)) => SkillNext::Wait(why),
+        (SkillNext::Wait(w), Some(why)) => SkillNext::Wait(format!("{w}; and {why}")),
+        (next, _) => next,
+    }
+}
+
+/// The session's marks for a draft's registration: the draft's own (as the session was when it
+/// was written), the mark file's, and the reviewer's (`Some(suspect)`): marked if any is.
+fn marks(
+    d: &clio_toolhost::skills::Draft,
+    file: Option<bool>,
+    reviewer: Option<bool>,
+) -> (bool, bool) {
+    (
+        d.marked || file.is_some() || reviewer.is_some(),
+        d.suspect || file == Some(true) || reviewer == Some(true),
+    )
+}
+
+/// A review's notes on `name` go to the model at most once an hour: a version written in answer
+/// to notes is reviewed and registered, and its own notes are the person's only.
+fn notes_due(sent: &mut std::collections::HashMap<String, i64>, name: &str, now: i64) -> bool {
+    if sent.get(name).is_some_and(|at| now - at < HOUR_MS) {
+        return false;
+    }
+    sent.insert(name.to_owned(), now);
+    true
+}
+
+const HOUR_MS: i64 = 3_600_000;
+
+/// `taken/<id>.done`: the draft's outcome was decided; it is not reviewed again.
+fn done_marker(th: &Path, id: &str) -> PathBuf {
+    clio_toolhost::skills::taken_dir(th).join(format!("{id}.done"))
+}
+
+/// Drafts of `session` taken for review whose outcome was never decided (a quit, `/new` or a
+/// crash during their review): reviewed again, in the session that wrote them.
+fn unfinished(th: &Path, session: &str) -> Vec<(String, String)> {
+    clio_toolhost::skills::drafts_in(&clio_toolhost::skills::taken_dir(th))
+        .into_iter()
+        .filter(|d| d.session == session && valid_draft_id(&d.id))
+        .filter(|d| !done_marker(th, &d.id).exists())
+        .map(|d| (d.id, d.name))
+        .collect()
+}
+
 /// Failed reviews of a skill's drafts, in a row, after which the draft is dropped.
 const SKILL_ATTEMPTS: u32 = 3;
 
@@ -607,6 +677,13 @@ fn skill_count(
 }
 
 impl ChatSession {
+    /// The mark the session's tool host left in the run folder: `Some(suspect)` when marked.
+    fn mark_file(&self) -> Option<bool> {
+        std::fs::read_to_string(&self.taint_file)
+            .ok()
+            .map(|t| t.contains("\"suspect\""))
+    }
+
     /// What a skill draft's review leads to (S-68): `passes` registers it in a clean session (its
     /// findings, if any, go to the model as notes) and sets it aside for the person in a marked
     /// one; `could_not_check` always waits for the person; `fails` gives the findings back to the
@@ -621,9 +698,8 @@ impl ChatSession {
     ) -> Result<super::SkillOutcome, String> {
         let a = &rv.answer;
         let name = d.name.clone();
-        let suspect = self.suspect() || rv.marked == Some(true);
-        let marked = self.taint_file.is_file() || rv.marked.is_some();
-        let next = skill_next(a, marked, suspect);
+        let (marked, suspect) = marks(d, self.mark_file(), rv.marked);
+        let next = held(skill_next(a, marked, suspect), kept_for_person(root, &name));
         let (attempt, dropped) = skill_count(
             &mut locked(&self.skill_fails),
             &name,
@@ -634,7 +710,18 @@ impl ChatSession {
             SkillNext::Wait(why) => Some(why),
             SkillNext::Reject => {
                 let next = if dropped {
-                    "It is dropped: do not write it again unless the person asks for it."
+                    // The name is refused by `skill_write` for the next hour.
+                    let ban =
+                        clio_toolhost::skills::dropped_file(&self.run_dir.join("toolhost"), &name);
+                    ban.parent()
+                        .map_or(Ok(()), crate::cli::mkdir_private)
+                        .and_then(|()| {
+                            crate::cli::write_private(
+                                &ban,
+                                crate::cli::now_ms().to_string().as_bytes(),
+                            )
+                        })?;
+                    "It is dropped, and that name is refused for the next hour: tell the person what failed instead."
                 } else {
                     "Fix what the findings say and call skill_write again with the whole skill."
                 };
@@ -671,11 +758,14 @@ impl ChatSession {
             locked(&h.notes).push(format!(
                 "Clio registered your skill «{name}» (version {n}) after its review passed; it is available from the next session."
             ));
+            let notes = (a.goes_to_model()
+                && notes_due(&mut locked(&self.skill_notes), &name, crate::cli::now_ms()))
+            .then(|| a.for_model());
             return Ok(super::SkillOutcome::Registered {
                 name,
                 description: d.description.clone(),
                 n,
-                notes: a.goes_to_model().then(|| a.for_model()),
+                notes,
             });
         };
         let args = json!({
@@ -856,17 +946,23 @@ impl Session for ChatSession {
         let th = self.run_dir.join("toolhost");
         let notes = crate::cli::skills::apply_reports(root, &th);
         let dir = clio_toolhost::skills::drafts_dir(&th);
-        let taken = dir.join("taken");
-        let mut out = vec![];
+        let taken = clio_toolhost::skills::taken_dir(&th);
+        let mut handed = locked(&self.skill_handed);
+        // Taken before and never answered: once per opening of the session.
+        let mut out: Vec<(String, String)> = unfinished(&th, &self.pi.session_id)
+            .into_iter()
+            .filter(|(id, _)| handed.insert(id.clone()))
+            .collect();
         for d in clio_toolhost::skills::drafts(&th) {
             if d.session != self.pi.session_id || !valid_draft_id(&d.id) {
                 continue;
             }
-            // Taken once: a draft is reviewed once, whatever happens next.
+            // Taken once: a draft is reviewed once, unless its review never ended.
             let from = dir.join(format!("{}.json", d.id));
             if crate::cli::mkdir_private(&taken).is_ok()
                 && std::fs::rename(&from, taken.join(format!("{}.json", d.id))).is_ok()
             {
+                handed.insert(d.id.clone());
                 out.push((d.id, d.name));
             }
         }
@@ -883,54 +979,55 @@ impl Session for ChatSession {
             return Err(format!("{id:?} is not a draft"));
         }
         let th = self.run_dir.join("toolhost");
-        let file = clio_toolhost::skills::drafts_dir(&th)
-            .join("taken")
-            .join(format!("{id}.json"));
-        let d: clio_toolhost::skills::Draft = std::fs::read_to_string(&file)
+        let file = clio_toolhost::skills::taken_dir(&th).join(format!("{id}.json"));
+        // Decided (or not reviewable): it is not reviewed again.
+        let done = || crate::cli::write_private(&done_marker(&th, id), b"");
+        let d: clio_toolhost::skills::Draft = match std::fs::read_to_string(&file)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .ok_or_else(|| format!("draft {id} is gone or damaged"))?;
+        {
+            Some(d) => d,
+            None => {
+                done()?;
+                return Err(format!("draft {id} is gone or damaged"));
+            }
+        };
         // What is reviewed, shown and registered is exactly what the judge read.
         if d.id != id
             || d.session != self.pi.session_id
             || clio_toolhost::skills::digest(&d.skill_md, &d.files) != d.sha256
         {
+            done()?;
             return Err(format!("draft {id} changed after it was stored: dropped"));
         }
-        clio_toolhost::skills::check_stored(&d.name, &d.skill_md, &d.files)?;
-        // Its own folder for the reviewer: inside the run in copy mode (the review's copy), under
-        // /tmp in host mode (the one place a review's commands may write).
-        let stage = if self.host_mode {
-            PathBuf::from(format!("/tmp/clio-skill-{id}"))
-        } else {
-            self.run_dir.join(format!("skills/review-{id}"))
-        };
-        let _ = std::fs::remove_dir_all(&stage);
-        let folder = stage.join(&d.name);
-        crate::cli::skills::write_tree(&folder, &d.skill_md, &d.files)?;
-        let marked = std::fs::read_to_string(&self.taint_file)
-            .ok()
-            .map(|t| t.contains("\"suspect\""));
+        if let Err(e) = clio_toolhost::skills::check_stored(&d.name, &d.skill_md, &d.files) {
+            done()?;
+            return Err(e);
+        }
+        // The reviewer is marked like the session was when the draft was written, or is now.
+        let (m, suspect) = marks(&d, self.mark_file(), None);
         let model = locked(&self.model).clone();
-        let work = if self.host_mode {
-            self.work.clone()
-        } else {
-            folder.clone()
-        };
         let parent = super::review::Parent {
             dirs: &self.dirs,
             run: &self.id,
             run_dir: &self.run_dir,
-            work: &work,
+            work: &self.work,
             host: self.host_mode,
-            marked,
+            marked: m.then_some(suspect),
             day: self.day.clone(),
             model: &model,
         };
-        let req = super::review::skill_request(&d, &folder);
-        let mut rv = super::review::run(&parent, &req, cancel);
-        let _ = std::fs::remove_dir_all(&stage);
-        rv.skill = Some(self.after_skill_review(root, h, &d, &rv)?);
+        let mut rv = super::review::run_skill(&parent, &d, cancel);
+        if cancel.is_cancelled() {
+            // Not decided: reviewed again when this session is opened again.
+            return Err(format!(
+                "the review of «{}» was stopped; it runs again when this session is opened again",
+                d.name
+            ));
+        }
+        let outcome = self.after_skill_review(root, h, &d, &rv);
+        done()?;
+        rv.skill = Some(outcome?);
         Ok(rv)
     }
 
@@ -1036,7 +1133,7 @@ impl Session for ChatSession {
     }
 
     fn suspect(&self) -> bool {
-        std::fs::read_to_string(&self.taint_file).is_ok_and(|t| t.contains("\"suspect\""))
+        self.mark_file() == Some(true)
     }
 
     fn steer(&self, text: &str) -> Result<(), PiError> {
@@ -1370,6 +1467,111 @@ mod tests {
             skill_next(&parse("looks fine to me"), false, false),
             SkillNext::Wait(_)
         ));
+    }
+
+    fn draft(name: &str, session: &str, id: &str) -> clio_toolhost::skills::Draft {
+        clio_toolhost::skills::Draft {
+            id: id.into(),
+            session: session.into(),
+            name: name.into(),
+            description: "d".into(),
+            reason: "r".into(),
+            verify: "v".into(),
+            skill_md: "md".into(),
+            files: vec![],
+            created_ms: 1,
+            update: false,
+            sha256: String::new(),
+            marked: false,
+            suspect: false,
+        }
+    }
+
+    // S-68: the draft's own marks count: with the mark file gone, a draft written in a marked
+    // session still waits for the person.
+    #[test]
+    fn a_marked_draft_waits_even_without_the_mark_file() {
+        use clio_brain::pi::review::parse;
+        let passes = parse("```review\nverdict: passes\nran: bash t.sh\nfindings: none\n```");
+        let mut d = draft("x", "s", "a1");
+        let next = |d: &clio_toolhost::skills::Draft, file, rv| {
+            let (m, s) = marks(d, file, rv);
+            skill_next(&passes, m, s)
+        };
+        assert_eq!(next(&d, None, None), SkillNext::Register);
+        d.marked = true;
+        assert!(matches!(next(&d, None, None), SkillNext::Wait(w) if w.contains("outside")));
+        d.suspect = true;
+        assert!(matches!(next(&d, None, None), SkillNext::Wait(w) if w.contains("orders")));
+        // Any one of the three marks.
+        let clean = draft("x", "s", "a1");
+        assert!(matches!(
+            next(&clean, Some(false), None),
+            SkillNext::Wait(_)
+        ));
+        assert!(
+            matches!(next(&clean, None, Some(true)), SkillNext::Wait(w) if w.contains("orders"))
+        );
+    }
+
+    // S-68: the shipped skill's name, or one the person removed, never registers by itself.
+    #[test]
+    fn the_shipped_skill_and_a_removed_name_wait_for_the_person() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        let bundled = kept_for_person(&root, crate::cli::skills::BUNDLED).unwrap();
+        assert!(bundled.contains("ships with"), "{bundled}");
+        assert_eq!(kept_for_person(&root, "pdf-tools"), None);
+        std::fs::create_dir_all(root.join("removed/pdf-tools-1700000000000")).unwrap();
+        let removed = kept_for_person(&root, "pdf-tools").unwrap();
+        assert!(removed.contains("removed"), "{removed}");
+        assert_eq!(kept_for_person(&root, "pdf"), None);
+        assert_eq!(
+            held(SkillNext::Register, Some(bundled.clone())),
+            SkillNext::Wait(bundled.clone())
+        );
+        assert!(matches!(
+            held(SkillNext::Wait("its check could not be run here".into()), Some(bundled)),
+            SkillNext::Wait(w) if w.contains("could not") && w.contains("ships with")
+        ));
+        assert_eq!(held(SkillNext::Reject, Some("x".into())), SkillNext::Reject);
+        assert_eq!(held(SkillNext::Register, None), SkillNext::Register);
+    }
+
+    // S-68: a review's notes on a skill go to the model once an hour per name, so a version
+    // written in answer to notes cannot start another round by itself.
+    #[test]
+    fn a_skills_notes_go_to_the_model_once_an_hour() {
+        let mut sent = std::collections::HashMap::new();
+        assert!(notes_due(&mut sent, "x", 1_000));
+        assert!(!notes_due(&mut sent, "x", 2_000));
+        assert!(notes_due(&mut sent, "y", 2_000));
+        assert!(!notes_due(&mut sent, "x", 1_000 + HOUR_MS - 1));
+        assert!(notes_due(&mut sent, "x", 1_000 + HOUR_MS));
+    }
+
+    // S-68: a draft taken for review whose outcome was never decided is reviewed again when its
+    // session is opened again; one decided, or of another session, is not.
+    #[test]
+    fn a_taken_draft_without_its_outcome_is_queued_again() {
+        let t = tempfile::tempdir().unwrap();
+        let th = t.path().join("toolhost");
+        let taken = clio_toolhost::skills::taken_dir(&th);
+        std::fs::create_dir_all(&taken).unwrap();
+        for d in [
+            draft("open", "s", "a1"),
+            draft("decided", "s", "a2"),
+            draft("theirs", "other", "a3"),
+        ] {
+            std::fs::write(
+                taken.join(format!("{}.json", d.id)),
+                serde_json::to_string(&d).unwrap(),
+            )
+            .unwrap();
+        }
+        std::fs::write(done_marker(&th, "a2"), "").unwrap();
+        assert_eq!(unfinished(&th, "s"), vec![("a1".into(), "open".into())]);
+        assert!(unfinished(&t.path().join("none"), "s").is_empty());
     }
 
     // S-47: the Pi path gets the same caps as the builtin loop, from the same configuration.
