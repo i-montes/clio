@@ -51,6 +51,10 @@ Source: `Gentleman-Programming/gentle-dot` (`packages/daemon/src/rotation.ts`, `
 `/new` (and `n` in the drawer) starts a new conversation; the drawer and `/sessions` stay as they
 are. `clio --new` opens a draft directly. No new state file: "most recent" is what the drawer
 already sorts by. Config `session.continuous` (default `true`) turns it off.
+A conversation is held by one `clio` at a time (an advisory lock in its run folder): when the last
+one is open in another terminal, `clio` opens a draft with a note instead of an older one, and the
+drawer refuses it. Pi can write its session files, so Clio seals each (size and SHA-256 in the run
+folder) when it opens and closes; a reopened file that does not match marks the session, with a note.
 
 ### 2. A cap on the context, checked between turns
 
@@ -58,7 +62,9 @@ Config `session.context_cap_tokens`, default `200000`. When a turn settles and n
 (no run, no question, no approval), if the context Pi reports is over the cap, Clio sends `compact`.
 The cap is never applied in the middle of a turn, so a long job is not cut; Pi's own compaction near
 the window stays as the backstop. At most one automatic compaction per settled turn; if the context
-is still over the cap afterwards, a note says so once and Clio waits for the next turn.
+is still over the cap afterwards, a note says so once (not again until the context is back under
+the cap) and Clio waits for the next turn. Quitting does not wait for an automatic compaction (Pi is
+stopped as on any close; the compaction is not recorded), and `Esc` stops one with Pi's `abort`.
 
 The owner sets the cap from the chat: `/compact` alone compacts now, as today; `/compact N`, with N
 a whole number of thousands of tokens (`/compact 300`), sets the cap and saves it in `config.json`;
@@ -81,7 +87,8 @@ each model's window (a 200K model would compact on every turn) and it would also
 The chat shows the messages recorded in the conversation's session files, oldest first, not
 `get_messages`. It loads the last page (about 100 turns) and an earlier page when the person scrolls
 to the top. A quiet line marks where the earlier part was summarised. Clio only reads Pi's session
-format (`type: "message"` entries); it never writes it.
+format (`type: "message"` entries); it never writes it. A file over 128 MiB is not read (Pi's copy
+is shown instead), a line over 512 KiB is skipped, and a page holds at most 5,000 entries.
 
 ### 4. Rotation (second stage)
 
@@ -107,7 +114,9 @@ This is the part Gentle Dot does not have, and it needs the owner's decision.
   "start again at each compaction": Pi reports compactions, and Pi is inside the jail, so a fooled
   Pi could reset its own budget; the tool host's clock cannot be moved from there.
 - **`tainted`** (the session read outside content). In one endless chat it is almost always set:
-  the output of any command the agent runs sets it. Until now a tainted session's
+  in copy mode any file read or command output sets it; in host mode reading a foreign folder, a
+  command with the network, one that reaches out or reads logs; in both, a memory that is not the
+  person's, a judged tool result (`suspect`) and a mark restored from the run folder. Until now a tainted session's
   `memory_block_edit` was refused ("open a new session"). The owner hit this on 2026-11-18: after a
   disk clean-up he asked Clio to keep watching the disk, and the change to his `vigilancia` block
   was refused because the session had read the output of `df` and `docker`. Decision: in a marked
