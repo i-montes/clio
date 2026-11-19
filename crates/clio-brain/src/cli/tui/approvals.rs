@@ -51,9 +51,9 @@ pub const APPROVALS_TURN: &str = "turn started by the approvals: Clio says what 
 /// The note of a turn that acts on what Clio created started.
 pub const MANAGE_TURN: &str = "turn started by what Clio did: she goes on with your request";
 /// Turns `MANAGE_TURN` in a row without a message of the person; then Clio stops and says so.
-pub const MAX_AUTO_TURNS: u8 = 3;
+pub const MAX_AUTO_TURNS: u8 = 6;
 /// The note when she stops.
-pub const MANAGE_STOPPED: &str = "Clio stopped going on by herself after 3 turns in a row without a message from you: say how to go on";
+pub const MANAGE_STOPPED: &str = "Clio stopped going on by herself after 6 turns in a row without a message from you: say how to go on";
 /// The note of the turn that sums up a permission window that ended.
 pub const GRANT_TURN: &str =
     "turn started by the end of your permission window: Clio sums up what she did without asking";
@@ -844,7 +844,8 @@ mod tests {
     // person's request; at most `MAX_AUTO_TURNS` in a row, then Clio stops and says so; the
     // person's message resets the count; what is typed takes the outcomes with it instead.
     #[test]
-    fn acts_done_after_a_turn_go_on_by_themselves_three_times_at_most() {
+    fn acts_done_after_a_turn_go_on_by_themselves_six_times_at_most() {
+        assert_eq!(super::MAX_AUTO_TURNS, 6);
         let acted = || Input::Bg(Bg::Acted(vec!["Clio did this by herself: x".into()]));
         let mut a = idle();
         for n in 1..=super::MAX_AUTO_TURNS {
@@ -859,7 +860,7 @@ mod tests {
             a = b;
         }
         let (a, cmds) = feed(a, vec![acted()]);
-        assert_eq!(approvals_turns(&cmds), 0, "the fourth in a row waits");
+        assert_eq!(approvals_turns(&cmds), 0, "the seventh in a row waits");
         assert_eq!(
             notes(&a).last().map(String::as_str),
             Some(super::MANAGE_STOPPED)
