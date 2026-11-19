@@ -46,20 +46,22 @@ pub const GUARD_TOOLS: [&str; 24] = [
     "skill_write",
     "skill_report",
 ];
-/// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
-pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
+/// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools
+/// and the services' (S-69).
+pub const HOST_GUARD_TOOLS: [&str; 4] =
+    ["job_output", "job_stop", "service_write", "service_status"];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@23";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@23.md");
+pub const PROMPT_NAME: &str = "clio-agent@24";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@24.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@7";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@7.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@8";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@8.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -491,10 +493,36 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 23\n"));
-        assert!(HOST_PROMPT.starts_with("version: 7\n"));
+        assert!(PROMPT.starts_with("version: 24\n"));
+        assert!(HOST_PROMPT.starts_with("version: 8\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
+        }
+        // S-69: the services' tools are the host's only.
+        for t in ["service_write", "service_status"] {
+            assert!(HOST_PROMPT.contains(&format!("`{t}`")) && !PROMPT.contains(&format!("`{t}`")));
+        }
+    }
+
+    // S-69: the new prompts are the old ones plus one Services section, nothing else changed.
+    #[test]
+    fn the_new_prompts_only_add_a_services_section() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was) in [
+            (PROMPT, old("clio-agent@23.md")),
+            (HOST_PROMPT, old("clio-host@7.md")),
+        ] {
+            let start = new.find("\nServices\n").expect("a Services section");
+            let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
+            let without = format!("{}{}", &new[..start + 1], &new[end + 1..]);
+            let first = |t: &str| t.split_once('\n').map(|(_, r)| r.to_owned()).unwrap();
+            assert_eq!(first(&without), first(&was));
         }
     }
 }

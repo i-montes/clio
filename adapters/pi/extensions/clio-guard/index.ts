@@ -59,13 +59,16 @@ const SKILL_READ = "clio-guard.skill-read";
 const SKILL_READ_TOOLS = new Set(["read", "ls"]);
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write", "skill_write", "skill_report"] as const;
-// Host mode only: the commands `bash` starts in the background (`background: true`).
-export const HOST_TOOL_NAMES = ["job_output", "job_stop"] as const;
+// Host mode only: the commands `bash` starts in the background (`background: true`), and services
+// (stage 3, S-69): programs the person approves that then run on a schedule with no model.
+export const HOST_TOOL_NAMES = ["job_output", "job_stop", "service_write", "service_status"] as const;
 // Review mode: the only tools of a review, always these (its prompt prefix caches).
 export const REVIEW_TOOL_NAMES = ["read", "bash", "find", "ls"] as const;
 export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
 	job_output: "check what a command started in the background has printed so far, and whether it ended",
 	job_stop: "stop a command that runs in the background",
+	service_write: "propose a program that runs by itself on a schedule, with no model, for the person to approve",
+	service_status: "see Clio's services and their last runs",
 };
 const REVIEW = process.env.CLIO_GUARD_REVIEW === "1";
 const ACTIVE: string[] = REVIEW ? [...REVIEW_TOOL_NAMES] : [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
@@ -125,7 +128,9 @@ const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
 // Tools whose result is Clio's own words or the person's, not outside content.
-const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write", "skill_write", "skill_report"]);
+const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write", "skill_write", "skill_report", "service_write"]);
+// Tools whose result is what a command printed: outside data, wrapped as a tool's result.
+const PRINTED = new Set(["bash", "job_output", "service_status"]);
 // `todo_write`: the widget the chat draws (the only one it reads) and the marks of its lines.
 const TODO_KEY = "clio-todo";
 const TODO_MARK: Record<string, string> = { done: "[x] ", in_progress: "[>] ", pending: "[ ] " };
@@ -319,8 +324,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 			// biome-ignore lint/suspicious/noExplicitAny: same
 			execute: (id: string, params: any, ...more: any[]) => {
 				const { reason: _reason, ...own } = params ?? {};
-				// `skill_write` keeps it: the host stores it with the draft (why this skill).
-				return d.execute(id, d.name === "skill_write" ? (params ?? {}) : own, ...more);
+				// `skill_write` and `service_write` keep it: the host stores it with the draft (why).
+				return d.execute(id, d.name === "skill_write" || d.name === "service_write" ? (params ?? {}) : own, ...more);
 			},
 		});
 	};
@@ -780,6 +785,98 @@ export default function clioGuard(pi: ExtensionAPI) {
 			parameters: { type: "object", properties: { id: ID }, required: ["id"], additionalProperties: false },
 			execute: job("job_stop"),
 		});
+
+		// Services (S-69): a draft goes to the host, which checks it, has the judge read it and
+		// stores it; the person's Clio reviews it and the person approves it, always. Nothing here
+		// registers, runs, turns on or off a service.
+		const LIST = (what: string, max: number) => ({ type: "array", maxItems: max, items: { type: "string", minLength: 1, maxLength: 200 }, description: what });
+		register({
+			name: "service_write",
+			label: "service_write",
+			description:
+				"Propose a service, or a new version of one (same name = update): a program that runs by itself on a schedule (every N minutes, hours or days; daily at a time), with no model, as the person, the machine read-only except its state folder ($CLIO_STATE_DIR) and the paths in `writes`, and the network only to the hosts in `network`. Exit 0 when all is well, 10 when the person should look, anything else on a failure. It is never registered by itself: Clio's judge reads it, a reviewer runs `verify`, and then the person approves it or not. The result comes by itself with a later message. Read the service-creator skill first.",
+			promptSnippet: "Propose a scheduled program (the person approves it).",
+			promptGuidelines: [
+				"service_write: only when the person wants something done again and again on a schedule; read the service-creator skill first; never a secret in it (declare it in `secrets`). Nothing else turns a service on, off or runs it: the person does.",
+			],
+			parameters: {
+				type: "object",
+				properties: {
+					name: { type: "string", pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", maxLength: 64, description: "Lowercase letters, digits and single hyphens. An existing service's name proposes a new version." },
+					description: { type: "string", minLength: 20, maxLength: 1024, description: "One line: what it does, for the person." },
+					schedule: {
+						type: "object",
+						properties: {
+							every: { type: "string", pattern: "^[1-9][0-9]{0,5}[mhd]$", description: "A whole number of m, h or d; at least 5m." },
+							at: { type: "string", pattern: "^[0-2][0-9]:[0-5][0-9]$", description: "Only with every 1d: the local time, HH:MM." },
+						},
+						required: ["every"],
+						additionalProperties: false,
+					},
+					command: { type: "string", minLength: 1, maxLength: 2000, description: "Run with bash from the service's folder (read-only)." },
+					verify: { type: "string", minLength: 1, maxLength: 4000, description: "A check run from the service's folder, without network, that succeeds only when the service works." },
+					files: {
+						type: "array",
+						maxItems: 10,
+						description: "The service's files, paths relative to its folder (for example run.sh).",
+						items: {
+							type: "object",
+							properties: { path: { type: "string", minLength: 1, maxLength: 200 }, content: { type: "string" } },
+							required: ["path", "content"],
+							additionalProperties: false,
+						},
+					},
+					network: LIST("The only hosts it may reach (host, or host:port; 443 by default). None: no network.", 10),
+					secrets: {
+						type: "array",
+						maxItems: 8,
+						description: "Secrets it needs from the vault: each one only for one of its hosts, given as the variable `env`.",
+						items: {
+							type: "object",
+							properties: {
+								name: { type: "string", minLength: 1, maxLength: 64 },
+								env: { type: "string", pattern: "^[A-Z][A-Z0-9_]{0,63}$" },
+								host: { type: "string", minLength: 1, maxLength: 200 },
+							},
+							required: ["name", "env", "host"],
+							additionalProperties: false,
+						},
+					},
+					writes: LIST("Absolute paths under the home it may write besides its state folder.", 10),
+					limits: {
+						type: "object",
+						properties: {
+							cpu_percent: { type: "integer", minimum: 1, maximum: 100 },
+							memory_mb: { type: "integer", minimum: 16, maximum: 2048 },
+							seconds: { type: "integer", minimum: 10, maximum: 3600 },
+						},
+						additionalProperties: false,
+					},
+				},
+				required: ["name", "description", "schedule", "command", "verify"],
+				additionalProperties: false,
+			},
+			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+				content: [{ type: "text" as const, text: (await host("service_write", params, id, signal, 60_000)).content }],
+				details: {},
+			}),
+		});
+		register({
+			name: "service_status",
+			label: "service_status",
+			description: "Clio's services with their schedule, state and last runs; with `name`, one service and the output of its last run.",
+			promptSnippet: "See the services and their last runs.",
+			promptGuidelines: [`service_status: ${DATA_RULE}`],
+			parameters: {
+				type: "object",
+				properties: { name: { type: "string", maxLength: 64, description: "One service; empty for the list." } },
+				additionalProperties: false,
+			},
+			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+				content: [{ type: "text" as const, text: (await host("service_status", { name: params?.name ?? "" }, id, signal)).content }],
+				details: {},
+			}),
+		});
 	}
 
 	// A project can not decide what Pi loads (S-16): always "no".
@@ -844,7 +941,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		// line: cleaned, never wrapped as outside data.
 		// A registered skill's file is Clio's own text too (S-68).
 		const own = OWN_TOOLS.has(event.toolName) || isSkillRead(event.toolName, event.toolCallId);
-		const source = MEMORY_TOOLS.has(event.toolName) || own ? undefined : event.toolName === "bash" || event.toolName === "job_output" ? "tool-result" : "file";
+		const source = MEMORY_TOOLS.has(event.toolName) || own ? undefined : PRINTED.has(event.toolName) ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
 			if (v && typeof v === "object") {

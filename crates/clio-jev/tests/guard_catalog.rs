@@ -62,11 +62,11 @@ fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
             && src.contains("...(HOST ? HOST_TOOL_NAMES.map((name) => ({ name, use_when: HOST_USE_WHEN[name] })) : []),"),
         "the guard reports the catalog at the start of the session"
     );
-    // Host mode adds the background command tools to it.
+    // Host mode adds the background command tools and the services' (S-69) to it.
     let host = use_when_of(&src, "export const HOST_USE_WHEN");
     assert_eq!(
         host.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-        ["job_output", "job_stop"]
+        ["job_output", "job_stop", "service_write", "service_status"]
     );
     let catalog: Vec<_> = use_when(&src)
         .into_iter()
@@ -75,5 +75,5 @@ fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
         .collect();
     let hints = parse_catalog(&json!(catalog)).unwrap();
     let questions = tool_questions(&hints).unwrap();
-    assert_eq!(questions.len(), tool_names(&src).len() + 2);
+    assert_eq!(questions.len(), tool_names(&src).len() + 4);
 }
