@@ -75,6 +75,12 @@ pub struct Draft {
     pub update: bool,
     /// `digest(skill_md, files)`: what is reviewed, shown and registered is exactly this.
     pub sha256: String,
+    /// The session's marks when it was written (outside content read; flagged by the judge):
+    /// its registration counts them even if the mark file is lost.
+    #[serde(default)]
+    pub marked: bool,
+    #[serde(default)]
+    pub suspect: bool,
 }
 
 /// Pi's rules for a name: `a-z`, `0-9` and `-`, at most 64, no hyphen first, last or twice.
@@ -178,6 +184,12 @@ pub fn check(
             "verify: a check that can be run, at most {MAX_VERIFY} bytes (it is required)"
         ));
     }
+    if no_check(verify) {
+        return Err(
+            "verify: that succeeds whatever the skill does, so it is no check; give commands that fail when the skill does not do what it says (run its script on a sample and compare the output)"
+                .into(),
+        );
+    }
     if body
         .lines()
         .any(|l| l.trim().eq_ignore_ascii_case(VERIFY_HEADING))
@@ -226,6 +238,14 @@ pub fn check(
         }
     }
     Ok(skill_md)
+}
+
+/// A `verify` that succeeds whatever the skill does: only `true`, `:`, `exit 0`, or one `echo`
+/// (no pipe, list or second line).
+pub fn no_check(verify: &str) -> bool {
+    let v = verify.trim();
+    matches!(v, "true" | ":" | "exit 0" | "echo")
+        || (v.starts_with("echo ") && !v.contains(['|', ';', '&', '\n']))
 }
 
 /// A skill as it is stored or registered (SKILL.md already written): the same limits as a draft
@@ -290,9 +310,35 @@ pub fn reports_file(run_dir: &Path) -> PathBuf {
     run_dir.join("skills/reports.jsonl")
 }
 
+/// Drafts the person's `clio` took for review (`<drafts>/taken/<id>.json`).
+pub fn taken_dir(run_dir: &Path) -> PathBuf {
+    drafts_dir(run_dir).join("taken")
+}
+
+/// `<run>/skills/dropped/<name>`: the time (ms) a draft of `name` was dropped after three failed
+/// reviews; that name is refused for an hour after.
+pub fn dropped_file(run_dir: &Path, name: &str) -> PathBuf {
+    run_dir.join("skills/dropped").join(name)
+}
+
+/// When `name` was dropped within the hour before `now`: until when it is refused.
+pub fn dropped_until(run_dir: &Path, name: &str, now: i64) -> Option<i64> {
+    let at: i64 = fs::read_to_string(dropped_file(run_dir, name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    (at + HOUR_MS > now).then_some(at + HOUR_MS)
+}
+
 /// Every draft in `run_dir`, oldest first.
 pub fn drafts(run_dir: &Path) -> Vec<Draft> {
-    let mut all: Vec<Draft> = fs::read_dir(drafts_dir(run_dir))
+    drafts_in(&drafts_dir(run_dir))
+}
+
+/// The drafts stored in `dir`, oldest first.
+pub fn drafts_in(dir: &Path) -> Vec<Draft> {
+    let mut all: Vec<Draft> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -387,9 +433,17 @@ impl ToolHost {
             }
         }
         let now = now_ms();
+        if let Some(until) = dropped_until(&self.run_dir, name, now) {
+            return fail(&format!(
+                "a draft of «{name}» was dropped after three failed reviews; that name is refused for {} more minutes. Tell the person what failed instead of writing it again",
+                (until - now) / 60_000 + 1
+            ));
+        }
         let dir = drafts_dir(&self.run_dir);
+        // The ones the person's `clio` took for review count too: each one cost a review.
         let recent = drafts(&self.run_dir)
-            .iter()
+            .into_iter()
+            .chain(drafts_in(&taken_dir(&self.run_dir)))
             .filter(|d| d.session == req.session && d.created_ms > now - HOUR_MS)
             .count();
         if recent >= DRAFTS_PER_HOUR {
@@ -416,7 +470,7 @@ impl ToolHost {
             }
             TextVerdict::NoJudge => {
                 return fail(
-                    "a skill must be read by Clio's judge first, and the judge is off (jev.enabled in config.json)",
+                    "a skill must be read by Clio's judge first, and the judge is off. Tell the person that skills need the judge on (jev.enabled in config.json)",
                 );
             }
             TextVerdict::NoAnswer => {
@@ -441,6 +495,8 @@ impl ToolHost {
             created_ms: now,
             update,
             sha256,
+            marked: self.is_tainted(&req.session),
+            suspect: self.is_suspect(&req.session),
         };
         let stored = private_dir(&dir).and_then(|()| {
             let body = serde_json::to_vec_pretty(&draft).map_err(std::io::Error::other)?;
@@ -703,6 +759,27 @@ mod tests {
         assert!(check("x", d, "tab\there", "v", &[]).is_err());
         assert!(check("x", d, "zero\u{200b}width", "v", &[]).is_err());
         assert!(check("x", &format!("{d}\nsecond"), "b", "v", &[]).is_err());
+        // A check that succeeds whatever the skill does is refused, with what a check is.
+        for none in [
+            "true",
+            " : ",
+            "exit 0",
+            "echo ok",
+            "echo $(bash a.sh)",
+            "echo",
+        ] {
+            let e = check("x", d, "b", none, &[]).unwrap_err();
+            assert!(e.contains("no check"), "{none}: {e}");
+        }
+        for real in [
+            "bash a.sh",
+            "echo x | grep -q x",
+            "true && bash a.sh",
+            "echo a\nbash a.sh",
+            "truex",
+        ] {
+            assert!(check("x", d, "b", real, &[]).is_ok(), "{real}");
+        }
         let big = SkillFile {
             path: "a".into(),
             content: "x".repeat(MAX_FILE + 1),

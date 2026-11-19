@@ -417,11 +417,7 @@ impl ToolHost {
                 max_output: Limits::default().max_output,
                 masks: h.cfg.control.clone(),
                 read_only: self.review,
-                shows: self
-                    .skills
-                    .iter()
-                    .map(|r| r.join(crate::skills::LIVE))
-                    .collect(),
+                shows: self.windows(),
             };
             let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));

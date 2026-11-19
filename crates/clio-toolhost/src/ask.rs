@@ -316,15 +316,17 @@ impl HostRules {
         self
     }
 
-    /// The read-only window of Clio's skills (`<data>/skills/live`, S-68): a path to a skill's
-    /// file in it (plain names, none starting with a dot, so no `..`) is not, by itself, a reason
-    /// for `control`. Every other path of Clio's still is.
+    /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
+    /// path to a file in one (plain names, none starting with a dot, so no `..`) is not, by
+    /// itself, a reason for `control`. Every other path of Clio's still is. The path must end
+    /// where the shell ends a word: a quote, `\`, `$`, a backtick or a glob character after it
+    /// would join it to what follows, so the match does not end there.
     pub fn with_window(mut self, home: &Path, live: &[PathBuf]) -> Self {
         let spellings = spellings(home, live);
         self.window = (!spellings.is_empty()).then(|| {
             let any = spellings.join("|");
             Regex::new(&format!(
-                r"(?P<pre>^|[^\w.~/$-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>$|[^\w./-])"
+                r#"(?P<pre>^|[^\w.~/$-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>$|[^\w./\-"'\\$`*?\[\]{{}}~])"#
             ))
             .expect("escaped paths")
         });
@@ -368,7 +370,9 @@ impl HostRules {
         // Each match takes the character after it, which the next one may start from: again until
         // nothing changes.
         let mut outside = command.to_owned();
-        if let Some(w) = &self.window {
+        // A `..` anywhere may climb out of a window (`cd <window>/demo && cat ../../records/x`):
+        // then no path counts as in it.
+        if let Some(w) = self.window.as_ref().filter(|_| !command.contains("..")) {
             while let std::borrow::Cow::Owned(o) = w.replace_all(&outside, "${pre}SKILL${post}") {
                 outside = o;
             }
@@ -791,6 +795,21 @@ mod tests {
             format!("bash {live}/demo/run.sh; cat /home/u/.local/share/clio/vault.key"),
             format!("cp x {live}/demo/.hidden"),
             "cat ~/.config/clio/config.json".to_owned(),
+            // The shell joins a word across quotes, `\`, `$`, backticks and globs.
+            format!("cat {live}/demo\"/../../records/x\""),
+            format!("cat {live}/demo'/../../records/x'"),
+            format!("cat {live}/demo\\/../../records/x"),
+            format!("cat {live}/demo$X/../../records/x"),
+            format!("cat {live}/demo`true`/../../records/x"),
+            format!("cat {live}/demo*/../../records/x"),
+            format!("cat {live}/demo?/../../records/x"),
+            format!("cat {live}/demo[a]/../../records/x"),
+            format!("cat {live}/demo{{,/../../records/x}}"),
+            format!("cat {live}/demo/*"),
+            format!("cat {live}/demo\"x\""),
+            format!("cat {live}/demo$x"),
+            format!("cd {live}/demo && cat ../../records/x"),
+            format!("cd {live}/demo; cat ../../../vault.key"),
         ] {
             assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
         }

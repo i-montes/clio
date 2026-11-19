@@ -194,6 +194,9 @@ pub struct Config {
     /// Clio's skills folder (`<data>/skills`, S-68): `skill_write` and `skill_report` work, and
     /// a registered, enabled skill is read as Clio's own text. Only a chat gets it.
     pub skills: Option<PathBuf>,
+    /// Host mode: more folders inside Clio's masked ones that commands see read-only, besides
+    /// the skills' `live/` (a skill draft's stage, for its reviewer).
+    pub shows: Vec<PathBuf>,
 }
 
 impl Config {
@@ -213,6 +216,7 @@ impl Config {
             clock: Arc::new(SystemClock),
             review: false,
             skills: None,
+            shows: Vec::new(),
         }
     }
 }
@@ -265,6 +269,17 @@ pub struct ToolHost {
     /// The working folder as configured (copy mode: what relative paths are under).
     work: PathBuf,
     skills: Option<PathBuf>,
+    shows: Vec<PathBuf>,
+}
+
+/// The folders host-mode commands see read-only inside Clio's masked ones: the skills' `live/`
+/// and the configured `--show`s.
+fn windows(skills: Option<&Path>, shows: &[PathBuf]) -> Vec<PathBuf> {
+    skills
+        .map(|r| r.join(skills::LIVE))
+        .into_iter()
+        .chain(shows.iter().cloned())
+        .collect()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -326,10 +341,12 @@ impl ToolHost {
         let (host, exec_status) = match cfg.host {
             Some(h) => {
                 let (mut h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
-                if let Some(root) = &cfg.skills {
-                    let live = root.join(skills::LIVE);
-                    let both: Vec<PathBuf> =
-                        live.canonicalize().into_iter().chain([live]).collect();
+                let windows = windows(cfg.skills.as_deref(), &cfg.shows);
+                if !windows.is_empty() {
+                    let both: Vec<PathBuf> = windows
+                        .iter()
+                        .flat_map(|w| w.canonicalize().into_iter().chain([w.clone()]))
+                        .collect();
                     h.cfg.rules = h.cfg.rules.clone().with_window(&h.cfg.home, &both);
                 }
                 (Some(h), status)
@@ -436,6 +453,7 @@ impl ToolHost {
             jobs: jobs::Jobs::default(),
             work: cfg.work,
             skills: cfg.skills,
+            shows: cfg.shows,
         })
     }
 
@@ -475,6 +493,11 @@ impl ToolHost {
 
     pub fn telemetry(&self) -> Telemetry {
         self.gateway.telemetry()
+    }
+
+    /// The folders this host's commands see read-only inside Clio's masked ones (S-68).
+    pub fn windows(&self) -> Vec<PathBuf> {
+        windows(self.skills.as_deref(), &self.shows)
     }
 
     pub fn is_tainted(&self, session: &str) -> bool {

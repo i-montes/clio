@@ -16,6 +16,9 @@
 //!
 //! `--skills D`: Clio's skills folder (`skill_write`, `skill_report`, reading a registered skill).
 //!
+//! `--show D` (host mode, repeatable): a folder inside Clio's masked ones that commands see
+//! read-only (a skill draft's stage, for its reviewer).
+//!
 //! Host mode: `--host-home H --host-state S --host-run ID [--host-control P]... [--host-rules
 //! FILE]` (the person's `host.json`). `--work` is then not needed: the tools work on `/`.
 
@@ -47,11 +50,13 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let (mut secret_state, mut secret_run, mut vault_person) = (None, None, None);
     let mut review = false;
     let mut skills = None;
+    let mut shows = Vec::new();
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--review" => review = true,
             "--skills" => skills = Some(PathBuf::from(value()?)),
+            "--show" => shows.push(PathBuf::from(value()?)),
             "--socket-dir" => dir = Some(PathBuf::from(value()?)),
             "--work" => work = Some(PathBuf::from(value()?)),
             "--scratch" => scratch = Some(PathBuf::from(value()?)),
@@ -137,6 +142,7 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     }
     cfg.review = review;
     cfg.skills = skills;
+    cfg.shows = shows;
     cfg.host = host;
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));

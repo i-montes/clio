@@ -404,17 +404,43 @@ fn exec_ok(e: &Env) -> bool {
     }
 }
 
-// S-68: in host mode a skill's script runs as the same command typed: it sees the skill
-// read-only (and nothing else of Clio's), cannot change it, and what the list sets aside is set
-// aside the same.
+// S-68: in host mode a skill's script runs read-only: it sees the skill (and nothing else of
+// Clio's, not even the rest of the skills folder above `live/`) and cannot change it; its
+// command line is classified as the same line typed. What the script does inside is not
+// classified (the rules see the command line): the review, and the person when it waited for
+// approval, check that.
 #[test]
-fn a_skill_script_runs_under_host_rules_and_cannot_change_the_skill() {
+fn a_skill_script_runs_read_only_and_its_command_line_is_classified_as_typed() {
     let e = env_with(true, true, None);
     if !exec_ok(&e) {
         return;
     }
-    let before = tree(&e.skills);
     let live = e.skills.join("live/demo");
+    // From inside the window, nothing above `live/` can be listed or read.
+    std::fs::write(
+        live.join("scripts/peek.sh"),
+        "cd \"$(dirname \"$0\")/..\"; echo \"live: $(ls ..)\"; echo \"skills: $(ls ../..)\"; \
+         cat ../../records/demo.json && echo READ; ls ../../versions && echo LISTED; true\n",
+    )
+    .unwrap();
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": format!("bash {}/scripts/peek.sh", live.display())}),
+    );
+    assert_eq!(r.decision.outcome, "allow", "{r:?}");
+    assert!(
+        r.content.starts_with("live: demo\nskills: live\n"),
+        "{}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("READ") && !r.content.contains("LISTED"),
+        "{}",
+        r.content
+    );
+    let before = tree(&e.skills);
     let cmd = format!(
         "bash {s}/scripts/hello.sh; \
          echo x > {s}/SKILL.md 2>/dev/null && echo WROTE; \
@@ -448,4 +474,201 @@ fn a_skill_script_runs_under_host_rules_and_cannot_change_the_skill() {
         assert_eq!(r.decision.outcome, "ask", "{cmd}: {r:?}");
     }
     assert!(target.exists());
+}
+
+// S-68: six drafts an hour per session, those the person's `clio` already took for review
+// counted too (it moves them to `taken/` after each turn).
+#[test]
+fn the_hourly_draft_cap_counts_the_drafts_already_taken() {
+    let e = env(false);
+    let run = e.data.join("runs/r1");
+    for i in 0..skills::DRAFTS_PER_HOUR {
+        let r = call(&e, "s", "skill_write", draft_args(&format!("hello-{i}")));
+        assert!(r.ok, "{r:?}");
+        // Taken as the brain takes them.
+        let taken = skills::taken_dir(&run);
+        std::fs::create_dir_all(&taken).unwrap();
+        for d in skills::drafts(&run) {
+            let f = format!("{}.json", d.id);
+            std::fs::rename(skills::drafts_dir(&run).join(&f), taken.join(&f)).unwrap();
+        }
+    }
+    let r = call(&e, "s", "skill_write", draft_args("one-more"));
+    assert!(!r.ok && r.content.contains("in the last hour"), "{r:?}");
+    // Another session has its own.
+    assert!(call(&e, "t", "skill_write", draft_args("one-more")).ok);
+}
+
+// S-68: a name whose draft was dropped (three failed reviews) is refused for the rest of that
+// hour, with why; an older drop does not count.
+#[test]
+fn a_dropped_name_is_refused_for_an_hour() {
+    let e = env(false);
+    let run = e.data.join("runs/r1");
+    let f = skills::dropped_file(&run, "hello");
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    std::fs::write(&f, (now - 60_000).to_string()).unwrap();
+    let r = call(&e, "s", "skill_write", draft_args("hello"));
+    assert!(
+        !r.ok && r.content.contains("dropped") && r.content.contains("Tell the person"),
+        "{r:?}"
+    );
+    assert!(call(&e, "s", "skill_write", draft_args("other")).ok);
+    std::fs::write(&f, (now - 3_700_000).to_string()).unwrap();
+    assert!(call(&e, "s", "skill_write", draft_args("hello")).ok);
+}
+
+// S-68: the draft keeps the session's marks as they were when it was written, so registration
+// does not depend on the mark file alone.
+#[test]
+fn a_draft_records_the_sessions_marks() {
+    let e = env(false);
+    let run = e.data.join("runs/r1");
+    assert!(call(&e, "s", "skill_write", draft_args("clean")).ok);
+    call(&e, "s", "taint", json!({"source": "web"}));
+    assert!(call(&e, "s", "skill_write", draft_args("marked")).ok);
+    let marks: Vec<(String, bool, bool)> = skills::drafts(&run)
+        .into_iter()
+        .map(|d| (d.name, d.marked, d.suspect))
+        .collect();
+    assert!(marks.contains(&("clean".into(), false, false)), "{marks:?}");
+    assert!(marks.contains(&("marked".into(), true, false)), "{marks:?}");
+}
+
+// S-68: with the judge off, `skill_write` says the person must turn it on.
+#[test]
+fn without_the_judge_the_refusal_says_to_tell_the_person() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let data = r.join("data");
+    std::fs::create_dir_all(r.join("home")).unwrap();
+    let mut c = Config::new(&r.join("home"), &r.join("scratch"), &data.join("runs/r1"));
+    c.jail = JailMode::Off;
+    c.skills = Some(data.join("skills"));
+    let host = ToolHost::new(c).unwrap();
+    let res = host.handle(Request {
+        id: "i1".into(),
+        tool: "skill_write".into(),
+        args: draft_args("hello"),
+        session: "s".into(),
+        call_id: "c1".into(),
+        tainted: false,
+    });
+    assert!(
+        !res.ok && res.content.contains("Tell the person") && res.content.contains("jev.enabled"),
+        "{res:?}"
+    );
+}
+
+/// A review's stage as the brain makes it: `<run>/reviews/1/stage/demo/SKILL.md`.
+fn stage(e: &Env) -> PathBuf {
+    let s = e.data.join("runs/r1/reviews/1/stage");
+    std::fs::create_dir_all(s.join("demo")).unwrap();
+    std::fs::write(s.join("demo/SKILL.md"), "staged\n").unwrap();
+    s
+}
+
+/// The reviewer's tool host for `stage` (`clio toolhost --review --show <stage>`).
+fn reviewer(e: &Env, stage: &Path) -> ToolHost {
+    let mut c = Config::new(
+        &e.home,
+        &e.data.join("scratch-review"),
+        &e.data.join("runs/r1/reviews/1"),
+    );
+    c.jail = JailMode::Auto;
+    c.review = true;
+    c.shows = vec![stage.to_path_buf()];
+    c.host = Some(HostCfg {
+        home: e.home.clone(),
+        state: e.data.join("host"),
+        control: vec![e.data.clone()],
+        rules: HostRules::factory(),
+        run: "r1.review-1".into(),
+        launcher: Some(clio_node::Launcher::Bwrap),
+    });
+    ToolHost::new(c).unwrap()
+}
+
+// S-68: a review's stage lives in Clio's data folder. A host-mode chat command neither sees nor
+// writes it (the folder is masked, only `live/` is shown); the reviewer's commands read it and
+// cannot change it. With systemd by its arguments, with bwrap for real.
+#[test]
+fn a_reviews_stage_is_shown_read_only_to_its_reviewer_and_to_nobody_else() {
+    use clio_node::{HostJail, HostJob, Launcher};
+    let e = env_with(true, true, None);
+    let st = stage(&e);
+    let rv = reviewer(&e, &st);
+    assert_eq!(e.host.windows(), vec![e.skills.join("live")]);
+    assert_eq!(rv.windows(), vec![st.clone()]);
+    match HostJail::with(Launcher::Systemd) {
+        Ok(sd) => {
+            for (h, shown) in [(&e.host, false), (&rv, true)] {
+                let job = HostJob {
+                    command: "true".into(),
+                    cwd: e.home.clone(),
+                    home: e.home.clone(),
+                    network: false,
+                    timeout: None,
+                    max_output: 1024,
+                    masks: vec![e.data.clone()],
+                    shows: h.windows(),
+                    read_only: shown,
+                };
+                let (_, a) = sd.args(&job).unwrap();
+                let bind = format!("BindReadOnlyPaths={}", st.display());
+                assert_eq!(a.contains(&bind), shown, "{a:?}");
+                assert!(
+                    a.contains(&format!("TemporaryFileSystem={}:ro", e.data.display())),
+                    "{a:?}"
+                );
+                assert!(!a.iter().any(|x| x.starts_with("BindPaths=")), "{a:?}");
+            }
+        }
+        Err(why) => eprintln!("SKIPPED (systemd's arguments were not checked): {why}"),
+    }
+    if !exec_ok(&e) {
+        return;
+    }
+    let before = tree(&st);
+    // The chat: the path spelled so no rule sees it; there is nothing there to read or write.
+    let parent = e.data.parent().unwrap().display().to_string();
+    let hidden = format!("\"$(printf %s {parent}/da)ta/runs/r1/reviews/1/stage/demo\"");
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": format!(
+            "cat {hidden}/SKILL.md && echo READ; echo x > {hidden}/SKILL.md && echo WROTE; \
+             mkdir -p {hidden} && touch {hidden}/new && echo MADE; ls {hidden}/.. && echo LISTED; true"
+        )}),
+    );
+    assert_eq!(r.decision.outcome, "allow", "{r:?}");
+    assert!(r.content.contains("No such file"), "{}", r.content);
+    for word in ["staged", "READ", "WROTE", "LISTED"] {
+        assert!(!r.content.contains(word), "{word}: {}", r.content);
+    }
+    assert_eq!(tree(&st), before);
+    // The reviewer: reads it by its path, writes nothing.
+    let s = st.join("demo").display().to_string();
+    let r = rv.handle(Request {
+        id: "i1".into(),
+        tool: "exec".into(),
+        args: json!({"command": format!(
+            "cat {s}/SKILL.md; echo x > {s}/SKILL.md && echo WROTE; touch {s}/new && echo MADE; true"
+        )}),
+        session: "rv".into(),
+        call_id: "c1".into(),
+        tainted: false,
+    });
+    assert!(r.ok, "{r:?}");
+    assert!(r.content.starts_with("staged\n"), "{r:?}");
+    assert!(
+        !r.content.contains("WROTE") && !r.content.contains("MADE"),
+        "{r:?}"
+    );
+    assert_eq!(tree(&st), before);
 }
