@@ -214,6 +214,11 @@ impl ToolHost {
             max_output: Limits::default().max_output,
             masks: h.cfg.control.clone(),
             read_only: self.review,
+            shows: self
+                .skills
+                .iter()
+                .map(|r| r.join(crate::skills::LIVE))
+                .collect(),
         };
         let out = Arc::new(Mutex::new(Out {
             file,

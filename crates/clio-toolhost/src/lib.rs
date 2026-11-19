@@ -33,6 +33,7 @@ mod ops;
 pub mod pending;
 mod sanitize;
 mod server;
+pub mod skills;
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -190,6 +191,9 @@ pub struct Config {
     /// A review (`--review`): nobody can be asked, so what would wait for the person is refused
     /// outright and nothing is stored as pending; no background commands either.
     pub review: bool,
+    /// Clio's skills folder (`<data>/skills`, S-68): `skill_write` and `skill_report` work, and
+    /// a registered, enabled skill is read as Clio's own text. Only a chat gets it.
+    pub skills: Option<PathBuf>,
 }
 
 impl Config {
@@ -208,6 +212,7 @@ impl Config {
             secrets: None,
             clock: Arc::new(SystemClock),
             review: false,
+            skills: None,
         }
     }
 }
@@ -257,6 +262,9 @@ pub struct ToolHost {
     stopping: std::sync::atomic::AtomicBool,
     /// Host mode: the commands that run in the background.
     jobs: jobs::Jobs,
+    /// The working folder as configured (copy mode: what relative paths are under).
+    work: PathBuf,
+    skills: Option<PathBuf>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -317,7 +325,13 @@ impl ToolHost {
         }
         let (host, exec_status) = match cfg.host {
             Some(h) => {
-                let (h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
+                let (mut h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
+                if let Some(root) = &cfg.skills {
+                    let live = root.join(skills::LIVE);
+                    let both: Vec<PathBuf> =
+                        live.canonicalize().into_iter().chain([live]).collect();
+                    h.cfg.rules = h.cfg.rules.clone().with_window(&h.cfg.home, &both);
+                }
                 (Some(h), status)
             }
             None if cfg.jail == JailMode::Off => (None, Err("the jail is switched off".to_owned())),
@@ -420,6 +434,8 @@ impl ToolHost {
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),
+            work: cfg.work,
+            skills: cfg.skills,
         })
     }
 
@@ -668,6 +684,11 @@ impl ToolHost {
         if req.tool == "request_secret" {
             return self.request_secret(&req, &map, tainted);
         }
+        match req.tool.as_str() {
+            "skill_write" => return self.skill_write(&req, &map),
+            "skill_report" => return self.skill_report(&req, &map),
+            _ => {}
+        }
         if map
             .get("content")
             .and_then(Value::as_str)
@@ -701,6 +722,9 @@ impl ToolHost {
             let abs = h.cfg.home.join(p).to_string_lossy().into_owned();
             map.insert("path".into(), Value::from(abs));
             req.args = Value::Object(map.clone());
+        }
+        if let Some(r) = self.skill_read(&req, &map) {
+            return r;
         }
         let ar = ActionRequest {
             tool: req.tool.clone(),

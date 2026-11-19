@@ -31,6 +31,7 @@ fn job(dir: &Path, command: &str) -> HostJob {
         timeout: Some(Duration::from_secs(20)),
         max_output: 64 * 1024,
         masks: vec![],
+        shows: vec![],
         read_only: false,
     }
 }
@@ -93,6 +94,50 @@ fn bwrap_args_mask_existing_folders_cut_the_network_and_clear_the_environment() 
     j.network = true;
     let (_, a) = h.args(&j).unwrap();
     assert!(!a.contains(&"--unshare-net".to_owned()));
+}
+
+/// A mask with a shown folder inside it (Clio's registered skills): `clio/skills/live`, with a
+/// script, beside the decoy.
+fn masked_with_window(d: &TempDir) -> (PathBuf, PathBuf) {
+    let (mask, _) = masked(d);
+    let live = mask.join("skills/live/demo");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("run.sh"), "echo from-the-skill\n").unwrap();
+    (mask.clone(), mask.join("skills/live"))
+}
+
+// S-68: the skills a command may run are shown read-only inside Clio's masked folder, in both
+// launchers' arguments, and never bound writable.
+#[test]
+fn a_shown_folder_is_a_read_only_window_inside_its_mask_in_both_launchers() {
+    let d = TempDir::new().unwrap();
+    let (mask, live) = masked_with_window(&d);
+    let mut j = job(d.path(), "true");
+    j.masks = vec![mask.clone()];
+    j.shows = vec![live.clone(), d.path().join("missing")];
+    let (m, w) = (mask.to_string_lossy(), live.to_string_lossy());
+    if let Some(h) = with(Launcher::Bwrap) {
+        let (_, a) = h.args(&j).unwrap();
+        let at = |x: &str| a.iter().position(|y| y == x).unwrap();
+        assert_eq!(after(&a, "--ro-bind"), [w.as_ref()]);
+        assert_eq!(after(&a, "--bind"), ["/"], "{a:?}");
+        // After the empty mask is made, before it becomes read-only.
+        assert!(at("--tmpfs") < at("--ro-bind") && at("--ro-bind") < at("--remount-ro"));
+        assert_eq!(after(&a, "--remount-ro"), [m.as_ref()]);
+        assert!(!a.iter().any(|x| x.contains("missing")), "{a:?}");
+    }
+    if let Some(h) = with(Launcher::Systemd) {
+        let (_, a) = h.args(&j).unwrap();
+        let props = after(&a, "-p");
+        assert!(
+            props.contains(&format!("BindReadOnlyPaths={w}").as_str()),
+            "{props:?}"
+        );
+        assert!(
+            !props.iter().any(|p| p.starts_with("BindPaths=")),
+            "{props:?}"
+        );
+    }
 }
 
 #[test]
@@ -287,6 +332,35 @@ fn gone(m: &str, what: &str) {
 fn bwrap_for_real_hides_the_mask_cuts_the_network_on_request_and_kills_on_timeout() {
     let Some(h) = bwrap() else { return };
     real(&h);
+}
+
+// S-68: for real, with `bwrap`: a command reads and runs what is in the shown folder and can
+// write, rename or delete none of it; the rest of the mask stays empty.
+#[test]
+fn bwrap_for_real_shows_the_window_read_only_and_hides_the_rest_of_the_mask() {
+    let Some(h) = bwrap() else { return };
+    let d = TempDir::new().unwrap();
+    let (mask, live) = masked_with_window(&d);
+    let w = live.display();
+    let mut j = job(
+        d.path(),
+        &format!(
+            "bash {w}/demo/run.sh; test -e {m}/decoy && echo SEEN; \
+             echo x > {w}/demo/run.sh 2>/dev/null && echo WROTE; \
+             touch {w}/demo/new 2>/dev/null && echo MADE; \
+             mv {w}/demo {w}/moved 2>/dev/null && echo MOVED; \
+             rm -f {w}/demo/run.sh 2>/dev/null; test -e {w}/demo/run.sh || echo DELETED; true",
+            m = mask.display()
+        ),
+    );
+    j.masks = vec![mask.clone()];
+    j.shows = vec![live.clone()];
+    let o = h.run(&j).unwrap();
+    assert_eq!(o.stdout, "from-the-skill\n", "{o:?}");
+    assert_eq!(
+        std::fs::read_to_string(live.join("demo/run.sh")).unwrap(),
+        "echo from-the-skill\n"
+    );
 }
 
 #[test]

@@ -58,6 +58,9 @@ pub struct HostJob {
     pub max_output: usize,
     /// Clio's folders: shown empty and read-only. Absolute; one that does not exist is skipped.
     pub masks: Vec<PathBuf>,
+    /// Folders inside a mask shown as they are, read-only (Clio's registered skills): a command
+    /// can read and run what is there and change none of it. One that does not exist is skipped.
+    pub shows: Vec<PathBuf>,
     /// A review's command: everything read-only but `/tmp`, and no new privileges (no `sudo`).
     pub read_only: bool,
 }
@@ -230,17 +233,22 @@ impl HostJail {
             return Err(format!("{} is not a folder", cwd.display()));
         }
         let cwd = cwd.to_string_lossy().into_owned();
-        let mut masks = Vec::new();
-        for m in &job.masks {
-            if !m.is_absolute() {
-                return Err(format!("mask {} is not an absolute path", m.display()));
+        let canon = |list: &[PathBuf], what: &str| -> Result<Vec<String>, String> {
+            let mut out = Vec::new();
+            for m in list {
+                if !m.is_absolute() {
+                    return Err(format!("{what} {} is not an absolute path", m.display()));
+                }
+                match m.canonicalize() {
+                    Ok(c) => out.push(c.to_string_lossy().into_owned()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("{what} {}: {e}", m.display())),
+                }
             }
-            match m.canonicalize() {
-                Ok(c) => masks.push(c.to_string_lossy().into_owned()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("mask {}: {e}", m.display())),
-            }
-        }
+            Ok(out)
+        };
+        let masks = canon(&job.masks, "mask")?;
+        let shows = canon(&job.shows, "shown folder")?;
         let env = [
             ("HOME", job.home.to_string_lossy().into_owned()),
             ("USER", self.user.clone()),
@@ -281,12 +289,12 @@ impl HostJail {
                     a.push("--unshare-net".into());
                 }
                 for m in &masks {
-                    a.extend([
-                        "--tmpfs".into(),
-                        m.clone(),
-                        "--remount-ro".into(),
-                        m.clone(),
-                    ]);
+                    a.extend(["--tmpfs".into(), m.clone()]);
+                    // A window into the mask, made while the mask can still take its mount point.
+                    for w in shows.iter().filter(|w| Path::new(w).starts_with(m)) {
+                        a.extend(["--ro-bind".into(), w.clone(), w.clone()]);
+                    }
+                    a.extend(["--remount-ro".into(), m.clone()]);
                 }
                 for (k, v) in env {
                     a.extend(["--setenv".into(), k.into(), v]);
@@ -297,7 +305,7 @@ impl HostJail {
             Tools::Systemd { sudo, run, .. } => {
                 // `TemporaryFileSystem=` splits on spaces and colons and unquotes: such a path
                 // would not be masked as written.
-                if let Some(m) = masks.iter().find(|m| {
+                if let Some(m) = masks.iter().chain(&shows).find(|m| {
                     m.chars().any(|c| {
                         c.is_whitespace() || c.is_control() || matches!(c, ':' | '"' | '\'' | '\\')
                     })
@@ -338,6 +346,13 @@ impl HostJail {
                 }
                 for m in &masks {
                     a.extend(["-p".into(), format!("TemporaryFileSystem={m}:ro")]);
+                }
+                // systemd mounts these after the temporary file systems: a window into a mask.
+                for w in shows
+                    .iter()
+                    .filter(|w| masks.iter().any(|m| Path::new(w).starts_with(m)))
+                {
+                    a.extend(["-p".into(), format!("BindReadOnlyPaths={w}")]);
                 }
                 for (k, v) in env {
                     a.extend(["-E".into(), format!("{k}={v}")]);
@@ -451,6 +466,7 @@ impl HostJail {
                 timeout: Some(Duration::from_secs(20)),
                 max_output: 4096,
                 masks: vec![mask.clone()],
+                shows: vec![],
                 read_only: false,
             })?;
             let why = match (out.exit_code, network) {

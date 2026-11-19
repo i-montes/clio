@@ -182,6 +182,114 @@ pub fn approve_block(
     Ok(p)
 }
 
+/// Name, description, SKILL.md and the other files (`path`, `content`) of a skill set aside.
+pub type SkillOf<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, &'a str)>);
+
+/// What a skill waiting to be registered is, read from its arguments: name, description, SKILL.md
+/// and its files (`path`, `content`).
+pub fn skill_of(p: &Pending) -> Option<SkillOf<'_>> {
+    let s = |k: &str| p.args.get(k).and_then(Value::as_str).unwrap_or("");
+    let files = p.args["files"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|f| {
+                    let g = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or("");
+                    (g("path"), g("content"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (p.class == Class::Skill).then(|| (s("name"), s("description"), s("skill_md"), files))
+}
+
+/// The person's `clio` sets aside a reviewed skill draft (S-68): `args` holds the whole draft
+/// (name, description, `skill_md`, `files`, `sha256`, `draft`), `reason` why it waits. Same store
+/// and questions as the rest; the model has no way here.
+pub fn set_aside_skill(
+    state: &Path,
+    run: &str,
+    session: &str,
+    args: Value,
+    reason: &str,
+    per_day: u32,
+) -> Result<Pending, String> {
+    let now = now_ms();
+    let name = args["name"].as_str().unwrap_or("").to_owned();
+    let p = Pending {
+        id: String::new(),
+        class: Class::Skill,
+        tool: "skill_write".into(),
+        args,
+        hash: String::new(),
+        what: name,
+        run: run.to_owned(),
+        session: session.to_owned(),
+        created_ms: now,
+        expires_ms: now + DAY_MS,
+        ask: false,
+        state: State::Waiting,
+        reason: Some(reason.to_owned()),
+    };
+    let p = set_aside(state, p, per_day)?;
+    if let Err(e) = log_line(
+        state,
+        run,
+        session,
+        &p.tool,
+        &p.what,
+        false,
+        "aside",
+        "skills/aside",
+        None,
+    ) {
+        eprintln!("clio-toolhost: the action log lost a line: {e}");
+    }
+    Ok(p)
+}
+
+/// The person approves skill `id`: `register` (the person's `clio`) writes it to the skills
+/// folder as it was stored (same hash), once; a failed registration leaves it waiting.
+pub fn approve_skill(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    register: impl FnOnce(&Pending) -> Result<String, String>,
+) -> Result<Pending, String> {
+    let mut p = check(state, id, now_ms)?;
+    if p.class != Class::Skill {
+        return Err(format!("{id} is not a skill"));
+    }
+    if hash_of(&p.tool, &p.args) != p.hash {
+        return Err(format!(
+            "{id} changed after it was set aside: nothing was registered"
+        ));
+    }
+    claim(state, id).map_err(|_| format!("{id} was already answered"))?;
+    let done = register(&p).inspect_err(|_| {
+        let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
+    })?;
+    p.state = State::Done {
+        exit_code: None,
+        output_tail: done,
+    };
+    save(state, &p)?;
+    if let Err(e) = log_line(
+        state,
+        &p.run,
+        &p.session,
+        &p.tool,
+        &p.what,
+        false,
+        "approved",
+        "skills/approved",
+        None,
+    ) {
+        eprintln!("clio-toolhost: the action log lost a line: {e}");
+    }
+    Ok(p)
+}
+
 /// The person typed the value of secret request `id`: `store` puts it in the vault. Claimed
 /// first, so it is stored once; a failed store leaves it waiting.
 pub fn answer_secret(
@@ -367,7 +475,7 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     claim(state, id).map_err(|_| format!("{id} was already answered"))?;
     p.state = State::Rejected;
     save(state, &p)?;
-    if p.class == Class::Memory
+    if matches!(p.class, Class::Memory | Class::Skill)
         && let Err(e) = log_line(
             state,
             &p.run,
@@ -647,6 +755,11 @@ impl ToolHost {
         if p.class == Class::Memory {
             return Err(format!(
                 "{id} changes one of your blocks: it is written when approved, not run"
+            ));
+        }
+        if p.class == Class::Skill {
+            return Err(format!(
+                "{id} is a skill: it is registered by `clio approve`, not run"
             ));
         }
         if p.run != h.cfg.run {

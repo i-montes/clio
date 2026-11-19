@@ -32,6 +32,10 @@ pub enum Class {
     /// Not an action: a change to one of the person's blocks from a session that read outside
     /// content (`memory_block_edit`). Approved, it is written as the person's; never run.
     Memory,
+    /// Not an action: a skill draft that passed its review and waits to be registered (S-68),
+    /// from a marked session or one whose check could not run. Approved, the person's `clio`
+    /// registers it exactly as it was shown; never run.
+    Skill,
 }
 
 impl fmt::Display for Class {
@@ -43,6 +47,7 @@ impl fmt::Display for Class {
             Control => "control",
             Class::Secret => "secret",
             Class::Memory => "memory",
+            Class::Skill => "skill",
         })
     }
 }
@@ -110,6 +115,22 @@ const FACTORY: &[(Class, &str)] = &[
     // the launcher, unmasked: `systemd-run --user clio approve …`.
     (Control, r"^(systemd-run|gdbus|dbus-send|busctl)\b"),
 ];
+
+/// How a command may spell each of `paths`: absolute, or under `home` as `~/rel`, `$HOME/rel`,
+/// `./rel` or `rel`, escaped for a pattern.
+fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in paths {
+        out.push(regex::escape(&p.to_string_lossy()));
+        if let Ok(rel) = p.strip_prefix(home).map(Path::to_string_lossy)
+            && !rel.is_empty()
+        {
+            let rel = regex::escape(&rel);
+            out.push(format!(r"(~/|\$HOME/|\$\{{HOME\}}/|\./)?{rel}"));
+        }
+    }
+    out
+}
 
 /// Absolute folders match by prefix; a bare name matches a folder of that name anywhere.
 const FOREIGN: [&str; 6] = [
@@ -242,6 +263,9 @@ pub struct HostRules {
     rules: Vec<(Class, Regex)>,
     foreign: Vec<PathBuf>,
     control: Option<Regex>,
+    /// A registered skill's file in the read-only window of Clio's skills (S-68): naming it does
+    /// not make a command `control`.
+    window: Option<Regex>,
     backup: Regex,
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
@@ -273,6 +297,7 @@ impl HostRules {
             rules: FACTORY.iter().map(|(c, p)| (*c, re(p))).collect(),
             foreign: FOREIGN.iter().map(PathBuf::from).collect(),
             control: None,
+            window: None,
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
@@ -283,19 +308,25 @@ impl HostRules {
     /// Clio's own paths: a command that names one, as `/abs`, or under `home` as `~/rel`,
     /// `$HOME/rel` or `rel`, is `control`.
     pub fn with_control(mut self, home: &Path, control: &[PathBuf]) -> Self {
-        let mut spellings = Vec::new();
-        for p in control {
-            spellings.push(regex::escape(&p.to_string_lossy()));
-            if let Ok(rel) = p.strip_prefix(home).map(Path::to_string_lossy)
-                && !rel.is_empty()
-            {
-                let rel = regex::escape(&rel);
-                spellings.push(format!(r"(~/|\$HOME/|\$\{{HOME\}}/|\./)?{rel}"));
-            }
-        }
+        let spellings = spellings(home, control);
         self.control = (!spellings.is_empty()).then(|| {
             let any = spellings.join("|");
             Regex::new(&format!(r"(^|[^\w.~/$-])({any})($|[^\w.-])")).expect("escaped paths")
+        });
+        self
+    }
+
+    /// The read-only window of Clio's skills (`<data>/skills/live`, S-68): a path to a skill's
+    /// file in it (plain names, none starting with a dot, so no `..`) is not, by itself, a reason
+    /// for `control`. Every other path of Clio's still is.
+    pub fn with_window(mut self, home: &Path, live: &[PathBuf]) -> Self {
+        let spellings = spellings(home, live);
+        self.window = (!spellings.is_empty()).then(|| {
+            let any = spellings.join("|");
+            Regex::new(&format!(
+                r"(?P<pre>^|[^\w.~/$-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>$|[^\w./-])"
+            ))
+            .expect("escaped paths")
         });
         self
     }
@@ -334,7 +365,15 @@ impl HostRules {
     }
 
     pub fn classify_command(&self, command: &str) -> Option<Class> {
-        if self.control.as_ref().is_some_and(|r| r.is_match(command)) {
+        // Each match takes the character after it, which the next one may start from: again until
+        // nothing changes.
+        let mut outside = command.to_owned();
+        if let Some(w) = &self.window {
+            while let std::borrow::Cow::Owned(o) = w.replace_all(&outside, "${pre}SKILL${post}") {
+                outside = o;
+            }
+        }
+        if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) {
             return Some(Control);
         }
         simple_commands(command).iter().find_map(|w| {
@@ -729,6 +768,37 @@ mod tests {
                 PathBuf::from("/home/u/.local/share/clio"),
             ],
         )
+    }
+
+    #[test]
+    fn a_skill_in_the_window_is_not_control_and_the_rest_of_clio_still_is() {
+        let r = rules().with_window(
+            Path::new("/home/u"),
+            &[PathBuf::from("/home/u/.local/share/clio/skills/live")],
+        );
+        let live = "/home/u/.local/share/clio/skills/live";
+        for ok in [
+            format!("bash {live}/demo/scripts/run.sh"),
+            "cat ~/.local/share/clio/skills/live/demo/SKILL.md | head".to_owned(),
+            format!("python3 {live}/demo/a.py --x 1"),
+        ] {
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
+        }
+        for bad in [
+            format!("cat {live}/../records/demo.json"),
+            format!("ls {live}"),
+            format!("ls {live}/"),
+            format!("bash {live}/demo/run.sh; cat /home/u/.local/share/clio/vault.key"),
+            format!("cp x {live}/demo/.hidden"),
+            "cat ~/.config/clio/config.json".to_owned(),
+        ] {
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+        }
+        // The other classes see the same command.
+        assert_eq!(
+            r.classify_command(&format!("bash {live}/demo/run.sh && rm -rf ~/proyecto")),
+            Some(Delete)
+        );
     }
 
     /// The plan's table (Task 3), row by row.

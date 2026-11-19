@@ -60,7 +60,7 @@ fn sha256(b: &[u8]) -> String {
 /// Where `p` really lands: canonical, or for a path that does not exist yet, its longest existing
 /// ancestor made canonical plus the rest. So neither a link nor `..` hides it. `None`: a dangling
 /// link or a `..` past what exists.
-fn real(p: &Path) -> Option<PathBuf> {
+pub(crate) fn real(p: &Path) -> Option<PathBuf> {
     let (mut base, mut tail) = (p.to_path_buf(), Vec::new());
     loop {
         if let Ok(c) = base.canonicalize() {
@@ -417,6 +417,11 @@ impl ToolHost {
                 max_output: Limits::default().max_output,
                 masks: h.cfg.control.clone(),
                 read_only: self.review,
+                shows: self
+                    .skills
+                    .iter()
+                    .map(|r| r.join(crate::skills::LIVE))
+                    .collect(),
             };
             let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));
