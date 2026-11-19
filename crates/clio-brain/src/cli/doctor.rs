@@ -779,8 +779,9 @@ fn host_report(o: &mut Report, found: Result<(clio_node::Launcher, Result<(), St
     use clio_node::Launcher;
     let fix = Some("It needs bubblewrap (bwrap) or passwordless sudo with systemd-run; without that Clio works without a console in host mode.".to_owned());
     match &found {
+        // Off Linux there is no launcher to install: a warning, as for the jail.
         Err(why) => o.say(
-            Level::Fail,
+            if cfg!(target_os = "linux") { Level::Fail } else { Level::Warn },
             format!("host mode: there is nothing to run the console with ({why}): there will be no console"),
             fix,
         ),
@@ -1026,7 +1027,12 @@ mod tests {
         );
         let broken = said(Ok((Launcher::Bwrap, Err("x".into()))));
         assert_eq!(broken[0].0, Level::Fail);
-        assert_eq!(said(Err("nothing".into()))[0].0, Level::Fail);
+        let none = if cfg!(target_os = "linux") {
+            Level::Fail
+        } else {
+            Level::Warn
+        };
+        assert_eq!(said(Err("nothing".into()))[0].0, none);
     }
 
     // A person who makes `~/.config/clio/commands/` by hand gets 755 and 644: the check is not

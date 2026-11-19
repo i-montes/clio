@@ -150,8 +150,23 @@ fn call(args: &[String], stdin: Option<&str>) -> Res<()> {
 
 fn running(p: &Paths) -> Option<u32> {
     let pid: u32 = std::fs::read_to_string(&p.pid).ok()?.trim().parse().ok()?;
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    (comm.trim() == "clio-vault").then_some(pid)
+    (comm(pid)? == "clio-vault").then_some(pid)
+}
+
+/// The command name of process `pid`, `None` when there is no such process.
+fn comm(pid: u32) -> Option<String> {
+    if cfg!(target_os = "linux") {
+        let c = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        return Some(c.trim().to_owned());
+    }
+    // No /proc on macOS: ps gives the command's path.
+    let o = Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let c = String::from_utf8_lossy(&o.stdout);
+    let name = c.trim().rsplit('/').next()?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 fn start(dirs: &Dirs) -> Res<()> {
@@ -196,9 +211,18 @@ fn start(dirs: &Dirs) -> Res<()> {
         .append(true)
         .open(&log)
         .map_err(|e| io_err(&log, &e))?;
-    // setsid: the server must outlive this terminal.
-    let mut child = Command::new("setsid")
-        .arg(&bin)
+    // The server must outlive this terminal: setsid(1) on Linux; macOS has no setsid(1), so there
+    // the server gets its own process group, out of reach of the terminal's Ctrl-C and hangup.
+    let mut cmd = if cfg!(target_os = "linux") {
+        let mut c = Command::new("setsid");
+        c.arg(&bin);
+        c
+    } else {
+        let mut c = Command::new(&bin);
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        c
+    };
+    let mut child = cmd
         .args([
             "serve",
             "--vault",
@@ -212,7 +236,7 @@ fn start(dirs: &Dirs) -> Res<()> {
         .stdout(logf.try_clone().map_err(|e| e.to_string())?)
         .stderr(logf)
         .spawn()
-        .map_err(|e| format!("setsid {}: {e}", bin.display()))?;
+        .map_err(|e| format!("starting {}: {e}", bin.display()))?;
     write_private(&p.pid, child.id().to_string().as_bytes())?;
     // A server that did not come up or did not unlock is stopped: no locked orphan stays behind.
     let mut abort = |why: String| {
@@ -224,7 +248,8 @@ fn start(dirs: &Dirs) -> Res<()> {
         why
     };
     let t = Instant::now();
-    while !p.person.exists() {
+    // Up means it accepts: the socket file exists a moment before the server listens on it.
+    while std::os::unix::net::UnixStream::connect(&p.person).is_err() {
         if t.elapsed() > Duration::from_secs(10) {
             return Err(abort(format!(
                 "the vault did not come up; see {}",
@@ -252,9 +277,7 @@ fn stop(dirs: &Dirs) -> Res<()> {
     };
     let _ = Command::new("kill").arg(pid.to_string()).status();
     let t = Instant::now();
-    while std::path::Path::new(&format!("/proc/{pid}")).exists()
-        && t.elapsed() < Duration::from_secs(5)
-    {
+    while comm(pid).is_some() && t.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));
     }
     for f in [&p.gateway, &p.person, &p.pid] {
