@@ -41,6 +41,8 @@ Clio ships with who she is. Her primordial memories (the blocks `identidad`, `re
 
 Clio writes her own skills (how to do a kind of task, with a check and, if needed, scripts) with `skill_write`: the judge reads each one, a second agent reviews it, and it is registered only by your own `clio`, at once in a clean session and with your approval otherwise. `/skills` or `clio skills` lists them and turns one off, back a version or away (S-68).
 
+Work that repeats can become a service: a program Clio writes with `service_write` that then runs by itself on a schedule, with no model, as you, the machine read-only except its own folder and the paths it declared, the network only to the hosts it declared, its secrets from the vault only for those hosts. Every service and every new version waits for your approval after the judge and the reviewer. `clio services enable` sets up a systemd user timer that runs them; `/services` or `clio services` lists them, shows their runs and turns one off (S-69).
+
 Guide: [`docs/usage.md`](docs/usage.md).
 
 ## Layout
