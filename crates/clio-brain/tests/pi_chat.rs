@@ -672,22 +672,22 @@ fn files_in(d: &Path) -> Vec<PathBuf> {
 
 // S-71: a round end to end, with the fake model and the fake judge. Its only message is what the
 // brain built (Clio's request, the watch list as data) under its own prompt, with the host tools;
-// what needs the person waits; its notice is told once (the second round finds the same and says
-// nothing new); it is not a conversation of the drawer. The next chat shows the notice, gives it
-// to the model with the person's message as outside text (once), and asks what the round set
-// aside in the one box, named as the round's; the chat's own prompt is the host one, unchanged.
+// it changes nothing (its write is refused, its notice proposes instead) and nothing waits; its
+// notice is told once (the second round finds the same and says nothing new); it is not a
+// conversation of the drawer. The next chat gives the notice to the model with the person's
+// message as outside text, once (a later chat does not); the chat's own prompt is the host one.
 #[test]
-fn a_round_looks_tells_once_and_what_it_set_aside_is_asked_in_the_next_chat() {
+fn a_round_looks_tells_once_and_changes_nothing() {
     if can_run("round", true).is_none() {
         return;
     }
-    let block = "```round\n- key: disk-root\n  state: problem\n  notice: El disco está al 86 %; vaciar backup.sql espera tu sí.\n```";
+    let block = "```round\n- key: disk-root\n  state: problem\n  notice: El disco está al 86 %; propongo vaciar backup.sql: `truncate -s 0 ~/backup.sql`.\n```";
     let script = json!([
         {"tool_calls": [{"name": "write", "arguments": {"reason": "liberar espacio", "path": "backup.sql", "content": "nada\n"}}]},
         {"text": block},
         {"text": block},
         {"text": "seen the round"},
-        {"text": "the backup is empty now"}
+        {"text": "nothing new"}
     ]);
     let w = World::new_with(&script.to_string(), &["--log-body"]);
     let _vault = start_vault(&w, &format!("jev-test-{}-{}", "key", "7171"));
@@ -729,17 +729,22 @@ fn a_round_looks_tells_once_and_what_it_set_aside_is_asked_in_the_next_chat() {
     let first = round(&w);
     assert!(first.contains("round: 1 thing(s) found, 1 told"), "{first}");
     assert!(
-        first.contains("«disk-root» El disco está al 86 %"),
+        first.contains("«disk-root» El disco está al 86 %; propongo vaciar"),
         "{first}"
     );
-    assert!(
-        first.contains("1 action(s) it found wait for your yes"),
-        "{first}"
-    );
+    assert!(!first.contains("wait for your yes"), "{first}");
     assert_eq!(
         std::fs::read_to_string(w.home().join("backup.sql")).unwrap(),
         "datos\n",
-        "set aside, not done"
+        "refused, not done"
+    );
+    let refused = body_with(&w._provider, clio_toolhost::ROUND_ONLY_READS);
+    assert!(refused.to_string().contains("on your round"));
+    let waiting = w.clio(&["pending"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&waiting.stdout).contains("nothing is waiting"),
+        "{}",
+        String::from_utf8_lossy(&waiting.stdout)
     );
     // Its message: Clio's request, then the watch list as data; its own prompt; the host tools.
     let asked = body_with(&w._provider, clio_brain::pi::preprompt::ROUND_ASK);
@@ -779,32 +784,19 @@ fn a_round_looks_tells_once_and_what_it_set_aside_is_asked_in_the_next_chat() {
     let sessions = w.home().join(".local/share/clio/pi/sessions");
     assert!(files_in(&sessions).is_empty(), "{:?}", files_in(&sessions));
 
-    let v = w.pty_with(
-        "approve",
-        json!({"ask": "¿qué encontró la ronda?", "answer": "seen the round", "after": "the backup is empty now"}),
-        &[("CLIO_JAIL", "off")],
-        &decoy(),
-    );
-    ok(
-        &v,
-        &[
-            "opened",
-            "answered",
-            "box",
-            "armed",
-            "approvals_turn",
-            "after",
-        ],
-    );
-    let boxed = v["box_screen"].as_str().unwrap();
-    assert!(boxed.contains("set aside by the round at"), "{boxed}");
-    assert_eq!(
-        std::fs::read_to_string(w.home().join("backup.sql")).unwrap(),
-        "nada\n"
-    );
-    // The person's message carried the round's notices, as outside text; the next turn did not.
-    let chat = body_with(&w._provider, "¿qué encontró la ronda?");
-    let last = messages(&chat).last().unwrap().to_string();
+    let chat = |ask: &str, answer: &str| {
+        let v = w.pty_with(
+            "one_turn",
+            json!({"ask": ask, "answer": answer}),
+            &[("CLIO_JAIL", "off")],
+            &decoy(),
+        );
+        ok(&v, &["opened", "answered"]);
+    };
+    chat("¿qué encontró la ronda?", "seen the round");
+    // The person's message carried the round's notices, as outside text.
+    let body = body_with(&w._provider, "¿qué encontró la ronda?");
+    let last = messages(&body).last().unwrap().to_string();
     let (_, data) = last
         .split_once("<<<UNTRUSTED-DATA subagent-summary")
         .unwrap();
@@ -813,13 +805,14 @@ fn a_round_looks_tells_once_and_what_it_set_aside_is_asked_in_the_next_chat() {
         "{last}"
     );
     assert!(
-        messages(&chat)[0]["content"]
+        messages(&body)[0]["content"]
             .to_string()
             .contains("You act on the person's real machine")
     );
-    let after = body_with(&w._provider, clio_brain::pi::preprompt::APPROVALS_ASK);
-    let last = messages(&after).last().unwrap().to_string();
-    assert!(!last.contains("Notices from Clio's rounds"), "{last}");
+    // Once: the next chat does not get them again.
+    chat("¿algo más?", "nothing new");
+    let body = body_with(&w._provider, "¿algo más?");
+    assert!(!body.to_string().contains("Notices from Clio's rounds"));
     w.assert_key_nowhere();
 }
 

@@ -819,7 +819,7 @@ fn command_states() -> Vec<(&'static str, App)> {
 fn round_states(out: &mut Vec<(&'static str, App)>) {
     let mut a = pi(true);
     for n in [
-        "the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I can clear it; it waits for your yes.",
+        "the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I propose clearing it: `docker buildx prune`.",
         "the round at 08:00: «backup-notes» resolved: The backup ran again last night.",
         "the round at 08:00: 1 action(s) it found wait for your yes: the approval box asks when a chat opens (or clio pending)",
     ] {
@@ -827,10 +827,12 @@ fn round_states(out: &mut Vec<(&'static str, App)>) {
     }
     out.push(("the round's notices when a chat opens", a));
     let mut p = manage_item("service_manage", serde_json::json!({}), None);
-    p.class = clio_toolhost::ask::Class::Delete;
+    p.class = clio_toolhost::ask::Class::Send;
     p.tool = "exec".into();
-    p.args = serde_json::json!({"command": "rm -rf /home/ivan/.cache/build", "reason": "Free 48 GB on /"});
-    p.reason = Some("set aside by the round at 08:00".into());
+    p.args = serde_json::json!({"command": "sudo du -xsh /var/lib/docker", "reason": "What takes the disk"});
+    // As `round::with_origin` shows it: the origin is display only.
+    p.reason =
+        Some("set aside by the round at 08:00; a round reaches nothing outside by itself".into());
     out.push(("what a round set aside, in the one box", manage_box(&p)));
     let t = tempfile::tempdir().unwrap();
     let d = crate::cli::home::Dirs {
@@ -848,7 +850,7 @@ fn round_states(out: &mut Vec<(&'static str, App)>) {
         serde_json::json!({"last_start_ms": now - 3_600_000, "rounds": [
             {"start_ms": now - 9 * 3_600_000, "ms": 74_000, "by": "timer", "run": "20261119-000000-a1b2", "outcome": "nothing to tell"},
             {"start_ms": now - 3_600_000, "ms": 131_000, "by": "timer", "run": "20261119-080000-c3d4", "outcome": "2 thing(s) found, 2 told", "aside": 1,
-             "notices": ["the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I can clear it; it waits for your yes.",
+             "notices": ["the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I propose clearing it: `docker buildx prune`.",
                          "the round at 08:00: 1 action(s) it found wait for your yes: the approval box asks when a chat opens (or clio pending)"]}
         ]})
         .to_string(),

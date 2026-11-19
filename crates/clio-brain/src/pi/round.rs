@@ -18,6 +18,10 @@ const MAX_NOTICE: usize = 600;
 const MAX_RAW: usize = 4000;
 /// A problem already told is told again ("still") after this long.
 pub const STILL_MS: i64 = 24 * 3_600_000;
+/// An `info` told longer ago than this is forgotten.
+pub const INFO_KEPT_MS: i64 = 7 * 24 * 3_600_000;
+/// The most things kept as told (the newest).
+pub const MAX_TOLD: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,7 +62,7 @@ pub enum Report {
 }
 
 /// `max` characters at most, an ellipsis marking the cut.
-fn cap(s: &str, max: usize) -> String {
+pub fn cap(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -174,8 +178,13 @@ pub fn to_tell(
     for e in entries {
         let prev = told.get(&e.key);
         let text = match e.state {
+            // A time ahead of `now` (a clock set back) counts as long ago.
             State::Problem => match prev {
-                Some(g) if g.state == State::Problem && now - g.at_ms < STILL_MS => None,
+                Some(g)
+                    if g.state == State::Problem && (0..STILL_MS).contains(&(now - g.at_ms)) =>
+                {
+                    None
+                }
                 Some(g) if g.state == State::Problem => Some(format!("still: {}", e.notice)),
                 _ => Some(e.notice.clone()),
             },
@@ -203,7 +212,22 @@ pub fn to_tell(
             out.push((e.key.clone(), t));
         }
     }
+    prune(told, now);
     out
+}
+
+/// Keeps `told` bounded: an `info` older than `INFO_KEPT_MS` is forgotten, and only the newest
+/// `MAX_TOLD` things are kept.
+pub fn prune(told: &mut BTreeMap<String, Given>, now: i64) {
+    told.retain(|_, g| g.state != State::Info || now - g.at_ms <= INFO_KEPT_MS);
+    if told.len() > MAX_TOLD {
+        let mut by_age: Vec<(i64, String)> =
+            told.iter().map(|(k, g)| (g.at_ms, k.clone())).collect();
+        by_age.sort_unstable_by(|a, b| b.cmp(a));
+        for (_, k) in by_age.into_iter().skip(MAX_TOLD) {
+            told.remove(&k);
+        }
+    }
 }
 
 /// `HH:MM-HH:MM` as minutes of the day (start, end); `None` when it does not read.
@@ -230,9 +254,9 @@ pub fn in_quiet(quiet: Option<(u32, u32)>, now: i64, offset_s: i64) -> bool {
 }
 
 /// Whether a round is due at `now`: rounds on (`every_hours` > 0), not in the quiet hours, and
-/// `every_hours` since the last one started (none yet: due). Measured from the last start, a
-/// machine that was off catches up once, never once per missed slot; a round that falls in the
-/// quiet hours waits for their end.
+/// `every_hours` since the last one started (none yet, or one ahead of `now` after the clock was
+/// set back: due). Measured from the last start, a machine that was off catches up once, never
+/// once per missed slot; a round that falls in the quiet hours waits for their end.
 pub fn due(
     every_hours: u64,
     quiet: Option<(u32, u32)>,
@@ -244,7 +268,7 @@ pub fn due(
         return false;
     }
     let every = i64::try_from(every_hours.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
-    last_start.is_none_or(|l| now.saturating_sub(l) >= every)
+    last_start.is_none_or(|l| l > now || now.saturating_sub(l) >= every)
 }
 
 #[cfg(test)]

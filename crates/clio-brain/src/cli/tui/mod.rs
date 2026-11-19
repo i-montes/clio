@@ -573,7 +573,8 @@ fn offer(d: &Dirs, waiting: &[clio_toolhost::pending::Pending], suspect: bool, t
     let asks: Vec<_> = aside
         .into_iter()
         .map(|p| {
-            let k = pick(p, suspect || super::pending::suspect_run(d, &p.run));
+            let shown = super::round::with_origin(d, p.clone());
+            let k = pick(&shown, suspect || super::pending::suspect_run(d, &p.run));
             (k.id, k.what, k.block)
         })
         .collect();
@@ -1668,7 +1669,8 @@ impl Ctx {
                             .iter()
                             .map(|p| {
                                 let marked = suspect || super::pending::suspect_run(d, &p.run);
-                                (super::pending::line(p, now), pick(p, marked))
+                                let shown = super::round::with_origin(d, p.clone());
+                                (super::pending::line(&shown, now), pick(&shown, marked))
                             })
                             .collect();
                         let cut = super::pending::interrupted(d)
