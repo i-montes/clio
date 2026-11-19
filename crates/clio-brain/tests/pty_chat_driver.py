@@ -172,7 +172,13 @@ def open_drawer(fd):
 
 
 def ask(fd, text, answer, timeout=60):
-    type_text(fd, text)
+    # Each key once the screen shows the ones before it (the TUI took them), and Enter only once
+    # it shows them all: a key that is lost fails here, not later as a request without it.
+    for i, ch in enumerate(text):
+        os.write(fd, ch.encode())
+        if not wait_screen(fd, text[: i + 1], 10):
+            print(f"typed {text[: i + 1]!r} but the screen never showed it", file=sys.stderr)
+            return False
     send(fd, ENTER)
     return wait_screen(fd, answer, timeout) and idle(fd)
 
