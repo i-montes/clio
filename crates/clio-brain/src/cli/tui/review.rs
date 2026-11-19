@@ -2,6 +2,7 @@
 //! changed something, what the person sees when one ends, and the turn that gives its findings to
 //! the model. The review itself runs in the background (`Session::review`).
 
+use clio_brain::pi::preprompt::{REVIEW_ASK, SKILL_NOTES_ASK};
 use clio_brain::pi::review::Verdict;
 use clio_brain::pi::rpc::{Cancel, Usage};
 
@@ -35,8 +36,8 @@ pub struct Review {
     pub changed: bool,
     /// The turn running answers a review's findings: it is never reviewed itself.
     pub answering: bool,
-    /// Findings waiting for the chat to be idle, and the reviewer's mark.
-    pub findings: Option<(String, Option<bool>)>,
+    /// Findings waiting for the chat to be idle, the reviewer's mark and Clio's request.
+    pub findings: Option<(String, Option<bool>, &'static str)>,
     /// What the reviews of this session spent.
     pub usage: Usage,
     pub count: u32,
@@ -195,22 +196,36 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
             name,
             description,
             n,
-        } => app.chat.items.push(Item::Note(format!(
-            "skill registered: «{}»{}: {} · review: {verdict} · available from the next session (or when this one is reopened)",
-            clean(name),
-            if *n > 1 { format!(" (version {n})") } else { String::new() },
-            cap(description, 200)
-        ))),
+            notes,
+        } => {
+            // Notes of a review that passed: never a blocker, given to the model once.
+            let left = match notes {
+                Some(text) => {
+                    app.chat.review.findings = Some((text.clone(), rv.marked, SKILL_NOTES_ASK));
+                    let k = rv.answer.findings.len() + rv.answer.dropped;
+                    format!(
+                        " with {k} note{}{}; they go to Clio when the chat is idle",
+                        if k == 1 { "" } else { "s" },
+                        rv.full
+                            .as_ref()
+                            .map_or_else(String::new, |f| format!(" (full text: {})", cap(f, 300)))
+                    )
+                }
+                None => String::new(),
+            };
+            app.chat.items.push(Item::Note(format!(
+                "skill registered: «{}»{}: {} · review: {verdict}{left} · available from the next session (or when this one is reopened)",
+                clean(name),
+                if *n > 1 { format!(" (version {n})") } else { String::new() },
+                cap(description, 200)
+            )));
+        }
         SkillOutcome::Waits { id, what, ask } => {
             app.chat.items.push(Item::Note(format!(
                 "a skill waits for your approval ({id}) · review: {verdict}"
             )));
-            let mut c = super::app::Confirm::new(
-                super::app::Action::Approve,
-                id.clone(),
-                0,
-                what.clone(),
-            );
+            let mut c =
+                super::app::Confirm::new(super::app::Action::Approve, id.clone(), 0, what.clone());
             c.session.clone_from(&app.chat.session_id);
             c.block = (**ask).clone();
             app.asks.push_back(c);
@@ -222,15 +237,15 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
             dropped,
             to_model,
         } => {
-            app.chat.review.findings = Some((to_model.clone(), rv.marked));
+            app.chat.review.findings = Some((to_model.clone(), rv.marked, REVIEW_ASK));
             app.chat.items.push(Item::Note(if *dropped {
                 format!(
-                    "skill «{}» not registered: review {verdict}, the third time in a row; the draft is dropped",
+                    "skill «{}» not registered: review failed three times in a row; the draft was dropped",
                     clean(name)
                 )
             } else {
                 format!(
-                    "skill «{}» not registered: review {verdict} (attempt {attempt} of 3); the findings go to Clio when the chat is idle",
+                    "skill «{}» not registered: review failed (attempt {attempt} of 3); the findings go to Clio when the chat is idle",
                     clean(name)
                 )
             }));
@@ -251,14 +266,18 @@ pub fn deliver(app: &mut App) -> Vec<Cmd> {
     {
         return vec![];
     }
-    let Some((findings, marked)) = app.chat.review.findings.take() else {
+    let Some((findings, marked, ask)) = app.chat.review.findings.take() else {
         return vec![];
     };
     app.chat.items.push(Item::Note(REVIEW_TURN.into()));
     app.chat.review.answering = true;
     app.chat.scroll = 0;
     app.chat.start_turn(app.now_ms);
-    vec![Cmd::ReviewTurn { findings, marked }]
+    vec![Cmd::ReviewTurn {
+        findings,
+        marked,
+        ask,
+    }]
 }
 
 /// `claude-opus-5-5` → `opus`; any other id as it is.
@@ -300,7 +319,7 @@ pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>
     u.cost += rv.usage.cost;
     r.count += 1;
     if rv.answer.goes_to_model() && rv.skill.is_none() {
-        r.findings = Some((rv.answer.for_model(), rv.marked));
+        r.findings = Some((rv.answer.for_model(), rv.marked, REVIEW_ASK));
     }
     let a = &rv.answer;
     let verdict = match a.verdict {

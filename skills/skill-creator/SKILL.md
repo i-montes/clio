@@ -58,8 +58,9 @@ open its SKILL.md with `read` and follow it.
 ## After skill_write
 
 A reviewer runs the check in the background; the answer comes by itself: registered (usable from
-the next session), waiting for the person's approval, or findings. Fix the findings and call
-skill_write again; after three failed reviews in a row the draft is dropped.
+the next session), waiting for the person's approval, or failed with findings. A registered skill
+may come with the review's notes: write a new version only if a note is worth it. When it failed,
+fix it and call skill_write again; after three failed reviews in a row the draft is dropped.
 
 ## After using a skill
 

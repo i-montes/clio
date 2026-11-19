@@ -205,6 +205,8 @@ pub enum Cmd {
     ReviewTurn {
         findings: String,
         marked: Option<bool>,
+        /// Clio's request that goes with them (`preprompt::REVIEW_ASK`).
+        ask: &'static str,
     },
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),

@@ -64,6 +64,8 @@ pub const COMPACTED_ASK: &str = "the conversation was just compacted: before you
 pub const PRESENTATION_ASK: &str = "This is your first conversation with this person. Before anything else, introduce yourself in two or three lines with what your identity says. Then ask them these questions, one by one, waiting for each answer: 1) what their name is and how they want you to address them; 2) what they do and what they have on this machine; 3) what they want you to watch; 4) what counts as important enough to tell them about. Save each answer with memory_block_edit: what is about the person in «preferencias» and each thing to watch in «vigilancia», one per entry. If they want to change who you are or how you speak, change «identidad» or «reglas». If they do not want to answer now, save in «preferencias» that they preferred not to introduce themselves, and do not insist. Write all of this in the language of the person's memories and blocks; if there are none, in English. When you finish, tell them they can change all this whenever they want, by talking to you.";
 /// What Clio asks with the findings of a review (they follow the message, as data).
 pub const REVIEW_ASK: &str = "An independent review of your last work found the following; fix what is right, and say which findings you do not accept and why.";
+/// What Clio asks with the notes of a review that passed a skill, which is registered already.
+pub const SKILL_NOTES_ASK: &str = "The skill was registered; its review also noted the following. Write a new version with skill_write only if a note is worth it; otherwise leave the skill as it is.";
 /// What Clio asks when the person closes the session.
 pub const CLOSING_ASK: &str = "the person closed this session: save its summary with memory_session_summary and do nothing else (do not change files and do not reply to them).";
 
@@ -124,8 +126,8 @@ struct Inner {
     summaries: AtomicBool,
     /// Pi compacted the conversation: the next message asks for the summary first.
     compacted: AtomicBool,
-    /// A review's findings go with the next message: it carries `REVIEW_ASK`.
-    reviewed: AtomicBool,
+    /// A review's findings go with the next message: it carries this request (`REVIEW_ASK`).
+    reviewed: Mutex<Option<&'static str>>,
     /// What this session has been shown: ids (never twice) and characters (up to a budget).
     shown: Mutex<(HashSet<i64>, usize)>,
 }
@@ -163,7 +165,7 @@ impl PrePrompt {
             opening: AtomicBool::new(true),
             summaries: AtomicBool::new(false),
             compacted: AtomicBool::new(false),
-            reviewed: AtomicBool::new(false),
+            reviewed: Mutex::new(None),
             shown: Mutex::new((HashSet::new(), 0)),
         }))
     }
@@ -198,9 +200,13 @@ impl PrePrompt {
         }
     }
 
-    /// A review's findings go with the next message: it asks the model to answer them (once).
-    pub fn reviewed(&self) {
-        self.0.reviewed.store(true, Ordering::SeqCst);
+    /// A review's findings go with the next message: `ask` asks the model to answer them (once).
+    pub fn reviewed(&self, ask: &'static str) {
+        *self
+            .0
+            .reviewed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ask);
     }
 
     /// The last message of a session the person closes: only Clio's request for the summary, with
@@ -280,8 +286,9 @@ impl PrePrompt {
         let review = self
             .0
             .reviewed
-            .swap(false, Ordering::SeqCst)
-            .then_some(REVIEW_ASK);
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let asks: Vec<&str> = first.into_iter().chain(review).collect();
         (!asks.is_empty()).then(|| asks.join(" "))
     }
@@ -1116,7 +1123,7 @@ mod tests {
     #[test]
     fn a_reviews_findings_carry_clios_request_once_beside_the_summary_one() {
         let pre = PrePrompt::time_only();
-        pre.reviewed();
+        pre.reviewed(REVIEW_ASK);
         let p = pre.prepare_within("", STAMP);
         assert!(
             p.text.contains(&format!("Clio's request: {REVIEW_ASK}\n")),
@@ -1132,7 +1139,7 @@ mod tests {
         // After a compaction too: both requests, the summary first.
         pre.set_summaries(true);
         pre.compacted();
-        pre.reviewed();
+        pre.reviewed(REVIEW_ASK);
         let p = pre.prepare("", STAMP);
         assert!(
             p.text

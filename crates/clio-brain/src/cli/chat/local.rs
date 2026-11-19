@@ -527,7 +527,7 @@ struct ChatSession {
     /// The last turn, for what it changed (`last_work`).
     turn: Mutex<super::review::Turn>,
     /// A review's findings for the next message, and the reviewer's mark.
-    findings: Mutex<Option<(String, Option<bool>)>>,
+    findings: Mutex<Option<(String, Option<bool>, &'static str)>>,
     /// Clio's skills folder: a chat's (S-68).
     skills: Option<PathBuf>,
     /// Failed reviews in a row of each skill's drafts, by name.
@@ -561,8 +561,9 @@ enum SkillNext {
     Reject,
 }
 
-/// `passes` with no findings registers it, unless the session (or the reviewer) is marked:
-/// then it waits; `could_not_check` always waits; anything else is rejected.
+/// The verdict decides, not the findings (`clio-reviewer@3` defines it): `passes` registers it,
+/// unless the session (or the reviewer) is marked: then it waits; `could_not_check` always waits;
+/// `fails` is rejected.
 fn skill_next(a: &clio_brain::pi::review::Answer, marked: bool, suspect: bool) -> SkillNext {
     use clio_brain::pi::review::Verdict;
     match a.verdict {
@@ -570,25 +571,47 @@ fn skill_next(a: &clio_brain::pi::review::Answer, marked: bool, suspect: bool) -
             "its check could not be run here: {}",
             clio_brain::pi::text::line(&a.ran, 300)
         )),
-        Verdict::Passes if a.findings.is_empty() && a.dropped == 0 => match (marked, suspect) {
+        Verdict::Passes => match (marked, suspect) {
             (_, true) => {
                 SkillNext::Wait("this session read content that tried to give orders".to_owned())
             }
             (true, false) => SkillNext::Wait("this session read content from outside".to_owned()),
             (false, false) => SkillNext::Register,
         },
-        _ => SkillNext::Reject,
+        Verdict::Fails => SkillNext::Reject,
     }
 }
 
 /// Failed reviews of a skill's drafts, in a row, after which the draft is dropped.
 const SKILL_ATTEMPTS: u32 = 3;
 
+/// A review of `name`'s draft ended: which failure in a row it is, and whether the draft is
+/// dropped (the third). Only `failed` counts; any other verdict clears the count.
+fn skill_count(
+    fails: &mut std::collections::HashMap<String, u32>,
+    name: &str,
+    failed: bool,
+) -> (u32, bool) {
+    if !failed {
+        fails.remove(name);
+        return (0, false);
+    }
+    let attempt = fails.entry(name.to_owned()).or_insert(0);
+    *attempt += 1;
+    let attempt = *attempt;
+    let dropped = attempt >= SKILL_ATTEMPTS;
+    if dropped {
+        fails.remove(name);
+    }
+    (attempt, dropped)
+}
+
 impl ChatSession {
-    /// What a skill draft's review leads to (S-68): `passes` with no findings registers it in a
-    /// clean session and sets it aside for the person in a marked one; `could_not_check` always
-    /// waits for the person; anything else gives the findings back to the model, and the third
-    /// failure in a row drops it. Registering happens here, in the person's `clio`.
+    /// What a skill draft's review leads to (S-68): `passes` registers it in a clean session (its
+    /// findings, if any, go to the model as notes) and sets it aside for the person in a marked
+    /// one; `could_not_check` always waits for the person; `fails` gives the findings back to the
+    /// model, and the third failure in a row drops it. Registering happens here, in the person's
+    /// `clio`.
     fn after_skill_review(
         &self,
         root: &Path,
@@ -600,18 +623,16 @@ impl ChatSession {
         let name = d.name.clone();
         let suspect = self.suspect() || rv.marked == Some(true);
         let marked = self.taint_file.is_file() || rv.marked.is_some();
-        let wait = match skill_next(a, marked, suspect) {
+        let next = skill_next(a, marked, suspect);
+        let (attempt, dropped) = skill_count(
+            &mut locked(&self.skill_fails),
+            &name,
+            next == SkillNext::Reject,
+        );
+        let wait = match next {
             SkillNext::Register => None,
             SkillNext::Wait(why) => Some(why),
             SkillNext::Reject => {
-                let mut fails = locked(&self.skill_fails);
-                let attempt = fails.entry(name.clone()).or_insert(0);
-                *attempt += 1;
-                let attempt = *attempt;
-                let dropped = attempt >= SKILL_ATTEMPTS;
-                if dropped {
-                    fails.remove(&name);
-                }
                 let next = if dropped {
                     "It is dropped: do not write it again unless the person asks for it."
                 } else {
@@ -619,7 +640,7 @@ impl ChatSession {
                 };
                 return Ok(super::SkillOutcome::Rejected {
                     to_model: format!(
-                        "Your draft {} of the skill «{name}» was not registered: its review did not pass (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
+                        "Your draft {} of the skill «{name}» was not registered: its review failed (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
                         d.id,
                         a.for_model()
                     ),
@@ -629,7 +650,6 @@ impl ChatSession {
                 });
             }
         };
-        locked(&self.skill_fails).remove(&name);
         let verdict = a.verdict.word();
         let Some(reason) = wait else {
             let n = crate::cli::skills::register(
@@ -655,6 +675,7 @@ impl ChatSession {
                 name,
                 description: d.description.clone(),
                 n,
+                notes: a.goes_to_model().then(|| a.for_model()),
             });
         };
         let args = json!({
@@ -713,10 +734,11 @@ impl Session for ChatSession {
         // reviewer that read what is not the person's marks this session the same way, and the
         // judge reads them first; a mark that cannot be made means they are not given.
         let findings = match locked(&self.findings).take() {
-            Some((f, marked)) => Some(
+            Some((f, marked, ask)) => Some((
                 jev::findings_for_model(&self.toolhost.socket, &self.pi.session_id, &f, marked)
                     .map_err(PiError::Io)?,
-            ),
+                ask,
+            )),
             None => None,
         };
         let n = self.prompts.fetch_add(1, Ordering::Relaxed);
@@ -750,8 +772,8 @@ impl Session for ChatSession {
         if !data.is_empty() {
             given.push((Source::ToolResult, data.as_str()));
         }
-        if let Some(f) = &findings {
-            self.pre.reviewed();
+        if let Some((f, ask)) = &findings {
+            self.pre.reviewed(ask);
             given.push((Source::SubagentSummary, f.as_str()));
         }
         let mut turn = super::review::Turn {
@@ -823,8 +845,8 @@ impl Session for ChatSession {
         Ok(super::review::run(&parent, req, cancel))
     }
 
-    fn queue_findings(&self, findings: &str, marked: Option<bool>) {
-        *locked(&self.findings) = Some((findings.to_owned(), marked));
+    fn queue_findings(&self, findings: &str, marked: Option<bool>, ask: &'static str) {
+        *locked(&self.findings) = Some((findings.to_owned(), marked, ask));
     }
 
     fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
@@ -1281,10 +1303,11 @@ fn is_taint(e: &Value) -> bool {
 mod tests {
     use super::*;
 
-    // S-68: only a review that passes with no findings registers a skill by itself, and only in a
-    // clean session; a check that could not run, or a marked session, waits for the person.
+    // S-68: the verdict decides: a review that passes registers a skill by itself, with or without
+    // findings, and only in a clean session; a check that could not run, or a marked session,
+    // waits for the person; only `fails` is rejected.
     #[test]
-    fn a_skill_registers_by_itself_only_when_it_passed_cleanly_in_a_clean_session() {
+    fn a_skill_registers_by_itself_only_when_it_passed_in_a_clean_session() {
         use clio_brain::pi::review::parse;
         let a = |verdict: &str, findings: &str| {
             parse(&format!(
@@ -1303,7 +1326,19 @@ mod tests {
         assert!(
             matches!(skill_next(&clean, true, true), SkillNext::Wait(w) if w.contains("orders"))
         );
-        assert_eq!(skill_next(&found, false, false), SkillNext::Reject);
+        assert_eq!(skill_next(&found, false, false), SkillNext::Register);
+        assert!(matches!(
+            skill_next(&found, true, false),
+            SkillNext::Wait(_)
+        ));
+        assert_eq!(
+            skill_next(
+                &a("fails", "\n- what: the check fails\n  evidence: exit 1"),
+                false,
+                false
+            ),
+            SkillNext::Reject
+        );
         assert_eq!(
             skill_next(&a("fails", " none"), false, false),
             SkillNext::Reject
@@ -1314,6 +1349,22 @@ mod tests {
                 SkillNext::Wait(w) if w.starts_with("its check could not be run")
             ));
         }
+        // Only `fails` counts toward the three: the third in a row drops the draft, and a pass
+        // after two failures registers it and clears the count.
+        let mut fails = std::collections::HashMap::new();
+        let mut review = |a: &clio_brain::pi::review::Answer| {
+            let next = skill_next(a, false, false);
+            let failed = next == SkillNext::Reject;
+            (next, skill_count(&mut fails, "x", failed))
+        };
+        let failed = a("fails", "\n- what: the check fails\n  evidence: exit 1");
+        assert_eq!(review(&failed).1, (1, false));
+        assert_eq!(review(&failed).1, (2, false));
+        assert_eq!(review(&found), (SkillNext::Register, (0, false)));
+        assert_eq!(review(&failed).1, (1, false));
+        assert_eq!(review(&failed).1, (2, false));
+        assert_eq!(review(&failed), (SkillNext::Reject, (3, true)));
+        assert_eq!(review(&failed).1, (1, false), "a dropped draft starts over");
         // An answer that is not the fixed shape is `could_not_check`: it never registers.
         assert!(matches!(
             skill_next(&parse("looks fine to me"), false, false),

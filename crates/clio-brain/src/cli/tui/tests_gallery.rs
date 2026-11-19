@@ -465,10 +465,35 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
                 name: "disk-report".into(),
                 description: SKILL_DESCRIPTION.into(),
                 n: 1,
+                notes: None,
             }),
         })),
     );
     out.push(("skill registered", a));
+    let mut a = conversation(true);
+    let noted = "```review\nverdict: passes\nran: bash scripts/report.sh samples | grep -q big (exit 0)\nfindings:\n- what: a folder name with spaces is not quoted\n  evidence: scripts/report.sh line 2: du -sh $1\n- what: it does not say what happens on an empty folder\n  evidence: ran it on an empty mktemp -d: no output, exit 0\n```";
+    let answer = clio_brain::pi::review::parse(noted);
+    super::review::ended(
+        &mut a,
+        "sid",
+        Ok(Box::new(crate::cli::chat::Reviewed {
+            skill: Some(crate::cli::chat::SkillOutcome::Registered {
+                name: "disk-report".into(),
+                description: SKILL_DESCRIPTION.into(),
+                n: 2,
+                notes: Some(answer.for_model()),
+            }),
+            answer,
+            model: "claude-opus-5-5".into(),
+            fallback: None,
+            secs: 63,
+            commands: 4,
+            marked: None,
+            full: Some("~/.local/share/clio/runs/20261118-2210/reviews/3/answer.txt".into()),
+            usage: clio_brain::pi::rpc::Usage::default(),
+        })),
+    );
+    out.push(("skill registered, the review left notes", a));
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;

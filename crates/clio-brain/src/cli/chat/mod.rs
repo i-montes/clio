@@ -201,8 +201,8 @@ pub trait Session: Send + Sync {
     /// A review's findings go with the next message, as data, with Clio's request to answer
     /// them, once the judge read them like any outside text; `marked`: the reviewer ended marked
     /// (`Some(suspect)`), so they mark this session the same way, and are not given when the
-    /// mark cannot be made.
-    fn queue_findings(&self, _findings: &str, _marked: Option<bool>) {}
+    /// mark cannot be made. `ask` is Clio's request that goes with them.
+    fn queue_findings(&self, _findings: &str, _marked: Option<bool>, _ask: &'static str) {}
     /// Skills (S-68), after a turn: the drafts `skill_write` stored since the last call (each
     /// once: id and name), and what the person is told of the skills' reports (one turned off).
     fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
@@ -218,11 +218,13 @@ pub trait Session: Send + Sync {
 /// What came of a skill draft's review.
 #[derive(Debug, Clone)]
 pub enum SkillOutcome {
-    /// Registered as version `n`: the chat says so in one line.
+    /// Registered as version `n`: the chat says so in one line. `notes`: what the review that
+    /// passed it still found, for the model once (as a review's findings).
     Registered {
         name: String,
         description: String,
         n: u32,
+        notes: Option<String>,
     },
     /// Waits for the person (`pending` id): its Approval box.
     Waits {
@@ -230,7 +232,8 @@ pub enum SkillOutcome {
         what: String,
         ask: Box<Option<super::tui::ask::BlockAsk>>,
     },
-    /// Not registered: the findings go to the model (`to_model`); `dropped` after the third.
+    /// Not registered (the review failed): the findings go to the model (`to_model`); `dropped`
+    /// after the third failure in a row.
     Rejected {
         name: String,
         attempt: u32,

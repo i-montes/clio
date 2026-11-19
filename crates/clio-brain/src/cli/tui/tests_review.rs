@@ -210,9 +210,17 @@ fn findings_reach_the_model_only_when_idle_after_the_queued_message_and_that_tur
     // That turn ends: now the findings go, as the review's own turn.
     let (a, cmds) = feed(a, vec![settled(Some(1000))]);
     let turn_cmd = reviews(&cmds);
-    let [Cmd::ReviewTurn { findings, marked }] = turn_cmd[..] else {
+    let [
+        Cmd::ReviewTurn {
+            findings,
+            marked,
+            ask,
+        },
+    ] = turn_cmd[..]
+    else {
         panic!("{cmds:?}");
     };
+    assert_eq!(*ask, clio_brain::pi::preprompt::REVIEW_ASK);
     assert!(findings.starts_with("verdict: fails\n"), "{findings}");
     assert!(findings.contains("evidence: backup.sh line 12"));
     assert_eq!(*marked, None);
@@ -634,6 +642,7 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
                 name: "hello".into(),
                 description: "Says hello. Use when greeting.".into(),
                 n: 1,
+                notes: None,
             },
         )],
     );
@@ -670,10 +679,26 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
     assert!(
         matches!(
             reviews(&cmds).as_slice(),
-            [Cmd::ReviewTurn { findings, .. }] if findings.starts_with("Your draft d2")
+            [Cmd::ReviewTurn { findings, ask, .. }] if findings.starts_with("Your draft d2")
+                && *ask == clio_brain::pi::preprompt::REVIEW_ASK
         ),
         "{cmds:?}"
     );
+    // The third failure in a row: dropped, and said so.
+    let (a, _) = feed(
+        idle(),
+        vec![skill_reviewed(
+            FAILS,
+            SkillOutcome::Rejected {
+                name: "bye".into(),
+                attempt: 3,
+                dropped: true,
+                to_model: "Your draft d4 of the skill «bye» was not registered".into(),
+            },
+        )],
+    );
+    assert!(notes(&a).iter().any(|n| n
+        == "skill «bye» not registered: review failed three times in a row; the draft was dropped"));
     // Waits: its box, with the whole skill.
     let b = super::tests_gallery::skill_ask(
         &super::tests_gallery::skill_md("1. Say hello."),
@@ -700,4 +725,49 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
         s.contains("Clio wants to register the skill «disk-report»."),
         "{s}"
     );
+}
+
+// S-68: a review that passes with findings registers the skill; its notes are said in the line
+// (how many, where the full text is) and go to the model once, with Clio's request for this case,
+// in a turn that is not reviewed.
+#[test]
+fn a_skill_that_passed_with_notes_is_registered_and_its_notes_reach_the_model_once() {
+    use crate::cli::chat::SkillOutcome;
+    use clio_brain::pi::preprompt::SKILL_NOTES_ASK;
+    const NOTED: &str = "```review\nverdict: passes\nran: bash check.sh, exit 0\nfindings:\n- what: a name with spaces is not quoted\n  evidence: report.sh line 3: du $1\n```";
+    let notes_text = clio_brain::pi::review::parse(NOTED).for_model();
+    let (a, cmds) = feed(
+        idle(),
+        vec![skill_reviewed(
+            NOTED,
+            SkillOutcome::Registered {
+                name: "top-files".into(),
+                description: "Lists the largest files. Use when the disk is full.".into(),
+                n: 1,
+                notes: Some(notes_text.clone()),
+            },
+        )],
+    );
+    assert!(
+        notes(&a)
+            .iter()
+            .any(|n| n.starts_with("skill registered: «top-files»")
+                && n.contains(
+                    "review: passes with 1 note (full text: /runs/r1/reviews/1/answer.txt)"
+                )),
+        "{:?}",
+        notes(&a)
+    );
+    let [Cmd::ReviewTurn { findings, ask, .. }] = reviews(&cmds)[..] else {
+        panic!("{cmds:?}");
+    };
+    assert_eq!(
+        (findings.as_str(), *ask),
+        (notes_text.as_str(), SKILL_NOTES_ASK)
+    );
+    assert!(a.chat.review.answering && a.chat.review.findings.is_none());
+    // That turn ends: the notes are not given again and the turn is not reviewed.
+    let (a, cmds) = feed(a, vec![settled(Some(1000))]);
+    assert!(reviews(&cmds).is_empty(), "{cmds:?}");
+    assert!(a.reviews_at.is_empty() && !a.chat.review.judging);
 }

@@ -1298,9 +1298,13 @@ impl Ctx {
                     c.cancel();
                 }
             }
-            Cmd::ReviewTurn { findings, marked } => {
+            Cmd::ReviewTurn {
+                findings,
+                marked,
+                ask,
+            } => {
                 if let Some(s) = self.current_chat() {
-                    s.queue_findings(&findings, marked);
+                    s.queue_findings(&findings, marked, ask);
                 }
                 self.exec(Cmd::ChatSend {
                     text: String::new(),
