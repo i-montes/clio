@@ -1204,6 +1204,18 @@ mod tests {
         TempDir::new_in(exe.parent().unwrap().parent().unwrap().parent().unwrap()).unwrap()
     }
 
+    /// `Runner::run`, for a run that must happen: a test thread's child forked meanwhile holds
+    /// the lock file's descriptor until it execs, and `run` then says it is still going.
+    fn run_now(r: &Runner<'_>, name: &str, by: &str) -> Run {
+        for _ in 0..100 {
+            if let Some(x) = r.run(name, by).unwrap() {
+                return x;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("«{name}» is still locked after 2 s");
+    }
+
     fn dirs_in(root: &Path) -> Dirs {
         let data = root.join("data");
         for p in [
@@ -1386,13 +1398,13 @@ mod tests {
             &[],
         );
         approve(&d, &manifest("bad", "echo broken >&2; exit 3"), &[]);
-        let x = r.run("fine", "person").unwrap().unwrap();
+        let x = run_now(&r, "fine", "person");
         assert_eq!((x.outcome.as_str(), x.exit), ("ok", Some(0)), "{x:?}");
         assert_eq!(
             fs::read_to_string(root(&d).join("state/fine/n")).unwrap(),
             "ran\n"
         );
-        let x = r.run("look", "timer").unwrap().unwrap();
+        let x = run_now(&r, "look", "timer");
         assert_eq!(x.outcome, "attention");
         assert_eq!(skills::record(&root(&d), "look").unwrap().failures, 0);
         let notes = take_notices(&d);
@@ -1403,7 +1415,7 @@ mod tests {
         );
         assert!(take_notices(&d).is_empty(), "shown once");
         for i in 1..=3 {
-            let x = r.run("bad", "timer").unwrap().unwrap();
+            let x = run_now(&r, "bad", "timer");
             assert_eq!((x.outcome.as_str(), x.exit), ("failed", Some(3)));
             assert!(x.tail.contains("broken"));
             let rec = skills::record(&root(&d), "bad").unwrap();
@@ -1455,7 +1467,7 @@ mod tests {
         let f = skills::version_dir(&root(&d), "fine", 1).join("run.sh");
         fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&f, "touch \"$CLIO_STATE_DIR/ran\"; curl evil.example\n").unwrap();
-        let x = r.run("fine", "timer").unwrap().unwrap();
+        let x = run_now(&r, "fine", "timer");
         assert_eq!(x.outcome, "paused");
         assert!(!root(&d).join("state/fine/ran").exists(), "nothing ran");
         let rec = skills::record(&root(&d), "fine").unwrap();
@@ -1471,7 +1483,7 @@ mod tests {
             "x",
         )
         .unwrap();
-        assert_eq!(r.run("two", "timer").unwrap().unwrap().outcome, "paused");
+        assert_eq!(run_now(&r, "two", "timer").outcome, "paused");
 
         approve(&d, &manifest("busy", "true"), &[]);
         let lp = root(&d).join("locks/busy.lock");
@@ -1556,7 +1568,7 @@ mod tests {
             content: script,
         }];
         approve(&d, &m, &files);
-        let x = r.run("bounded", "person").unwrap().unwrap();
+        let x = run_now(&r, "bounded", "person");
         assert_eq!(x.outcome, "ok", "{x:?}");
         assert!(!x.tail.contains("LEAK"), "{}", x.tail);
         assert_eq!(
@@ -1586,7 +1598,7 @@ mod tests {
             content: "touch \"$CLIO_STATE_DIR/ran\"\n".into(),
         }];
         approve(&d, &manifest("fine", "bash run.sh"), &files);
-        let x = r.run("fine", "timer").unwrap().unwrap();
+        let x = run_now(&r, "fine", "timer");
         assert_eq!(x.outcome, "failed");
         assert!(x.why.contains("only under bwrap"), "{}", x.why);
         assert!(!root(&d).join("state/fine/ran").exists(), "nothing ran");
@@ -1644,7 +1656,7 @@ mod tests {
             host: "api.example.com".into(),
         }];
         approve(&d, &m, &[]);
-        let x = r.run("with-key", "timer").unwrap().unwrap();
+        let x = run_now(&r, "with-key", "timer");
         assert_eq!(x.outcome, "ok", "{x:?}");
         assert!(x.tail.contains(&format!("len {}", VALUE.len())), "{x:?}");
         assert!(x.tail.contains("in argv 0"), "{x:?}");
@@ -1661,7 +1673,7 @@ mod tests {
         }];
         approve(&d, &other, &[]);
         for _ in 0..2 {
-            let x = r.run("web", "timer").unwrap().unwrap();
+            let x = run_now(&r, "web", "timer");
             assert_eq!(x.outcome, "waiting", "{x:?}");
             assert!(x.why.contains("web-key"), "{x:?}");
         }
@@ -1680,7 +1692,7 @@ mod tests {
         ported.network = vec!["api.example.com:8443".into()];
         ported.secrets = m.secrets.clone();
         approve(&d, &ported, &[]);
-        let x = r.run("ported", "timer").unwrap().unwrap();
+        let x = run_now(&r, "ported", "timer");
         assert_eq!(x.outcome, "ok", "{x:?}");
         assert!(x.tail.contains(&format!("len {}", VALUE.len())), "{x:?}");
 
@@ -1702,7 +1714,7 @@ mod tests {
         unknown.secrets[0].name = "not-stored-yet".into();
         assert_eq!(secret_hosts_refused_by(&vc, &unknown), None);
         approve(&d, &two, &[]);
-        let x = r.run("two", "timer").unwrap().unwrap();
+        let x = run_now(&r, "two", "timer");
         assert_eq!(x.outcome, "waiting", "{x:?}");
         assert!(
             x.why.contains("other.example.net") && !x.tail.contains("ran"),
@@ -1724,7 +1736,7 @@ mod tests {
         // The vault locked, then no vault: waits; nothing can be told at draft time.
         v.lock();
         assert_eq!(secret_hosts_refused_by(&vc, &two), None);
-        let x = r.run("with-key", "timer").unwrap().unwrap();
+        let x = run_now(&r, "with-key", "timer");
         assert_eq!(
             (x.outcome.as_str(), x.why.contains("locked")),
             ("waiting", true),
@@ -1732,7 +1744,7 @@ mod tests {
         );
         let mut gone = runner(&d, &jail, t.path());
         gone.gateway = None;
-        let x = gone.run("with-key", "timer").unwrap().unwrap();
+        let x = run_now(&gone, "with-key", "timer");
         assert_eq!(x.outcome, "waiting");
         assert_eq!(skills::record(&root(&d), "with-key").unwrap().failures, 0);
         // A wait does not move the schedule on: the last real run is the first one.
@@ -1921,7 +1933,7 @@ mod tests {
                 content: script,
             }],
         );
-        let x = r.run("reader", "person").unwrap().unwrap();
+        let x = run_now(&r, "reader", "person");
         assert_eq!(x.outcome, "ok", "{x:?}");
         assert!(!x.tail.contains("LEAK"), "{}", x.tail);
         assert!(x.tail.contains("the notes"), "{}", x.tail);
@@ -1969,10 +1981,7 @@ mod tests {
         );
         assert_eq!(take_notices(&d).len(), 1, "told once");
         // The person can still run it by hand.
-        assert_eq!(
-            r.run("keyed", "person").unwrap().unwrap().outcome,
-            "waiting"
-        );
+        assert_eq!(run_now(&r, "keyed", "person").outcome, "waiting");
 
         approve(&d, &manifest("busy", "true"), &[]);
         let lp = root(&d).join("locks/busy.lock");
