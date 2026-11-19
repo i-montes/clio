@@ -41,9 +41,11 @@ add "$CONF/config.json"
 [ -d "$DATA/runs" ] && paths+=("$DATA/runs")
 # The services (S-69): what the person approved, its records, runs and each one's state folder.
 add "$DATA/services"
+# MCP servers (S-70): approved manifests, records, state, data, logs and the installed packages.
+add "$DATA/mcp"
 if [ "${#paths[@]}" -eq 0 ]; then echo "backup: there is nothing to back up" >&2; exit 4; fi
 
-restic backup --tag clio --exclude "$DATA/runs/*/sandbox" --exclude "$DATA/runs/*/scratch" --exclude "$DATA/services/locks" "${paths[@]}"
+restic backup --tag clio --exclude "$DATA/runs/*/sandbox" --exclude "$DATA/runs/*/scratch" --exclude "$DATA/services/locks" --exclude "$DATA/mcp/npm" --exclude "$DATA/mcp/npm-cache" "${paths[@]}"
 # Keep only the last copies, then look at the repository.
 restic forget --tag clio --keep-last "$KEEP" --prune
 restic check --read-data-subset=5%

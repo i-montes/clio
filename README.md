@@ -43,6 +43,8 @@ Clio writes her own skills (how to do a kind of task, with a check and, if neede
 
 Work that repeats can become a service: a program Clio writes with `service_write` that then runs by itself on a schedule, with no model, as you, the machine read-only except its own folder and the paths it declared, the network only to the hosts it declared, its secrets from the vault only for those hosts. Every service and every new version waits for your approval after the judge and the reviewer. `clio services enable` sets up a systemd user timer that runs them; `/services` or `clio services` lists them, shows their runs and turns one off (S-69).
 
+Clio can also use MCP servers: npm packages at an exact version that run on your machine over standard input and output (no remote servers, OAuth, Python or Docker ones). Clio proposes one with `mcp_propose`; it always waits for your approval, showing npm's facts, the hosts it may reach and the secrets it would hold. Approved, it is installed with no install scripts, started once without network or secrets to list its tools, and stays off until you confirm them (`/mcp confirm` or `clio mcp confirm`). It runs in a service's jail with only its own secrets; Clio calls it through two fixed tools, and a tool that may change something asks you each time (S-70).
+
 Guide: [`docs/usage.md`](docs/usage.md).
 
 ## Layout
