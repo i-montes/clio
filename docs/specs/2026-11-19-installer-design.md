@@ -21,12 +21,12 @@ clio-memory from its own repository, and `clio services enable`. There are no pu
 ## The line
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/i-montes/clio/main/install.sh | sh
+curl -fsSL https://github.com/i-montes/clio/releases/latest/download/install.sh | sh
 ```
 
 ## Two pieces
 
-1. **`install.sh`** — small, POSIX `sh`, no dependencies beyond `curl` (or `wget`), `uname`,
+1. **`install.sh`** — small, POSIX `sh`, no dependencies beyond `curl`, `uname`,
    `sha256sum`/`shasum`. It finds the system and processor, downloads the matching `clio` and
    `clio-vault` from the latest GitHub release with `SHA256SUMS`, checks them, puts them in
    `~/.local/bin`, and starts `clio setup` attached to the terminal (`/dev/tty`, since its own
@@ -94,9 +94,9 @@ inside Clio's jail is left out and said so. Choosing one in the installer is the
 ## Releases
 
 The installer needs published binaries. `release.yml` gains the build after its existing gates and
-the owner's review: `clio` and `clio-vault` for Linux x86_64 and aarch64 and macOS arm64 and
-x86_64, `SHA256SUMS`, and `install.sh`, attached to the GitHub release. On macOS there is no jail
-yet, so the installer says what works there and what does not.
+the owner's review: `clio` and `clio-vault` for Linux x86_64 and aarch64, `SHA256SUMS`, and
+`install.sh`, attached to the GitHub release. macOS is left out until it has been run end to end
+(CI still builds and tests it); `install.sh` says it is not supported yet.
 
 ## Not included
 
@@ -109,15 +109,21 @@ yet, so the installer says what works there and what does not.
 - Release files: plain binaries `clio-<target>` and `clio-vault-<target>` (no archive, so `install.sh` needs no `tar`), plus `SHA256SUMS`, `install.sh` and `VERSION`; the latest release is the one `releases/latest/download/VERSION` names, and every file then comes from `releases/download/v<VERSION>/`, so two releases are never mixed.
 - Linux portability: `cargo zigbuild` against glibc 2.28 (Ubuntu 22.04 has 2.35, Debian 12 2.36); the release checks the highest `GLIBC_` symbol with `objdump` and starts both binaries in `ubuntu:22.04` and `debian:12` containers. Not musl: clio-memory loads ONNX Runtime, a glibc library.
 - `install.sh` uses `mkdir -p` (for `~/.local/bin`) and `rm -rf` (only on the temporary folder it made with `mktemp -d`) besides the tools listed: without them a failed download would leave files behind.
-- `CLIO_RELEASE_BASE` is one release's folder (or URL) with the same file names; with it, `CLIO_VERSION` is not used.
+- `CLIO_RELEASE_BASE` is one release's folder (or `https://` URL, never `http://`) with the same file names; with it, `CLIO_VERSION` is not used, and `install.sh` names it in one line. `clio` reads it only in debug builds, so a variable left in a profile cannot redirect `clio update`.
+- The one line is the latest release's own `install.sh` (`releases/latest/download/install.sh`), which went through every gate, not `main`'s.
+- `install.sh` puts `~/.local/bin` on the `PATH` of the next terminal when it is not there: one marked line, once, in `~/.bash_profile` (or `~/.profile`) and `~/.zshrc` for zsh. It refuses root unless `CLIO_ALLOW_ROOT=1`, and a folder in the place of a binary.
 - The private Node: 22.23.5, the official tarball with its SHA-256 pinned in the binary, unpacked in `~/.local/share/clio/node` (a `.clio-node` mark says which archive); everything that starts Node or npm for Clio (Pi, its install, the reviewer, MCP servers) puts its `bin` first in the `PATH`.
-- clio-memory: the binary of release v0.13.0 (the one Clio's library is pinned to), checked against that release's `SHA256SUMS`, whose own SHA-256 is pinned; a newer one already installed is kept. Its model and ONNX Runtime come from the specs in `clio_memory::setup` (the same URLs and SHA-256 as its own installer), with the runtime's `.sha256` mark, so `clio-memory setup` finds them done.
-- `sudo`: the package manager's install of `bubblewrap` and `loginctl enable-linger` run back to back in one moment, with the screen handed back to the terminal, so `sudo` asks once; Clio never reads the password. As root they run directly; without `sudo`, one line names what to ask an administrator for.
-- The Claude token: `claude setup-token` (the Claude Code Pi brings) runs on the terminal with Pi's home folder; then the screen and its scrollback are cleared and the token is pasted into a masked field. "Later" is always a choice.
+- clio-memory: the binary of release v0.14.0 (the one Clio's library is pinned to), checked against that release's `SHA256SUMS`, whose own SHA-256 is pinned; a newer one already installed is kept. Its model and ONNX Runtime come from the specs in `clio_memory::setup` (the same URLs and SHA-256 as its own installer), with the runtime's `.sha256` mark, so `clio-memory setup` finds them done.
+- Ask first: every question (language, what to do with an installation, the vault's passphrase, the model, the judge, the sudo moment) comes before any download; after the last answer nothing stops until the last screen. An existing vault is opened while asking (a mistyped passphrase is asked again); a new one is created by its step. An update that will replace the binary asks nothing: the new binary asks after it took over.
+- `sudo`: the package manager's install of `bubblewrap`, `loginctl enable-linger` and, only where `kernel.apparmor_restrict_unprivileged_userns` is 1, no profile names `/usr/bin/bwrap` and the jail still does not start, the fixed AppArmor profile `clio-bwrap`, run back to back in one moment with the exact commands shown first, so `sudo` asks once; Clio never reads the password. Then the jail is tried: when it cannot start, the last screen names what to ask an administrator for and the chat does not open. As root they run directly; without `sudo`, one line names what to ask an administrator for.
+- The Claude token is pasted into a masked field; it comes from `claude setup-token` (Clio does not run it: before the downloads, Claude Code is not there yet). "Later" is always a choice, and the last screen then says the exact next step.
+- The memory model: the runtime first, then the files gathered in a hidden `.<dir>.partial` folder that takes the model folder's place only when all are verified. A failure is a warning ("search by meaning: finishes later"), leaves no model folder (memory searches by text) and `clio update` tries again.
+- The runtime folder for the sockets, the same for every command: `$XDG_RUNTIME_DIR/clio`; without it, `/run/user/<uid>/clio` when that folder is the person's; else a private `clio-<uid>` (0700, checked without following a symlink) in the temporary folder.
+- No UTF-8 locale: the screens and lines go out in ASCII.
 - Secrets go from the installer's process straight to the vault (`Vault::init`, then unlock and put over its socket): never an argument, an environment variable or a child's input.
 - The language is recorded in `config.json` (`ui.language`, `es` or `en`); the first conversation's presentation request asks for that language instead of English while the memory has nothing in a language of its own. The system prompt does not change.
-- Update replaces the binaries first; if they changed, the new `clio` is started in place of the old one (`CLIO_UPDATE_REEXEC`) to bring Node, Pi, clio-memory and the skills to what it pins.
+- Update replaces the binaries first; if they changed, the new `clio` is started in place of the old one (with a hidden argument, `setup --resume-update` or `update --reexec`, so nothing stays in the environment of the chat) to bring Node, Pi, clio-memory and the skills to what it pins. The wizard's Update also finishes a half-done install (the vault, the model); `clio update` never asks.
 - Both removals keep clio-memory and its model (other agents may use them); Remove-keeping-data keeps Pi's conversations (`pi/sessions`, `pi/agent`, `pi/home`) and removes Pi's installed versions, the private Node, the binaries and the timer's units.
 - The round learns of a newer release at most once a day (`~/.local/share/clio/update.json`) and adds one line to its data when there is one.
-- Tests use debug-only seams: `CLIO_TEST_PINS` (local fakes in place of the pinned downloads) and `CLIO_TEST_SYSTEM` (fake `sudo`, package manager, `systemctl`, `loginctl`); release builds ignore both.
-- macOS: no jail and no timer yet; the steps say so in one line and go on.
+- Tests use debug-only seams: `CLIO_TEST_PINS` (local fakes in place of the pinned downloads), `CLIO_TEST_SYSTEM` (fake `sudo`, package manager, `systemctl`, `loginctl`, `bwrap`, `tee`, `apparmor_parser`, the sysctl and the AppArmor folder) and `CLIO_RELEASE_BASE`; release builds ignore them.
+- macOS: not released yet (`install.sh` refuses it in one line).

@@ -30,13 +30,13 @@ just audit   # cargo-deny and cargo-audit (S-41)
 
 ## Using Clio on your machine
 
-Install with one line (Linux x86_64 and aarch64, macOS arm64 and x86_64):
+Install with one line (Linux x86_64 and aarch64; macOS is not supported yet):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/i-montes/clio/main/install.sh | sh
+curl -fsSL https://github.com/i-montes/clio/releases/latest/download/install.sh | sh
 ```
 
-It puts `clio` and `clio-vault` of the latest release in `~/.local/bin`, verified against the release's `SHA256SUMS`, and starts `clio setup`: a guided installer in Spanish or English that installs the rest (bubblewrap, a private Node 22, Pi, clio-memory and its model, the vault, the model's key, the services timer, the shipped skills) and opens the chat. Running `clio setup` again repairs, updates or removes an installation; `clio update` brings everything up to date without questions. What it downloads and how each is checked: [`docs/security.md`](docs/security.md#what-the-installer-downloads).
+It puts `clio` and `clio-vault` of the latest release in `~/.local/bin` (and that folder on the `PATH` of your next terminal), verified against the release's `SHA256SUMS`, and starts `clio setup`: a guided installer in Spanish or English that asks everything first, then installs the rest (bubblewrap, a private Node 22, Pi, clio-memory and its model, the vault, the model's key, the services timer, the shipped skills) and opens the chat. Running `clio setup` again repairs, updates or removes an installation; `clio update` brings everything up to date without questions. What it downloads and how each is checked: [`docs/security.md`](docs/security.md#what-the-installer-downloads).
 
 By hand, from a checkout:
 

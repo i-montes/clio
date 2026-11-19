@@ -21,11 +21,11 @@ No new dependency without passing `cargo-deny`. Nothing that looks like a secret
 ## Cutting a release
 
 1. On a branch, set the new version in the workspace `Cargo.toml` (`[workspace.package] version`, and the `clio-core` requirement in `crates/clio-vault/Cargo.toml` if it names it), run `cargo check` so `Cargo.lock` follows, and merge it through a PR.
-2. Tag that commit on `main` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
-3. `release.yml` checks that the tag is the version in `Cargo.toml` (`clio --version` prints it), runs every gate, and waits in the `release-review` environment until the owner approves (read the sensitive paths first, as the workflow says). Then it builds `clio` and `clio-vault` for Linux x86_64 and aarch64 (glibc 2.28, with `cargo zigbuild`) and macOS arm64 and x86_64, smoke-tests them (on Ubuntu 22.04 and Debian 12 too), attests them, and publishes them with `VERSION`, `SHA256SUMS` and `install.sh`.
+2. Tag that commit on `main` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`. The version is a plain `x.y.z`: a pre-release tag is refused (`install.sh` and `clio update` could not install it).
+3. `release.yml` checks that the tag is the version in `Cargo.toml` (`clio --version` prints it), runs every gate, and waits in the `release-review` environment until the owner approves (read the sensitive paths first, as the workflow says). Then it builds `clio` and `clio-vault` for Linux x86_64 and aarch64 (glibc 2.28, with `cargo zigbuild`; macOS is not released until it has been run end to end), smoke-tests them (on Ubuntu 22.04 and Debian 12 too), attests them, and publishes them with `VERSION`, `SHA256SUMS` and `install.sh`.
 4. The one-line install and `clio update` take the new release at once (they read `releases/latest/download/VERSION`). A release is not edited after it is published: a fix is a new version.
 
-A manual run of the workflow (`workflow_dispatch`) builds and tests everything but publishes nothing.
+A manual run of the workflow (`workflow_dispatch`) builds and tests everything but publishes nothing, even when started on a tag: only a pushed tag publishes.
 
 ## Every incident adds a case to the battery
 
