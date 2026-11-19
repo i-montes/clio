@@ -17,6 +17,7 @@ pub mod memory;
 pub mod pending;
 pub mod pi;
 pub mod runs;
+pub mod services;
 pub mod sessions;
 pub mod skills;
 pub mod sleep;

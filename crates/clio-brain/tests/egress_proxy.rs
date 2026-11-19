@@ -156,3 +156,28 @@ fn dropping_the_proxy_removes_its_socket_and_folder() {
     drop(p);
     assert!(!sock.exists() && !sock.parent().unwrap().exists());
 }
+
+// S-69: a service's proxy allows each of its declared hosts and nothing else.
+#[test]
+fn a_services_proxy_allows_each_declared_host_and_nothing_else() {
+    let (_one, port, _d) = rig();
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let other = l.local_addr().unwrap().port();
+    std::thread::spawn(move || for _ in l.incoming() {});
+    let dir = tempfile::tempdir().unwrap();
+    let p = EgressProxy::start_many(
+        dir.path(),
+        &[format!("127.0.0.1:{port}"), format!("127.0.0.1:{other}")],
+    )
+    .unwrap();
+    for allowed in [port, other] {
+        let (line, _s) = ask(
+            &p,
+            format!("CONNECT 127.0.0.1:{allowed} HTTP/1.1\r\n\r\n").as_bytes(),
+        );
+        assert!(line.starts_with("HTTP/1.1 200"), "{allowed}: {line}");
+    }
+    let (line, _s) = ask(&p, b"CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+    assert!(line.contains("403"), "{line}");
+    assert_eq!(p.denied().len(), 1);
+}

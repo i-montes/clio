@@ -30,6 +30,9 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
                                               is printed whole and asked about first; --yes skips that)
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
+  clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
+                                              Clio's services (programs run on a schedule): list them, look at one,
+                                              turn one off or on, run one now; enable/disable the timer that runs them
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
                                               picks the model (opencode, your Claude subscription or the Anthropic API) and keeps its key in the vault
@@ -125,6 +128,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "reject"
             | "actions"
             | "skills"
+            | "services"
             | "vault"
             | "connect"
             | "doctor"
@@ -253,6 +257,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 rest.push("--yes".into());
             }
             cli::skills::cmd(&dirs, &rest)?;
+        }
+        "services" => {
+            let yes = args.flag("--yes");
+            let mut rest = args.rest()?;
+            if yes {
+                rest.push("--yes".into());
+            }
+            cli::services::cmd(&dirs, &rest)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
         "connect" => return connect::run(&dirs, args.into_raw()),

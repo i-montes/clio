@@ -39,9 +39,11 @@ fi
 add "$DATA/vault.bin"          # already encrypted by the vault; restic encrypts it again
 add "$CONF/config.json"
 [ -d "$DATA/runs" ] && paths+=("$DATA/runs")
+# The services (S-69): what the person approved, its records, runs and each one's state folder.
+add "$DATA/services"
 if [ "${#paths[@]}" -eq 0 ]; then echo "backup: there is nothing to back up" >&2; exit 4; fi
 
-restic backup --tag clio --exclude "$DATA/runs/*/sandbox" --exclude "$DATA/runs/*/scratch" "${paths[@]}"
+restic backup --tag clio --exclude "$DATA/runs/*/sandbox" --exclude "$DATA/runs/*/scratch" --exclude "$DATA/services/locks" "${paths[@]}"
 # Keep only the last copies, then look at the repository.
 restic forget --tag clio --keep-last "$KEEP" --prune
 restic check --read-data-subset=5%

@@ -97,6 +97,11 @@ impl EgressProxy {
     /// Makes `<parent>/egress-<pid>-<n>/` (0700) with the socket inside, and allows only `allow`
     /// (`host:port`, lowercase, as `allow_of` gives it).
     pub fn start(parent: &Path, allow: &str) -> Result<Self, String> {
+        Self::start_many(parent, &[allow.to_owned()])
+    }
+
+    /// `start`, allowing each of `allow` (a service's declared hosts, stage 3) and nothing else.
+    pub fn start_many(parent: &Path, allow: &[String]) -> Result<Self, String> {
         let dir = parent.join(format!(
             "egress-{}-{}",
             std::process::id(),
@@ -122,7 +127,7 @@ impl EgressProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let denied = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
-        let (flag, log, allow) = (stop.clone(), denied.clone(), allow.to_owned());
+        let (flag, log, allow) = (stop.clone(), denied.clone(), allow.to_vec());
         // Not a blocking `accept`: stopping must not depend on the socket file still being there
         // to connect to (the runtime folder can be gone before the proxy is dropped).
         listener
@@ -255,7 +260,7 @@ fn reply(c: &mut UnixStream, status: &str) {
     let _ = c.flush();
 }
 
-fn handle(mut c: UnixStream, allow: &str, log: &Mutex<Vec<String>>) {
+fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>) {
     let _ = c.set_read_timeout(Some(HEAD_TIMEOUT));
     let (head, rest) = match read_head(&mut c) {
         Ok(h) => h,
@@ -276,10 +281,11 @@ fn handle(mut c: UnixStream, allow: &str, log: &Mutex<Vec<String>>) {
         remember(log, format!("{method} (not CONNECT)"));
         return refuse(&mut c, "405 Method Not Allowed");
     }
-    if target.to_ascii_lowercase() != allow {
+    let target = target.to_ascii_lowercase();
+    let Some(allow) = allow.iter().find(|a| **a == target) else {
         remember(log, target.chars().take(120).collect());
         return refuse(&mut c, "403 Forbidden");
-    }
+    };
     let Some(up) = connect_upstream(allow) else {
         return refuse(&mut c, "502 Bad Gateway");
     };

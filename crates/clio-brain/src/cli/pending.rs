@@ -33,6 +33,9 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
+    if let Some((name, description, ..)) = pending::service_of(p) {
+        return format!("register the service «{name}»: {description}");
+    }
     if let Some((name, description, _, files)) = pending::skill_of(p) {
         let n = files.len();
         return format!(
@@ -225,6 +228,11 @@ pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     let done = if pending::skill_of(&p).is_some() {
         // Registered here, by the person's own `clio`: never from the jail (S-68).
         pending::approve_skill(&state(dirs), id, now_ms(), |p| register_skill(dirs, p))?
+    } else if pending::service_of(&p).is_some() {
+        // Only here, by the person's own `clio` (S-69): never from the jail, never by a review.
+        pending::approve_service(&state(dirs), id, now_ms(), |p| {
+            super::services::register_approved(dirs, p)
+        })?
     } else if pending::block_of(&p).is_some() {
         // The same port a clean session's tool host writes the person's blocks with.
         let models = clio_brain::memory_link::MemoryLink::model_dirs(&dirs.home);
@@ -314,9 +322,16 @@ fn approve_cmd_with(
     if let Some(text) = block_text(dirs, &p) {
         println!("{id}:\n{text}\n");
     }
-    if pending::skill_of(&p).is_some()
+    let question = if pending::service_of(&p).is_some() {
+        Some("register this service exactly as shown above? it then runs on its schedule")
+    } else {
+        pending::skill_of(&p)
+            .is_some()
+            .then_some("register this skill exactly as shown above?")
+    };
+    if let Some(q) = question
         && !yes
-        && !confirm("register this skill exactly as shown above?")
+        && !confirm(q)
     {
         println!("nothing was registered: {id} still waits (clio reject {id} drops it)");
         return Ok(());
@@ -331,6 +346,14 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = reject(dirs, id)?;
     if let Some((name, ..)) = pending::secret_of(&p) {
         println!("declined {}: {name} is not stored", p.id);
+        return Ok(());
+    }
+    if let Some((name, ..)) = pending::service_of(&p) {
+        println!(
+            "rejected {}: the service «{}» is not registered",
+            p.id,
+            sanitize::line(name)
+        );
         return Ok(());
     }
     if let Some((name, ..)) = pending::skill_of(&p) {

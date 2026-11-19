@@ -35,6 +35,68 @@ const BUNDLED_FILES: [(&str, &str); 2] = [
         include_str!("../../../../skills/skill-creator/scripts/check-skill.sh"),
     ),
 ];
+/// The second skill Clio ships (S-69): how to write a service.
+pub const SERVICE_CREATOR: &str = "service-creator";
+const SERVICE_CREATOR_FILES: [(&str, &str); 2] = [
+    (
+        "SKILL.md",
+        include_str!("../../../../skills/service-creator/SKILL.md"),
+    ),
+    (
+        "scripts/check-run.sh",
+        include_str!("../../../../skills/service-creator/scripts/check-run.sh"),
+    ),
+];
+
+/// A skill Clio ships: a change to it always waits for the person.
+pub fn is_shipped(name: &str) -> bool {
+    name == BUNDLED || name == SERVICE_CREATOR
+}
+
+/// What the folder holds: skills (Pi loads `live/`) or services (stage 3: they run from
+/// `versions/`, nothing is live). The same folder layout, lock, writes and history serve both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Skill,
+    Service,
+}
+
+impl Kind {
+    /// The main file: SKILL.md, or the service's manifest.
+    pub fn main(self) -> &'static str {
+        match self {
+            Self::Skill => "SKILL.md",
+            Self::Service => clio_toolhost::services::MANIFEST,
+        }
+    }
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Service => "service",
+        }
+    }
+
+    fn check(self, name: &str, main: &str, files: &[SkillFile]) -> Res<()> {
+        match self {
+            Self::Skill => th::check_stored(name, main, files),
+            Self::Service => clio_toolhost::services::check_stored(name, main, files).map(drop),
+        }
+    }
+
+    fn description(self, dir: &Path) -> Option<String> {
+        match self {
+            Self::Skill => description_of(dir),
+            Self::Service => {
+                let t = fs::read_to_string(dir.join(self.main())).ok()?;
+                serde_json::from_str::<clio_toolhost::services::Manifest>(&t)
+                    .ok()
+                    .map(|m| m.description)
+            }
+        }
+    }
+}
+
 /// Failed reports in a row that turn a skill off.
 pub const FAILS_TO_OFF: u32 = 3;
 /// Reports kept in a record.
@@ -99,7 +161,7 @@ fn record_path(root: &Path, name: &str) -> PathBuf {
     root.join(th::RECORDS).join(format!("{name}.json"))
 }
 
-fn version_dir(root: &Path, name: &str, n: u32) -> PathBuf {
+pub(crate) fn version_dir(root: &Path, name: &str, n: u32) -> PathBuf {
     root.join(th::VERSIONS).join(name).join(n.to_string())
 }
 
@@ -110,7 +172,7 @@ pub fn record(root: &Path, name: &str) -> Option<Record> {
     serde_json::from_str(&fs::read_to_string(record_path(root, name)).ok()?).ok()
 }
 
-fn save(root: &Path, r: &Record) -> Res<()> {
+pub(crate) fn save(root: &Path, r: &Record) -> Res<()> {
     let p = record_path(root, &r.name);
     let tmp = p.with_extension("json.tmp");
     write_private(
@@ -137,8 +199,15 @@ pub fn records(root: &Path) -> Vec<Record> {
 
 /// One change at a time, across processes (the chat and `clio skills` may both write).
 fn lock(root: &Path) -> Res<fs::File> {
+    lock_in(root, Kind::Skill)
+}
+
+/// `lock` of a skills or a services folder (a services folder has no `live/`).
+pub(crate) fn lock_in(root: &Path, kind: Kind) -> Res<fs::File> {
     for d in [th::LIVE, th::VERSIONS, th::RECORDS] {
-        mkdir_private(&root.join(d))?;
+        if d != th::LIVE || kind == Kind::Skill {
+            mkdir_private(&root.join(d))?;
+        }
     }
     let p = root.join(".lock");
     let f = fs::OpenOptions::new()
@@ -169,15 +238,22 @@ pub fn was_removed(root: &Path, name: &str) -> bool {
 }
 
 /// The shipped skill's description and its other files, as the binary has them.
+#[cfg(test)]
 fn bundled() -> (String, Vec<SkillFile>) {
-    let files = BUNDLED_FILES[1..]
+    shipped(&BUNDLED_FILES)
+}
+
+/// A shipped skill's description and other files (`files[0]` is its SKILL.md).
+fn shipped(files: &[(&str, &str)]) -> (String, Vec<SkillFile>) {
+    let all = files;
+    let files = all[1..]
         .iter()
         .map(|(p, c)| SkillFile {
             path: (*p).into(),
             content: (*c).into(),
         })
         .collect();
-    let description = BUNDLED_FILES[0]
+    let description = all[0]
         .1
         .lines()
         .nth(2)
@@ -187,15 +263,22 @@ fn bundled() -> (String, Vec<SkillFile>) {
     (description, files)
 }
 
-/// Registers the binary's text of the shipped skill (the lock held).
-fn install_bundled(root: &Path) -> Res<u32> {
-    let (description, files) = bundled();
+fn shipped_files(name: &str) -> &'static [(&'static str, &'static str)] {
+    if name == SERVICE_CREATOR {
+        &SERVICE_CREATOR_FILES
+    } else {
+        &BUNDLED_FILES
+    }
+}
+
+fn install_shipped(root: &Path, name: &str, all: &[(&str, &str)]) -> Res<u32> {
+    let (description, files) = shipped(all);
     register_locked(
         root,
         &New {
-            name: BUNDLED,
+            name,
             description: &description,
-            skill_md: BUNDLED_FILES[0].1,
+            skill_md: all[0].1,
             files: &files,
             by: "bundled",
             verdict: "shipped with Clio",
@@ -214,22 +297,25 @@ pub fn ensure(d: &Dirs) -> Res<()> {
 
 fn ensure_in(root: &Path) -> Res<()> {
     let _l = lock(root)?;
-    let Some(r) = record(root, BUNDLED) else {
-        if !was_removed(root, BUNDLED) {
-            install_bundled(root)?;
+    for name in [BUNDLED, SERVICE_CREATOR] {
+        let all = shipped_files(name);
+        let Some(r) = record(root, name) else {
+            if !was_removed(root, name) {
+                install_shipped(root, name, all)?;
+            }
+            continue;
+        };
+        let (_, files) = shipped(all);
+        let shipped = th::digest(all[0].1, &files);
+        let latest = r.versions.iter().map(|v| v.n).max();
+        let stale = r
+            .versions
+            .iter()
+            .find(|v| v.n == r.current)
+            .is_some_and(|v| v.by == "bundled" && v.sha256 != shipped);
+        if latest == Some(r.current) && stale {
+            install_shipped(root, name, all)?;
         }
-        return Ok(());
-    };
-    let (_, files) = bundled();
-    let shipped = th::digest(BUNDLED_FILES[0].1, &files);
-    let latest = r.versions.iter().map(|v| v.n).max();
-    let stale = r
-        .versions
-        .iter()
-        .find(|v| v.n == r.current)
-        .is_some_and(|v| v.by == "bundled" && v.sha256 != shipped);
-    if latest == Some(r.current) && stale {
-        install_bundled(root)?;
     }
     Ok(())
 }
@@ -242,7 +328,17 @@ pub fn register(root: &Path, s: &New<'_>) -> Res<u32> {
 }
 
 fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
-    th::check_stored(s.name, s.skill_md, s.files)?;
+    register_kind(root, Kind::Skill, s)
+}
+
+/// `register` into a skills or a services folder (`kind`).
+pub(crate) fn register_in(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
+    let _l = lock_in(root, kind)?;
+    register_kind(root, kind, s)
+}
+
+fn register_kind(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
+    kind.check(s.name, s.skill_md, s.files)?;
     let old = record(root, s.name);
     // One more than any version the record or the folder has: a folder a failed registration
     // left behind never blocks the name.
@@ -269,7 +365,7 @@ fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
     let dir = version_dir(root, s.name, n);
     let tmp = dir.with_file_name(format!(".tmp-{n}-{}", std::process::id()));
     clear(&tmp)?;
-    let built = write_tree(&tmp, s.skill_md, s.files)
+    let built = write_tree_named(&tmp, kind.main(), s.skill_md, s.files)
         .and_then(|()| fs::rename(&tmp, &dir).map_err(|e| io_err(&dir, &e)));
     if let Err(e) = built {
         return Err(also(e, clear(&tmp)));
@@ -302,13 +398,15 @@ fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
     }
     // Live first, then the record; either failing puts back what was there and takes the new
     // version's folder away.
-    if r.enabled
+    if kind == Kind::Skill
+        && r.enabled
         && let Err(e) = install(root, &r.name, n)
     {
         return Err(also(e, clear(&dir)));
     }
     if let Err(e) = save(root, &r) {
         let back = match &old {
+            _ if kind == Kind::Service => Ok(()),
             Some(o) if o.enabled => install(root, s.name, o.current),
             _ => uninstall(root, s.name),
         };
@@ -356,13 +454,25 @@ fn new_file(p: &Path, mode: u32, bytes: &[u8]) -> Res<()> {
 /// SKILL.md and the files under `dir`, which this call makes: every folder made here one level at
 /// a time (none that exists, no link followed), every file new; folders 0700, a script (`#!`)
 /// 0700, the rest 0600. Any failure is an error.
+#[cfg(test)]
 pub(crate) fn write_tree(dir: &Path, skill_md: &str, files: &[SkillFile]) -> Res<()> {
+    write_tree_named(dir, "SKILL.md", skill_md, files)
+}
+
+/// `write_tree` with the main file named `main` (a service's `service.json`).
+pub(crate) fn write_tree_named(
+    dir: &Path,
+    main: &str,
+    skill_md: &str,
+    files: &[SkillFile],
+) -> Res<()> {
     new_dir(dir)?;
     let mut made = HashSet::new();
-    for (path, content) in std::iter::once(("SKILL.md", skill_md))
+    for (i, (path, content)) in std::iter::once((main, skill_md))
         .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
+        .enumerate()
     {
-        th::valid_path(path).or_else(|e| if path == "SKILL.md" { Ok(()) } else { Err(e) })?;
+        th::valid_path(path).or_else(|e| if i == 0 { Ok(()) } else { Err(e) })?;
         let mut at = dir.to_path_buf();
         for part in Path::new(path)
             .parent()
@@ -445,40 +555,73 @@ fn uninstall(root: &Path, name: &str) -> Res<()> {
 pub const OFF_BY_PERSON: &str = "turned off by the person";
 
 fn known(root: &Path, name: &str) -> Res<Record> {
-    record(root, name)
-        .ok_or_else(|| format!("there is no skill «{}»", super::tui::sanitize::line(name)))
+    known_kind(root, Kind::Skill, name)
+}
+
+fn known_kind(root: &Path, kind: Kind, name: &str) -> Res<Record> {
+    record(root, name).ok_or_else(|| {
+        format!(
+            "there is no {} «{}»",
+            kind.word(),
+            super::tui::sanitize::line(name)
+        )
+    })
 }
 
 /// `off` / `on`: what Pi loads from the next session, and whether its files read as Clio's.
 pub fn set_enabled(root: &Path, name: &str, on: bool, why: &str) -> Res<String> {
-    let _l = lock(root)?;
-    // The shipped skill, removed: `on` installs it again, as this binary has it.
-    if on && name == BUNDLED && record(root, name).is_none() {
-        let n = install_bundled(root)?;
+    set_enabled_in(root, Kind::Skill, name, on, why)
+}
+
+/// `set_enabled` of a skill or a service (a service has nothing live: its record says).
+pub(crate) fn set_enabled_in(
+    root: &Path,
+    kind: Kind,
+    name: &str,
+    on: bool,
+    why: &str,
+) -> Res<String> {
+    let _l = lock_in(root, kind)?;
+    // A shipped skill, removed: `on` installs it again, as this binary has it.
+    if kind == Kind::Skill && on && is_shipped(name) && record(root, name).is_none() {
+        let n = install_shipped(root, name, shipped_files(name))?;
         return Ok(format!(
             "«{name}» is installed again as Clio ships it (version {n}): from the next session"
         ));
     }
-    let mut r = known(root, name)?;
+    let mut r = known_kind(root, kind, name)?;
     r.enabled = on;
     r.off = (!on).then(|| why.to_owned());
     if on {
         r.failures = 0;
-        install(root, name, r.current)?;
-    } else {
-        uninstall(root, name)?;
+    }
+    if kind == Kind::Skill {
+        if on {
+            install(root, name, r.current)?;
+        } else {
+            uninstall(root, name)?;
+        }
     }
     save(root, &r)?;
     Ok(format!(
-        "«{name}» is {}: from the next session",
-        if on { "on" } else { "off" }
+        "«{name}» is {}{}",
+        if on { "on" } else { "off" },
+        if kind == Kind::Skill {
+            ": from the next session"
+        } else {
+            ""
+        }
     ))
 }
 
 /// Back to the version before the current one, exactly as it was registered.
 pub fn undo(root: &Path, name: &str) -> Res<String> {
-    let _l = lock(root)?;
-    let mut r = known(root, name)?;
+    undo_in(root, Kind::Skill, name)
+}
+
+pub(crate) fn undo_in(root: &Path, kind: Kind, name: &str) -> Res<String> {
+    let _l = lock_in(root, kind)?;
+    let mut r = known_kind(root, kind, name)?;
     let prev = r
         .versions
         .iter()
@@ -490,15 +633,22 @@ pub fn undo(root: &Path, name: &str) -> Res<String> {
     r.current = prev;
     r.failures = 0;
     if let Some(v) = r.versions.iter().find(|v| v.n == prev) {
-        // The description of that version: read from its SKILL.md.
-        r.description = description_of(&version_dir(root, name, v.n)).unwrap_or(r.description);
+        // The description of that version: read from its main file.
+        r.description = kind
+            .description(&version_dir(root, name, v.n))
+            .unwrap_or(r.description);
     }
-    if r.enabled {
+    if kind == Kind::Skill && r.enabled {
         install(root, name, prev)?;
     }
     save(root, &r)?;
     Ok(format!(
-        "«{name}» is back to version {prev} (was {from}): from the next session"
+        "«{name}» is back to version {prev} (was {from}){}",
+        if kind == Kind::Skill {
+            ": from the next session"
+        } else {
+            ""
+        }
     ))
 }
 
@@ -510,9 +660,15 @@ fn description_of(dir: &Path) -> Option<String> {
 
 /// Takes the skill away: off Pi's list, its versions and record kept in `removed/`.
 pub fn remove(root: &Path, name: &str) -> Res<String> {
-    let _l = lock(root)?;
-    known(root, name)?;
-    uninstall(root, name)?;
+    remove_in(root, Kind::Skill, name)
+}
+
+pub(crate) fn remove_in(root: &Path, kind: Kind, name: &str) -> Res<String> {
+    let _l = lock_in(root, kind)?;
+    known_kind(root, kind, name)?;
+    if kind == Kind::Skill {
+        uninstall(root, name)?;
+    }
     let to = root.join("removed").join(format!("{name}-{}", now_ms()));
     mkdir_private(&to)?;
     let versions = root.join(th::VERSIONS).join(name);
@@ -522,8 +678,13 @@ pub fn remove(root: &Path, name: &str) -> Res<String> {
     let rec = record_path(root, name);
     fs::rename(&rec, to.join("record.json")).map_err(|e| io_err(&rec, &e))?;
     Ok(format!(
-        "«{name}» was removed (kept in {}): from the next session",
-        to.display()
+        "«{name}» was removed (kept in {}){}",
+        to.display(),
+        if kind == Kind::Skill {
+            ": from the next session"
+        } else {
+            ""
+        }
     ))
 }
 
@@ -1001,5 +1162,33 @@ mod tests {
         // A reviewed new version turns it back on.
         register(&root, &new("hi", &m, &[])).unwrap();
         assert!(record(&root, "hi").unwrap().enabled);
+    }
+
+    // S-69: the service-creator skill ships with the binary beside skill-creator, installed by
+    // `ensure` like it, and passes its own check from its folder.
+    #[test]
+    fn the_service_creator_ships_and_passes_its_own_check() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        ensure_in(&root).unwrap();
+        for name in [BUNDLED, SERVICE_CREATOR] {
+            let r = record(&root, name).unwrap();
+            assert!(r.enabled && r.versions[0].by == "bundled", "{r:?}");
+        }
+        let live = root.join("live").join(SERVICE_CREATOR);
+        let md = fs::read_to_string(live.join("SKILL.md")).unwrap();
+        let verify = md.split("## How to verify").nth(1).unwrap();
+        let cmd = verify
+            .lines()
+            .find(|l| l.contains("check-run.sh"))
+            .unwrap()
+            .trim()
+            .trim_matches('`');
+        let out = std::process::Command::new("bash")
+            .args(["-c", cmd])
+            .current_dir(&live)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {out:?}");
     }
 }

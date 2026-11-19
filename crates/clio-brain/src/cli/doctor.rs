@@ -838,6 +838,9 @@ pub fn collect(dirs: &Dirs) -> Report {
         );
     }
     data_audit(&mut o, &dirs.data);
+    if let Some(w) = super::services::timer_warning(dirs) {
+        o.say(Level::Warn, w, Some("clio services enable".into()));
+    }
     memory_report(&mut o, dirs);
     vault_audit(&mut o, dirs);
     match Config::load(dirs) {
