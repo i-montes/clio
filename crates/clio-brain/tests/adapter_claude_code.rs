@@ -125,17 +125,20 @@ fn runs_claude_code_with_the_token_only_in_its_env() {
     assert_eq!(s["system"], "Eres Clio.");
     assert_eq!(s["system_mode"], 0o600);
     assert!(
-        Path::new(s["system_file"].as_str().unwrap()).starts_with(s["cwd"].as_str().unwrap()),
+        // On macOS /tmp is a link to /private/tmp, and getcwd() gives the latter.
+        Path::new(s["system_file"].as_str().unwrap())
+            .starts_with(s["cwd"].as_str().unwrap().trim_start_matches("/private")),
         "{s}"
     );
 
     let env = s["env"].as_object().unwrap();
     assert_eq!(env["CLAUDE_CODE_OAUTH_TOKEN"], TOKEN);
-    // LC_CTYPE is the fake's own Python setting its locale (PEP 538), not something it was given.
+    // LC_CTYPE is the fake's own Python setting its locale (PEP 538), not something it was given;
+    // so is __CF_USER_TEXT_ENCODING, which Python sets itself on macOS.
     let mut names: Vec<&str> = env
         .keys()
         .map(String::as_str)
-        .filter(|k| *k != "LC_CTYPE")
+        .filter(|k| *k != "LC_CTYPE" && *k != "__CF_USER_TEXT_ENCODING")
         .collect();
     names.sort_unstable();
     assert_eq!(
@@ -160,7 +163,11 @@ fn runs_claude_code_with_the_token_only_in_its_env() {
     let home = env["HOME"].as_str().unwrap();
     assert_ne!(Path::new(home), person);
     assert!(!Path::new(home).exists(), "{home} was left behind");
-    assert_eq!(s["cwd"].as_str().unwrap(), home);
+    // On macOS /tmp is a link to /private/tmp, and getcwd() gives the latter.
+    assert_eq!(
+        s["cwd"].as_str().unwrap().trim_start_matches("/private"),
+        home
+    );
 }
 
 #[test]
@@ -304,11 +311,21 @@ fn non_utf8_output_is_a_clear_error() {
 
 /// Whether process `pid` is still there (and not a zombie).
 fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+    #[cfg(target_os = "linux")]
+    return std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
         s.rsplit(')')
             .next()
             .is_some_and(|r| !r.trim_start().starts_with('Z'))
-    })
+    });
+    // No /proc off Linux: ps says the state (empty when the process is gone).
+    #[cfg(not(target_os = "linux"))]
+    return Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            let st = String::from_utf8_lossy(&o.stdout);
+            !st.trim().is_empty() && !st.trim_start().starts_with('Z')
+        });
 }
 
 // When Clio stops the adapter (SIGTERM, what `CommandModel` sends at its deadline), Claude Code is
