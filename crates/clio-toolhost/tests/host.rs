@@ -573,25 +573,32 @@ fn a_review_refuses_what_would_wait_for_the_person_and_leaves_nothing_pending() 
         r,
         _t: t,
     };
+    // A write is not one of a review's tools at all.
     let w = write_backup(&e, "backup.sql", "nuevo");
-    assert!(
-        !w.ok && w.content.contains("a review cannot ask the person"),
-        "{w:?}"
-    );
-    assert_eq!(w.decision.outcome, "deny");
+    assert!(!w.ok && w.decision.rule == "review/tool", "{w:?}");
     assert_eq!(
         std::fs::read_to_string(e.r.join("outside/backup.sql")).unwrap(),
         "viejo"
     );
     assert!(pending::list(&e.state).is_empty());
-    // The refusal is in the action log, under the review's run.
-    let log = actions(&e);
-    assert!(
-        log.iter()
-            .any(|l| l["outcome"] == "deny" && l["rule"] == "review/aside" && l["run"] == "r1"),
-        "{log:?}"
-    );
     if exec_ok(&e) {
+        // A command the list sets aside is refused, and the refusal is in the action log,
+        // under the review's run.
+        let gone = e.home.join("proyecto");
+        std::fs::create_dir_all(&gone).unwrap();
+        let w = call(&e, "s", "exec", json!({"command": "rm -rf ~/proyecto"}));
+        assert!(
+            !w.ok && w.content.contains("a review cannot ask the person"),
+            "{w:?}"
+        );
+        assert_eq!(w.decision.outcome, "deny");
+        assert!(gone.is_dir());
+        let log = actions(&e);
+        assert!(
+            log.iter()
+                .any(|l| l["outcome"] == "deny" && l["rule"] == "review/aside" && l["run"] == "r1"),
+            "{log:?}"
+        );
         let b = call(
             &e,
             "s",
@@ -606,6 +613,59 @@ fn a_review_refuses_what_would_wait_for_the_person_and_leaves_nothing_pending() 
         assert!(f.ok && f.content.contains("hi"), "{f:?}");
     }
     assert!(pending::list(&e.state).is_empty());
+}
+
+// S-67: a review (nobody watches it) has no network and no `sudo`: asking for the network, a
+// program that reaches out by itself and `sudo` are refused outright and logged; a plain local
+// command still runs
+#[test]
+fn a_review_has_no_network_and_no_sudo_and_a_local_command_runs() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let mut c = cfg(&r);
+    c.review = true;
+    let e = Env {
+        home: r.join("home"),
+        config: r.join("clio/config"),
+        state: r.join("clio/data/host"),
+        run: r.join("clio/data/runs/r1"),
+        host: ToolHost::new(c).unwrap(),
+        r,
+        _t: t,
+    };
+    if !exec_ok(&e) {
+        return;
+    }
+    for args in [
+        json!({"command": "echo hi", "network": true}),
+        json!({"command": "ssh host true"}),
+        json!({"command": "docker run --rm alpine true"}),
+        json!({"command": "sudo -n true"}),
+        json!({"command": "echo x | sudo tee /etc/x"}),
+    ] {
+        let o = call(&e, "s", "exec", args.clone());
+        assert!(!o.ok, "{args}: {o:?}");
+        assert_eq!(o.decision.rule, "review/network", "{args}: {o:?}");
+        assert!(o.content.contains("no network and no sudo"), "{o:?}");
+    }
+    assert!(pending::list(&e.state).is_empty());
+    let log = actions(&e);
+    let denied = log
+        .iter()
+        .filter(|l| l["outcome"] == "deny" && l["rule"] == "review/network")
+        .count();
+    assert_eq!(denied, 5, "{log:?}");
+    assert!(log.iter().any(|l| l["network"] == true), "{log:?}");
+    let o = call(&e, "s", "exec", json!({"command": "echo local"}));
+    assert!(o.ok && o.content.contains("local"), "{o:?}");
+    // A program that only needs the network runs without it.
+    let o = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": "curl -sm 5 https://example.com"}),
+    );
+    assert_ne!(o.data["exit_code"], 0, "{o:?}");
 }
 
 #[test]

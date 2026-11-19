@@ -598,3 +598,72 @@ fn the_brain_can_taint_a_session_and_nothing_clears_it() {
     assert!(!call(&e, "other", "fs_stat", json!({"path":"a.txt"})).tainted);
     assert!(call_t(&e, "s1", "fs_stat", json!({"path":"a.txt"}), false).tainted);
 }
+
+// S-67: a review's tool host serves only the reading tools, `exec` and the internal operations,
+// whoever sends the request: a forged write, folder, job, memory or secret request changes nothing
+#[test]
+fn a_review_refuses_every_tool_but_reading_and_exec_whoever_asks() {
+    let e = env_with(|c| c.review = true);
+    std::fs::write(e.work.join("a.txt"), "old").unwrap();
+    for (tool, args) in [
+        ("fs_write", json!({"path": "a.txt", "content": "new"})),
+        ("fs_write", json!({"path": "b.txt", "content": "new"})),
+        ("fs_mkdir", json!({"path": "d"})),
+        ("job_output", json!({"id": "j1"})),
+        ("job_stop", json!({"id": "j1"})),
+        ("memory_save", json!({"text": "x"})),
+        ("memory_search", json!({"query": "x"})),
+        ("memory_block_edit", json!({"block": "reglas", "text": "x"})),
+        ("request_secret", json!({"name": "K", "why": "x"})),
+        ("unknown_tool", json!({})),
+    ] {
+        let r = call(&e, "s", tool, args);
+        assert!(!r.ok, "{tool}: {r:?}");
+        assert_eq!(r.decision.rule, "review/tool", "{tool}: {r:?}");
+        assert!(r.content.contains("only reads and runs commands"), "{r:?}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(e.work.join("a.txt")).unwrap(),
+        "old"
+    );
+    assert!(!e.work.join("b.txt").exists() && !e.work.join("d").exists());
+    // The reading tools still answer.
+    let r = call(&e, "s", "fs_read", json!({"path": "a.txt"}));
+    assert!(r.ok && r.content.contains("old"), "{r:?}");
+    assert!(call(&e, "s", "fs_list", json!({"path": "."})).ok);
+}
+
+// S-67: in copy mode a review's `bash` sees the working copy read-only; it writes only its `/tmp`
+#[test]
+fn a_reviews_bash_cannot_write_the_copy_but_can_write_tmp() {
+    let e = env_with(|c| {
+        c.jail = JailMode::Auto;
+        c.review = true;
+    });
+    if let Err(why) = e.host.exec_available() {
+        eprintln!("SKIPPED (the jail cannot run here, nothing was tested): {why}");
+        assert!(
+            std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+            "CLIO_REQUIRE_JAIL is set: {why}"
+        );
+        return;
+    }
+    std::fs::write(e.work.join("a.txt"), "old").unwrap();
+    let r = call(&e, "s", "exec", json!({"command": "echo new > a.txt"}));
+    assert!(r.data["exit_code"].as_i64().unwrap_or(0) != 0, "{r:?}");
+    let r = call(&e, "s", "exec", json!({"command": "touch b.txt"}));
+    assert!(r.data["exit_code"].as_i64().unwrap_or(0) != 0, "{r:?}");
+    assert_eq!(
+        std::fs::read_to_string(e.work.join("a.txt")).unwrap(),
+        "old"
+    );
+    assert!(!e.work.join("b.txt").exists());
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": "d=$(mktemp -d) && cp a.txt $d/c && echo more >> $d/c && cat $d/c"}),
+    );
+    assert_eq!(r.data["exit_code"], 0, "{r:?}");
+    assert!(r.content.contains("oldmore"), "{r:?}");
+}

@@ -150,6 +150,14 @@ pub enum JailMode {
 
 /// What a review is told instead of an action being set aside for the person.
 pub const REVIEW_CANNOT_ASK: &str = "a review cannot ask the person: what needs their approval is not run in a review, and nothing waits for them";
+/// What a review is told when a command asks for the network or `sudo`, or reaches out by itself.
+pub const REVIEW_NO_NETWORK: &str = "a review has no network and no sudo: what needs them cannot be checked here, so report it as could_not_check";
+/// The only requests a review's tool host serves: the reading tools, `exec`, and the internal
+/// operations of the guard and of Clio (S-67). Everything else is refused, whoever sent it.
+const REVIEW_OPS: [&str; 10] = [
+    "fs_read", "fs_stat", "fs_list", "fs_glob", "exec", "filter", "judge", "jobs", "taint",
+    "closing",
+];
 
 pub struct Config {
     /// The session's working copy: the only folder the tools may touch.
@@ -322,7 +330,7 @@ impl ToolHost {
             cfg.work.clone()
         };
         let mut registry = Registry::new();
-        for t in ops::tools(exec_status.is_ok(), host.is_some()) {
+        for t in ops::tools(exec_status.is_ok(), host.is_some(), cfg.review) {
             registry.register(t).map_err(|x| e(&x))?;
         }
         let (mut tools, mut descriptions) = (Vec::new(), HashMap::new());
@@ -608,6 +616,14 @@ impl ToolHost {
                 tainted,
             );
         };
+        if self.review && !REVIEW_OPS.contains(&req.tool.as_str()) {
+            let at = self
+                .host
+                .as_ref()
+                .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()));
+            let why = "a review only reads and runs commands: this is not one of its tools";
+            return self.refuse_in_review(at, &req, &req.args, "review/tool", why);
+        }
         let closing = || {
             lock(&self.sessions)
                 .get(&req.session)
@@ -814,6 +830,25 @@ impl ToolHost {
             self.counter.fetch_add(1, Ordering::SeqCst)
         );
         if let Some(h) = &self.host {
+            // What reaches out (the network asked for, or a program that does by itself) or
+            // uses `sudo`: root can reach out past any cut.
+            let reaches = req.tool == "exec" && {
+                let command = map.get("command").and_then(Value::as_str).unwrap_or("");
+                let network = map.get("network").and_then(Value::as_bool) == Some(true);
+                let rules = &h.cfg.rules;
+                network || rules.reaches_out(command) || rules.uses_sudo(command)
+            };
+            // A review, which nobody watches, never does (S-67).
+            if reaches && self.review {
+                let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
+                return self.refuse_in_review(
+                    Some(at),
+                    &req,
+                    &req.args,
+                    "review/network",
+                    REVIEW_NO_NETWORK,
+                );
+            }
             // The list, not the model, says what waits for the person.
             let class = match req.tool.as_str() {
                 "exec" => map
@@ -827,14 +862,9 @@ impl ToolHost {
                 return self.aside(h, &req, class, None);
             }
             // A session that read text the judge flagged asks before it reaches out, whatever
-            // the command: what it read may be what wants out. Root can reach out past any cut.
-            if req.tool == "exec" && self.is_suspect(&req.session) {
-                let command = map.get("command").and_then(Value::as_str).unwrap_or("");
-                let network = map.get("network").and_then(Value::as_bool) == Some(true);
-                let rules = &h.cfg.rules;
-                if network || rules.reaches_out(command) || rules.uses_sudo(command) {
-                    return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON));
-                }
+            // the command: what it read may be what wants out.
+            if reaches && self.is_suspect(&req.session) {
+                return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON));
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
                 if self.review {

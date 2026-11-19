@@ -48,7 +48,8 @@ fn tool(
 }
 
 /// `host`: `exec` is declared here but served by `ToolHost` itself, with the host launcher.
-pub fn tools(jail: bool, host: bool) -> Vec<Tool> {
+/// `review`: `exec` sees the working copy read-only (it writes only its own `/tmp`).
+pub fn tools(jail: bool, host: bool, review: bool) -> Vec<Tool> {
     let mut v = vec![
         tool(
             "fs_read",
@@ -109,7 +110,7 @@ pub fn tools(jail: bool, host: bool) -> Vec<Tool> {
             "exec",
             "Run a shell command inside the jail (no network, only the working copy)",
             Effect::LocalReversible,
-            exec,
+            if review { exec_review } else { exec },
         ));
     }
     v
@@ -275,6 +276,14 @@ impl Drop for MountPoints {
 }
 
 fn exec(s: &Sandbox, a: &Value) -> Result<Value> {
+    exec_in(s, a, false)
+}
+
+fn exec_review(s: &Sandbox, a: &Value) -> Result<Value> {
+    exec_in(s, a, true)
+}
+
+fn exec_in(s: &Sandbox, a: &Value, work_read_only: bool) -> Result<Value> {
     let command = text(a, "command")?;
     let secs = a
         .get("timeout")
@@ -292,6 +301,7 @@ fn exec(s: &Sandbox, a: &Value) -> Result<Value> {
             argv: vec![BASH.into(), "-c".into(), command.into()],
             env: vec![],
             limits: Some(limits),
+            work_read_only,
             ..Job::default()
         })
         .map_err(Error::Jail)?;

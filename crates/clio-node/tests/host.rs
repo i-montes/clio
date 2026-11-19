@@ -31,6 +31,7 @@ fn job(dir: &Path, command: &str) -> HostJob {
         timeout: Some(Duration::from_secs(20)),
         max_output: 64 * 1024,
         masks: vec![],
+        read_only: false,
     }
 }
 
@@ -339,4 +340,54 @@ fn a_streamed_command_hands_over_its_output_as_it_comes_and_is_not_cut_for_volum
         "{}",
         all.len()
     );
+}
+
+// S-67: a review's command sees the machine read-only but `/tmp`, and gets no new privileges
+#[test]
+fn a_read_only_job_writes_only_tmp() {
+    for l in [Launcher::Bwrap, Launcher::Systemd] {
+        let Some(h) = with(l) else { continue };
+        let d = TempDir::new().unwrap();
+        let mut j = job(d.path(), "true");
+        j.read_only = true;
+        let (_, a) = h.args(&j).unwrap();
+        match l {
+            Launcher::Bwrap => {
+                assert_eq!(after(&a, "--ro-bind"), ["/"], "{a:?}");
+                assert_eq!(after(&a, "--bind"), ["/tmp"], "{a:?}");
+            }
+            Launcher::Systemd => {
+                let props = after(&a, "-p");
+                for p in [
+                    "ReadOnlyPaths=/",
+                    "ReadWritePaths=/tmp",
+                    "NoNewPrivileges=yes",
+                ] {
+                    assert!(props.contains(&p), "{p} missing from {a:?}");
+                }
+            }
+        }
+    }
+    let Some(h) = bwrap() else {
+        return;
+    };
+    // A folder outside `/tmp` (the build's own) cannot be written; one under `/tmp` can.
+    let outside = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let inside = TempDir::new().unwrap();
+    let mut j = job(
+        outside.path(),
+        &format!(
+            "touch x; echo $? ; touch {}/y; echo $?",
+            inside.path().display()
+        ),
+    );
+    j.read_only = true;
+    let o = h.run(&j).unwrap();
+    assert_eq!(
+        o.stdout.split_whitespace().collect::<Vec<_>>(),
+        ["1", "0"],
+        "{o:?}"
+    );
+    assert!(!outside.path().join("x").exists());
+    assert!(inside.path().join("y").exists());
 }

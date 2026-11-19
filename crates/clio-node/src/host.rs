@@ -58,6 +58,8 @@ pub struct HostJob {
     pub max_output: usize,
     /// Clio's folders: shown empty and read-only. Absolute; one that does not exist is skipped.
     pub masks: Vec<PathBuf>,
+    /// A review's command: everything read-only but `/tmp`, and no new privileges (no `sudo`).
+    pub read_only: bool,
 }
 
 fn unit_name() -> String {
@@ -256,11 +258,13 @@ impl HostJail {
         let program = match &self.tools {
             Tools::Bwrap(bwrap) => {
                 // Its own pid namespace: when its first process dies, everything it started dies.
+                let root = if job.read_only { "--ro-bind" } else { "--bind" };
+                a.extend([root, "/", "/"].map(String::from));
+                if job.read_only {
+                    a.extend(["--bind", "/tmp", "/tmp"].map(String::from));
+                }
                 a.extend(
                     [
-                        "--bind",
-                        "/",
-                        "/",
                         "--dev-bind",
                         "/dev",
                         "/dev",
@@ -322,6 +326,15 @@ impl HostJail {
                 }
                 if !job.network {
                     a.extend(["-p".into(), "PrivateNetwork=yes".into()]);
+                }
+                if job.read_only {
+                    for p in [
+                        "ReadOnlyPaths=/",
+                        "ReadWritePaths=/tmp",
+                        "NoNewPrivileges=yes",
+                    ] {
+                        a.extend(["-p".into(), p.into()]);
+                    }
                 }
                 for m in &masks {
                     a.extend(["-p".into(), format!("TemporaryFileSystem={m}:ro")]);
@@ -438,6 +451,7 @@ impl HostJail {
                 timeout: Some(Duration::from_secs(20)),
                 max_output: 4096,
                 masks: vec![mask.clone()],
+                read_only: false,
             })?;
             let why = match (out.exit_code, network) {
                 (Some(21), false) | (Some(20), true) => continue,

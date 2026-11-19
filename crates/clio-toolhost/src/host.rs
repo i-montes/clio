@@ -416,6 +416,7 @@ impl ToolHost {
                 timeout: secs.map(Duration::from_secs),
                 max_output: Limits::default().max_output,
                 masks: h.cfg.control.clone(),
+                read_only: self.review,
             };
             let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));

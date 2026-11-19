@@ -213,6 +213,7 @@ impl ToolHost {
                 .map(|s| Duration::from_secs(s.clamp(1, crate::host::MAX_TIMEOUT_SECS))),
             max_output: Limits::default().max_output,
             masks: h.cfg.control.clone(),
+            read_only: self.review,
         };
         let out = Arc::new(Mutex::new(Out {
             file,

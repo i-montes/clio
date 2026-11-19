@@ -69,6 +69,8 @@ pub struct Job {
     pub work: PathBuf,
     /// Paths relative to `work` that must stay read-only inside the jail (if they exist).
     pub read_only: Vec<String>,
+    /// The whole working folder is mounted read-only (a review: it reads, and writes only `/tmp`).
+    pub work_read_only: bool,
     /// `argv[0]` must be an absolute path inside the jail (for example `/usr/bin/python3`).
     pub argv: Vec<String>,
     /// Variables of the jailed command, besides the fixed ones.
@@ -372,7 +374,12 @@ impl Jail {
             ]);
         }
         let w = work.to_string_lossy().into_owned();
-        a.extend(["--bind".into(), w.clone(), "/work".into()]);
+        let bind = if job.work_read_only {
+            "--ro-bind"
+        } else {
+            "--bind"
+        };
+        a.extend([bind.into(), w.clone(), "/work".into()]);
         for rel in &job.read_only {
             let host = work.join(rel);
             if host.exists() && !rel.contains("..") {
