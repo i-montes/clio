@@ -207,6 +207,10 @@ fn a_round_only_reads_and_what_reaches_out_waits() {
 #[test]
 fn a_round_under_an_open_window_acts_on_nothing_and_opens_none() {
     let e = env(true);
+    // A round sets aside only commands: without a launcher there is nothing to set aside.
+    if !exec_ok(&e) {
+        return;
+    }
     let w = grant::open(&e.state, 4, &["x".into()]).unwrap().unwrap();
     let o = call(&e, "exec", json!({"command": "rm -r /srv/site.bak"}));
     assert!(!o.ok && o.decision.rule == "host/aside", "{o:?}");
