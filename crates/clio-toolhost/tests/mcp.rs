@@ -67,7 +67,7 @@ impl McpPort for Port {
     fn root(&self) -> PathBuf {
         self.root.clone()
     }
-    fn npm_view(&self, package: &str, version: &str) -> Result<Value, String> {
+    fn npm_view(&self, _name: &str, package: &str, version: &str) -> Result<Value, String> {
         self.views
             .lock()
             .unwrap()
@@ -916,6 +916,10 @@ fn a_hostile_server_cannot_hurt_the_client() {
         "{:?}",
         s.tools
     );
+    // A description too long is cut, and the cut is said.
+    let wordy = s.tools.iter().find(|t| t.name == "wordy").unwrap();
+    assert_eq!(wordy.description.chars().count(), 2000);
+    assert!(wordy.description.ends_with("y…"));
     drop(s);
     install(&e, "paged", true, true, 60);
     let p = e.port.start("paged").unwrap();

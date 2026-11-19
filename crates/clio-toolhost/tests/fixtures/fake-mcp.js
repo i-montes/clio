@@ -31,7 +31,7 @@ if (mode === "report") {
 	tools[2].description = `key ${(process.env.STATUS_KEY || "").length} proxy ${process.env.HTTPS_PROXY || "none"} home ${home} args ${JSON.stringify(process.argv.slice(2))} setting ${process.env.TZ_DEFAULT || "none"}`;
 }
 if (mode === "many") for (let i = 0; i < 300; i++) tools.push({ name: `t${i}`, description: "x", inputSchema: { type: "object" } });
-if (mode === "badnames") tools.push({ name: "../evil", description: "x" }, { name: "big", description: "x", inputSchema: { type: "object", d: "x".repeat(40000) } });
+if (mode === "badnames") tools.push({ name: "../evil", description: "x" }, { name: "big", description: "x", inputSchema: { type: "object", d: "x".repeat(40000) } }, { name: "wordy", description: "y".repeat(3000), inputSchema: { type: "object" } });
 
 const inspect = (a) => {
 	const seen = {};

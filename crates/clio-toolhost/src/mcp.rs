@@ -203,9 +203,10 @@ pub struct Proc {
 pub trait McpPort: Send + Sync {
     /// `<data>/mcp`: records, versions, state, logs.
     fn root(&self) -> PathBuf;
-    /// npm's facts about `package@version` (`npm view --json`), from the person's npm in its jail
-    /// with only the registry reachable. Outside text. Nothing is downloaded but this.
-    fn npm_view(&self, package: &str, version: &str) -> Result<Value, String>;
+    /// npm's facts about `package@version` (`npm view --json`) for server `name`, from the
+    /// person's npm in its jail with only the registry reachable. Outside text. Nothing is
+    /// downloaded but this. A failure is said in fixed words; npm's own go to `name`'s log.
+    fn npm_view(&self, name: &str, package: &str, version: &str) -> Result<Value, String>;
     /// Starts server `name` in its jail: only one that is on, whose tools the person confirmed
     /// and whose installed files are as they were (else it is turned off, with a notice).
     fn start(&self, name: &str) -> Result<Proc, String>;
@@ -1044,10 +1045,15 @@ fn tool_of(t: &Value) -> Option<Tool> {
     }
     Some(Tool {
         name: name.to_owned(),
-        description: sanitize(t["description"].as_str().unwrap_or(""))
-            .chars()
-            .take(MAX_DESCRIPTION)
-            .collect(),
+        // Cut where it is too long, and said so: real servers write long ones.
+        description: {
+            let d = sanitize(t["description"].as_str().unwrap_or(""));
+            if d.chars().count() > MAX_DESCRIPTION {
+                d.chars().take(MAX_DESCRIPTION - 1).chain(['…']).collect()
+            } else {
+                d
+            }
+        },
         schema,
         // Its own claim, and only when nothing it says contradicts it: a destructive or
         // open-world hint makes it a tool that asks.
@@ -1322,7 +1328,7 @@ impl ToolHost {
             ));
         }
         let facts = match port
-            .npm_view(&m.package, &m.version)
+            .npm_view(&m.name, &m.package, &m.version)
             .and_then(|v| npm_facts(&v, &m.package, &m.version, &|s| self.clean(s)))
         {
             Ok(f) => f,
