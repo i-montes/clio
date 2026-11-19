@@ -930,6 +930,40 @@ fn say(r: Res<String>) -> Res<()> {
 mod tests {
     use super::*;
 
+    // The prompt prefix lists each enabled skill's name and description: the shipped skills'
+    // stay as they were (only their bodies say how Clio manages what she creates).
+    #[test]
+    fn the_shipped_skills_keep_their_names_and_descriptions() {
+        for (files, head) in [
+            (
+                BUNDLED_FILES,
+                r#"---
+name: skill-creator
+description: "How to write or fix one of Clio's skills with skill_write. Use when the person asks for a skill, when the same kind of request keeps coming back, or when a skill failed and needs a new version."
+---
+"#,
+            ),
+            (
+                SERVICE_CREATOR_FILES,
+                r#"---
+name: service-creator
+description: "How to write one of Clio's services with service_write: a program that runs by itself on a schedule, with no model. Use when the person wants something done every few minutes, hours or days, or when the same check keeps being asked for."
+---
+"#,
+            ),
+            (
+                MCP_INSTALLER_FILES,
+                r#"---
+name: mcp-installer
+description: "How to choose and propose an MCP server with mcp_propose, and how to use one with mcp_tools and mcp_call. Use when the person wants Clio to have the tools of an MCP server (GitHub, a database, a time or search service)."
+---
+"#,
+            ),
+        ] {
+            assert!(files[0].1.starts_with(head), "{head}");
+        }
+    }
+
     fn tree(d: &Path) -> Vec<(PathBuf, Vec<u8>, u32)> {
         let mut out = vec![];
         let mut stack = vec![d.to_path_buf()];

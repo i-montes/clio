@@ -448,6 +448,41 @@ fn dump_screen(buf: &ratatui::buffer::Buffer, path: &std::path::Path) {
     }
 }
 
+/// Free acts on what Clio created (S-69): the notes of what was done now, for the caller; each
+/// run runs on a thread of its own, so nothing waits for it, and what came of it goes to the chat
+/// it was asked in (`Bg::Acted`), if that is still the open one.
+// shortcut: a run that ends before its chat's `ChatOpened` is handled loses its chat note (the
+// model still hears it); fine while runs take seconds, upgrade if a run can end at once.
+fn manage_news(
+    session: &Arc<dyn Session>,
+    slot: &Arc<Mutex<Slot>>,
+    tx: &Sender<Input>,
+) -> Vec<String> {
+    let (notes, runs) = session.manage_news();
+    for r in runs {
+        let (s, slot, out) = (session.clone(), slot.clone(), tx.clone());
+        let spawned = std::thread::Builder::new()
+            .name("clio-manage-run".into())
+            .spawn(move || {
+                let note = s.manage_run(&r);
+                let open = slot
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.session.clone())
+                    .is_some_and(|c| Arc::ptr_eq(&c, &s));
+                if open {
+                    let _ = out.send(Input::Bg(Bg::Acted(vec![note])));
+                }
+            });
+        if let Err(e) = spawned {
+            let _ = tx.send(Input::Bg(Bg::Done(Err(format!(
+                "could not start a thread: {e}"
+            )))));
+        }
+    }
+    notes
+}
+
 /// The open Pi session, if any, and which `ChatOpen` is the current one: an open that finishes
 /// after the person left (or after a newer one started) shuts its own session down.
 #[derive(Default)]
@@ -1259,6 +1294,9 @@ impl Ctx {
                         let (drafts, notes) = opened.session.skill_news();
                         let mut info = ChatInfo::from(&opened);
                         info.notes.extend(notes);
+                        // Done as the chat opens: its notes; the model hears them with the next
+                        // message.
+                        info.notes.extend(manage_news(&opened.session, &slot, tx));
                         if !drafts.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::SkillNews(drafts, vec![])));
                         }
@@ -1279,6 +1317,7 @@ impl Ctx {
                 if let Ok(mut c) = self.chat_cancel.lock() {
                     *c = cancel.clone();
                 }
+                let slot = self.chat.clone();
                 self.spawn(
                     move |_, tx| {
                         let mut forward = |e: &clio_brain::pi::rpc::Event| {
@@ -1303,6 +1342,10 @@ impl Ctx {
                         let (drafts, notes) = session.skill_news();
                         if !drafts.is_empty() || !notes.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::SkillNews(drafts, notes)));
+                        }
+                        let acted = manage_news(&session, &slot, tx);
+                        if !acted.is_empty() {
+                            let _ = tx.send(Input::Bg(Bg::Acted(acted)));
                         }
                         (result, session.refresh().ok())
                     },
@@ -1656,7 +1699,13 @@ impl Ctx {
                         if !suspect && let Some(w) = super::pending::window_now(d) {
                             for p in s.waiting() {
                                 if clio_toolhost::grant::may_answer(&w, &p) {
-                                    let _ = tx.send(Input::Bg(Bg::Granted(s.grant(&p.id))));
+                                    // An act on what Clio created goes on by itself (`Acted`).
+                                    let _ = tx.send(Input::Bg(match s.grant(&p.id) {
+                                        Ok(n) if clio_toolhost::manage::is_manage(&p) => {
+                                            Bg::Acted(vec![n])
+                                        }
+                                        r => Bg::Granted(r),
+                                    }));
                                 }
                             }
                         }

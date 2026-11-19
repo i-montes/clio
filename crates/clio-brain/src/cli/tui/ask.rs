@@ -261,6 +261,25 @@ pub struct SkillAsk {
 
 /// A service's rows for its box, from the stored item: `None` if its manifest does not read.
 fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<Vec<String>> {
+    let mut rows = grant_rows(manifest)?;
+    rows.push(format!(
+        "review: {}",
+        match p.args["verdict"].as_str().unwrap_or("") {
+            "could_not_check" => "could not check",
+            v => v,
+        }
+    ));
+    let notes = p.args["notes"].as_str().unwrap_or("").trim();
+    if !notes.is_empty() {
+        rows.push("review notes:".into());
+        rows.extend(notes.lines().map(str::to_owned));
+    }
+    Some(rows)
+}
+
+/// What a service's manifest grants, one row each (schedule, command, hosts, secrets and every
+/// host each can reach, reads, writes, limits): `None` if it does not read.
+fn grant_rows(manifest: &str) -> Option<Vec<String>> {
     let m: clio_toolhost::services::Manifest = serde_json::from_str(manifest).ok()?;
     let none = |v: &[String]| {
         if v.is_empty() {
@@ -269,7 +288,7 @@ fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<V
             v.join(", ")
         }
     };
-    let mut rows = vec![
+    Some(vec![
         format!(
             "schedule: every {}{}",
             m.schedule.every,
@@ -317,20 +336,7 @@ fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<V
             clio_node::host::SERVICE_TASKS,
             m.limits.seconds
         ),
-        format!(
-            "review: {}",
-            match p.args["verdict"].as_str().unwrap_or("") {
-                "could_not_check" => "could not check",
-                v => v,
-            }
-        ),
-    ];
-    let notes = p.args["notes"].as_str().unwrap_or("").trim();
-    if !notes.is_empty() {
-        rows.push("review notes:".into());
-        rows.extend(notes.lines().map(str::to_owned));
-    }
-    Some(rows)
+    ])
 }
 
 impl BlockAsk {
@@ -346,10 +352,21 @@ impl BlockAsk {
                 head = format!("{}{}?", c.to_uppercase(), &head[1..]);
             }
             // The box's label line already says why it always asks, when it does.
-            let rows = vec![
+            let mut rows = vec![
                 (Part::Head, head),
                 (Part::Label, format!("Clio's reason: {}", clean(&why))),
             ];
+            // A service's `undo`: what the version it goes back to was granted.
+            if let Some(older) = p.args["older"].as_str() {
+                rows.push((
+                    Part::Label,
+                    format!("version {} may:", p.args["to"].as_u64().unwrap_or(0)),
+                ));
+                match grant_rows(older) {
+                    Some(g) => rows.extend(g.into_iter().map(|r| (Part::Text, clean(&r)))),
+                    None => rows.push((Part::Warn, "its manifest does not read".into())),
+                }
+            }
             let yes = match p.args["action"].as_str().unwrap_or("") {
                 "remove" => " yes, remove it",
                 "undo" => " yes, go back",

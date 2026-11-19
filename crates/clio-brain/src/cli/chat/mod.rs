@@ -236,6 +236,16 @@ pub trait Session: Send + Sync {
     fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
         (Vec::new(), Vec::new())
     }
+    /// What the model asked of what it created, free (S-69), after a turn or when the chat opens:
+    /// the chat's notes of what was done now (`off`, or not done), and the runs, each for
+    /// `manage_run` on a thread of its own. The model hears each outcome as data.
+    fn manage_news(&self) -> (Vec<String>, Vec<crate::cli::manage::Request>) {
+        (Vec::new(), Vec::new())
+    }
+    /// Runs one of `manage_news`'s runs; the chat's note of what came of it.
+    fn manage_run(&self, _r: &crate::cli::manage::Request) -> String {
+        String::new()
+    }
     /// Reviews skill draft `id` (`review::run` on its text and check) and acts on the verdict:
     /// registers it, sets it aside for the person, or gives the findings back to the model.
     fn review_skill(&self, id: &str, _cancel: &Cancel) -> Result<Reviewed, String> {
