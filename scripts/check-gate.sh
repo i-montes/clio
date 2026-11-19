@@ -2,7 +2,8 @@
 # The gate is the same for every change: a prompt, a model or a policy goes through the PR
 # checks like code does, and a release cannot start unless the bench, the attacks and the
 # human review passed. This checks that the workflows still say so.
-set -euo pipefail
+# POSIX: it runs with `sh` as well as through its shebang.
+set -eu
 cd "$(dirname "$0")/.."
 
 # 078: no path filter on the PR checks, so no kind of change (a prompt, a model, a policy
