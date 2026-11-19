@@ -608,6 +608,8 @@ mod tests {
     }
 
     // ...and the launch refuses such a copy before any jail is built, whichever of the three it is.
+    // Linux only: elsewhere the claude connector is refused earlier, as there is no jail at all.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_copy_with_a_claude_path_as_a_link_or_an_odd_mcp_json_does_not_launch_the_bridge() {
         let t = tempfile::tempdir().unwrap();
