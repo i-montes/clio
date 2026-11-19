@@ -510,8 +510,6 @@ impl App {
         }
     }
 
-    /// The window, the limits and the name of the model Clio is set up with, for what a run did
-    /// not record.
     /// Past this many tokens of context, Clio compacts between turns (`session.context_cap_tokens`).
     pub fn context_cap(&self) -> u64 {
         self.home
@@ -520,6 +518,8 @@ impl App {
             .map_or(crate::cli::home::CONTEXT_CAP, |h| h.context_cap)
     }
 
+    /// The window, the limits and the name of the model Clio is set up with, for what a run did
+    /// not record.
     pub(super) fn fallback(&self) -> (u64, bool, RunLimits) {
         self.home
             .header
@@ -899,9 +899,6 @@ pub(super) fn next_ask(app: &mut App) {
     }
 }
 
-/// `clio` could not reopen the last conversation: a draft, as when there is none, with what was
-/// typed meanwhile kept. With none, a message sent meanwhile starts the new one; a failure says why
-/// in a note and gives the message back to the composer.
 /// A turn ended: a context over the cap is compacted now, as `/compact` does, if nothing waits
 /// (a question, an approval, a message, an action still running). Once per turn that ends.
 fn over_cap(app: &mut App) -> Vec<Cmd> {
@@ -936,6 +933,9 @@ fn over_cap(app: &mut App) -> Vec<Cmd> {
     vec![Cmd::Compact(String::new())]
 }
 
+/// `clio` could not reopen the last conversation: a draft, as when there is none, with what was
+/// typed meanwhile kept. With none, a message sent meanwhile starts the new one; a failure says why
+/// in a note and gives the message back to the composer.
 fn reopen_failed(app: &mut App, e: String, queued: Option<String>) -> Vec<Cmd> {
     let typed = std::mem::take(&mut app.chat.input);
     app.chat = Chat::draft(app.now_ms);

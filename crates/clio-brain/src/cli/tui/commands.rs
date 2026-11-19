@@ -613,8 +613,6 @@ fn last_answer(app: &App) -> Option<String> {
     })
 }
 
-/// The session's numbers, from Pi's own totals: what `/context` and `/usage` show (the context
-/// and usage screens belong to the builtin loop's runs).
 /// `/compact N`: past N thousand tokens Clio compacts between turns, from now on.
 fn set_cap(app: &mut App, args: &str) -> Vec<Cmd> {
     app.chat.menu = None;
@@ -631,6 +629,8 @@ fn set_cap(app: &mut App, args: &str) -> Vec<Cmd> {
     }
 }
 
+/// The session's numbers, from Pi's own totals: what `/context` and `/usage` show (the context
+/// and usage screens belong to the builtin loop's runs).
 fn numbers(app: &App, context: bool) -> Modal {
     use crate::cli::usage::{self, tokens};
     let c = &app.chat;
