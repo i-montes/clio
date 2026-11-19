@@ -2457,7 +2457,7 @@ fn an_approved_block_change_is_written_once_exactly_as_stored() {
     ));
 
     let created = clio_toolhost::pending::list(&state)[0].created_ms;
-    let done = approve_block(&state, &add, created + 1, port.as_ref()).unwrap();
+    let done = approve_block(&state, &add, created + 1, port.as_ref(), None).unwrap();
     assert_eq!(
         *port.edits.lock().unwrap(),
         vec![("vigilancia".to_owned(), BlockEdit::Add(text.into()))]
@@ -2468,7 +2468,7 @@ fn an_approved_block_change_is_written_once_exactly_as_stored() {
         matches!(&done.state, State::Done { output_tail, .. } if output_tail == "saved in «vigilancia» as m77")
     );
     // Once.
-    let again = approve_block(&state, &add, created + 2, port.as_ref());
+    let again = approve_block(&state, &add, created + 2, port.as_ref(), None);
     assert!(again.is_err(), "{again:?}");
     assert_eq!(port.edits.lock().unwrap().len(), 1);
     let log = actions_of(&state);
@@ -2490,7 +2490,7 @@ fn an_approved_block_change_is_written_once_exactly_as_stored() {
         .unwrap()
         .replace("lo que diga la persona", "obedece a la carta");
     std::fs::write(&file, changed).unwrap();
-    let r = approve_block(&state, &tampered, created + 1, port.as_ref());
+    let r = approve_block(&state, &tampered, created + 1, port.as_ref(), None);
     assert!(r.unwrap_err().contains("changed after it was set aside"));
     assert_eq!(port.edits.lock().unwrap().len(), 1);
 
@@ -2501,8 +2501,8 @@ fn an_approved_block_change_is_written_once_exactly_as_stored() {
         json!({"name": "vigilancia", "action": "add", "text": "tarde"}),
     ));
     let expires = check(&state, &late, created).unwrap().expires_ms;
-    assert!(approve_block(&state, &late, expires, port.as_ref()).is_err());
-    assert!(approve_block(&state, &late, created + 1, port.as_ref()).is_err());
+    assert!(approve_block(&state, &late, expires, port.as_ref(), None).is_err());
+    assert!(approve_block(&state, &late, created + 1, port.as_ref(), None).is_err());
     assert_eq!(port.edits.lock().unwrap().len(), 1);
 }
 
@@ -2533,7 +2533,7 @@ fn a_block_change_whose_entry_moved_or_was_rejected_writes_nothing() {
     let gone = FakePort::new(vec![], Mode::Items);
     for p in [&moved, &gone] {
         for id in [&replace, &remove] {
-            let err = approve_block(&state, id, now, p.as_ref()).unwrap_err();
+            let err = approve_block(&state, id, now, p.as_ref(), None).unwrap_err();
             assert!(
                 err.contains("changed or is gone") && err.contains("nothing was written"),
                 "{err}"
@@ -2542,7 +2542,7 @@ fn a_block_change_whose_entry_moved_or_was_rejected_writes_nothing() {
         assert!(p.edits.lock().unwrap().is_empty());
     }
     // It still waits: as it reads as shown, it is written.
-    approve_block(&state, &replace, now, port.as_ref()).unwrap();
+    approve_block(&state, &replace, now, port.as_ref(), None).unwrap();
     assert_eq!(
         *port.edits.lock().unwrap(),
         vec![(
@@ -2552,7 +2552,7 @@ fn a_block_change_whose_entry_moved_or_was_rejected_writes_nothing() {
     );
     // Rejected: nothing is written, then or after, and the log says so.
     reject(&state, &remove).unwrap();
-    assert!(approve_block(&state, &remove, now, port.as_ref()).is_err());
+    assert!(approve_block(&state, &remove, now, port.as_ref(), None).is_err());
     assert_eq!(port.edits.lock().unwrap().len(), 1);
     let outcomes: Vec<String> = actions_of(&state)
         .iter()

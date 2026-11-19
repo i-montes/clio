@@ -1,7 +1,7 @@
 //! Host mode: what the list (`ask`) sets aside waits here for the person, in
 //! `state/pending/<id>.json`. Nothing set aside runs until the person approves it, and then it
-//! runs as it was saved (same hash), once, and never after it expired (24 hours). When the chat
-//! asks about them is the brain's (`approvals.every_hours`): every item may be asked.
+//! runs as it was saved (same hash), once, and never after it expired (24 hours). The person's yes
+//! and a permission window's (`grant`) go through the same functions here; `granted` says which.
 
 use std::fs;
 use std::io::Write;
@@ -29,6 +29,9 @@ const TAIL_BYTES: usize = 4000;
 /// How long the reason of a secret request may be.
 const MAX_WHY: usize = 200;
 
+/// What an approved call ran into: ok, its text, its data, and whether that text is outside text.
+pub(crate) type Ran = (bool, String, Value, bool);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
     pub id: String,
@@ -49,6 +52,9 @@ pub struct Pending {
     /// Why it waits when its class alone would not say it (a suspect session reaching out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Approved by the permission window of this id (`grant`), not by the person's own yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +120,7 @@ pub fn approve_block(
     id: &str,
     now_ms: i64,
     port: &dyn MemoryPort,
+    granted: Option<&str>,
 ) -> Result<Pending, String> {
     let mut p = check(state, id, now_ms)?;
     let Some(b) = block_of(&p) else {
@@ -164,6 +171,7 @@ pub fn approve_block(
         exit_code: None,
         output_tail: done,
     };
+    p.granted = granted.map(str::to_owned);
     save(state, &p)?;
     if let Err(e) = log_line(
         state,
@@ -173,7 +181,7 @@ pub fn approve_block(
         &p.what,
         false,
         "approved",
-        "host/approved",
+        approved_rule(granted, "host/approved"),
         None,
     ) {
         eprintln!("clio-toolhost: the action log lost a line: {e}");
@@ -280,6 +288,7 @@ fn set_aside_made(
         expires_ms: now + DAY_MS,
         state: State::Waiting,
         reason: Some(reason.to_owned()),
+        granted: None,
     };
     let p = set_aside(state, p)?;
     if let Err(e) = log_line(
@@ -295,10 +304,10 @@ fn set_aside_made(
 pub fn approve_skill(
     state: &Path,
     id: &str,
-    now_ms: i64,
+    (now_ms, granted): (i64, Option<&str>),
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
-    approve_made(state, id, now_ms, Class::Skill, register)
+    approve_made(state, id, (now_ms, granted), Class::Skill, register)
 }
 
 /// The person approves MCP server `id` (S-70), as `approve_skill`: `install` downloads, checks,
@@ -306,26 +315,35 @@ pub fn approve_skill(
 pub fn approve_mcp(
     state: &Path,
     id: &str,
-    now_ms: i64,
+    (now_ms, granted): (i64, Option<&str>),
     install: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
-    approve_made(state, id, now_ms, Class::Mcp, install)
+    approve_made(state, id, (now_ms, granted), Class::Mcp, install)
 }
 
 /// The person approves service `id` (S-69), as `approve_skill`.
 pub fn approve_service(
     state: &Path,
     id: &str,
-    now_ms: i64,
+    (now_ms, granted): (i64, Option<&str>),
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
-    approve_made(state, id, now_ms, Class::Service, register)
+    approve_made(state, id, (now_ms, granted), Class::Service, register)
+}
+
+/// The action log's rule for an approval: the person's own (`rule`), or a permission window's.
+fn approved_rule<'a>(granted: Option<&str>, rule: &'a str) -> &'a str {
+    if granted.is_some() {
+        "grant/approved"
+    } else {
+        rule
+    }
 }
 
 fn approve_made(
     state: &Path,
     id: &str,
-    now_ms: i64,
+    (now_ms, granted): (i64, Option<&str>),
     class: Class,
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
@@ -346,6 +364,7 @@ fn approve_made(
         exit_code: None,
         output_tail: done,
     };
+    p.granted = granted.map(str::to_owned);
     save(state, &p)?;
     if let Err(e) = log_line(
         state,
@@ -355,11 +374,14 @@ fn approve_made(
         &p.what,
         false,
         "approved",
-        match class {
-            Class::Service => "services/approved",
-            Class::Mcp => "mcp/approved",
-            _ => "skills/approved",
-        },
+        approved_rule(
+            granted,
+            match class {
+                Class::Service => "services/approved",
+                Class::Mcp => "mcp/approved",
+                _ => "skills/approved",
+            },
+        ),
         None,
     ) {
         eprintln!("clio-toolhost: the action log lost a line: {e}");
@@ -453,7 +475,7 @@ fn hash_of(tool: &str, args: &Value) -> String {
 }
 
 /// `date` in the local time zone: there is no date crate here.
-pub(crate) fn local(ms: i64, fmt: &str) -> Option<String> {
+pub fn local(ms: i64, fmt: &str) -> Option<String> {
     let o = std::process::Command::new("/usr/bin/date")
         .arg(format!("--date=@{}", ms.div_euclid(1000)))
         .arg(format!("+{fmt}"))
@@ -746,6 +768,7 @@ impl ToolHost {
             expires_ms: now + DAY_MS,
             state: State::Waiting,
             reason: reason.map(str::to_owned),
+            granted: None,
         };
         draft.what = self.clean(shown(&draft));
         let (content, rule) = match set_aside(state, draft) {
@@ -763,7 +786,17 @@ impl ToolHost {
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
-                (aside_text(&p), "host/aside")
+                match self.granted(state, req, &p) {
+                    Ok(done) => return done,
+                    Err(None) => (aside_text(&p), "host/aside"),
+                    Err(Some(why)) => (
+                        format!(
+                            "{} (It could not run under the person's permission window: {why}.)",
+                            aside_text(&p)
+                        ),
+                        "host/aside",
+                    ),
+                }
             }
             // Fails closed: it was not set aside, and it does not run either.
             Err(e) => (
@@ -789,16 +822,107 @@ impl ToolHost {
         }
     }
 
+    /// A permission window is open (`grant`): what was just set aside (`p`, for call `req`) is
+    /// approved by it at once, through the same path as the person's yes, recorded in the
+    /// window's record before it runs, and its real result goes back as the call's own. Never a
+    /// secret, never in a `suspect` session, never in a review. `Err(None)`: no window, it waits;
+    /// `Err(Some(why))`: the window could not do it, and it waits.
+    fn granted(
+        &self,
+        state: &Path,
+        req: &Request,
+        p: &Pending,
+    ) -> Result<Response, Option<String>> {
+        if p.class == Class::Secret || self.review || self.is_suspect(&req.session) {
+            return Err(None);
+        }
+        let port = self.memory.clone();
+        if p.class == Class::Memory && port.is_none() {
+            return Err(None);
+        }
+        let w = crate::grant::begin(state, p, &p.what).ok_or(None)?;
+        let now = now_ms();
+        let left = crate::grant::left_text(w.ends_ms - now);
+        let (ok, content, data, external) = if p.class == Class::Memory {
+            let port = port.ok_or(None)?;
+            approve_block(state, &p.id, now, port.as_ref(), Some(&w.id)).map(|q| {
+                let text = match &q.state {
+                    State::Done { output_tail, .. } => output_tail.clone(),
+                    _ => String::new(),
+                };
+                (true, text, Value::Null, false)
+            })
+        } else {
+            self.approve_as(&p.id, now, Some(&w.id), Some(req))
+                .map(|(_, ran)| ran)
+        }
+        .map_err(|e| {
+            crate::grant::done(state, &w, &p.id, &format!("not done: {e}"));
+            Some(e)
+        })?;
+        let outcome = match data.get("exit_code").and_then(Value::as_i64) {
+            Some(c) => format!("done (exit {c})"),
+            None if ok => "done".to_owned(),
+            None => format!("failed: {content}"),
+        };
+        crate::grant::done(state, &w, &p.id, &outcome);
+        if p.tool == "mcp_call" {
+            return Ok(self.mcp_outside(req, ok, "grant/approved", &content, &p.what));
+        }
+        let reason =
+            format!("approved under the person's permission window ({left} left), so it ran");
+        Ok(Response {
+            id: req.id.clone(),
+            ok,
+            content,
+            data,
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "grant/approved".into(),
+                reason,
+            },
+            tainted: self.is_tainted(&req.session),
+            external,
+        })
+    }
+
     /// The person approves `id`: it runs as it was saved, through the same path as an allowed
     /// action (log, copy before change) and without being classified again. Only a waiting,
     /// unexpired, unchanged pending of this host's run runs, and only once. Works from a fresh
     /// `ToolHost` built in host mode with that run's `run_dir` and `HostCfg.run`.
     pub fn approve(&self, id: &str, now_ms: i64) -> Result<Pending, String> {
+        self.approve_by(id, now_ms, None)
+    }
+
+    /// `approve`, saying who approved: the person (`None`) or the permission window `granted`
+    /// (the brain approves what waits while one is open).
+    pub fn approve_by(
+        &self,
+        id: &str,
+        now_ms: i64,
+        granted: Option<&str>,
+    ) -> Result<Pending, String> {
+        let _one_at_a_time = lock(&self.busy);
+        self.approve_as(id, now_ms, granted, None).map(|(p, _)| p)
+    }
+
+    /// The one path of every yes: the person's (`granted` is `None`), or a permission window's
+    /// (`granted`: its id). `call`: the call it answers when the window approves it inline, while
+    /// that call holds the host, so the result is that call's own (judged and marked as any).
+    /// What ran, and its result (ok, text, data, outside text).
+    pub(crate) fn approve_as(
+        &self,
+        id: &str,
+        now_ms: i64,
+        granted: Option<&str>,
+        call: Option<&Request>,
+    ) -> Result<(Pending, Ran), String> {
         let h = self
             .host
             .as_ref()
             .ok_or("this service is not in host mode")?;
-        let _one_at_a_time = lock(&self.busy);
+        let rule = approved_rule(granted, "host/approved");
+        let granted = granted.map(str::to_owned);
         let state = &h.cfg.state;
         let mut p = check(state, id, now_ms)?;
         if p.class == Class::Secret {
@@ -828,10 +952,10 @@ impl ToolHost {
         // An MCP call: the exact server, tool and arguments shown, through the session's client.
         if p.tool == "mcp_call" {
             claim(state, id).map_err(|_| format!("{id} already ran"))?;
-            let (ok, text) = self.mcp_approved(&p.args).inspect_err(|_| {
+            let (ok, raw) = self.mcp_approved(&p.args).inspect_err(|_| {
                 let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
             })?;
-            let text = self.clean(&text);
+            let text = self.clean(&raw);
             if let Err(e) = log_line(
                 state,
                 &p.run,
@@ -840,7 +964,7 @@ impl ToolHost {
                 &p.what,
                 false,
                 if ok { "approved" } else { "failed" },
-                "host/approved",
+                rule,
                 None,
             ) {
                 eprintln!("clio-toolhost: the action log lost a line: {e}");
@@ -849,8 +973,9 @@ impl ToolHost {
                 exit_code: Some(i64::from(!ok)),
                 output_tail: tail(&text),
             };
+            p.granted = granted;
             save(state, &p)?;
-            return Ok(p);
+            return Ok((p, (ok, raw, Value::Null, true)));
         }
         if p.tool == "exec" {
             self.exec_available()
@@ -862,32 +987,38 @@ impl ToolHost {
         };
         // Claimed before it runs: a second approval, even from another process, finds it.
         claim(state, id).map_err(|_| format!("{id} already ran"))?;
+        // Under a window, as the call it answers: its result is judged when the guard filters it.
+        let (rid, call_id) = call.map_or_else(
+            || (id.to_owned(), "approve".to_owned()),
+            |r| (r.id.clone(), r.call_id.clone()),
+        );
         let req = Request {
-            id: id.into(),
+            id: rid,
             tool: p.tool.clone(),
             args: run_args(&p),
             session: p.session.clone(),
-            call_id: "approve".into(),
+            call_id,
             tainted: false,
         };
         let ran = self.host_run(
             h,
             &req,
             format!("approve:{id}"),
-            "host/approved",
+            rule,
             real.as_deref(),
             &|| false,
         );
         // It did not run (its line before could not be logged): it still waits.
-        let (_, content, data, _) = ran.inspect_err(|_| {
+        let ran = ran.inspect_err(|_| {
             let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
         })?;
         p.state = State::Done {
-            exit_code: data.get("exit_code").and_then(Value::as_i64),
-            output_tail: tail(&content),
+            exit_code: ran.2.get("exit_code").and_then(Value::as_i64),
+            output_tail: tail(&ran.1),
         };
+        p.granted = granted;
         save(state, &p)?;
-        Ok(p)
+        Ok((p, ran))
     }
 
     /// `request_secret`: checks the name, the destination and the vault now, and stores the
@@ -979,10 +1110,11 @@ impl ToolHost {
             expires_ms: now + DAY_MS,
             state: State::Waiting,
             reason: None,
+            granted: None,
         };
         let content = match set_aside(&cfg.state, draft) {
             Ok(p) => format!(
-                "requested {}: the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it",
+                "requested {}: the person is asked for it in the chat when this turn ends (a permission window never answers a secret), and their answer reaches you in a later turn; go on with what does not need it",
                 p.id
             ),
             Err(e) => return refuse(format!("the request could not be stored ({e})")),
@@ -1000,6 +1132,31 @@ impl ToolHost {
             tainted,
             external: false,
         }
+    }
+}
+
+/// A waiting delete of `session`, for tests.
+#[cfg(test)]
+pub(crate) fn tests_item(session: &str) -> Pending {
+    tests_item_at(session, 0, now_ms())
+}
+
+#[cfg(test)]
+fn tests_item_at(session: &str, n: usize, now: i64) -> Pending {
+    Pending {
+        id: String::new(),
+        class: Class::Delete,
+        tool: "exec".into(),
+        args: json!({"command": format!("rm -r /srv/old{n}")}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r".into(),
+        session: session.into(),
+        created_ms: now,
+        expires_ms: now + DAY_MS,
+        state: State::Waiting,
+        reason: None,
+        granted: None,
     }
 }
 
@@ -1022,6 +1179,7 @@ mod tests {
             expires_ms: 1,
             state: State::Waiting,
             reason: None,
+            granted: None,
         };
         assert_eq!(run_args(&p)["timeout"], MAX_TIMEOUT_SECS);
         assert!(aside_text(&p).contains("time limit of 3600 s"));
@@ -1060,20 +1218,7 @@ mod tests {
     }
 
     fn item(session: &str, n: usize, now: i64) -> Pending {
-        Pending {
-            id: String::new(),
-            class: Class::Delete,
-            tool: "exec".into(),
-            args: json!({"command": format!("rm -r /srv/old{n}")}),
-            hash: String::new(),
-            what: String::new(),
-            run: "r".into(),
-            session: session.into(),
-            created_ms: now,
-            expires_ms: now + DAY_MS,
-            state: State::Waiting,
-            reason: None,
-        }
+        super::tests_item_at(session, n, now)
     }
 
     // A session has at most 20 items waiting: the 21st is refused with a text for the model,
@@ -1094,6 +1239,40 @@ mod tests {
         // One answered makes room.
         reject(t.path(), &ids[0]).unwrap();
         assert!(set_aside(t.path(), item("s", 99, now)).is_ok());
+    }
+
+    // A permission window never answers a secret request: the value is the person's to type.
+    #[test]
+    fn a_window_never_answers_a_secret() {
+        let t = tempfile::tempdir().unwrap();
+        let st = t.path().join("state");
+        std::fs::create_dir_all(t.path().join("home")).unwrap();
+        let host = ToolHost::new(crate::Config::new(
+            &t.path().join("home"),
+            &t.path().join("scratch"),
+            &t.path().join("run"),
+        ))
+        .unwrap();
+        crate::grant::open(&st, 4, &["a1".into()]).unwrap().unwrap();
+        let mut p = super::tests_item("s");
+        p.class = Class::Secret;
+        p.tool = "request_secret".into();
+        p.args = json!({"name": "t", "destination": "http_fetch:api.example.com", "why": "x"});
+        let req = Request {
+            id: "i".into(),
+            tool: "request_secret".into(),
+            args: p.args.clone(),
+            session: "s".into(),
+            call_id: "c".into(),
+            tainted: false,
+        };
+        assert!(matches!(host.granted(&st, &req, &p), Err(None)));
+        assert!(
+            crate::grant::record(&st, &crate::grant::read(&st).unwrap().id)
+                .unwrap()
+                .1
+                .is_empty()
+        );
     }
 
     // Reading the store removes what is more than a week past its time, answered or not, with

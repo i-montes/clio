@@ -1188,7 +1188,7 @@ impl ToolHost {
     }
 
     /// Outside text for the model: cleaned, cut, judged when the guard filters it, and marking.
-    fn mcp_outside(
+    pub(crate) fn mcp_outside(
         &self,
         req: &Request,
         ok: bool,
@@ -1359,7 +1359,7 @@ impl ToolHost {
             true,
             "mcp/propose",
             format!(
-                "set aside {}: the MCP server «{}» ({}@{}) waits for the person's approval. Nothing was downloaded. If they approve, Clio installs it and lists its tools, and it stays off until the person confirms them; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end.",
+                "set aside {}: the MCP server «{}» ({}@{}) waits for the person's approval. Nothing was downloaded. If they approve (or their open permission window does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end.",
                 p.id, m.name, m.package, m.version
             ),
         )
@@ -1395,7 +1395,7 @@ impl ToolHost {
                 let mode = match (t.mode, t.flagged) {
                     (_, true) => "ask: it changed since the person confirmed it",
                     (Mode::Free, false) => "free",
-                    (Mode::Ask, false) => "ask: each call waits for the person",
+                    (Mode::Ask, false) => "ask: each call needs the person's permission",
                 };
                 out.push(format!("- {} [{mode}]: {}", t.name, t.description));
                 out.push(format!("  arguments: {}", t.schema));

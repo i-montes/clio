@@ -25,6 +25,7 @@
 
 pub mod ask;
 pub mod cli;
+pub mod grant;
 pub mod host;
 mod jobs;
 mod judge;
@@ -565,6 +566,25 @@ impl ToolHost {
         }
     }
 
+    /// Where the permission window lives (`grant`): Clio's host folder, in host mode or in a chat
+    /// (where secrets and block changes wait).
+    pub(crate) fn grant_state(&self) -> Option<&Path> {
+        self.host
+            .as_ref()
+            .map(|h| h.cfg.state.as_path())
+            .or_else(|| self.secrets.as_ref().map(|c| c.state.as_path()))
+    }
+
+    /// The judge flagged an injection: the permission window closes now, for every conversation
+    /// (they all read the same file), and Clio asks again for everything.
+    pub(crate) fn close_window_flagged(&self) {
+        if let Some(st) = self.grant_state()
+            && let Err(e) = grant::close(st, grant::FLAGGED)
+        {
+            eprintln!("clio-toolhost: the permission window could not be closed: {e}");
+        }
+    }
+
     fn mark(&self, session: &str, source: &'static str) -> bool {
         let mut s = lock(&self.sessions);
         if s.len() >= MAX_SESSIONS && !s.contains_key(session) {
@@ -1083,10 +1103,15 @@ impl ToolHost {
     /// The brain marks a session: it put into the model's message something the person did not
     /// write (a memory of the agent or from outside). Like every mark, it only ever goes up.
     /// With `{"suspect": true}` (a session the judge flagged, reopened) it is marked `suspect` too.
+    /// With `{"flagged": true}` too (a reviewer's judge flagged what it read), the permission
+    /// window closes, as when this host's judge flags.
     fn taint(&self, req: &Request) -> Response {
         self.mark(&req.session, "memory");
         if req.args.get("suspect").and_then(Value::as_bool) == Some(true) {
             self.mark(&req.session, "suspect");
+            if req.args.get("flagged").and_then(Value::as_bool) == Some(true) {
+                self.close_window_flagged();
+            }
         }
         Response {
             id: req.id.clone(),
