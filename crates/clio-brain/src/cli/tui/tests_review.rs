@@ -66,6 +66,7 @@ pub(super) fn reviewed(text: &str, marked: Option<bool>) -> Input {
             model: "claude-opus-5-5".into(),
             fallback: None,
             secs: 48,
+            commands: 3,
             marked,
             full: Some("/runs/r1/reviews/1/answer.txt".into()),
             usage: Usage {
@@ -112,6 +113,7 @@ fn a_turn_that_changed_something_asks_the_judge_once_and_a_read_only_one_never()
         a,
         vec![Input::Bg(Bg::ReviewSkipped {
             session: "sid".into(),
+            why: "the judge said 0.10, under the threshold 0.80".into(),
         })],
     );
     assert!(!a.chat.review.judging && a.chat.review.running.is_none());
@@ -149,6 +151,7 @@ fn no_automatic_review_when_auto_is_off_or_past_the_hourly_cap() {
         Input::Bg(Bg::ReviewStarted {
             session: "sid".into(),
             auto,
+            why: String::new(),
         })
     };
     let (a, _) = feed(a, vec![started(false), reviewed(PASSES, None)]);
@@ -279,10 +282,13 @@ fn the_reviewers_mark_goes_with_its_findings_and_a_clean_one_marks_nothing() {
 #[test]
 fn what_the_person_sees_when_a_review_ends() {
     let (a, _) = feed(idle(), vec![reviewed(PASSES, None)]);
-    assert_eq!(notes(&a), vec!["review: passes · opus · 48 s"]);
+    assert_eq!(
+        notes(&a),
+        vec!["review: passes · opus · 48 s · ran 3 commands"]
+    );
     let (a, _) = feed(idle(), vec![reviewed(FAILS, None)]);
     let n = notes(&a);
-    assert_eq!(n[0], "review: fails · opus · 48 s");
+    assert_eq!(n[0], "review: fails · opus · 48 s · ran 3 commands");
     assert!(
         n[1].starts_with("1. the script deletes the old backup"),
         "{}",
@@ -409,4 +415,172 @@ fn a_reopened_session_shows_the_reviews_turn_as_the_reviews_not_the_persons() {
     let n = notes(&a);
     assert_eq!(n, vec![super::review::REVIEW_TURN]);
     assert!(!a.chat.items.iter().any(|i| matches!(i, Item::User(_))));
+}
+
+// A turn that ended with an approval question on screen is offered to the judge once the
+// question is answered, and only once.
+#[test]
+fn a_turn_that_ended_with_a_question_is_offered_to_the_judge_once_it_is_answered() {
+    let mut a = idle();
+    a.confirm = Some(Confirm::new(
+        Action::Approve,
+        "b2".into(),
+        0,
+        "«delete» x".into(),
+    ));
+    a.confirm.as_mut().unwrap().session = "sid".into();
+    let (a, cmds) = turn(a, true);
+    assert!(reviews(&cmds).is_empty(), "{cmds:?}");
+    assert!(a.chat.review.changed);
+    // The person says no to it; once the answer is in, the chat is idle and the judge is asked
+    // about that turn.
+    let (a, cmds) = feed(a, vec![ch('n')]);
+    assert!(a.confirm.is_none());
+    assert!(reviews(&cmds).is_empty(), "{cmds:?}");
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAnswered(Ok(
+            "rejected b2: it is not run".into(),
+        )))],
+    );
+    assert_eq!(
+        reviews(&cmds),
+        vec![&Cmd::Review {
+            session: "sid".into(),
+            what: None,
+            work: Some(work()),
+            auto: true,
+        }]
+    );
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ReviewSkipped {
+            session: "sid".into(),
+            why: "no".into(),
+        })],
+    );
+    let (_, cmds) = feed(a, vec![Input::Tick(1), settled(Some(1000))]);
+    assert!(reviews(&cmds).is_empty(), "{cmds:?}");
+}
+
+// Why the judge did or did not ask for a review shows only in the debug mode.
+#[test]
+fn the_judges_reason_shows_only_in_debug_mode() {
+    let skip = |why: &str| {
+        Input::Bg(Bg::ReviewSkipped {
+            session: "sid".into(),
+            why: why.into(),
+        })
+    };
+    let (a, _) = feed(idle(), vec![skip("review.auto is off")]);
+    assert!(notes(&a).is_empty(), "{:?}", notes(&a));
+    let mut a = idle();
+    a.debug = true;
+    let (a, _) = feed(
+        a,
+        vec![
+            skip("the judge said 0.40, under the threshold 0.80"),
+            Input::Bg(Bg::ReviewStarted {
+                session: "sid".into(),
+                auto: true,
+                why: "the judge said 0.90: a review".into(),
+            }),
+        ],
+    );
+    assert_eq!(
+        notes(&a),
+        vec![
+            "review: the judge said 0.40, under the threshold 0.80",
+            "the judge asked for a review of this turn",
+            "review: the judge said 0.90: a review",
+        ]
+    );
+}
+
+// A `fails` with no findings shows its verdict and what was run, and starts no turn.
+#[test]
+fn a_fails_with_no_findings_shows_what_was_run_and_gives_the_model_nothing() {
+    let (a, cmds) = feed(
+        idle(),
+        vec![reviewed(
+            "```review\nverdict: fails\nran: sh check.sh, exit 1\nfindings: none\n```",
+            None,
+        )],
+    );
+    assert!(reviews(&cmds).is_empty(), "{cmds:?}");
+    assert!(a.chat.review.findings.is_none() && !a.chat.running);
+    assert_eq!(
+        notes(&a),
+        vec![
+            "review: fails · opus · 48 s · ran 3 commands",
+            "sh check.sh, exit 1\nfull text: /runs/r1/reviews/1/answer.txt",
+        ]
+    );
+}
+
+/// A session whose judge says yes, and which records whether a review was started.
+struct Judges {
+    reviewed: std::sync::Mutex<u32>,
+}
+
+impl crate::cli::chat::Session for Judges {
+    fn run_prompt(
+        &self,
+        _: &str,
+        _: &clio_brain::pi::rpc::Cancel,
+        _: &mut dyn FnMut(&clio_brain::pi::rpc::Event),
+    ) -> Result<clio_brain::pi::rpc::RunSummary, clio_brain::pi::PiError> {
+        Err(clio_brain::pi::PiError::Protocol("no".into()))
+    }
+    fn steer(&self, _: &str) -> Result<(), clio_brain::pi::PiError> {
+        Ok(())
+    }
+    fn refresh(&self) -> Result<crate::cli::chat::Refresh, clio_brain::pi::PiError> {
+        Err(clio_brain::pi::PiError::Protocol("no".into()))
+    }
+    fn shutdown(&self) {}
+    fn needs_review(&self, _: &TurnWork) -> crate::cli::chat::review::Judged {
+        crate::cli::chat::review::Judged::Yes { score: 0.9 }
+    }
+    fn review(
+        &self,
+        _: &crate::cli::chat::ReviewRequest,
+        _: &clio_brain::pi::rpc::Cancel,
+    ) -> Result<Reviewed, String> {
+        *self.reviewed.lock().unwrap() += 1;
+        Err("ran".into())
+    }
+}
+
+// `/review stop` while the judge is asked: the review never starts, is never shown as started
+// and never counts toward the hourly cap.
+#[test]
+fn a_review_stopped_while_the_judge_is_asked_never_starts() {
+    let s = Judges {
+        reviewed: std::sync::Mutex::new(0),
+    };
+    let cancel = clio_brain::pi::rpc::Cancel::new();
+    let mut said = Vec::new();
+    let w = work();
+    let r = super::review::job(&s, None, Some(&w), true, &cancel, &mut |why| said.push(why));
+    assert_eq!(r.unwrap().unwrap_err(), "ran");
+    assert_eq!(said, vec!["the judge said 0.90: a review".to_owned()]);
+    cancel.cancel();
+    said.clear();
+    let r = super::review::job(&s, None, Some(&w), true, &cancel, &mut |why| said.push(why));
+    assert!(r.unwrap_err().contains("stopped"));
+    assert!(said.is_empty());
+    assert_eq!(*s.reviewed.lock().unwrap(), 1);
+    // What the chat does with it: nothing shown, nothing counted, the review no longer runs.
+    let mut a = idle();
+    a.chat.review.judging = true;
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ReviewSkipped {
+            session: "sid".into(),
+            why: "the review was stopped before it started".into(),
+        })],
+    );
+    assert!(a.reviews_at.is_empty() && notes(&a).is_empty());
+    assert!(!a.chat.review.judging && a.chat.review.running.is_none());
 }

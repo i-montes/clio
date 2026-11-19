@@ -400,7 +400,7 @@ impl SessionSource for LocalSource {
             id: id.clone(),
             work: work.clone(),
             host_mode: host,
-            model: cfg.model.model.clone(),
+            model: Mutex::new(cfg.model.clone()),
             turn: Mutex::default(),
             findings: Mutex::default(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
@@ -507,11 +507,12 @@ struct ChatSession {
     /// Held while a turn runs: the closing turn never runs beside one (both would read Pi's events).
     busy: Mutex<()>,
     host: Option<HostSide>,
-    /// The run, the folder it works on, its mode and model: what a review starts from.
+    /// The run, the folder it works on, its mode, connector and model (`/model` changes it):
+    /// what a review starts from.
     id: String,
     work: PathBuf,
     host_mode: bool,
-    model: String,
+    model: Mutex<crate::cli::home::ModelCfg>,
     /// The last turn, for what it changed (`last_work`).
     turn: Mutex<super::review::Turn>,
     /// A review's findings for the next message, and the reviewer's mark.
@@ -552,6 +553,16 @@ impl Session for ChatSession {
             .busy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A review's findings: data from another agent, with Clio's request to answer them. A
+        // reviewer that read what is not the person's marks this session the same way, and the
+        // judge reads them first; a mark that cannot be made means they are not given.
+        let findings = match locked(&self.findings).take() {
+            Some((f, marked)) => Some(
+                jev::findings_for_model(&self.toolhost.socket, &self.pi.session_id, &f, marked)
+                    .map_err(PiError::Io)?,
+            ),
+            None => None,
+        };
         let n = self.prompts.fetch_add(1, Ordering::Relaxed);
         let mut guard = RunGuard::new(
             Arc::new(SystemClock),
@@ -583,16 +594,8 @@ impl Session for ChatSession {
         if !data.is_empty() {
             given.push((Source::ToolResult, data.as_str()));
         }
-        // A review's findings: data from another agent, with Clio's request to answer them. A
-        // reviewer that read what is not the person's marks this session the same way.
-        let findings = locked(&self.findings).take();
-        if let Some((_, marked)) = &findings {
-            if let Some(suspect) = *marked {
-                jev::taint_session(&self.toolhost.socket, &self.pi.session_id, suspect);
-            }
+        if let Some(f) = &findings {
             self.pre.reviewed();
-        }
-        if let Some((f, _)) = &findings {
             given.push((Source::SubagentSummary, f.as_str()));
         }
         let mut turn = super::review::Turn {
@@ -636,8 +639,10 @@ impl Session for ChatSession {
         )
     }
 
-    fn needs_review(&self, work: &super::TurnWork) -> bool {
-        super::review::needs_review(&self.dirs, work)
+    fn needs_review(&self, work: &super::TurnWork) -> super::review::Judged {
+        let j = super::review::needs_review(&self.dirs, work);
+        super::review::record(&self.run_dir, &j);
+        j
     }
 
     fn review(
@@ -648,6 +653,7 @@ impl Session for ChatSession {
         let marked = std::fs::read_to_string(&self.taint_file)
             .ok()
             .map(|t| t.contains("\"suspect\""));
+        let model = locked(&self.model).clone();
         let parent = super::review::Parent {
             dirs: &self.dirs,
             run: &self.id,
@@ -656,7 +662,7 @@ impl Session for ChatSession {
             host: self.host_mode,
             marked,
             day: self.day.clone(),
-            model: &self.model,
+            model: &model,
         };
         Ok(super::review::run(&parent, req, cancel))
     }
@@ -850,6 +856,9 @@ impl Session for ChatSession {
         if self.down.lock().map_or(true, |d| *d) {
             return Err("the session is already closed".into());
         }
+        let model = (kind == "set_model")
+            .then(|| fields["modelId"].as_str().map(str::to_owned))
+            .flatten();
         let r = if kind == "compact" {
             level::compact(
                 &self.pi.client,
@@ -859,6 +868,10 @@ impl Session for ChatSession {
         } else {
             self.pi.client.request(kind, fields)
         };
+        // The session's model now: a review falls back to it.
+        if let (Ok(_), Some(m)) = (&r, model) {
+            locked(&self.model).model = m;
+        }
         r.map_err(text)
     }
 

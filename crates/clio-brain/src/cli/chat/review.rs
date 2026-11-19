@@ -11,19 +11,20 @@
 //!   prompt prefix caches; no memory, no person to ask (`clio toolhost --review`: what would wait
 //!   for the person is refused), no background commands;
 //! - a clean context: only the review request, never the conversation, the identity or memory;
-//! - the session's marks, the same day's budget, and the action log under its own run id
-//!   (`<run>.review-<n>`).
+//! - the session's marks, connector and model, the same day's budget, its own cost cap
+//!   (`review.max_cost_micro_usd`), and the action log under its own run id (`<run>.review-<n>`),
+//!   which `/actions` shows with the session's.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clio_brain::control::DayBudget;
+use clio_brain::control::{Budget, DayBudget, Stop};
 use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, SessionTarget, start};
 use clio_brain::pi::review::{self, Answer};
-use clio_brain::pi::rpc::{Cancel, Usage};
+use clio_brain::pi::rpc::{Cancel, Event, Usage};
 use clio_brain::pi::session::{
     HostOpts, REVIEW_GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, review_guard_env,
 };
@@ -34,7 +35,7 @@ use serde_json::{Value, json};
 
 use super::local::{provider_of, task_budget};
 use super::{ReviewRequest, Reviewed, TurnWork};
-use crate::cli::home::{Config, Dirs, REVIEW_MODEL_CLAUDE};
+use crate::cli::home::{Config, Dirs, ModelCfg, REVIEW_MODEL_CLAUDE};
 use crate::cli::{jev, usage};
 
 /// The judge's closed question after a turn that changed something.
@@ -56,8 +57,9 @@ pub struct Parent<'a> {
     /// Its mark: `Some(suspect)` when it is marked.
     pub marked: Option<bool>,
     pub day: Arc<Mutex<DayBudget>>,
-    /// The session's model, used when the connector does not offer the reviewer's.
-    pub model: &'a str,
+    /// The session's connector and its model now (after `/model`): the review runs on that
+    /// connector, and on that model when the connector does not offer the reviewer's.
+    pub model: &'a ModelCfg,
 }
 
 /// The reviewer's model: `review.model`, else Opus with the `claude` connector, else the
@@ -109,9 +111,10 @@ pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
     let began = Instant::now();
     let mut out = Reviewed {
         answer: Answer::could_not_check("the review did not start", None),
-        model: p.model.to_owned(),
+        model: p.model.model.clone(),
         fallback: None,
         secs: 0,
+        commands: 0,
         marked: None,
         full: None,
         usage: Usage::default(),
@@ -141,8 +144,8 @@ fn started(
         return Err((None, "it was stopped".into()));
     }
     let d = p.dirs;
-    let cfg = Config::load(d).map_err(|e| (None, e))?;
-    let (model, fallback) = model_for(d, &cfg, p.model);
+    let cfg = session_cfg(d, p.model).map_err(|e| (None, e))?;
+    let (model, fallback) = model_for(d, &cfg, &p.model.model);
     out.model.clone_from(&model);
     out.fallback = fallback;
     let (n, dir) = new_folder(p.run_dir).map_err(|e| (None, e))?;
@@ -211,14 +214,23 @@ fn started(
             "it could not be marked like the session that asked for it".into(),
         ));
     }
-    let mut budget = task_budget(&cfg.limits);
-    budget.max_steps = cfg.review.max_steps;
-    budget.max_ms = i64::try_from(cfg.review.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
-    let mut guard = RunGuard::new(Arc::new(SystemClock), &id, budget, p.day.clone());
-    let ask = review::request(&req.what, &req.subject, &req.paths, &req.check);
+    let mut guard = RunGuard::new(
+        Arc::new(SystemClock),
+        &id,
+        review_budget(&cfg),
+        p.day.clone(),
+    );
+    let ask = review::request(&req.what, &req.subject, &req.check);
+    // Its commands, for the note (they are in the action log in host mode).
+    let mut commands = 0;
     let ran = pi
         .client
-        .run_prompt_limited(&ask, cancel, &mut guard, &mut |_| {});
+        .run_prompt_limited(&ask, cancel, &mut guard, &mut |e| {
+            if matches!(e, Event::ToolStart { name, .. } if name == "bash") {
+                commands += 1;
+            }
+        });
+    out.commands = commands;
     let (answer, raw) = match ran {
         Err(e) => (
             Answer::could_not_check(&format!("the review did not run: {e}"), None),
@@ -230,7 +242,7 @@ fn started(
                 Answer::could_not_check("the review was stopped", Some(&s.text))
             } else if let Some(stop) = s.stopped {
                 Answer::could_not_check(
-                    &format!("the review reached its limit: {}", stop.reason()),
+                    &format!("the review reached its limit: {}", limit(stop)),
                     Some(&s.text),
                 )
             } else if s.text.trim().is_empty() && !s.errors.is_empty() {
@@ -258,6 +270,34 @@ fn started(
     Ok(dir)
 }
 
+/// The config a review starts from: the file's, with the session's connector and model (the
+/// file may name another since `/connector` or `/model`).
+fn session_cfg(d: &Dirs, model: &ModelCfg) -> Result<Config, String> {
+    let mut cfg = Config::load(d)?;
+    cfg.model = model.clone();
+    Ok(cfg)
+}
+
+/// A review's caps: its own steps, time and cost (`review.*`), the task's anti-loop and retries.
+fn review_budget(cfg: &Config) -> Budget {
+    let mut b = task_budget(&cfg.limits);
+    b.max_steps = cfg.review.max_steps;
+    b.max_ms = i64::try_from(cfg.review.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
+    b.max_cost_micro = cfg.review.max_cost_micro_usd;
+    b
+}
+
+/// Which limit ended a review, with the key that sets it.
+fn limit(stop: Stop) -> String {
+    let key = match stop {
+        Stop::Steps => " (review.max_steps)",
+        Stop::Time => " (review.max_seconds)",
+        Stop::Cost => " (review.max_cost_micro_usd)",
+        _ => "",
+    };
+    format!("{}{key}", stop.reason())
+}
+
 /// `review.json` in the review's folder: what was asked and what came of it.
 fn keep(dir: &Path, req: &ReviewRequest, r: &Reviewed) {
     let a = &r.answer;
@@ -273,6 +313,7 @@ fn keep(dir: &Path, req: &ReviewRequest, r: &Reviewed) {
         "model": r.model,
         "fallback": r.fallback,
         "secs": r.secs,
+        "commands": r.commands,
         "marked": r.marked,
         "usage": {"input": r.usage.input, "output": r.usage.output, "cache_read": r.usage.cache_read, "cache_write": r.usage.cache_write, "cost": r.usage.cost},
     });
@@ -284,43 +325,172 @@ fn keep(dir: &Path, req: &ReviewRequest, r: &Reviewed) {
     );
 }
 
-/// The judge's closed question about a turn's work; `false` when the judge is off, silent, or
-/// says no (under `review.threshold`).
-pub fn needs_review(d: &Dirs, work: &TurnWork) -> bool {
-    let Ok(cfg) = Config::load(d) else {
-        return false;
+/// What came of the judge's question about a turn: a review, or why not.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Judged {
+    /// `review.auto` is off.
+    AutoOff,
+    /// The judge is off.
+    JudgeOff,
+    /// No vault to scrub what the judge would read.
+    NoVault(String),
+    /// The config, the question or the judge's call failed, or the judge did not answer.
+    Failed(String),
+    /// The judge's score, under `review.threshold`.
+    Below { score: f64, threshold: f64 },
+    /// Asked, and yes.
+    Yes { score: f64 },
+}
+
+impl Judged {
+    pub fn yes(&self) -> bool {
+        matches!(self, Self::Yes { .. })
+    }
+
+    /// In words, for the debug note and `judged.jsonl`.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::AutoOff => "review.auto is off".into(),
+            Self::JudgeOff => "the judge is off".into(),
+            Self::NoVault(e) => format!("no vault to scrub what the judge reads: {e}"),
+            Self::Failed(e) => format!("the judge could not be asked: {e}"),
+            Self::Below { score, threshold } => {
+                format!("the judge said {score:.2}, under the threshold {threshold:.2}")
+            }
+            Self::Yes { score } => format!("the judge said {score:.2}: a review"),
+        }
+    }
+
+    fn word(&self) -> &'static str {
+        match self {
+            Self::AutoOff => "auto_off",
+            Self::JudgeOff => "judge_off",
+            Self::NoVault(_) => "no_vault",
+            Self::Failed(_) => "failed",
+            Self::Below { .. } => "below",
+            Self::Yes { .. } => "yes",
+        }
+    }
+}
+
+/// One line per decision in `<run>/reviews/judged.jsonl` (private, like the run's other files).
+/// Best effort: a line that cannot be written is said on stderr.
+pub fn record(run_dir: &Path, j: &Judged) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = run_dir.join("reviews");
+    let score = match j {
+        Judged::Below { score, .. } | Judged::Yes { score } => Some(*score),
+        _ => None,
     };
-    let Some(judge) = jev::client(d, &cfg.jev).filter(|_| cfg.review.auto) else {
-        return false;
-    };
-    let Ok(socket) = crate::cli::vault::gateway_socket(d) else {
-        return false;
-    };
-    let vault = clio_vault::VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
-    let scrub = |t: &str| vault.scrub(t).map_err(|e| e.to_string());
-    let done: Vec<String> = work
+    let line = json!({
+        "at_ms": crate::cli::now_ms(),
+        "decision": j.word(),
+        "score": score,
+        "reason": j.reason(),
+    });
+    let wrote = crate::cli::mkdir_private(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(dir.join("judged.jsonl"))
+            .and_then(|mut f| writeln!(f, "{line}"))
+            .map_err(|e| e.to_string())
+    });
+    if let Err(e) = wrote {
+        eprintln!("clio: the judge's decision on a review was not recorded: {e}");
+    }
+}
+
+/// What the judge reads about a turn's work: each string scrubbed whole, then cut (S-63), so
+/// a secret across a cut is never half left.
+fn judge_state(
+    work: &TurnWork,
+    scrub: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<Value, String> {
+    let done = work
         .commands
         .iter()
-        .map(|c| format!("ran: {}", text::line(c, 300)))
-        .chain(
-            work.files
-                .iter()
-                .map(|f| format!("wrote: {}", text::line(f, 300))),
-        )
+        .map(|c| ("ran", c))
+        .chain(work.files.iter().map(|f| ("wrote", f)))
         .take(40)
-        .collect();
-    let state = json!({ "person_request": text::line(&work.request, 2000), "done": done });
-    let (Ok(state), Ok(qs)) = (
-        Clean::try_new(state, &scrub),
-        Questions::new().noul(NEEDS_REVIEW, NEEDS_REVIEW_TEXT),
-    ) else {
-        return false;
+        .map(|(k, v)| Ok(format!("{k}: {}", text::line(&scrub(v)?, 300))))
+        .collect::<Result<Vec<String>, String>>()?;
+    let request = text::line(&scrub(&work.request)?, 2000);
+    Ok(json!({ "person_request": request, "done": done }))
+}
+
+/// The judge's closed question about a turn's work: a review only with `Judged::Yes` (the
+/// judge's score at or over `review.threshold`).
+pub fn needs_review(d: &Dirs, work: &TurnWork) -> Judged {
+    let cfg = match Config::load(d) {
+        Ok(c) => c,
+        Err(e) => return Judged::Failed(e),
     };
-    judge
-        .ask(&state, &qs)
-        .ok()
-        .and_then(|a| a.noul(NEEDS_REVIEW))
-        .is_some_and(|p| p >= cfg.review.threshold)
+    let judge = jev::client(d, &cfg.jev);
+    let ask = judge.as_ref().map(|j| {
+        move |state: &Clean, qs: &Questions| {
+            j.ask(state, qs)
+                .map(|a| a.noul(NEEDS_REVIEW))
+                .map_err(|e| e.to_string())
+        }
+    });
+    let vault = crate::cli::vault::gateway_socket(d)
+        .map(|s| clio_vault::VaultClient::new(&s).with_timeout(Duration::from_secs(2)));
+    let scrub = vault
+        .as_ref()
+        .map(|v| move |t: &str| v.scrub(t).map_err(|e| e.to_string()))
+        .map_err(Clone::clone);
+    decide(
+        &cfg.review,
+        work,
+        ask.as_ref().map(|f| f as &Ask<'_>),
+        scrub
+            .as_ref()
+            .map(|f| f as &Scrub<'_>)
+            .map_err(Clone::clone),
+    )
+}
+
+type Ask<'a> = dyn Fn(&Clean, &Questions) -> Result<Option<f64>, String> + 'a;
+type Scrub<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+
+/// `needs_review` once the judge (`None`: off) and the vault's scrubber (or why there is none)
+/// are known.
+fn decide(
+    cfg: &crate::cli::home::ReviewCfg,
+    work: &TurnWork,
+    judge: Option<&Ask<'_>>,
+    scrub: Result<&Scrub<'_>, String>,
+) -> Judged {
+    if !cfg.auto {
+        return Judged::AutoOff;
+    }
+    let Some(judge) = judge else {
+        return Judged::JudgeOff;
+    };
+    let scrub = match scrub {
+        Ok(s) => s,
+        Err(e) => return Judged::NoVault(e),
+    };
+    let state = match judge_state(work, scrub).and_then(|s| Clean::try_new(s, scrub)) {
+        Ok(s) => s,
+        Err(e) => return Judged::NoVault(e),
+    };
+    let qs = match Questions::new().noul(NEEDS_REVIEW, NEEDS_REVIEW_TEXT) {
+        Ok(q) => q,
+        Err(e) => return Judged::Failed(e),
+    };
+    match judge(&state, &qs) {
+        Err(e) => Judged::Failed(e),
+        Ok(None) => Judged::Failed("it did not answer the question".into()),
+        Ok(Some(score)) if score >= cfg.threshold => Judged::Yes { score },
+        Ok(Some(score)) => Judged::Below {
+            score,
+            threshold: cfg.threshold,
+        },
+    }
 }
 
 /// One turn as the session saw it: its tool calls, by id.
@@ -489,16 +659,141 @@ mod tests {
         }
     }
 
-    // The judge off (the default) or `review.auto` off: no question, no automatic review.
+    // `review.auto` off is the only thing between a judge and vault that say yes and a review;
+    // every other way to no review says which it is.
     #[test]
     fn without_the_judge_or_with_auto_off_no_automatic_review() {
         let t = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default_with(vec![]);
+        let cfg = Config::default_with(vec![]);
         assert!(!cfg.jev.enabled && cfg.review.auto);
-        assert!(!needs_review(&dirs_in(t.path(), &cfg), &work()));
-        cfg.jev.enabled = true;
-        cfg.review.auto = false;
-        assert!(!needs_review(&dirs_in(t.path(), &cfg), &work()));
+        assert_eq!(
+            needs_review(&dirs_in(t.path(), &cfg), &work()),
+            Judged::JudgeOff
+        );
+        let yes = |_: &Clean, _: &Questions| Ok(Some(0.95));
+        let plain = |t: &str| Ok(t.to_owned());
+        let mut r = cfg.review.clone();
+        assert_eq!(
+            decide(&r, &work(), Some(&yes), Ok(&plain)),
+            Judged::Yes { score: 0.95 }
+        );
+        r.auto = false;
+        assert_eq!(decide(&r, &work(), Some(&yes), Ok(&plain)), Judged::AutoOff);
+        r.auto = true;
+        assert_eq!(decide(&r, &work(), None, Ok(&plain)), Judged::JudgeOff);
+        assert_eq!(
+            decide(&r, &work(), Some(&yes), Err("no socket".into())),
+            Judged::NoVault("no socket".into())
+        );
+        let low = |_: &Clean, _: &Questions| Ok(Some(0.5));
+        let j = decide(&r, &work(), Some(&low), Ok(&plain));
+        assert_eq!(
+            j,
+            Judged::Below {
+                score: 0.5,
+                threshold: 0.8
+            }
+        );
+        assert!(!j.yes() && j.reason().contains("0.50") && j.reason().contains("0.80"));
+        let silent = |_: &Clean, _: &Questions| Err("timeout".into());
+        assert!(matches!(
+            decide(&r, &work(), Some(&silent), Ok(&plain)),
+            Judged::Failed(e) if e == "timeout"
+        ));
+    }
+
+    // S-63: what the judge reads is scrubbed whole and cut after, so a secret across the cut
+    // leaves nothing of itself.
+    #[test]
+    fn the_judges_input_is_scrubbed_before_it_is_cut() {
+        let secret = "sk-ant-api03-ZZZZZZZZZZZZZZZZZZZZ";
+        let mut w = work();
+        w.commands = vec![format!("{} {secret}", "x".repeat(290))];
+        w.request = format!("{} {secret}", "y".repeat(1995));
+        let scrub = |t: &str| Ok(t.replace(secret, "[REDACTED]"));
+        let state = judge_state(&w, &scrub).unwrap().to_string();
+        assert!(!state.contains("sk-ant"), "{state}");
+        assert!(state.contains("ran: xxx"), "{state}");
+        let fails = |_: &str| Err("vault down".to_owned());
+        assert_eq!(judge_state(&w, &fails).unwrap_err(), "vault down");
+    }
+
+    // Every decision is one private line in the run's `reviews/judged.jsonl`.
+    #[test]
+    fn each_decision_of_the_judge_is_kept_in_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        record(t.path(), &Judged::AutoOff);
+        record(t.path(), &Judged::Yes { score: 0.9 });
+        let file = t.path().join("reviews/judged.jsonl");
+        let lines: Vec<Value> = std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["decision"], "auto_off");
+        assert_eq!(lines[0]["score"], Value::Null);
+        assert_eq!(lines[1]["decision"], "yes");
+        assert_eq!(lines[1]["score"], 0.9);
+        assert!(lines[1]["reason"].as_str().unwrap().contains("0.90"));
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&t.path().join("reviews")), 0o700);
+    }
+
+    // A review has its own cost cap (Opus on a paid connector costs more than a task's), and a
+    // review cut by a limit says which, with its key.
+    #[test]
+    fn a_review_has_its_own_budget_and_says_which_limit_ended_it() {
+        let mut cfg = Config::default_with(vec![]);
+        cfg.limits.max_cost_micro_usd = 100_000;
+        cfg.review.max_steps = 12;
+        cfg.review.max_seconds = 90;
+        let b = review_budget(&cfg);
+        assert_eq!(
+            (b.max_cost_micro, b.max_steps, b.max_ms),
+            (1_000_000, 12, 90_000)
+        );
+        cfg.review.max_cost_micro_usd = 250_000;
+        assert_eq!(review_budget(&cfg).max_cost_micro, 250_000);
+        assert!(limit(Stop::Cost).ends_with("(review.max_cost_micro_usd)"));
+        assert!(limit(Stop::Time).ends_with("(review.max_seconds)"));
+        assert!(limit(Stop::Steps).ends_with("(review.max_steps)"));
+        assert_eq!(limit(Stop::DayCost), Stop::DayCost.reason());
+    }
+
+    // After `/connector` (saved for the next session) and `/model` (the session switched), a
+    // review runs on the session's connector and falls back to its model now.
+    #[test]
+    fn a_review_runs_on_the_sessions_connector_and_model() {
+        let t = tempfile::tempdir().unwrap();
+        let mut file = Config::default_with(vec![]);
+        file.model.provider = "opencode-go".into();
+        file.model.model = "beam-free".into();
+        let d = dirs_in(t.path(), &file);
+        let mut session = file.model.clone();
+        session.provider = "claude".into();
+        session.model = "claude-sonnet-5-5".into();
+        usage::save_pi_models(
+            &d,
+            "claude",
+            &["claude-sonnet-5-5".into(), REVIEW_MODEL_CLAUDE.into()],
+        );
+        let cfg = session_cfg(&d, &session).unwrap();
+        assert_eq!(cfg.model.provider, "claude");
+        assert_eq!(
+            model_for(&d, &cfg, &session.model),
+            (REVIEW_MODEL_CLAUDE.into(), None)
+        );
+        // The session's connector does not offer the reviewer's model: the session's model now.
+        usage::save_pi_models(
+            &d,
+            "claude",
+            &["claude-sonnet-5-5".into(), "claude-haiku".into()],
+        );
+        session.model = "claude-haiku".into();
+        let cfg = session_cfg(&d, &session).unwrap();
+        assert_eq!(model_for(&d, &cfg, &session.model).0, "claude-haiku");
     }
 
     #[test]

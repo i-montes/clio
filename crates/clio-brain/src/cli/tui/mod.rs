@@ -1228,23 +1228,24 @@ impl Ctx {
                 let sid = id.clone();
                 self.spawn(
                     move |_, tx| {
-                        // The judge's: asked first, and nothing at all when it says no.
-                        if auto && !work.as_ref().is_some_and(|w| s.needs_review(w)) {
-                            return None;
-                        }
-                        let _ = tx.send(Input::Bg(Bg::ReviewStarted {
-                            session: sid.clone(),
-                            auto,
-                        }));
-                        let req = crate::cli::chat::ReviewRequest::of_work(
+                        review::job(
+                            &*s,
                             what.as_deref(),
                             work.as_ref(),
-                        );
-                        Some(s.review(&req, &cancel))
+                            auto,
+                            &cancel,
+                            &mut |why| {
+                                let _ = tx.send(Input::Bg(Bg::ReviewStarted {
+                                    session: sid.clone(),
+                                    auto,
+                                    why,
+                                }));
+                            },
+                        )
                     },
                     move |r| match r {
-                        Ok(None) => Bg::ReviewSkipped { session: id },
-                        Ok(Some(r)) => Bg::Reviewed {
+                        Ok(Err(why)) => Bg::ReviewSkipped { session: id, why },
+                        Ok(Ok(r)) => Bg::Reviewed {
                             session: id,
                             result: r.map(Box::new),
                         },

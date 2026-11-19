@@ -3,11 +3,11 @@
 //! the model. The review itself runs in the background (`Session::review`).
 
 use clio_brain::pi::review::Verdict;
-use clio_brain::pi::rpc::Usage;
+use clio_brain::pi::rpc::{Cancel, Usage};
 
 use super::app::{App, Cmd};
 use super::chat::Item;
-use crate::cli::chat::{Reviewed, TurnWork};
+use crate::cli::chat::{ReviewRequest, Reviewed, Session, TurnWork};
 use crate::cli::usage;
 
 /// Findings shown in the chat (the rest are in the full text); what each shows at most.
@@ -30,7 +30,8 @@ pub struct Review {
     pub judging: bool,
     /// The last turn that changed something: what `/review` with no argument reviews.
     pub work: Option<TurnWork>,
-    /// The turn that just ended changed something (its work came before it settled).
+    /// A turn that ended changed something (its work came before it settled), and the judge
+    /// has not been asked about it yet: it is, once the chat is idle.
     pub changed: bool,
     /// The turn running answers a review's findings: it is never reviewed itself.
     pub answering: bool,
@@ -91,23 +92,32 @@ pub fn command(app: &mut App, args: &str) -> Vec<Cmd> {
     }]
 }
 
-/// A turn ended: if it changed something, the chat is idle, the judge's review is on and under
-/// its caps, the judge is asked whether the turn needs a review (`Cmd::Review` with `auto`).
-/// Once per turn; never for the turn that answered a review's findings.
+/// A turn ended: the turn that answered a review's findings is never reviewed itself.
+pub fn turn_ended(app: &mut App) -> Vec<Cmd> {
+    if std::mem::take(&mut app.chat.review.answering) {
+        app.chat.review.changed = false;
+    }
+    after_turn(app)
+}
+
+/// A turn that changed something is waiting and the chat is idle (its questions answered, no
+/// message queued): if the judge's review is on and under its caps, the judge is asked whether
+/// it needs a review (`Cmd::Review` with `auto`). Called whenever something happens, so a turn
+/// that ended with a question is asked about once it is answered; at most once per turn.
 pub fn after_turn(app: &mut App) -> Vec<Cmd> {
-    let changed = std::mem::take(&mut app.chat.review.changed);
-    let answering = std::mem::take(&mut app.chat.review.answering);
+    let r = &app.chat.review;
+    if !r.changed || r.answering || super::app::chat_waits(app) {
+        return vec![];
+    }
+    app.chat.review.changed = false;
     let cfg = cfg(app);
     let hour_ago = app.now_ms.saturating_sub(HOUR_MS);
     app.reviews_at.retain(|t| *t > hour_ago);
     let r = &app.chat.review;
-    if !changed
-        || answering
-        || !cfg.auto
+    if !cfg.auto
         || r.running.is_some()
         || r.judging
         || app.reviews_at.len() >= cfg.max_per_hour as usize
-        || super::app::chat_waits(app)
     {
         return vec![];
     }
@@ -118,6 +128,34 @@ pub fn after_turn(app: &mut App) -> Vec<Cmd> {
         work: app.chat.review.work.clone(),
         auto: true,
     }]
+}
+
+/// What `Cmd::Review` does on its worker. With `auto` the judge is asked first; nothing starts
+/// (`Err(why)`) when it says no, or when the review was stopped meanwhile, so a stopped request
+/// is never shown as started nor counted. Then `started` (with the judge's reason), and the
+/// review.
+pub fn job(
+    s: &dyn Session,
+    what: Option<&str>,
+    work: Option<&TurnWork>,
+    auto: bool,
+    cancel: &Cancel,
+    started: &mut dyn FnMut(String),
+) -> Result<Result<Reviewed, String>, String> {
+    let mut why = String::new();
+    if auto {
+        let j = work.ok_or("the turn changed nothing")?;
+        let j = s.needs_review(j);
+        if !j.yes() {
+            return Err(j.reason());
+        }
+        why = j.reason();
+    }
+    if cancel.is_cancelled() {
+        return Err("the review was stopped before it started".into());
+    }
+    started(why);
+    Ok(s.review(&ReviewRequest::of_work(what, work), cancel))
 }
 
 /// Findings waiting go to the model once the chat is idle and the person is not typing: an
@@ -190,16 +228,19 @@ pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>
         v => v.word(),
     };
     let items = &mut app.chat.items;
+    let s = if rv.commands == 1 { "" } else { "s" };
     items.push(Item::Note(format!(
-        "review: {verdict} · {} · {}",
+        "review: {verdict} · {} · {} · ran {} command{s}",
         short(&rv.model),
-        usage::duration(rv.secs)
+        usage::duration(rv.secs),
+        rv.commands
     )));
     if let Some(f) = &rv.fallback {
         items.push(Item::Note(format!("review: {}", cap(f, 200))));
     }
     let mut block = Vec::new();
-    if a.verdict == Verdict::CouldNotCheck {
+    // What was run, when there is nothing else to go on (a `fails` with no findings too).
+    if a.verdict == Verdict::CouldNotCheck || a.verdict == Verdict::Fails && a.findings.is_empty() {
         block.push(cap(&a.ran, 300));
     }
     for (i, f) in a.findings.iter().take(SHOWN).enumerate() {
@@ -229,8 +270,8 @@ pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>
     }
 }
 
-/// The automatic review started (the judge said yes), or `/review` did.
-pub fn started(app: &mut App, session: &str, auto: bool) {
+/// The automatic review started (the judge said yes: `why`), or `/review` did.
+pub fn started(app: &mut App, session: &str, auto: bool, why: &str) {
     if session != app.chat.session_id {
         return;
     }
@@ -241,13 +282,25 @@ pub fn started(app: &mut App, session: &str, auto: bool) {
         app.chat.items.push(Item::Note(
             "the judge asked for a review of this turn".into(),
         ));
+        debug_note(app, why);
     }
 }
 
-/// The judge said no (or was silent): nothing to show.
-pub fn skipped(app: &mut App, session: &str) {
+/// No review: the judge said no or could not be asked, or it was stopped first (`why`). Only
+/// the debug mode shows it.
+pub fn skipped(app: &mut App, session: &str, why: &str) {
     if session == app.chat.session_id {
         app.chat.review.judging = false;
+        app.chat.review.running = None;
+        debug_note(app, why);
+    }
+}
+
+fn debug_note(app: &mut App, why: &str) {
+    if app.debug && !why.is_empty() {
+        app.chat
+            .items
+            .push(Item::Note(format!("review: {}", cap(why, 300))));
     }
 }
 

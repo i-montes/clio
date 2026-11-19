@@ -231,6 +231,9 @@ pub struct ReviewCfg {
     pub threshold: f64,
     #[serde(default = "review_per_hour")]
     pub max_per_hour: u32,
+    /// What one review may spend (micro-dollars): its own cap, not `limits.max_cost_micro_usd`.
+    #[serde(default = "review_cost")]
+    pub max_cost_micro_usd: u64,
 }
 
 /// The reviewer's model with the `claude` connector when `review.model` is not set.
@@ -251,6 +254,23 @@ fn review_threshold() -> f64 {
 fn review_per_hour() -> u32 {
     3
 }
+fn review_cost() -> u64 {
+    1_000_000
+}
+
+impl ReviewCfg {
+    /// Values edited by hand are held to their ranges, and a thinking level Pi does not know is
+    /// `medium`: a bad `review.*` key never keeps the config from loading.
+    fn clamp(&mut self) {
+        if !clio_brain::pi::launch::THINKING.contains(&self.thinking.as_str()) {
+            self.thinking = review_thinking();
+        }
+        self.threshold = self.threshold.clamp(0.0, 1.0);
+        self.max_per_hour = self.max_per_hour.min(60);
+        self.max_seconds = self.max_seconds.clamp(30, 3600);
+        self.max_steps = self.max_steps.clamp(1, 200);
+    }
+}
 
 impl Default for ReviewCfg {
     fn default() -> Self {
@@ -262,6 +282,7 @@ impl Default for ReviewCfg {
             auto: true,
             threshold: review_threshold(),
             max_per_hour: review_per_hour(),
+            max_cost_micro_usd: review_cost(),
         }
     }
 }
@@ -397,14 +418,7 @@ impl Config {
             cfg.model.provider = provider.into();
         }
         cfg.model.check(&p)?;
-        if !clio_brain::pi::launch::THINKING.contains(&cfg.review.thinking.as_str()) {
-            return Err(format!(
-                "{}: review.thinking {:?} is not a Pi level ({})",
-                p.display(),
-                cfg.review.thinking,
-                clio_brain::pi::launch::THINKING.join(", ")
-            ));
-        }
+        cfg.review.clamp();
         Ok(cfg)
     }
 
@@ -666,6 +680,49 @@ mod tests {
         assert_eq!(cap(r#"{"context_cap_tokens": 99999999999}"#), 1_000_000);
         assert_eq!(cap(r#"{"context_cap_tokens": 300000}"#), 300_000);
         assert_eq!(cap("{}"), CONTEXT_CAP);
+    }
+
+    // The `review.*` keys edited by hand are held to their ranges when read, and a bad thinking
+    // level is `medium`: the config still loads.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_review_keys_are_clamped_and_a_bad_thinking_level_is_medium() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let dirs = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        let load = |review: serde_json::Value| {
+            let mut v = serde_json::to_value(Config::default_with(vec![])).unwrap();
+            v["review"] = review;
+            std::fs::write(dirs.config_file(), v.to_string()).unwrap();
+            Config::load(&dirs).unwrap().review
+        };
+        let r = load(serde_json::json!({}));
+        assert_eq!(
+            (r.thinking.as_str(), r.max_cost_micro_usd, r.max_steps),
+            ("medium", 1_000_000, 40)
+        );
+        let r = load(
+            serde_json::json!({"thinking": "ultra", "threshold": 7.5, "max_per_hour": 500,
+            "max_seconds": 1, "max_steps": 0, "max_cost_micro_usd": 3}),
+        );
+        assert_eq!(r.thinking, "medium");
+        assert!((r.threshold - 1.0).abs() < f64::EPSILON);
+        assert_eq!((r.max_per_hour, r.max_seconds, r.max_steps), (60, 30, 1));
+        assert_eq!(r.max_cost_micro_usd, 3);
+        let r = load(
+            serde_json::json!({"threshold": -1, "max_seconds": 99999, "max_steps": 999,
+            "thinking": "high", "max_per_hour": 0}),
+        );
+        assert_eq!(r.thinking, "high");
+        assert!(r.threshold.abs() < f64::EPSILON);
+        assert_eq!((r.max_per_hour, r.max_seconds, r.max_steps), (0, 3600, 200));
     }
 
     #[test]

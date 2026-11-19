@@ -276,14 +276,16 @@ pub enum Bg {
     Modal(Result<Modal, String>),
     /// What the turn about to settle changed (it changed something).
     TurnWork(Box<crate::cli::chat::TurnWork>),
-    /// A review of `session` started (`auto`: the judge asked for it).
+    /// A review of `session` started (`auto`: the judge asked for it, `why` its reason).
     ReviewStarted {
         session: String,
         auto: bool,
+        why: String,
     },
-    /// The judge said no (or did not answer): no review.
+    /// No review: the judge said no or could not be asked, or it was stopped first (`why`).
     ReviewSkipped {
         session: String,
+        why: String,
     },
     Reviewed {
         session: String,
@@ -696,8 +698,10 @@ impl App {
 
 pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
     let mut cmds = step(&mut app, input);
-    // A review's findings wait for the chat to be idle: whatever made it so, they go now.
+    // The judge's question about a turn and a review's findings wait for the chat to be idle:
+    // whatever made it so, they go now.
     if app.pi {
+        cmds.extend(super::review::after_turn(&mut app));
         cmds.extend(super::review::deliver(&mut app));
     }
     (app, cmds)
@@ -1431,12 +1435,12 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.chat.review.changed = true;
             vec![]
         }
-        Bg::ReviewStarted { session, auto } => {
-            super::review::started(app, &session, auto);
+        Bg::ReviewStarted { session, auto, why } => {
+            super::review::started(app, &session, auto, &why);
             vec![]
         }
-        Bg::ReviewSkipped { session } => {
-            super::review::skipped(app, &session);
+        Bg::ReviewSkipped { session, why } => {
+            super::review::skipped(app, &session, &why);
             vec![]
         }
         Bg::Reviewed { session, result } => {
@@ -1484,7 +1488,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             if app.pi {
                 let mut cmds = vec![Cmd::LoadSessions];
                 // Before the compaction: it would make the chat look busy.
-                cmds.extend(super::review::after_turn(app));
+                cmds.extend(super::review::turn_ended(app));
                 if refreshed {
                     cmds.extend(over_cap(app));
                 }

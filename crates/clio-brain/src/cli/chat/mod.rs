@@ -188,9 +188,10 @@ pub trait Session: Send + Sync {
         None
     }
     /// The judge's closed question after a turn that changed something: does this work need an
-    /// independent review? `false` when the judge is off or silent.
-    fn needs_review(&self, _work: &TurnWork) -> bool {
-        false
+    /// independent review? `Judged::yes` only when the judge said so; every decision is kept in
+    /// the run's `reviews/judged.jsonl`.
+    fn needs_review(&self, _work: &TurnWork) -> review::Judged {
+        review::Judged::JudgeOff
     }
     /// A review by a second agent (`review::run`): its own Pi, tool host and run folder, the
     /// marks and the day's budget of this session. Runs beside a turn; `cancel` stops it.
@@ -198,8 +199,9 @@ pub trait Session: Send + Sync {
         Err("reviews are not available in this session".into())
     }
     /// A review's findings go with the next message, as data, with Clio's request to answer
-    /// them; `marked`: the reviewer ended marked (`Some(suspect)`), so they mark this session
-    /// the same way.
+    /// them, once the judge read them like any outside text; `marked`: the reviewer ended marked
+    /// (`Some(suspect)`), so they mark this session the same way, and are not given when the
+    /// mark cannot be made.
     fn queue_findings(&self, _findings: &str, _marked: Option<bool>) {}
 }
 
@@ -263,6 +265,8 @@ pub struct Reviewed {
     /// Why it did not run on the reviewer's model (the connector does not offer it).
     pub fallback: Option<String>,
     pub secs: u64,
+    /// The commands it ran (`bash` calls).
+    pub commands: usize,
     /// The reviewer ended marked (it read what is not the person's): `Some(suspect)`.
     pub marked: Option<bool>,
     /// The reviewer's whole answer, kept in the review's folder.
