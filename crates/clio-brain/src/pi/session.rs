@@ -59,8 +59,8 @@ pub fn scrub_json(key: &str) -> String {
 pub const HOST_PROMPT_NAME: &str = "clio-host@6";
 pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@6.md");
 /// The prompt of a review (the second agent that checks a piece of work).
-pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@1";
-pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@1.md");
+pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@2";
+pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@2.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn the_review_prompt_is_the_one_the_guard_checks_and_names_its_tools() {
-        assert!(REVIEW_PROMPT.starts_with("version: 1\n"));
+        assert!(REVIEW_PROMPT.starts_with("version: 2\n"));
         assert!(!REVIEW_PROMPT.contains("Jev"));
         for t in REVIEW_GUARD_TOOLS {
             assert!(REVIEW_PROMPT.contains(&format!("`{t}`")), "{t}");
