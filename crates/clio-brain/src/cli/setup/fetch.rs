@@ -1,15 +1,16 @@
 //! What `clio setup` and `clio update` download, and how each is verified (`docs/security.md`,
 //! "What the installer downloads"):
 //!
-//! - Clio's `clio` and `clio-vault`: from the release (or `CLIO_RELEASE_BASE`), checked against
-//!   that release's `SHA256SUMS`; both are verified before either is replaced.
+//! - Clio's `clio` and `clio-vault`: from the release (a debug build: or `CLIO_RELEASE_BASE`),
+//!   checked against that release's `SHA256SUMS`; both are verified before either is replaced.
 //! - The private Node: the official tarball of [`NODE_VERSION`], its SHA-256 pinned here.
 //! - clio-memory: its release [`MEMORY_VERSION`], whose `SHA256SUMS` is pinned here by its own
 //!   SHA-256; the binary is checked against it.
 //! - The memory's model: the files and the ONNX runtime clio-memory pins (`clio_memory::setup`).
 //!
-//! A file that does not match replaces nothing. Downloads use `curl` (or `wget`); a local path in
-//! place of a URL is copied (`CLIO_RELEASE_BASE` as a folder, and the tests).
+//! A file that does not match replaces nothing. Downloads use `curl`, https only (TLS 1.2 or newer;
+//! plain http only in a debug build, for the tests' local server); a local path in place of a URL
+//! is copied (the tests).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -42,9 +43,9 @@ const NODE_SUMS: [(&str, &str); 4] = [
     ),
 ];
 /// The clio-memory release Clio installs: the one its library is built with (Cargo.toml).
-pub const MEMORY_VERSION: &str = "0.13.0";
+pub const MEMORY_VERSION: &str = "0.14.0";
 /// The SHA-256 of that release's `SHA256SUMS`, which lists each binary's.
-const MEMORY_SUMS_SHA256: &str = "6a3611dd665c19339fffa04c08840880ce24a78615d0c096f356549a61be6d12";
+const MEMORY_SUMS_SHA256: &str = "1ec3465ed9af10a0652a924d0a311ca4c2b344804e3c6a4b36b482cf1e556f19";
 
 /// What went wrong, in a form the installer says in the person's language.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,44 +236,37 @@ impl Drop for Reap {
 /// Over https a redirect may not leave https. Nothing secret is ever part of a URL.
 pub fn get(src: &str, to: &Path, on: &mut dyn FnMut(u64)) -> FRes<()> {
     let net = || Fail::Net(name_of(src));
-    if !(src.starts_with("https://") || src.starts_with("http://")) {
+    let https = src.starts_with("https://");
+    let http = src.starts_with("http://");
+    if http && !cfg!(debug_assertions) {
+        return Err(net());
+    }
+    if !(https || http) {
         std::fs::copy(src, to).map_err(|_| net())?;
         on(std::fs::metadata(to).map_or(0, |m| m.len()));
         return Ok(());
     }
     let path = std::env::var("PATH").unwrap_or_default();
-    let https = src.starts_with("https://");
-    let find = |n| clio_brain::pi::install::find_in_path(n, &path);
-    let mut cmd = if let Some(curl) = find("curl") {
-        let mut c = Command::new(curl);
-        // Stalled for a minute is a failure, not a wait forever.
-        c.args([
-            "-fsSL",
-            "--retry",
-            "3",
-            "--connect-timeout",
-            "20",
-            "-y",
-            "60",
-            "-Y",
-            "1",
-        ]);
-        if https {
-            c.args(["--proto", "=https", "--proto-redir", "=https"]);
-        }
-        c.arg("-o").arg(to).arg(src);
-        c
-    } else if let Some(wget) = find("wget") {
-        let mut c = Command::new(wget);
-        c.args(["-q", "--tries=3", "--timeout=60"]);
-        if https {
-            c.arg("--https-only");
-        }
-        c.arg("-O").arg(to).arg(src);
-        c
-    } else {
-        return Err(Fail::Other("curl or wget is needed to download".into()));
+    let Some(curl) = clio_brain::pi::install::find_in_path("curl", &path) else {
+        return Err(Fail::Other("curl is needed to download".into()));
     };
+    let mut cmd = Command::new(curl);
+    // Stalled for a minute is a failure, not a wait forever.
+    cmd.args([
+        "-fsSL",
+        "--retry",
+        "3",
+        "--connect-timeout",
+        "20",
+        "-y",
+        "60",
+        "-Y",
+        "1",
+    ]);
+    if https {
+        cmd.args(["--proto", "=https", "--proto-redir", "=https", "--tlsv1.2"]);
+    }
+    cmd.arg("-o").arg(to).arg(src);
     let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -361,12 +355,13 @@ pub struct Release {
 }
 
 impl Release {
-    /// The latest release (its `VERSION` names it), or the one `CLIO_RELEASE_BASE` points at (a
-    /// URL or a folder with the same file names). `tmp`: a folder to download into.
+    /// The latest release (its `VERSION` names it); in a debug build, the one `CLIO_RELEASE_BASE`
+    /// points at (a URL or a folder with the same file names): the tests' fake release. Release
+    /// builds never read it. `tmp`: a private folder to download into.
     pub fn find(tmp: &Path) -> FRes<Self> {
         let over = std::env::var("CLIO_RELEASE_BASE")
             .ok()
-            .filter(|b| !b.is_empty());
+            .filter(|b| cfg!(debug_assertions) && !b.is_empty());
         let (base, version_at) = match over {
             Some(b) => {
                 let b = b.trim_end_matches('/').to_owned();
@@ -599,25 +594,15 @@ pub fn install_memory(bin: &Path, m: &MemoryPin, on: &mut dyn FnMut(u64)) -> FRe
     Ok(Some(have.unwrap_or_default()))
 }
 
-/// The model's files and runtime under `home`, each kept when its SHA-256 is already right (the
-/// runtime by the mark clio-memory's installer leaves, `.sha256`). `on`: bytes of this call so
-/// far, out of [`model_size`]. Returns whether anything was downloaded.
+/// The model's runtime and files under `home`, each kept when its SHA-256 is already right (the
+/// runtime by the mark clio-memory's installer leaves, `.sha256`). The runtime comes first, and
+/// the files are gathered in a hidden `.<dir>.partial` beside the model's folder, which takes its
+/// place only when every file is verified: a failure leaves no model folder that cannot load
+/// (the memory then searches by text), and what was verified stays for the next try. `on`: bytes
+/// of this call so far, out of [`model_size`]. Returns whether anything was downloaded.
 pub fn install_model(home: &Path, m: &ModelPin, on: &mut dyn FnMut(u64)) -> FRes<bool> {
-    let dir = home.join(&m.dir);
-    std::fs::create_dir_all(&dir).map_err(|e| crate::cli::io_err(&dir, &e))?;
     let mut done = 0u64;
     let mut changed = false;
-    for f in &m.files {
-        let target = dir.join(&f.name);
-        if sha256_file(&target).as_deref() != Some(f.sha256.as_str()) {
-            let tmp = dir.join(format!(".{}.download", f.name));
-            get_verified(&f.url, &tmp, &f.sha256, &mut |n| on(done + n))?;
-            std::fs::rename(&tmp, &target).map_err(|e| crate::cli::io_err(&target, &e))?;
-            changed = true;
-        }
-        done += f.size;
-        on(done);
-    }
     let root = home.join(&m.runtime_dir);
     for r in &m.runtime {
         let into = root.join(&r.into);
@@ -632,7 +617,12 @@ pub fn install_model(home: &Path, m: &ModelPin, on: &mut dyn FnMut(u64)) -> FRes
         let file = root.join(format!(".{}.download", r.into));
         let staging = root.join(format!(".{}.new", r.into));
         let _ = std::fs::remove_dir_all(&staging);
-        let res = get_verified(&r.url, &file, &r.sha256, &mut |n| on(done + n)).and_then(|()| {
+        let mut got = 0;
+        let res = get_verified(&r.url, &file, &r.sha256, &mut |n| {
+            got = n;
+            on(n);
+        })
+        .and_then(|()| {
             std::fs::create_dir_all(&staging).map_err(|e| crate::cli::io_err(&staging, &e))?;
             unpack(&file, &staging)?;
             std::fs::write(staging.join(".sha256"), &r.sha256)
@@ -644,9 +634,39 @@ pub fn install_model(home: &Path, m: &ModelPin, on: &mut dyn FnMut(u64)) -> FRes
             return Err(e);
         }
         swap_dir(&staging, &into)?;
+        done += got;
         changed = true;
     }
-    Ok(changed)
+    let dir = home.join(&m.dir);
+    let right =
+        |d: &Path, f: &ModelFile| sha256_file(&d.join(&f.name)).as_deref() == Some(&f.sha256);
+    if m.files.iter().all(|f| right(&dir, f)) {
+        return Ok(changed);
+    }
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let partial = dir.with_file_name(format!(".{name}.partial"));
+    std::fs::create_dir_all(&partial).map_err(|e| crate::cli::io_err(&partial, &e))?;
+    for f in &m.files {
+        if !right(&partial, f) {
+            let target = partial.join(&f.name);
+            // One already right in the model's folder is copied, not downloaded again.
+            if right(&dir, f) {
+                std::fs::copy(dir.join(&f.name), &target)
+                    .map_err(|e| crate::cli::io_err(&target, &e))?;
+            } else {
+                let tmp = partial.join(format!(".{}.download", f.name));
+                get_verified(&f.url, &tmp, &f.sha256, &mut |n| on(done + n))?;
+                std::fs::rename(&tmp, &target).map_err(|e| crate::cli::io_err(&target, &e))?;
+            }
+        }
+        done += f.size;
+        on(done);
+    }
+    swap_dir(&partial, &dir)?;
+    Ok(true)
 }
 
 /// What the model's files weigh (the runtime is not counted: its size is not pinned).
