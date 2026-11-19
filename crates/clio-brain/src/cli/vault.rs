@@ -366,6 +366,17 @@ pub fn unlocked(dirs: &Dirs) -> Res<()> {
     }
 }
 
+/// Ok only if the vault answers on its socket and is unlocked (`unlocked` also wants its pid
+/// file): what a round needs.
+pub fn open_now(dirs: &Dirs) -> Res<()> {
+    let not_running = || "the vault is not running: clio vault start".to_owned();
+    match locked(&paths(dirs).map_err(|_| not_running())?) {
+        Some(false) => Ok(()),
+        Some(true) => Err("the vault is locked: clio vault start".into()),
+        None => Err(not_running()),
+    }
+}
+
 /// Whether the running vault is locked; `None` when it does not answer.
 fn locked(p: &Paths) -> Option<bool> {
     let status = VaultClient::new(&p.person)

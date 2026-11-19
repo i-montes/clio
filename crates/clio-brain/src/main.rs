@@ -36,6 +36,8 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
                                               Clio's services (programs run on a schedule): list them, look at one,
                                               turn one off or on, run one now; enable/disable the timer that runs them
+  clio round [now]                            the round (Clio looks by herself at what she watches, from the
+                                              services timer): the last rounds and what each told; now: one now
   clio mcp [show|on|off|confirm|remove|logs <name> | allow|ask <name> <tool>] [--yes]
                                               MCP servers (npm packages the model proposed and you approved):
                                               list them, confirm their tools, turn one on or off, set a tool free or ask
@@ -136,6 +138,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "actions"
             | "skills"
             | "services"
+            | "round"
             | "mcp"
             | "vault"
             | "connect"
@@ -295,6 +298,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             }
             cli::services::cmd(&dirs, &rest)?;
         }
+        "round" => cli::round::cmd(&dirs, &args.rest()?)?,
         "mcp" => {
             let yes = args.flag("--yes");
             let mut rest = args.rest()?;

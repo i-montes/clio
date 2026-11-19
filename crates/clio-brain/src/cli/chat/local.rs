@@ -39,7 +39,7 @@ use clio_brain::pi::preprompt::{APPROVALS_ASK, GRANT_ASK, MANAGE_ASK, PrePrompt}
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
-    guard_env,
+    guard_env, round_guard_env,
 };
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use clio_gateway::Source;
@@ -74,6 +74,8 @@ pub struct LocalSource {
     presentation: bool,
     /// `--host` or `--copy`, over the configuration, for a new session.
     mode: Option<Mode>,
+    /// A round (`round.rs`): its own prompt, caps, model and Pi folders.
+    round: bool,
 }
 
 impl LocalSource {
@@ -82,7 +84,18 @@ impl LocalSource {
             dirs,
             presentation: true,
             mode: None,
+            round: false,
         }
+    }
+
+    /// A round: host mode with nobody there, the prompt `clio-round@1`, the `round.*` caps and
+    /// model, and its Pi session in its own run folder (never in the sessions drawer).
+    #[must_use]
+    pub fn round(mut self) -> Self {
+        self.presentation = false;
+        self.mode = Some(Mode::Host);
+        self.round = true;
+        self
     }
 
     #[must_use]
@@ -183,7 +196,12 @@ impl SessionSource for LocalSource {
 
     fn open(&self, target: &Target) -> Result<Opened, String> {
         let d = &*self.dirs;
-        let cfg = Config::load(d)?;
+        let mut cfg = Config::load(d)?;
+        if self.round
+            && let Some(m) = cfg.round.model.clone()
+        {
+            cfg.model.model = m;
+        }
         let paths = crate::cli::pi::paths(d);
         let node = install::find_node(&path_var()).map_err(text)?;
         let install = install::locate(&paths).map_err(text)?;
@@ -196,7 +214,14 @@ impl SessionSource for LocalSource {
         let (id, session, host) = match target {
             Target::New { .. } if self.mode.unwrap_or(cfg.mode) == Mode::Host => {
                 clean_old_runs(d);
-                let id = runs::prepare_host(d, "Pi session")?;
+                let id = runs::prepare_host(
+                    d,
+                    if self.round {
+                        crate::cli::round::INSTRUCTION
+                    } else {
+                        "Pi session"
+                    },
+                )?;
                 (id.clone(), SessionTarget::New { id: Some(id) }, true)
             }
             Target::New { project } => {
@@ -234,6 +259,14 @@ impl SessionSource for LocalSource {
             }
         };
         let run_dir = d.runs.join(&id);
+        // A round's Pi folders are its run's: its session is not a conversation of the drawer.
+        let paths = if self.round {
+            clio_brain::pi::PiPaths {
+                root: run_dir.join("pi"),
+            }
+        } else {
+            paths
+        };
         // One `clio` per conversation: two would run two Pi on one file and share one run folder.
         let lock = hold(&run_dir)?;
         // A file Pi can write: if it is not as Clio left it, what it says is outside content.
@@ -260,7 +293,7 @@ impl SessionSource for LocalSource {
         }
         let person = crate::cli::vault::person_socket(d)?;
         // Skills (S-68): a chat's, with the shipped one installed when it never was there.
-        let skills = if self.presentation {
+        let skills = if self.presentation || self.round {
             crate::cli::skills::ensure(d)?;
             Some(crate::cli::skills::root(d))
         } else {
@@ -327,7 +360,11 @@ impl SessionSource for LocalSource {
                 .chain(HOST_GUARD_TOOLS.iter().filter(|_| host))
                 .map(|t| (*t).to_owned())
                 .collect(),
-            extra_env: guard_env(&paths, &toolhost, host, self.presentation)?,
+            extra_env: if self.round {
+                round_guard_env(&paths, &toolhost)?
+            } else {
+                guard_env(&paths, &toolhost, host, self.presentation)?
+            },
             provider: provider_of(d, &cfg),
             api_key: Some(key),
             cwd: work.clone(),
@@ -379,10 +416,17 @@ impl SessionSource for LocalSource {
             jev::taint_session(&toolhost.socket, &pi.session_id, false);
             notes.push(CHANGED_SINCE_CLOSE.to_owned());
         }
-        // A service paused or asking for attention since the last chat (S-69): a quiet note.
-        notes.extend(crate::cli::services::take_notices(d));
-        // An MCP server turned off because its installed files changed (S-70).
-        notes.extend(crate::cli::mcp_servers::take_notices(d));
+        // The person's notices go to a chat, never to `clio run` or a round, which would eat them.
+        let mut round_news = Vec::new();
+        if self.presentation {
+            // A service paused or asking for attention since the last chat (S-69): a quiet note.
+            notes.extend(crate::cli::services::take_notices(d));
+            // An MCP server turned off because its installed files changed (S-70).
+            notes.extend(crate::cli::mcp_servers::take_notices(d));
+            // What the rounds found: shown once, and given with the person's next message.
+            round_news = crate::cli::round::take_notices(d);
+            notes.extend(round_news.iter().cloned());
+        }
         let session_file =
             session_file.or_else(|| pi.state.session_file.clone().map(PathBuf::from));
         // What Pi offers this connector, kept for `/model` before a session's first message.
@@ -399,7 +443,9 @@ impl SessionSource for LocalSource {
             session_file,
             lock: Mutex::new(Some(lock)),
             down: Mutex::new(false),
-            budget: if host {
+            budget: if self.round {
+                crate::cli::round::budget(&cfg)
+            } else if host {
                 host_budget(task_budget(&cfg.limits))
             } else {
                 task_budget(&cfg.limits)
@@ -432,10 +478,12 @@ impl SessionSource for LocalSource {
             skill_fails: Mutex::default(),
             skill_notes: Mutex::default(),
             skill_handed: Mutex::default(),
+            round_news: Mutex::new(round_news),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
                 run: id.clone(),
+                rounds: self.presentation,
                 asked: Mutex::default(),
                 approved: Mutex::default(),
                 notes: Mutex::default(),
@@ -481,7 +529,7 @@ pub(super) fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
 /// An open session: Pi, and the toolhost beside it. Field order is the order they are dropped:
 /// Pi first, then the toolhost.
 /// The caps of one prompt: the configured limits, and the anti-loop and retries of the builtin loop.
-pub(super) fn task_budget(limits: &Limits) -> Budget {
+pub(crate) fn task_budget(limits: &Limits) -> Budget {
     let mut b = AgentConfig::new("pi", "", Path::new("")).budget;
     b.max_steps = limits.max_steps;
     b.max_ms = i64::try_from(limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
@@ -560,12 +608,16 @@ struct ChatSession {
     skill_notes: Mutex<std::collections::HashMap<String, i64>>,
     /// The drafts this opening of the session handed out for review.
     skill_handed: Mutex<HashSet<String>>,
+    /// The rounds' notices shown when this chat opened: they go with the person's next message.
+    round_news: Mutex<Vec<String>>,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
 struct HostSide {
     dirs: Arc<Dirs>,
     run: String,
+    /// A chat: what a round set aside is asked here too (`round::is_round`).
+    rounds: bool,
     /// The pending actions already put to the person: each is asked once.
     asked: Mutex<HashSet<String>>,
     /// What the actions the person approved did, for the model's next message.
@@ -584,6 +636,21 @@ struct HostSide {
 }
 
 impl HostSide {
+    /// Item `p` is asked in this session: set aside by it (`session`), or, in a chat, by a round.
+    fn mine(&self, p: &Pending, session: &str) -> bool {
+        (p.run == self.run && p.session == session)
+            || (self.rounds && crate::cli::round::is_round(&self.dirs, &p.run))
+    }
+
+    /// What waits for this session, a round's named as such.
+    fn waiting(&self, session: &str) -> Vec<Pending> {
+        pending::waiting(&self.dirs)
+            .into_iter()
+            .filter(|p| self.mine(p, session))
+            .map(|p| crate::cli::round::with_origin(&self.dirs, p))
+            .collect()
+    }
+
     /// `Session::grant` (`suspect`: the session's mark; `answer`: the person's path of a yes, as
     /// the window): the window open now (the judge on), an item of `session` it may answer
     /// (`grant::may_answer`), recorded before it runs and its outcome after, in fixed words.
@@ -594,16 +661,17 @@ impl HostSide {
         id: &str,
         answer: impl FnOnce(&grant::Window) -> Result<String, String>,
     ) -> Result<String, String> {
-        // A session the judge flagged never acts under a window: it asks.
-        if suspect {
+        let p = pending::waiting(&self.dirs)
+            .into_iter()
+            .find(|p| p.id == id && self.mine(p, session))
+            .ok_or_else(|| format!("{id} is not of this session"))?;
+        // A session the judge flagged (or the round that set it aside) never acts under a
+        // window: it asks.
+        if suspect || pending::suspect_run(&self.dirs, &p.run) {
             return Err(format!(
                 "{id}: this session read content that tried to give orders, so it waits for you"
             ));
         }
-        let p = pending::waiting(&self.dirs)
-            .into_iter()
-            .find(|p| p.id == id && p.run == self.run && p.session == session)
-            .ok_or_else(|| format!("{id} is not of this session"))?;
         // The judge off closes the window; what it may not answer, or what waited from before it
         // opened, keeps its box.
         let w = pending::window_now(&self.dirs)
@@ -1088,6 +1156,20 @@ impl Session for ChatSession {
             )),
             None => None,
         };
+        // The rounds' notices this chat showed when it opened go with the person's next message,
+        // once, as outside text: the session is marked first and the judge reads them; not given
+        // when the mark cannot be made.
+        let round = Some(text)
+            .filter(|t| !t.is_empty())
+            .map(|_| std::mem::take(&mut *locked(&self.round_news)))
+            .filter(|r| !r.is_empty())
+            .and_then(|r| {
+                let data = crate::cli::round::for_model(&r);
+                let (socket, sid) = (&self.toolhost.socket, &self.pi.session_id);
+                jev::taint_session(socket, sid, false).then(|| {
+                    jev::judged_for_model(socket, sid, &data, "round").map_or(data, |(s, _)| s)
+                })
+            });
         // Only what the person typed counts toward the closing summary.
         if !text.is_empty() {
             self.prompts.fetch_add(1, Ordering::Relaxed);
@@ -1156,6 +1238,9 @@ impl Session for ChatSession {
         if let Some((f, ask)) = &findings {
             self.pre.reviewed(ask);
             given.push((Source::SubagentSummary, f.as_str()));
+        }
+        if let Some(r) = &round {
+            given.push((Source::SubagentSummary, r.as_str()));
         }
         let mut turn = super::review::Turn {
             request: text.to_owned(),
@@ -1374,9 +1459,8 @@ impl Session for ChatSession {
             return Vec::new();
         };
         let mut asked = locked(&h.asked);
-        pending::waiting(&h.dirs)
+        h.waiting(&self.pi.session_id)
             .into_iter()
-            .filter(|p| p.run == h.run && p.session == self.pi.session_id)
             .filter(|p| asked.insert(p.id.clone()))
             .collect()
     }
@@ -1386,9 +1470,8 @@ impl Session for ChatSession {
             return Vec::new();
         };
         let mut asked = locked(&h.asked);
-        pending::waiting(&h.dirs)
+        h.waiting(&self.pi.session_id)
             .into_iter()
-            .filter(|p| p.run == h.run && p.session == self.pi.session_id)
             .inspect(|p| {
                 asked.insert(p.id.clone());
             })
@@ -1717,7 +1800,7 @@ impl ChatSession {
                 locked(&h.asked).contains(id)
                     || pending::waiting(&h.dirs)
                         .iter()
-                        .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
+                        .any(|p| p.id == id && h.mine(p, &self.pi.session_id))
             })
             .ok_or_else(|| format!("{id} is not of this session"))?;
         if pending::waiting(&h.dirs)
@@ -1972,6 +2055,7 @@ mod tests {
         HostSide {
             dirs: Arc::new(d),
             run: "r1".into(),
+            rounds: true,
             asked: Mutex::default(),
             approved: Mutex::default(),
             notes: Mutex::default(),
@@ -1990,6 +2074,50 @@ mod tests {
         let st = pending::state(&h.dirs);
         std::fs::write(st.join(format!("pending/{id}.json")), v.to_string()).unwrap();
         serde_json::from_value(v).unwrap()
+    }
+
+    // What a round set aside waits for the person and is asked in the next chat, named as the
+    // round's; never in another round, and never answered by a window when that round was flagged.
+    #[test]
+    fn a_rounds_items_are_asked_in_the_next_chat_and_a_flagged_rounds_always_ask() {
+        let t = tempfile::tempdir().unwrap();
+        let h = host_side(t.path());
+        let st = pending::state(&h.dirs);
+        let round = runs::prepare_host(&h.dirs, crate::cli::round::INSTRUCTION).unwrap();
+        let now = crate::cli::now_ms();
+        let w = grant::open(&st, 4, &["x".into()]).unwrap().unwrap();
+        for (id, run) in [("rnd1", round.as_str()), ("oth1", "elsewhere")] {
+            let v = json!({"id": id, "class": "delete", "tool": "exec",
+                "args": {"command": format!("rm -r /srv/{id}.bak")}, "hash": "", "what": "",
+                "run": run, "session": run, "created_ms": w.opened_ms,
+                "expires_ms": now + 3_600_000, "state": "waiting"});
+            std::fs::write(st.join(format!("pending/{id}.json")), v.to_string()).unwrap();
+        }
+        let asked = h.waiting("s1");
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].id, "rnd1");
+        assert!(
+            asked[0]
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("set aside by the round at ")),
+            "{asked:?}"
+        );
+        let in_a_round = HostSide {
+            rounds: false,
+            ..host_side(t.path())
+        };
+        assert!(in_a_round.waiting("s1").is_empty());
+        // The round was flagged: its item always asks the person, window or not.
+        let mark = h.dirs.runs.join(&round).join("toolhost");
+        std::fs::create_dir_all(&mark).unwrap();
+        std::fs::write(mark.join("tainted.json"), "{\"suspect\": true}").unwrap();
+        let err = h
+            .grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0))
+            .unwrap_err();
+        assert!(err.contains("waits for you"), "{err}");
+        std::fs::remove_file(mark.join("tainted.json")).unwrap();
+        assert!(h.grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0)).is_ok());
     }
 
     /// The person's path of a yes, faked: the item ran with exit `code` and printed words the

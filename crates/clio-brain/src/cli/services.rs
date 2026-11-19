@@ -65,7 +65,7 @@ pub struct Notice {
     pub seen: bool,
 }
 
-fn with_notices<T>(root: &Path, f: impl FnOnce(&mut Vec<Notice>) -> T) -> Res<T> {
+pub(crate) fn with_notices<T>(root: &Path, f: impl FnOnce(&mut Vec<Notice>) -> T) -> Res<T> {
     mkdir_private(root)?;
     let lock = root.join(".notices.lock");
     let l = fs::OpenOptions::new()
@@ -802,14 +802,15 @@ fn due_now(root: &Path, name: &str, now: i64) -> Res<bool> {
     ))
 }
 
-/// Starts `<exe> services run-timer <name>` in a transient user scope of its own and does not
-/// wait for it: `Ok` once it is in its scope (out of the timer's unit, which may then end without
-/// stopping it) or already ended well. `Err`: no scope (it ran nothing).
-fn start_detached(systemd_run: &Path, exe: &Path, name: &str) -> Res<()> {
+/// Starts `<exe> <args>` (`services run-timer <name>`, `round run-timer`) in a transient user
+/// scope of its own and does not wait for it: `Ok` once it is in its scope (out of the timer's
+/// unit, which may then end without stopping it) or already ended well. `Err`: no scope (it ran
+/// nothing).
+pub(crate) fn start_detached(systemd_run: &Path, exe: &Path, args: &[&str]) -> Res<()> {
     let mut child = std::process::Command::new(systemd_run)
         .args(["--user", "--scope", "--quiet", "--collect", "--"])
         .arg(exe)
-        .args(["services", "run-timer", name])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -854,7 +855,7 @@ pub fn run_due(runner: &Runner<'_>, now: i64) -> Vec<String> {
             }
         }
         if let Some(sr) = runner.jail.scope() {
-            match start_detached(sr, &runner.exe, &r.name) {
+            match start_detached(sr, &runner.exe, &["services", "run-timer", &r.name]) {
                 Ok(()) => {
                     out.push(format!("{}: started in a scope of its own", r.name));
                     continue;
@@ -1026,18 +1027,24 @@ pub fn timer_warning(d: &Dirs) -> Option<String> {
     if let Err(e) = service_jail() {
         return Some(format!("services are on but cannot run: {e}"));
     }
-    let active = systemctl().is_some_and(|s| {
-        std::process::Command::new(s)
-            .args(["--user", "is-active", "--quiet", UNITS[1]])
-            .status()
-            .is_ok_and(|st| st.success())
-    });
-    (!active).then(|| {
+    (!timer_active(&d.home)).then(|| {
         format!(
             "{on} service{} on, but the timer is not active: they do not run (clio services enable)",
             if on == 1 { " is" } else { "s are" }
         )
     })
+}
+
+/// Whether the services timer runs: its two files are there and the person's systemd says it is
+/// active (not asked when the files are missing).
+pub(crate) fn timer_active(home: &Path) -> bool {
+    timer_files_exist(home)
+        && systemctl().is_some_and(|s| {
+            std::process::Command::new(s)
+                .args(["--user", "is-active", "--quiet", UNITS[1]])
+                .status()
+                .is_ok_and(|st| st.success())
+        })
 }
 
 // ---- the person's commands ------------------------------------------------------------------
@@ -1217,6 +1224,8 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
         }
         Some("disable") => print(disable_in(&d.home, systemctl().as_deref())?),
         Some("run-due") => {
+            // A round first: it needs no service jail, and it is started, never waited for.
+            print(super::round::run_due(d, now_ms()))?;
             let jail = service_jail()?;
             let runner = Runner::new(d, &jail)?;
             print(run_due(&runner, now_ms()))
