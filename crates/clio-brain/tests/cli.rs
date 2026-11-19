@@ -1408,7 +1408,13 @@ fn clio_runs_with_the_runtime_telemetry_off() {
 // ---------------------------------------------------------------- clio connect
 
 /// The `clio-vault` binary (another package): next to this test's executable, built if missing.
+/// Built once per run: a build while another test runs it gets that process killed on macOS.
 fn vault_bin() -> PathBuf {
+    static BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(build_vault_bin).clone()
+}
+
+fn build_vault_bin() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let profile_dir = exe.parent().unwrap().parent().unwrap().to_path_buf();
     let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -1860,6 +1866,18 @@ fn a_locked_vault_is_opened_by_vault_start() {
 fn vault_servers(e: &Env) -> Vec<String> {
     let mark = e.home().join(".local/share/clio/vault.bin");
     let mark = mark.to_string_lossy().into_owned();
+    if !cfg!(target_os = "linux") {
+        // No /proc on macOS: ps lists every command line.
+        let o = Command::new("ps")
+            .args(["-ax", "-o", "command="])
+            .output()
+            .unwrap();
+        return String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|c| c.contains("serve") && c.contains(&mark))
+            .map(str::to_owned)
+            .collect();
+    }
     std::fs::read_dir("/proc")
         .unwrap()
         .flatten()
