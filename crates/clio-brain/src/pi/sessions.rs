@@ -309,6 +309,11 @@ pub fn list_sessions(dir: &Path) -> SessionList {
 /// The turns (a message of the person and what followed it) the chat reads from a session file at
 /// a time.
 pub const HISTORY_TURNS: usize = 200;
+/// A session file bigger than this is not read for the history (the chat shows Pi's own copy).
+const MAX_HISTORY_FILE: u64 = 128 * 1024 * 1024;
+/// The most entries one page holds, whatever its turns: a file with few or no messages of the
+/// person does not become one page of everything.
+const MAX_PAGE_ENTRIES: usize = 5_000;
 
 /// A page of a session's conversation, as Pi's file recorded it.
 #[derive(Debug, Default, PartialEq)]
@@ -337,10 +342,17 @@ struct Role {
 }
 
 /// The last `turns` turns of the session file at `path` that end before line `before` (`None`: the
-/// whole file). Clio only reads Pi's format, never writes it. A line that is not JSON (the last one
-/// while Pi writes it) is skipped; a file that cannot be read is an error.
+/// whole file), at most `MAX_PAGE_ENTRIES` entries. Clio only reads Pi's format, never writes it. A
+/// line that is not JSON (the last one while Pi writes it) or is over `MAX_RECORD` is skipped; a
+/// file that cannot be read, or is over `MAX_HISTORY_FILE`, is an error.
 pub fn read_history(path: &Path, before: Option<usize>, turns: usize) -> Result<History, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|f| f.take(MAX_HISTORY_FILE + 1).read_to_end(&mut bytes))
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_HISTORY_FILE {
+        return Err("it is over 128 MiB".into());
+    }
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.split('\n').collect();
     let end = before.unwrap_or(lines.len()).min(lines.len());
@@ -348,6 +360,7 @@ pub fn read_history(path: &Path, before: Option<usize>, turns: usize) -> Result<
     let kinds: Vec<(usize, bool)> = lines[..end]
         .iter()
         .enumerate()
+        .filter(|(_, l)| l.len() as u64 <= MAX_RECORD)
         .filter_map(|(i, l)| {
             let k: Kind = serde_json::from_str(l).ok()?;
             let role = k.message.map(|m| m.role).unwrap_or_default();
@@ -367,6 +380,7 @@ pub fn read_history(path: &Path, before: Option<usize>, turns: usize) -> Result<
             break;
         }
     }
+    let start = start.max(kinds.len().saturating_sub(MAX_PAGE_ENTRIES));
     let page = &kinds[start..];
     Ok(History {
         entries: page
@@ -435,5 +449,50 @@ mod tests {
         assert_eq!(said(&first), ["q0", "a0"]);
         assert!(!first.more);
         assert!(read_history(&t.path().join("gone.jsonl"), None, 2).is_err());
+    }
+
+    // The file is Pi's to write: a huge one is not read (the chat falls back to Pi's copy), a line
+    // over the record cap is skipped, and a file with no message of the person comes in pages of
+    // at most `MAX_PAGE_ENTRIES`, not one page of everything.
+    #[test]
+    fn the_history_reader_has_limits() {
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("s.jsonl");
+        let huge = File::create(&p).unwrap();
+        huge.set_len(MAX_HISTORY_FILE + 1).unwrap();
+        assert!(read_history(&p, None, 2).unwrap_err().contains("128 MiB"));
+
+        let msg = |role: &str, text: &str| {
+            serde_json::json!({"type":"message","message":{"role":role,"content":text}}).to_string()
+        };
+        let long = "x".repeat(usize::try_from(MAX_RECORD).unwrap());
+        std::fs::write(
+            &p,
+            [
+                msg("user", "q"),
+                msg("assistant", &long),
+                msg("assistant", "a"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let h = read_history(&p, None, 2).unwrap();
+        let said: Vec<&str> = h
+            .entries
+            .iter()
+            .map(|e| e["message"]["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(said, ["q", "a"], "the long line is skipped");
+
+        let lines: Vec<String> = (0..MAX_PAGE_ENTRIES + 10)
+            .map(|n| msg("assistant", &n.to_string()))
+            .collect();
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        let last = read_history(&p, None, HISTORY_TURNS).unwrap();
+        assert_eq!(last.entries.len(), MAX_PAGE_ENTRIES);
+        assert!(last.more && last.first == 10);
+        let rest = read_history(&p, Some(last.first), HISTORY_TURNS).unwrap();
+        assert_eq!(rest.entries.len(), 10);
+        assert!(!rest.more);
     }
 }
