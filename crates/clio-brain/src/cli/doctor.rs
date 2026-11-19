@@ -49,8 +49,18 @@ impl Report {
     }
 }
 
+/// A service's state folder (`services/state/<name>`, or one kept with a removed service): what
+/// the service wrote, not Clio. Its own mode is checked; what is inside is the service's.
+fn service_state(p: &Path) -> bool {
+    p.parent().is_some_and(|q| q.ends_with("services/state"))
+        || (p.ends_with("state")
+            && p.parent()
+                .and_then(Path::parent)
+                .is_some_and(|q| q.ends_with("services/removed")))
+}
+
 /// Every file and folder under `dir`: folders must be 0700, files and sockets without access for
-/// group and others.
+/// group and others. A service's state folder is checked, not walked.
 fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -72,7 +82,7 @@ fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
                     Some(format!("chmod 700 {}", p.display())),
                 );
             }
-            if depth < 8 {
+            if depth < 8 && !service_state(&p) {
                 check_tree(o, &p, depth + 1);
             }
         } else if md & 0o077 != 0 {
@@ -164,7 +174,7 @@ fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<Path
                 .file_name()
                 .to_str()
                 .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
-            if !skip && depth < 8 {
+            if !skip && depth < 8 && !service_state(&p) {
                 audit_walk(&p, depth + 1, f, out);
             }
         } else if t.is_file() {
@@ -1068,6 +1078,42 @@ mod tests {
             said[1].2,
             format!("chmod 600 {}", dir.join("review.md").display())
         );
+    }
+
+    // S-69: a service's state folder is the service's: its own mode is checked (0700), what it
+    // wrote inside is neither walked for S-23 nor scanned for key shapes.
+    #[test]
+    fn a_services_state_folder_is_checked_but_not_walked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let state = data.join("services/state");
+        let kept = data.join("services/removed/old-1/state");
+        for d in [state.join("a"), state.join("b"), kept.clone()] {
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(d.join("token"), "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+            std::fs::set_permissions(d.join("token"), std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }
+        for d in [
+            &data,
+            &data.join("services"),
+            &state,
+            &data.join("services/removed"),
+            &data.join("services/removed/old-1"),
+        ] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::set_permissions(state.join("b"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut o = Report::default();
+        check_tree(&mut o, &data, 0);
+        let said: Vec<_> = o.checks.iter().map(|c| c.msg.clone()).collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("state/b has mode 755"), "{said:?}");
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        assert!(found.1.is_empty(), "{:?}", found.1);
     }
 
     // A trash with deleted conversations in it is private all through (S-23), even when the
