@@ -2075,6 +2075,7 @@ mod tests {
                 history: vec![],
                 refresh: None,
                 presentation,
+                notes: vec![],
             };
             update(
                 app,
@@ -2665,6 +2666,7 @@ mod tests {
             history: vec![],
             refresh: None,
             presentation: true,
+            notes: vec![],
         };
         let (app, cmds) = update(
             app,

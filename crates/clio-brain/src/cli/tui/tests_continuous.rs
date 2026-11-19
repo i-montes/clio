@@ -31,6 +31,7 @@ pub(super) fn opened(id: &str, history: Vec<Value>) -> Box<ChatInfo> {
         history,
         refresh: None,
         presentation: false,
+        notes: vec![],
     })
 }
 
@@ -323,6 +324,41 @@ fn with_none_or_a_failure_clio_opens_a_draft() {
     assert_eq!(t.len(), 1, "{t:?}");
     assert!(t[0].contains("could not reopen the last conversation") && t[0].contains("code 1"));
     assert_eq!(a.chat.input, "hola\ny");
+}
+
+// The last conversation is open in another terminal: `clio` does not fall back to an older one; it
+// opens a draft and says why in one note.
+#[test]
+fn a_last_conversation_open_elsewhere_gives_a_new_one() {
+    let (a, seq) = resuming();
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Err(crate::cli::chat::local::OPEN_ELSEWHERE.into()),
+        })],
+    );
+    assert!(cmds.is_empty() && a.chat.is_draft(), "{cmds:?}");
+    assert_eq!(
+        texts(&a),
+        ["your last conversation is open in another terminal: this is a new one"]
+    );
+}
+
+// A note from opening (the session file changed after Clio closed it) is shown in the chat.
+#[test]
+fn a_note_from_opening_is_shown() {
+    let (a, seq) = resuming();
+    let mut info = opened("sid", vec![]);
+    info.notes = vec!["the session file is not as Clio left it".into()];
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatOpened {
+            seq,
+            result: Ok(info),
+        })],
+    );
+    assert_eq!(last_note(&a), "the session file is not as Clio left it");
 }
 
 // A session opened from the drawer that fails: the message sent meanwhile is back in the

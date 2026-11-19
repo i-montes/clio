@@ -231,6 +231,19 @@ impl SessionSource for LocalSource {
             }
         };
         let run_dir = d.runs.join(&id);
+        // One `clio` per conversation: two would run two Pi on one file and share one run folder.
+        let lock = hold(&run_dir)?;
+        // A file Pi can write: if it is not as Clio left it, what it says is outside content.
+        let session_file = match target {
+            Target::Existing { reference } => Some(PathBuf::from(reference)),
+            Target::New { .. } => None,
+        };
+        let changed = session_file
+            .as_deref()
+            .is_some_and(|f| changed_since_close(d, &run_dir, f));
+        if !changed {
+            seal(d, &run_dir, session_file.as_deref());
+        }
         let work = if host {
             d.home.clone()
         } else {
@@ -339,6 +352,13 @@ impl SessionSource for LocalSource {
                 std::fs::read_to_string(&taint_file).is_ok_and(|t| t.contains("\"suspect\""));
             jev::taint_session(&toolhost.socket, &pi.session_id, suspect);
         }
+        let mut notes = Vec::new();
+        if changed {
+            jev::taint_session(&toolhost.socket, &pi.session_id, false);
+            notes.push(CHANGED_SINCE_CLOSE.to_owned());
+        }
+        let session_file =
+            session_file.or_else(|| pi.state.session_file.clone().map(PathBuf::from));
         // What Pi offers this connector, kept for `/model` before a session's first message.
         if let Some(c) = connector::by_provider(&cfg.model.provider)
             && let Ok(v) = pi.client.request("get_available_models", json!({}))
@@ -348,6 +368,10 @@ impl SessionSource for LocalSource {
         let s = ChatSession {
             pi,
             toolhost,
+            dirs: self.dirs.clone(),
+            run_dir: run_dir.clone(),
+            session_file,
+            lock: Mutex::new(Some(lock)),
             down: Mutex::new(false),
             budget: if host {
                 host_budget(task_budget(&cfg.limits))
@@ -389,6 +413,7 @@ impl SessionSource for LocalSource {
             workspace: work.display().to_string(),
             history,
             refresh,
+            notes,
             session: Arc::new(s),
         })
     }
@@ -452,6 +477,12 @@ fn clean_old_runs(d: &Dirs) {
 struct ChatSession {
     pi: PiProcess,
     toolhost: Toolhost,
+    dirs: Arc<Dirs>,
+    run_dir: PathBuf,
+    /// Pi's file of the session, sealed when it closes.
+    session_file: Option<PathBuf>,
+    /// The run folder's lock, held until the session is shut down (`hold`).
+    lock: Mutex<Option<std::fs::File>>,
     down: Mutex<bool>,
     /// S-47: each prompt is a task with these caps; the day's spend is shared by all of them.
     budget: Budget,
@@ -746,7 +777,12 @@ impl Session for ChatSession {
                 return;
             }
             self.pi.client.kill();
+            // Reaped, so nothing more reaches the file before it is sealed.
+            self.pi.client.shutdown();
             self.toolhost.stop();
+            seal(&self.dirs, &self.run_dir, self.session_file.as_deref());
+            // Released here, not when the last handle goes: the same conversation may reopen now.
+            locked(&self.lock).take();
         }
     }
 }
@@ -754,6 +790,87 @@ impl Session for ChatSession {
 impl Drop for ChatSession {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// What `open` says when another `clio` holds the conversation.
+pub const OPEN_ELSEWHERE: &str = "that conversation is open in another terminal";
+
+const CHANGED_SINCE_CLOSE: &str = "the session file is not as Clio left it when it closed: what it holds is treated as outside content";
+
+/// Where Clio writes how she left a session's file (size and SHA-256), in its run folder.
+const SEAL: &str = "session-seal.json";
+
+/// Made the first time a seal is written: a run with no seal whose file changed after it predates
+/// the seals only if the change does too.
+const SEALS_SINCE: &str = "sessions-sealed";
+
+/// Holds an advisory lock on the run folder for as long as the file lives; `OPEN_ELSEWHERE` when
+/// another `clio` holds it.
+fn hold(run_dir: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(run_dir.join("session.lock"))
+        .map_err(text)?;
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| OPEN_ELSEWHERE.to_owned())?;
+    Ok(f)
+}
+
+/// Size and SHA-256 of `file`; a missing file is empty.
+fn digest(file: &Path) -> (u64, String) {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let (mut h, mut size, mut buf) = (Sha256::new(), 0u64, vec![0u8; 1 << 16]);
+    if let Ok(mut f) = std::fs::File::open(file) {
+        while let Ok(n) = f.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+            size += n as u64;
+        }
+    }
+    (
+        size,
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+    )
+}
+
+/// Writes the seal of `file` as it is now (an empty one when there is no file yet). Written when
+/// the session opens too, so a session Clio never closed does not match it.
+fn seal(d: &Dirs, run_dir: &Path, file: Option<&Path>) {
+    let (size, sha256) = file.map_or_else(|| digest(Path::new("")), digest);
+    let _ = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(d.data.join(SEALS_SINCE));
+    let _ = crate::cli::write_private(
+        &run_dir.join(SEAL),
+        json!({"size": size, "sha256": sha256})
+            .to_string()
+            .as_bytes(),
+    );
+}
+
+/// The session's file is not as Clio sealed it, or, in a run with no seal, it changed after Clio
+/// started sealing. A run from before the seals, untouched since, is not a mismatch.
+fn changed_since_close(d: &Dirs, run_dir: &Path, file: &Path) -> bool {
+    match std::fs::read(run_dir.join(SEAL)) {
+        Ok(b) => {
+            let (size, sha256) = digest(file);
+            serde_json::from_slice::<Value>(&b).map_or(true, |v| {
+                v["size"] != size || v["sha256"] != sha256.as_str()
+            })
+        }
+        Err(_) => {
+            let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            matches!((mtime(file), mtime(&d.data.join(SEALS_SINCE))), (Some(f), Some(s)) if f > s)
+        }
     }
 }
 
@@ -955,6 +1072,73 @@ mod tests {
         assert_eq!(copy.last(&other), file("b.jsonl"));
         assert_eq!(copy.last(&home.join("nowhere")), None);
         assert_eq!(copy.last(&home), None);
+    }
+
+    // A session file is Pi's to write: reopened, it must be as Clio left it when it closed. A run
+    // from before the seals, untouched since, is not a mismatch; one touched after Clio started
+    // sealing is.
+    #[test]
+    fn a_session_file_changed_after_it_was_closed_is_caught() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let (src, sessions) = local_source(&home);
+        let d = &*src.dirs;
+        let (run, file) = (d.runs.join("20261118-aaaa"), sessions.join("a.jsonl"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(&file, "{\"type\":\"session\"}\n").unwrap();
+        // Old run, no seal anywhere: not a mismatch.
+        assert!(!changed_since_close(d, &run, &file));
+        // Closed cleanly, reopened untouched: no mark.
+        seal(d, &run, Some(&file));
+        assert!(!changed_since_close(d, &run, &file));
+        // A forged turn appended after the close: marked.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        std::io::Write::write_all(&mut f, b"{\"role\":\"user\"}\n").unwrap();
+        assert!(changed_since_close(d, &run, &file));
+        // Same size, other bytes: marked.
+        seal(d, &run, Some(&file));
+        let same = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("user", "USER");
+        std::fs::write(&file, same).unwrap();
+        assert!(changed_since_close(d, &run, &file));
+        // A run with no seal whose file changed after Clio started sealing: marked.
+        let old = d.runs.join("20261117-bbbb");
+        std::fs::create_dir_all(&old).unwrap();
+        let other = sessions.join("b.jsonl");
+        std::fs::write(&other, "x").unwrap();
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        std::fs::File::options()
+            .write(true)
+            .open(d.data.join(SEALS_SINCE))
+            .unwrap()
+            .set_modified(past + std::time::Duration::from_secs(1))
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        assert!(
+            !changed_since_close(d, &old, &other),
+            "older than the seals"
+        );
+        std::fs::write(&other, "x forged").unwrap();
+        assert!(changed_since_close(d, &old, &other));
+    }
+
+    // Two `clio` on one conversation: the second cannot hold it while the first does.
+    #[test]
+    fn a_conversation_is_held_by_one_opener() {
+        let t = tempfile::tempdir().unwrap();
+        let first = hold(t.path()).unwrap();
+        assert_eq!(hold(t.path()).unwrap_err(), OPEN_ELSEWHERE);
+        drop(first);
+        assert!(hold(t.path()).is_ok());
     }
 
     #[test]

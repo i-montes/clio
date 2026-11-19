@@ -27,6 +27,7 @@ use super::sessions::Sessions;
 use super::theme::Theme;
 use super::{meter, status};
 use super::{sanitize, text};
+use crate::cli::chat::local::OPEN_ELSEWHERE;
 use crate::cli::chat::{Opened, Refresh, Row};
 use crate::cli::doctor::Report;
 use crate::cli::runs::{RunInfo, RunSummary};
@@ -270,6 +271,8 @@ pub struct ChatInfo {
     pub refresh: Option<Refresh>,
     /// Clio speaks first.
     pub presentation: bool,
+    /// Quiet notes for the chat, from opening it.
+    pub notes: Vec<String>,
 }
 
 impl From<&Opened> for ChatInfo {
@@ -280,6 +283,7 @@ impl From<&Opened> for ChatInfo {
             history: o.history.clone(),
             refresh: o.refresh.clone(),
             presentation: o.presentation,
+            notes: o.notes.clone(),
         }
     }
 }
@@ -923,9 +927,13 @@ fn reopen_failed(app: &mut App, e: String, queued: Option<String>) -> Vec<Cmd> {
     if e == NOTHING_TO_REOPEN {
         return queued.map_or_else(Vec::new, |text| super::chat::send_text(app, text));
     }
-    app.chat.items.push(super::chat::Item::Note(format!(
-        "could not reopen the last conversation ({e}): this is a new one"
-    )));
+    app.chat
+        .items
+        .push(super::chat::Item::Note(if e == OPEN_ELSEWHERE {
+            "your last conversation is open in another terminal: this is a new one".to_owned()
+        } else {
+            format!("could not reopen the last conversation ({e}): this is a new one")
+        }));
     if let Some(text) = queued {
         app.chat.unsend(text);
     }
@@ -1114,6 +1122,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     };
                     app.chat
                         .opened(info.id, info.workspace, history, info.refresh, app.now_ms);
+                    app.chat
+                        .items
+                        .extend(info.notes.into_iter().map(super::chat::Item::Note));
                     // A new session's first message: the presentation, if any, is asked in
                     // front of it (`PrePrompt`), so Clio introduces herself and answers.
                     if let Some(text) = queued {
