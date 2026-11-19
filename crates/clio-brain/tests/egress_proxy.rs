@@ -181,3 +181,22 @@ fn a_services_proxy_allows_each_declared_host_and_nothing_else() {
     assert!(line.contains("403"), "{line}");
     assert_eq!(p.denied().len(), 1);
 }
+
+// S-69: a service's proxy never reaches the machine, even for a host it allows: a name that
+// resolves to a loopback address (here the address itself, listening) is refused and remembered,
+// where Pi's proxy would tunnel.
+#[test]
+fn a_services_proxy_refuses_an_allowed_name_that_resolves_to_the_machine() {
+    let (_one, port, _d) = rig();
+    let dir = tempfile::tempdir().unwrap();
+    for name in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
+        let p = EgressProxy::start_service(dir.path(), std::slice::from_ref(&name)).unwrap();
+        let (line, _s) = ask(&p, format!("CONNECT {name} HTTP/1.1\r\n\r\n").as_bytes());
+        assert!(line.contains("403"), "{name}: {line}");
+        assert!(
+            p.denied()[0].contains("not a public address"),
+            "{:?}",
+            p.denied()
+        );
+    }
+}

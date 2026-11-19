@@ -13,7 +13,7 @@
 //! port, a host abstract socket and a `CONNECT` to another host must all fail.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -100,8 +100,20 @@ impl EgressProxy {
         Self::start_many(parent, &[allow.to_owned()])
     }
 
-    /// `start`, allowing each of `allow` (a service's declared hosts, stage 3) and nothing else.
+    /// `start`, allowing each of `allow` and nothing else.
     pub fn start_many(parent: &Path, allow: &[String]) -> Result<Self, String> {
+        Self::start_with(parent, allow, false)
+    }
+
+    /// A service's proxy (stage 3, S-69): `start_many` with its declared hosts, and each name
+    /// resolved once per connection and connected to only at a public address that was checked
+    /// (`is_public`, never one of this machine's own): a name that points at the machine, its
+    /// network or the cloud's metadata service, now or after it was approved, reaches nothing.
+    pub fn start_service(parent: &Path, allow: &[String]) -> Result<Self, String> {
+        Self::start_with(parent, allow, true)
+    }
+
+    fn start_with(parent: &Path, allow: &[String], public: bool) -> Result<Self, String> {
         let dir = parent.join(format!(
             "egress-{}-{}",
             std::process::id(),
@@ -155,7 +167,7 @@ impl EgressProxy {
                 }
                 let (allow, log, active) = (allow.clone(), log.clone(), active.clone());
                 std::thread::spawn(move || {
-                    handle(conn, &allow, &log);
+                    handle(conn, &allow, &log, public);
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
@@ -260,7 +272,7 @@ fn reply(c: &mut UnixStream, status: &str) {
     let _ = c.flush();
 }
 
-fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>) {
+fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>, public: bool) {
     let _ = c.set_read_timeout(Some(HEAD_TIMEOUT));
     let (head, rest) = match read_head(&mut c) {
         Ok(h) => h,
@@ -286,7 +298,19 @@ fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>) {
         remember(log, target.chars().take(120).collect());
         return refuse(&mut c, "403 Forbidden");
     };
-    let Some(up) = connect_upstream(allow) else {
+    let up = if public {
+        match connect_public(allow, &resolve, &own_addrs()) {
+            Ok(up) => Some(up),
+            Err(Refused(why)) => {
+                remember(log, why.chars().take(160).collect());
+                return refuse(&mut c, "403 Forbidden");
+            }
+            Err(Unreachable) => None,
+        }
+    } else {
+        connect_upstream(allow)
+    };
+    let Some(up) = up else {
         return refuse(&mut c, "502 Bad Gateway");
     };
     reply_open(&mut c);
@@ -297,6 +321,110 @@ fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>) {
 fn reply_open(c: &mut UnixStream) {
     let _ = c.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
     let _ = c.flush();
+}
+
+use ConnectError::{Refused, Unreachable};
+
+#[derive(Debug)]
+enum ConnectError {
+    /// No address it may go to (and why).
+    Refused(String),
+    /// Allowed addresses, none of which answered.
+    Unreachable,
+}
+
+fn resolve(allow: &str) -> Vec<SocketAddr> {
+    allow
+        .to_socket_addrs()
+        .map(Iterator::collect)
+        .unwrap_or_default()
+}
+
+/// Resolves `allow` once with `resolve` and connects only to an address that `is_public` and is
+/// not in `own`: the address checked is the one connected to (no second lookup).
+fn connect_public(
+    allow: &str,
+    resolve: &dyn Fn(&str) -> Vec<SocketAddr>,
+    own: &[IpAddr],
+) -> Result<TcpStream, ConnectError> {
+    let all = resolve(allow);
+    let public: Vec<&SocketAddr> = all
+        .iter()
+        .filter(|a| is_public(a.ip()) && !own.contains(&a.ip()))
+        .collect();
+    if public.is_empty() {
+        return Err(Refused(match all.first() {
+            None => format!("{allow}: it does not resolve"),
+            Some(a) => format!("{allow}: it resolves to {}, not a public address", a.ip()),
+        }));
+    }
+    public
+        .into_iter()
+        .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIMEOUT).ok())
+        .ok_or(Unreachable)
+}
+
+/// A global unicast address: not unspecified, loopback, private (RFC 1918), shared (100.64/10),
+/// link-local, documentation, benchmarking, multicast or reserved; for IPv6 within 2000::/3 and
+/// not documentation, Teredo or 6to4, or an IPv4 address (mapped or NAT64) that is public.
+pub fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => {
+            let [x, y, z, _] = a.octets();
+            !(x == 0
+                || x == 10
+                || x == 127
+                || (x == 100 && (64..128).contains(&y))
+                || (x == 169 && y == 254)
+                || (x == 172 && (16..32).contains(&y))
+                || (x == 192 && y == 168)
+                || (x == 192 && y == 0 && (z == 0 || z == 2))
+                || (x == 198 && (y == 18 || y == 19))
+                || (x == 198 && y == 51 && z == 100)
+                || (x == 203 && y == 0 && z == 113)
+                || x >= 224)
+        }
+        IpAddr::V6(a) => {
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            let s = a.segments();
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [_, _, _, _, _, _, hi, lo] = s;
+                let v4 = Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo));
+                return is_public(IpAddr::V4(v4));
+            }
+            s[0] & 0xe000 == 0x2000
+                && !(s[0] == 0x2001 && (s[1] == 0xdb8 || s[1] == 0))
+                && s[0] != 0x2002
+        }
+    }
+}
+
+/// This machine's own addresses (`/proc/net/fib_trie`'s local ones, `/proc/net/if_inet6`): a
+/// public address on one of its interfaces is still the machine.
+fn own_addrs() -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    if let Ok(t) = std::fs::read_to_string("/proc/net/fib_trie") {
+        let mut last = None;
+        for l in t.lines().map(str::trim) {
+            if let Some(a) = l.strip_prefix("|-- ").or_else(|| l.strip_prefix("+-- ")) {
+                last = a.split('/').next().and_then(|a| a.parse::<Ipv4Addr>().ok());
+            } else if l == "/32 host LOCAL"
+                && let Some(a) = last
+            {
+                out.push(IpAddr::V4(a));
+            }
+        }
+    }
+    if let Ok(t) = std::fs::read_to_string("/proc/net/if_inet6") {
+        out.extend(
+            t.lines()
+                .filter_map(|l| u128::from_str_radix(l.split_whitespace().next()?, 16).ok())
+                .map(|n| IpAddr::V6(Ipv6Addr::from(n))),
+        );
+    }
+    out
 }
 
 fn connect_upstream(allow: &str) -> Option<TcpStream> {
@@ -461,6 +589,91 @@ fn abstract_reachable(_: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_global_unicast_addresses_are_public() {
+        for a in [
+            "0.0.0.0",
+            "10.1.2.3",
+            "100.64.0.1",
+            "100.127.255.255",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::1",
+            "::127.0.0.1",
+        ] {
+            assert!(!is_public(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "100.128.0.1",
+            "172.32.0.1",
+            "2606:4700:4700::1111",
+            "::ffff:1.1.1.1",
+        ] {
+            assert!(is_public(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    // S-69: a service's proxy connects only where the one lookup it made says is public, and
+    // never to this machine: a listening local port is not reached, and nothing private is even
+    // tried.
+    #[test]
+    fn a_services_proxy_connects_only_to_a_checked_public_address() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = l.local_addr().unwrap();
+        let lookups = AtomicUsize::new(0);
+        let lookups = &lookups;
+        let to = |addrs: Vec<SocketAddr>| {
+            move |_: &str| {
+                lookups.fetch_add(1, Ordering::SeqCst);
+                addrs.clone()
+            }
+        };
+        let r = connect_public("db.example.com:5432", &to(vec![local]), &[]);
+        assert!(
+            matches!(r, Err(Refused(ref w)) if w.contains("127.0.0.1")),
+            "{r:?}"
+        );
+        for a in [
+            "10.0.0.5:443",
+            "169.254.169.254:80",
+            "[::1]:443",
+            "[::ffff:127.0.0.1]:443",
+        ] {
+            let r = connect_public("x.example.com:443", &to(vec![a.parse().unwrap()]), &[]);
+            assert!(matches!(r, Err(Refused(_))), "{a}: {r:?}");
+        }
+        assert!(matches!(
+            connect_public("x.example.com:443", &to(vec![]), &[]),
+            Err(Refused(_))
+        ));
+        // A public address that is this machine's own is refused too.
+        let mine: SocketAddr = "203.0.114.7:443".parse().unwrap();
+        let r = connect_public("x.example.com:443", &to(vec![mine]), &[mine.ip()]);
+        assert!(matches!(r, Err(Refused(_))), "{r:?}");
+        // One lookup per connection: what was checked is what would be connected to.
+        assert_eq!(lookups.load(Ordering::SeqCst), 7);
+    }
 
     #[test]
     fn the_forwarder_needs_its_arguments() {
