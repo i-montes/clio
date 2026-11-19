@@ -1144,10 +1144,13 @@ fn an_mcp_server_box_shows_what_it_grants_and_is_approved_only_after_its_end() {
         "package: @example/github-mcp-server@1.4.2 (npm)",
         "publisher: example-bot · maintainers: example-bot, jdoe",
         "integrity: sha512-",
-        "7 dependencies",
+        "7 direct dependencies",
+        "repository (the package says): git+https://github.com/example/github-mcp-server.git",
+        "license (the package says): MIT",
         "hosts: api.github.com",
         "secret gh-token as $GITHUB_TOKEN, bound to mcp:api.github.com; it can reach api.github.com",
         "limits: 50% of a processor, 1024 MB, 60 s a call",
+        "nothing of your home, /var, /srv, /opt, /mnt, /media, /root or other homes but the paths listed above",
         "This is someone else's code: it will hold these credentials and can send them to the hosts above.",
         "Its tools are not known yet",
         "--- mcp.json ---",
@@ -1166,4 +1169,192 @@ fn an_mcp_server_box_shows_what_it_grants_and_is_approved_only_after_its_end() {
             yes: true
         }]
     );
+}
+
+/// Feeds quiet seconds and the keys of an impatient person (`y`, Enter, then one row down) until
+/// the box on screen has shown its end: nothing may answer it meanwhile. What the box showed.
+fn read_to_the_end(mut a: App, w: u16, h: u16, mut t: u64) -> (App, String, u64) {
+    let mut seen = String::new();
+    for _ in 0..400 {
+        seen.push_str(&box_rows(&screen_text(&a, w, h)).join("\n"));
+        seen.push('\n');
+        let c = a.confirm.as_ref().unwrap();
+        if c.block.as_ref().unwrap().seen_end.get() {
+            break;
+        }
+        let (n, cmds) = feed(
+            a,
+            vec![
+                Input::Tick(t),
+                ch('y'),
+                key(KeyCode::Enter),
+                key(KeyCode::Down),
+            ],
+        );
+        assert!(cmds.is_empty(), "{cmds:?}");
+        a = n;
+        assert!(!a.confirm.as_ref().unwrap().armed);
+        t += 2_000;
+    }
+    assert!(
+        a.confirm
+            .as_ref()
+            .unwrap()
+            .block
+            .as_ref()
+            .unwrap()
+            .seen_end
+            .get()
+    );
+    (a, seen, t)
+}
+
+// S-70: an MCP tool's call set aside shows the server, the tool and its WHOLE arguments
+// (pretty-printed, cleaned) in the scrolling box, even when they are long and the terminal small:
+// keys are sorted, so a field that comes last must still be read, and `y` arms only once the end
+// of the box was shown.
+#[test]
+fn an_mcp_call_shows_its_whole_arguments_and_is_approved_only_after_its_end() {
+    let mut args = serde_json::Map::new();
+    for i in 0..40 {
+        args.insert(format!("k{i:02}"), serde_json::json!(format!("value {i}")));
+    }
+    args.insert(
+        "zz_last".into(),
+        serde_json::json!(format!("{} the hidden end \u{1b}[2J", "x".repeat(600))),
+    );
+    let arguments = serde_json::Value::Object(args);
+    let p = clio_toolhost::pending::Pending {
+        id: "c1d2e3f4".into(),
+        class: clio_toolhost::ask::Class::Send,
+        tool: "mcp_call".into(),
+        args: serde_json::json!({"server": "github", "tool": "create_issue",
+            "arguments": arguments, "version": "1.4.2",
+            "call": clio_toolhost::mcp::call_text("github", "create_issue", &arguments)}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        ask: true,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: Some("this tool of the server may change something".into()),
+    };
+    let b = super::ask::BlockAsk::new(&p, false).unwrap();
+    let (a, cmds) = feed(
+        chat(),
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "c1d2e3f4".into(),
+            "«send» MCP server «github»".into(),
+            Some(b),
+        )]))],
+    );
+    assert!(cmds.is_empty());
+    let (a, seen, t) = read_to_the_end(a, 70, 16, 2_000);
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "Clio wants to call a tool of the MCP server «github».",
+        "tool: create_issue",
+        "why it waits for you: this tool of the server may change something",
+        "\"k00\": \"value 0\"",
+        "\"k39\": \"value 39\"",
+        "the hidden end",
+        "yes, run it",
+    ] {
+        assert!(words.contains(want), "{want}\n{seen}");
+    }
+    assert!(!seen.contains('\u{1b}'));
+    let (_, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "c1d2e3f4".into(),
+            yes: true
+        }]
+    );
+}
+
+// S-70: `/mcp confirm` is the scrolling box of EVERY tool (its mode in plain words and its
+// description), in line with the other questions (never over one already open), under the
+// approval timing rule; `y` then Enter confirms exactly the list shown (its digest goes along).
+#[test]
+fn mcp_confirm_lists_every_tool_waits_in_line_and_keeps_the_timing_rule() {
+    let t = tempfile::tempdir().unwrap();
+    let d = crate::cli::home::Dirs {
+        config: t.path().join("config"),
+        data: t.path().join("data"),
+        runs: t.path().join("data/runs"),
+        runtime: None,
+        home: t.path().join("home"),
+    };
+    let root = crate::cli::mcp_servers::root(&d);
+    let tools: Vec<clio_toolhost::mcp::Tool> = (0..40)
+        .map(|i| clio_toolhost::mcp::Tool {
+            name: format!("tool_{i:02}"),
+            description: format!("Does thing number {i}."),
+            schema: serde_json::json!({"type": "object"}),
+            read_only: i % 2 == 0,
+            mode: clio_toolhost::mcp::Mode::Ask,
+            flagged: false,
+        })
+        .collect();
+    let st = clio_toolhost::mcp::State {
+        name: "srv".into(),
+        package: "@example/srv".into(),
+        version: "1.0.0".into(),
+        entry: "x".into(),
+        tree: "t".into(),
+        integrity: "sha512-x".into(),
+        packages: 7,
+        confirmed: false,
+        tools: clio_toolhost::mcp::first_modes(tools),
+    };
+    {
+        let _l = clio_toolhost::mcp::lock_root(&root).unwrap();
+        clio_toolhost::mcp::save_state(&root, &st).unwrap();
+    }
+    let (_, digest) = crate::cli::mcp_servers::confirm_rows(&d, "srv").unwrap();
+    let c = crate::cli::mcp_servers::confirm_ask(&d, "srv").unwrap();
+    // An approval is open: the confirmation waits behind it.
+    let mut a = chat();
+    let mut open = super::app::Confirm::new(Action::Approve, "x1".into(), 0, "«send» x".into());
+    open.session = "sid".into();
+    a.confirm = Some(open);
+    let (a, _) = feed(a, vec![Input::Bg(Bg::Confirm(Ok(c)))]);
+    assert_eq!(a.confirm.as_ref().unwrap().id, "x1");
+    let (a, cmds) = feed(a, vec![Input::Tick(2_000), ch('n')]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "x1".into(),
+            yes: false
+        }]
+    );
+    assert_eq!(a.confirm.as_ref().unwrap().action, Action::ConfirmMcp);
+    // At once: not even a `y` and Enter that came on time answer it.
+    let (a, cmds) = feed(a, vec![ch('y'), key(KeyCode::Enter)]);
+    assert!(cmds.is_empty(), "{cmds:?}");
+    let (a, seen, t) = read_to_the_end(a, 80, 20, 4_000);
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "Confirm the tools of the MCP server «srv» and turn it on?",
+        "7 packages installed in all",
+        "Tools marked 'runs without asking' are called by Clio whenever it wants; `/mcp ask <server> <tool>` changes one.",
+        "tool_00: runs without asking (the server says it only reads)",
+        "tool_01: asks you each time",
+        "tool_39: asks you each time",
+        "Does thing number 39.",
+        "yes, confirm them and turn it on",
+    ] {
+        assert!(words.contains(want), "{want}\n{seen}");
+    }
+    let (_, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(cmds, vec![Cmd::Mcp(format!("confirm srv {digest} --yes"))]);
 }

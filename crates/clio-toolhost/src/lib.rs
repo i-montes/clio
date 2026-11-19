@@ -201,6 +201,9 @@ pub struct Config {
     pub shows: Vec<PathBuf>,
     /// Host mode: the MCP servers (S-70), through the person's `clio`.
     pub mcp: Option<Arc<dyn mcp::McpPort>>,
+    /// Host mode: why the MCP servers could not be set up (no bwrap, no npm beside Node): the
+    /// chat starts anyway, and the three tools say this.
+    pub mcp_unavailable: Option<String>,
 }
 
 impl Config {
@@ -222,6 +225,7 @@ impl Config {
             skills: None,
             shows: Vec::new(),
             mcp: None,
+            mcp_unavailable: None,
         }
     }
 }
@@ -276,6 +280,7 @@ pub struct ToolHost {
     skills: Option<PathBuf>,
     shows: Vec<PathBuf>,
     mcp: Option<Arc<dyn mcp::McpPort>>,
+    mcp_off: Option<String>,
     /// The MCP servers this host started, each once (S-70).
     mcp_pool: mcp::Pool,
 }
@@ -432,8 +437,8 @@ impl ToolHost {
         // A program that runs in the folder can edit files in place: snapshots must be copies.
         sandbox.set_copy_snapshots(true);
         let pool = mcp::Pool::default();
-        if cfg.mcp.is_some() {
-            pool.reap_idle();
+        if let Some(port) = &cfg.mcp {
+            pool.reap_idle(port.root());
         }
         Ok(Self {
             gateway,
@@ -467,6 +472,7 @@ impl ToolHost {
             skills: cfg.skills,
             shows: cfg.shows,
             mcp: cfg.mcp,
+            mcp_off: cfg.mcp_unavailable,
             mcp_pool: pool,
         })
     }
@@ -690,6 +696,10 @@ impl ToolHost {
             "judge" => return self.judge_op(&req, &map),
             "jobs" => return self.job_op(&req, &map),
             "job_output" | "job_stop" if !closing() => return self.job_op(&req, &map),
+            // An MCP server holds only its own place in the pool: a slow one keeps no other tool
+            // (or the session's close) waiting (S-70).
+            "mcp_tools" if !closing() => return self.mcp_tools(&req, &map),
+            "mcp_call" if !closing() => return self.mcp_call(&req, &map),
             _ => {}
         }
         let _one_at_a_time = lock(&self.busy);

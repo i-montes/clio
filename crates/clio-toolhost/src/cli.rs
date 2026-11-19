@@ -176,13 +176,23 @@ pub fn run_with(
     }
     cfg.mcp = match (mcp_config, mcp_data, mcp_runtime, &host) {
         (None, None, None, _) => None,
-        (Some(config), Some(data), Some(runtime), Some(h)) if !review => Some(mcp(McpDirs {
-            config,
-            data,
-            runtime,
-            home: h.home.clone(),
-            node: mcp_node,
-        })?),
+        (Some(config), Some(data), Some(runtime), Some(h)) if !review => {
+            // No bwrap, no npm beside Node: the chat starts anyway, without MCP servers.
+            match mcp(McpDirs {
+                config,
+                data,
+                runtime,
+                home: h.home.clone(),
+                node: mcp_node,
+            }) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("clio-toolhost: MCP servers are not available: {e}");
+                    cfg.mcp_unavailable = Some(e);
+                    None
+                }
+            }
+        }
         _ => {
             return Err(
                 "--mcp-config, --mcp-data and --mcp-runtime go together, in host mode, not in a review"

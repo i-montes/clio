@@ -744,6 +744,8 @@ pub(super) fn mcp_ask() -> super::ask::BlockAsk {
         description: "GitHub's issues and pull requests, for the person's repositories.".into(),
         package: "@example/github-mcp-server".into(),
         version: "1.4.2".into(),
+        args: vec![],
+        env: Default::default(),
         network: vec!["api.github.com".into()],
         secrets: vec![clio_toolhost::services::SecretUse {
             name: "gh-token".into(),
@@ -854,6 +856,8 @@ fn mcp_states(out: &mut Vec<(&'static str, App)>) {
             description: format!("The {name} server, for the gallery."),
             package: package.into(),
             version: "1.0.0".into(),
+            args: vec![],
+            env: Default::default(),
             network: if name == "github" {
                 vec!["api.github.com".into()]
             } else {
@@ -880,6 +884,7 @@ fn mcp_states(out: &mut Vec<(&'static str, App)>) {
             entry: "node_modules/x/index.js".into(),
             tree: "t".into(),
             integrity: "sha512-x".into(),
+            packages: 12,
             confirmed,
             tools,
         };

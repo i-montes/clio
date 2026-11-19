@@ -904,6 +904,18 @@ export default function clioGuard(pi: ExtensionAPI) {
 					description: { type: "string", minLength: 20, maxLength: 1024, description: "One line: what it is for, for the person." },
 					package: { type: "string", minLength: 1, maxLength: 214, description: "The npm package: name or @scope/name, lowercase. Never a URL, a path, a git source or a tag." },
 					version: { type: "string", pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$", description: "The exact version, like 1.2.3. Never a range, a tag or latest." },
+					args: {
+						type: "array",
+						maxItems: 20,
+						items: { type: "string", minLength: 1, maxLength: 200 },
+						description: "Fixed arguments the server needs, passed after its entry point (like [\"stdio\"]). Each is shown to the person. Never a secret.",
+					},
+					env: {
+						type: "object",
+						maxProperties: 20,
+						additionalProperties: { type: "string", maxLength: 500 },
+						description: "Settings that are not secret, as variables (UPPER_CASE names; never NODE_*, PATH, HOME, LD_* or a secret's variable). A secret goes in secrets.",
+					},
 					network: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "The only hosts it may reach (host, or host:port; 443 by default). None: no network." },
 					secrets: {
 						type: "array",
@@ -920,7 +932,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 							additionalProperties: false,
 						},
 					},
-					reads: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Absolute paths under the home it may read." },
+					reads: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Absolute paths it may read, under the home or under /var, /srv, /opt, /mnt, /media, /root or /home." },
 					writes: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Absolute paths under the home it may write." },
 					limits: {
 						type: "object",

@@ -232,6 +232,9 @@ pub struct BlockAsk {
     pub seen_end: std::cell::Cell<bool>,
     /// A skill to register (S-68) instead of a block change: drawn whole the same way.
     pub skill: Option<SkillAsk>,
+    /// Rows already made, and what `y` does (an MCP call set aside, an MCP server's tools to
+    /// confirm): drawn whole the same way.
+    pub plain: Option<(Vec<(Part, String)>, &'static str)>,
 }
 
 /// A skill set aside for the person: what it is for, why it waits, and every file of it whole
@@ -330,6 +333,9 @@ fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<V
 impl BlockAsk {
     pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
+        if p.tool == "mcp_call" {
+            return Some(Self::mcp_call(p, suspect));
+        }
         let service = clio_toolhost::pending::service_of(p);
         let mcp = clio_toolhost::pending::mcp_of(p);
         if let Some((name, description, md, files)) = clio_toolhost::pending::skill_of(p)
@@ -346,6 +352,7 @@ impl BlockAsk {
                 scroll: 0,
                 max: std::cell::Cell::new(0),
                 seen_end: std::cell::Cell::new(false),
+                plain: None,
                 skill: Some(SkillAsk {
                     description: clean(description),
                     reason: clean(p.reason.as_deref().unwrap_or("")),
@@ -389,12 +396,79 @@ impl BlockAsk {
             max: std::cell::Cell::new(0),
             seen_end: std::cell::Cell::new(false),
             skill: None,
+            plain: None,
         })
+    }
+
+    /// A box of `rows` made elsewhere, `yes` under it.
+    pub fn rows(name: &str, rows: Vec<(Part, String)>, yes: &'static str) -> Self {
+        Self {
+            name: sanitize::line(name),
+            action: String::new(),
+            id: None,
+            text: None,
+            old: None,
+            suspect: false,
+            scroll: 0,
+            max: std::cell::Cell::new(0),
+            seen_end: std::cell::Cell::new(false),
+            skill: None,
+            plain: Some((rows, yes)),
+        }
+    }
+
+    /// An MCP tool's call set aside (S-70): the server, the tool, why it waits, and the whole
+    /// arguments, pretty-printed and cleaned (up to 32 KiB, keys sorted: nothing may fall off).
+    fn mcp_call(p: &clio_toolhost::pending::Pending, suspect: bool) -> Self {
+        let a = &p.args;
+        let s = |k: &str| {
+            sanitize::line(a[k].as_str().unwrap_or(""))
+                .trim()
+                .to_owned()
+        };
+        let mut rows = vec![
+            (
+                Part::Head,
+                format!(
+                    "Clio wants to call a tool of the MCP server «{}».",
+                    s("server")
+                ),
+            ),
+            (
+                Part::Label,
+                format!("server: {} (version {})", s("server"), s("version")),
+            ),
+            (Part::Label, format!("tool: {}", s("tool"))),
+            (
+                Part::Warn,
+                format!(
+                    "why it waits for you: {}",
+                    sanitize::line(p.reason.as_deref().unwrap_or("")).trim()
+                ),
+            ),
+            (Part::Label, "arguments:".into()),
+        ];
+        let pretty = serde_json::to_string_pretty(&a["arguments"]).unwrap_or_default();
+        rows.extend(sanitize::multiline(&pretty).lines().map(|l| {
+            (
+                Part::Text,
+                if l.is_empty() {
+                    " ".into()
+                } else {
+                    l.to_owned()
+                },
+            )
+        }));
+        let mut b = Self::rows(&s("server"), rows, " yes, run it");
+        b.suspect = suspect;
+        b
     }
 
     /// What `y` does, for the keys under the box.
     pub fn yes(&self) -> &'static str {
-        if self.skill.as_ref().is_some_and(|s| s.mcp.is_some()) {
+        if let Some((_, yes)) = &self.plain {
+            yes
+        } else if self.skill.as_ref().is_some_and(|s| s.mcp.is_some()) {
             " yes, download it and list its tools"
         } else if self.skill.is_some() {
             " yes, register it"
@@ -442,8 +516,13 @@ impl BlockAsk {
         if let Some(rows) = &s.mcp {
             let n = rows.len();
             for (i, row) in rows.iter().enumerate() {
-                // The last two say whose code it is and what approving does: in the warning color.
-                let part = if i + 2 >= n { Part::Warn } else { Part::Label };
+                // The last two say whose code it is and what approving does, and a deprecation is
+                // the registry's warning: in the warning color.
+                let part = if i + 2 >= n || row.starts_with("deprecated") {
+                    Part::Warn
+                } else {
+                    Part::Label
+                };
                 out.push((part, row.clone()));
             }
         }
@@ -481,6 +560,13 @@ impl BlockAsk {
     pub fn parts(&self) -> Vec<(Part, String)> {
         if let Some(s) = &self.skill {
             return self.skill_parts(s);
+        }
+        if let Some((rows, _)) = &self.plain {
+            let mut out = rows.clone();
+            if self.suspect {
+                out.push((Part::Warn, SUSPECT_LINE.into()));
+            }
+            return out;
         }
         let id = self.id.map_or_else(String::new, |n| format!(" m{n}"));
         let mut out = vec![

@@ -16,14 +16,14 @@
 //! The client is here too: JSON-RPC 2.0 over the server's standard input and output, one message
 //! a line; `initialize`, `notifications/initialized`, `tools/list` and `tools/call`, nothing else.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use clio_gateway::wrap_untrusted;
@@ -77,6 +77,29 @@ const MAX_PAGES: usize = 10;
 const MAX_REASON: usize = 300;
 /// What is kept of the registry's text: each string, the maintainers listed.
 const MAX_FACT: usize = 200;
+/// What is kept of the package's own `license` (its words, not the registry's).
+const MAX_LICENSE: usize = 40;
+/// The fields `npm view` is asked for: only these, so its answer stays small (no `versions` or
+/// `time` of the whole package).
+pub const NPM_FIELDS: [&str; 10] = [
+    "name",
+    "version",
+    "dist.integrity",
+    "dist.tarball",
+    "maintainers",
+    "_npmUser",
+    "license",
+    "repository",
+    "deprecated",
+    "dependencies",
+];
+/// A server's fixed arguments and settings: how many, and how long each.
+const MAX_ARGS_N: usize = 20;
+const MAX_ARG: usize = 200;
+const MAX_ENV_N: usize = 20;
+const MAX_ENV_VALUE: usize = 500;
+/// Proposals a session may make in an hour (counted before npm runs).
+pub const PROPOSALS_PER_HOUR: usize = 6;
 const MAX_MAINTAINERS: usize = 10;
 /// Events kept in a server's log.
 const KEPT_EVENTS: usize = 50;
@@ -91,6 +114,13 @@ pub struct Manifest {
     pub package: String,
     /// Exact: `1.2.3` or `1.2.3-beta.1`, never a range, a tag, a URL or a path.
     pub version: String,
+    /// Fixed arguments, passed after the entry point (never a secret).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Settings that are not secret, as variables (never `NODE_*`, `PATH`, `HOME`, `LD_*`, nor a
+    /// secret's variable).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// The only hosts it may reach, through the proxy (none: no network).
     pub network: Vec<String>,
     pub secrets: Vec<SecretUse>,
@@ -140,6 +170,9 @@ pub struct State {
     pub tree: String,
     /// The tarball's integrity, as the registry gave it and the lockfile recorded it.
     pub integrity: String,
+    /// How many packages npm installed in all (the package and every dependency).
+    #[serde(default)]
+    pub packages: usize,
     /// The person confirmed the tool list: only then can it be turned on.
     pub confirmed: bool,
     pub tools: Vec<Tool>,
@@ -258,6 +291,7 @@ pub fn check(m: &Manifest) -> Result<(), String> {
             one_line(&m.version)
         ));
     }
+    check_settings(m)?;
     // Node does not start in less.
     if m.limits.memory_mb < MIN_MEMORY_MB {
         return Err(format!(
@@ -271,6 +305,41 @@ pub fn check(m: &Manifest) -> Result<(), String> {
         m.limits,
         MAX_LIMITS,
     )
+}
+
+/// `args` and `env`: few, short, one line each, no hidden character; the variables' names by the
+/// secrets' rules, never Node's own (`NODE_*`: options, CA files, TLS checks), and never a
+/// secret's. Text shaped like a secret is refused with the whole manifest (`mcp_propose`).
+fn check_settings(m: &Manifest) -> Result<(), String> {
+    let plain = |t: &str, max: usize| {
+        t.chars().count() <= max && !t.chars().any(|c| c.is_control() || skills::hidden(c))
+    };
+    if m.args.len() > MAX_ARGS_N || m.args.iter().any(|a| a.is_empty() || !plain(a, MAX_ARG)) {
+        return Err(format!(
+            "args: at most {MAX_ARGS_N}, each one line of 1 to {MAX_ARG} characters (never a secret: declare it in secrets)"
+        ));
+    }
+    if m.env.len() > MAX_ENV_N {
+        return Err(format!("env: at most {MAX_ENV_N} settings"));
+    }
+    for (k, v) in &m.env {
+        if !services::valid_env(k)
+            || k.starts_with("NODE_")
+            || m.secrets.iter().any(|s| s.env == *k)
+        {
+            return Err(format!(
+                "env: {:?} must be UPPER_CASE, not one the shell, Node or Clio sets (PATH, HOME, LD_*, NODE_*, *_PROXY, CLIO_*...) and not a secret's",
+                one_line(k)
+            ));
+        }
+        if !plain(v, MAX_ENV_VALUE) {
+            return Err(format!(
+                "env: {:?} is one line of at most {MAX_ENV_VALUE} characters (never a secret: declare it in secrets)",
+                one_line(k)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The manifest's text: what is shown, approved, hashed and installed.
@@ -310,6 +379,19 @@ pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
         description: s("description"),
         package: s("package"),
         version: s("version"),
+        args: services::strings(args.get("args"), "args")?,
+        env: match args.get("env") {
+            None | Some(Value::Null) => BTreeMap::new(),
+            Some(Value::Object(o)) => o
+                .iter()
+                .map(|(k, v)| {
+                    v.as_str()
+                        .map(|v| (k.clone(), v.to_owned()))
+                        .ok_or_else(|| "env: an object of text values".to_owned())
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err("env: an object of text values".into()),
+        },
         network: services::strings(args.get("network"), "network")?,
         secrets: services::secrets_of(args.get("secrets"))?,
         reads: services::strings(args.get("reads"), "reads")?,
@@ -318,9 +400,10 @@ pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
     })
 }
 
-/// What is shown of npm's facts (`npm view --json`): outside text, each string cleaned by
-/// `clean` and cut, the maintainers capped. `Err` when it is not the asked version or has no
-/// integrity.
+/// What is shown of npm's facts (`npm view <package>@<version> <NPM_FIELDS> --json`: an object
+/// whose `dist` fields come as `"dist.integrity"`, maintainers as `"name <email>"`): outside text,
+/// each string cleaned by `clean` and cut, people by name only, the maintainers capped, the
+/// package's own `license` cut to 40. `Err` when it is not the asked version or has no integrity.
 pub fn npm_facts(
     v: &Value,
     package: &str,
@@ -340,20 +423,28 @@ pub fn npm_facts(
             "the registry has no {package}@{version} (check the name and that the version exists)"
         ));
     }
-    let cut = |s: &str| -> String { clean(s).chars().take(MAX_FACT).collect() };
-    let text = |x: &Value| -> String {
+    let cut = |s: &str, max: usize| -> String { clean(s).chars().take(max).collect() };
+    let text = |x: &Value, key: &str| -> String {
         match x {
-            Value::String(s) => cut(s),
+            Value::String(s) => cut(s, MAX_FACT),
             Value::Object(o) => o
-                .get("name")
-                .or_else(|| o.get("url"))
+                .get(key)
                 .and_then(Value::as_str)
-                .map(cut)
+                .map(|s| cut(s, MAX_FACT))
                 .unwrap_or_default(),
             _ => String::new(),
         }
     };
-    let integrity = v["dist"]["integrity"].as_str().unwrap_or("");
+    // A person: `name <email> (url)` or `{name, email}`; the name only.
+    let person = |x: &Value| -> String {
+        let t = text(x, "name");
+        t.split(['<', '(']).next().unwrap_or("").trim().to_owned()
+    };
+    let integrity = v
+        .get("dist.integrity")
+        .unwrap_or(&v["dist"]["integrity"])
+        .as_str()
+        .unwrap_or("");
     if !integrity.starts_with("sha512-")
         || !integrity[7..]
             .bytes()
@@ -363,19 +454,22 @@ pub fn npm_facts(
             "the registry gave no sha512 integrity for {package}@{version}: it is not installed"
         ));
     }
-    let maintainers: Vec<String> = v["maintainers"]
-        .as_array()
-        .map(|a| a.iter().map(text).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default();
+    let maintainers: Vec<String> = match &v["maintainers"] {
+        Value::Array(a) => a.iter().map(person).filter(|s| !s.is_empty()).collect(),
+        x => Some(person(x))
+            .filter(|s| !s.is_empty())
+            .into_iter()
+            .collect(),
+    };
     Ok(json!({
-        "publisher": text(&v["_npmUser"]),
+        "publisher": person(&v["_npmUser"]),
         "maintainers": maintainers.iter().take(MAX_MAINTAINERS).collect::<Vec<_>>(),
         "more_maintainers": maintainers.len().saturating_sub(MAX_MAINTAINERS),
         "integrity": integrity,
         "dependencies": v["dependencies"].as_object().map_or(0, Map::len),
-        "license": text(&v["license"]),
-        "description": text(&v["description"]),
-        "repository": text(&v["repository"]),
+        "license": cut(&text(&v["license"], "type"), MAX_LICENSE),
+        "repository": text(&v["repository"], "url"),
+        "deprecated": text(&v["deprecated"], ""),
     }))
 }
 
@@ -396,6 +490,30 @@ pub fn lock_root(root: &Path) -> Result<fs::File, String> {
     rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)
         .map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(f)
+}
+
+/// One npm at a time on the machine (`<mcp>/npm.lock`): `wait` for it (an install, the person's),
+/// or `None` at once when another npm runs (a proposal: the model's, within its tool's time).
+pub fn lock_npm(root: &Path, wait: bool) -> Result<Option<fs::File>, String> {
+    private_dir(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let p = root.join("npm.lock");
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    let how = if wait {
+        rustix::fs::FlockOperation::LockExclusive
+    } else {
+        rustix::fs::FlockOperation::NonBlockingLockExclusive
+    };
+    match rustix::fs::flock(&f, how) {
+        Ok(()) => Ok(Some(f)),
+        Err(rustix::io::Errno::WOULDBLOCK) if !wait => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
 }
 
 fn write_json(p: &Path, v: &impl Serialize) -> Result<(), String> {
@@ -523,6 +641,12 @@ pub fn observe(stored: &[Tool], seen: Vec<Tool>) -> Vec<Tool> {
             t
         })
         .collect()
+}
+
+/// The digest of a tool list as the person is shown it to confirm (names, descriptions, schemas,
+/// modes, flags): confirming is refused if the stored list is no longer this.
+pub fn tools_digest(tools: &[Tool]) -> String {
+    skills::digest(&serde_json::to_string(tools).unwrap_or_default(), &[])
 }
 
 /// The modes a first probe gives: `free` where the server says the tool only reads, else `ask`.
@@ -695,7 +819,9 @@ impl Server {
                 }
             }
         });
-        let (ltx, rx) = sync_channel(64);
+        // A few lines parked at most (each up to `MAX_LINE`): an idle server that keeps writing
+        // waits on its pipe, not in the tool host's memory.
+        let (ltx, rx) = sync_channel(4);
         std::thread::spawn(move || read_lines(stdout, ltx));
         let tail = Arc::new(Mutex::new(Vec::new()));
         let t2 = tail.clone();
@@ -923,27 +1049,98 @@ fn tool_of(t: &Value) -> Option<Tool> {
             .take(MAX_DESCRIPTION)
             .collect(),
         schema,
-        read_only: t["annotations"]["readOnlyHint"] == Value::Bool(true),
+        // Its own claim, and only when nothing it says contradicts it: a destructive or
+        // open-world hint makes it a tool that asks.
+        read_only: t["annotations"]["readOnlyHint"] == Value::Bool(true)
+            && t["annotations"]["destructiveHint"] != Value::Bool(true)
+            && t["annotations"]["openWorldHint"] != Value::Bool(true),
         mode: Mode::Ask,
         flagged: false,
     })
 }
 
-/// The servers a session started, each once, until it closes or they sit idle.
+/// A started server, and what it was started as: when its record's version, its installed
+/// version or its tree's digest is no longer this, or it is off, it is stopped.
+pub(crate) struct Entry {
+    server: Server,
+    current: u64,
+    version: String,
+    tree: String,
+}
+
+/// One server's place in the pool: a call holds it (never the whole pool) while it starts or
+/// calls the server, so a slow server keeps no other waiting.
+type Slot = Arc<Mutex<Option<Entry>>>;
+
+/// The servers a session started, each once, until it closes, they sit idle, or what they were
+/// started as changes; and when each session proposed a server (the brake on `mcp_propose`).
 #[derive(Default)]
-pub(crate) struct Pool(pub(crate) Arc<Mutex<HashMap<String, Server>>>);
+pub(crate) struct Pool {
+    servers: Arc<Mutex<HashMap<String, Slot>>>,
+    proposals: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+/// What `name` would start as now: its record's version, the installed version and digest, if it
+/// is on.
+fn started_as(root: &Path, name: &str) -> Option<(u64, String, String)> {
+    if !is_on(root, name) {
+        return None;
+    }
+    let current = record(root, name)?["current"].as_u64()?;
+    let st = load_state(root, name)?;
+    Some((current, st.version, st.tree))
+}
+
+fn still_fresh(root: &Path, name: &str, e: &Entry) -> bool {
+    e.server.last_use.elapsed() < IDLE
+        && started_as(root, name)
+            .is_some_and(|(c, v, t)| c == e.current && v == e.version && t == e.tree)
+}
+
+/// Stops the servers that sat idle or are no longer what they were started as (off, not
+/// confirmed, removed, updated): those a call holds are left to it, which checks them itself.
+fn prune(servers: &Mutex<HashMap<String, Slot>>, root: &Path) {
+    lock(servers).retain(|name, slot| match slot.try_lock() {
+        Ok(mut g) => {
+            if g.as_ref().is_some_and(|e| !still_fresh(root, name, e)) {
+                *g = None;
+                log_event(
+                    root,
+                    name,
+                    "stop",
+                    "ok",
+                    "idle, or no longer what was started",
+                );
+            }
+            g.is_some()
+        }
+        Err(_) => true,
+    });
+}
 
 impl Pool {
-    /// Stops the ones nobody called for `IDLE`, every half minute, while the pool lives.
-    pub(crate) fn reap_idle(&self) {
-        let weak = Arc::downgrade(&self.0);
+    /// Every half minute while the pool lives: `prune`.
+    pub(crate) fn reap_idle(&self, root: PathBuf) {
+        let weak = Arc::downgrade(&self.servers);
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(30));
                 let Some(p) = weak.upgrade() else { return };
-                lock(&p).retain(|_, s| s.last_use.elapsed() < IDLE);
+                prune(&p, &root);
             }
         });
+    }
+
+    /// A proposal of `session` now, if it is under `PROPOSALS_PER_HOUR` in the last hour.
+    fn may_propose(&self, session: &str) -> bool {
+        let mut all = lock(&self.proposals);
+        let times = all.entry(session.to_owned()).or_default();
+        times.retain(|t| t.elapsed() < Duration::from_secs(3600));
+        if times.len() >= PROPOSALS_PER_HOUR {
+            return false;
+        }
+        times.push(Instant::now());
+        true
     }
 }
 
@@ -959,6 +1156,15 @@ fn cut(s: &str, max: usize) -> String {
 }
 
 impl ToolHost {
+    /// Why there are no MCP servers here: a copy-mode chat, or a host whose side could not be set
+    /// up (no bwrap, no npm beside Node).
+    fn mcp_missing(&self) -> String {
+        match &self.mcp_off {
+            Some(why) => format!("MCP servers are not available here: {why}"),
+            None => "MCP servers exist only in a chat on the person's machine (host mode)".into(),
+        }
+    }
+
     fn mcp_answer(&self, req: &Request, ok: bool, rule: &str, content: String) -> Response {
         Response {
             id: req.id.clone(),
@@ -1017,10 +1223,16 @@ impl ToolHost {
             )
         };
         let (Some(port), Some(h)) = (self.mcp.as_ref(), self.host.as_ref()) else {
-            return fail("MCP servers exist only in a chat on the person's machine (host mode)");
+            return fail(&self.mcp_missing());
         };
         if self.review {
             return fail(crate::REVIEW_CANNOT_ASK);
+        }
+        // A session that read text the judge flagged proposes nothing: npm would run for it.
+        if self.is_suspect(&req.session) {
+            return fail(&format!(
+                "{SUSPECT_REASON}: no server is proposed from this session"
+            ));
         }
         let reason = args
             .get("reason")
@@ -1039,6 +1251,8 @@ impl ToolHost {
                     | "description"
                     | "package"
                     | "version"
+                    | "args"
+                    | "env"
                     | "network"
                     | "secrets"
                     | "reads"
@@ -1081,12 +1295,30 @@ impl ToolHost {
             Some(_) => {}
         }
         let root = port.root();
-        if load_state(&root, &m.name)
-            .is_some_and(|s| s.version == m.version && s.package == m.package)
+        let now = current_manifest(&root, &m.name);
+        let installed = load_state(&root, &m.name).map(|s| s.package);
+        if let Some(other) = now
+            .as_ref()
+            .map(|n| n.package.clone())
+            .or(installed)
+            .filter(|p| *p != m.package)
         {
             return fail(&format!(
-                "«{}» is installed at {}@{} already: the person turns it on with /mcp",
+                "that name is the server {other}; choose another name or remove it first"
+            ));
+        }
+        // The same package and version with other hosts, secrets, paths or settings is a new
+        // proposal; exactly the same one is not.
+        if now.as_ref() == Some(&m) {
+            return fail(&format!(
+                "«{}» is installed at {}@{} already, exactly so: the person turns it on with /mcp",
                 m.name, m.package, m.version
+            ));
+        }
+        // The brake, counted before npm runs.
+        if !self.mcp_pool.may_propose(&req.session) {
+            return fail(&format!(
+                "at most {PROPOSALS_PER_HOUR} proposals an hour in a session: wait, or ask the person"
             ));
         }
         let facts = match port
@@ -1096,7 +1328,7 @@ impl ToolHost {
             Ok(f) => f,
             Err(why) => return fail(&why),
         };
-        let update = record(&root, &m.name).is_some();
+        let update = now.is_some();
         let pending_args = json!({
             "name": m.name,
             "description": m.description,
@@ -1106,17 +1338,12 @@ impl ToolHost {
             "update": update,
             "npm": facts,
         });
-        let why = if self.is_suspect(&req.session) {
-            format!("{reason} (and this session read text the judge flagged)")
-        } else {
-            reason.to_owned()
-        };
         let p = match crate::pending::set_aside_mcp(
             &h.cfg.state,
             &h.cfg.run,
             &req.session,
             pending_args,
-            &self.clean(&why),
+            &self.clean(reason),
             h.cfg.rules.questions_per_day(),
         ) {
             Ok(p) => p,
@@ -1140,10 +1367,11 @@ impl ToolHost {
                 req,
                 false,
                 "mcp/tools",
-                "mcp_tools failed: MCP servers exist only in a chat on the person's machine (host mode)".into(),
+                format!("mcp_tools failed: {}", self.mcp_missing()),
             );
         };
         let root = port.root();
+        prune(&self.mcp_pool.servers, &root);
         let only = args
             .get("server")
             .and_then(Value::as_str)
@@ -1191,12 +1419,14 @@ impl ToolHost {
             )
         };
         let (Some(port), Some(h)) = (self.mcp.as_ref(), self.host.as_ref()) else {
-            return fail("MCP servers exist only in a chat on the person's machine (host mode)");
+            return fail(&self.mcp_missing());
         };
         let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").trim();
         let (server, tool) = (s("server"), s("tool"));
         let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
         let root = port.root();
+        // A copy turned off, removed or updated meanwhile stops before anything else.
+        prune(&self.mcp_pool.servers, &root);
         if !is_on(&root, server) {
             return fail(&format!(
                 "no MCP server «{}» is on (mcp_tools lists them)",
@@ -1261,8 +1491,10 @@ impl ToolHost {
     }
 
     /// Runs `tool` of `server` in this host's process of it, started on first use (and its tools
-    /// compared with the stored ones: a changed one is flagged, and then the call waits). The
-    /// text: what it answered, or why it failed (a crashed or hung server is killed).
+    /// compared with the stored ones: a changed one is flagged, and then the call waits); one that
+    /// is no longer what it was started as is stopped first. The wait for the server, its start
+    /// and the call share the call's time limit; no other server waits for it. The text: what it
+    /// answered, or why it failed (a crashed or hung server is killed).
     pub(crate) fn mcp_run(&self, server: &str, tool: &str, arguments: &Value) -> (bool, String) {
         let Some(port) = self.mcp.as_ref() else {
             return (false, "no MCP servers here".into());
@@ -1271,9 +1503,42 @@ impl ToolHost {
         let limit = Duration::from_secs(
             current_manifest(&root, server).map_or(DEFAULT_LIMITS.seconds, |m| m.limits.seconds),
         );
-        let mut pool = lock(&self.mcp_pool.0);
-        if !pool.contains_key(server) {
-            let started = port.start(server).and_then(|p| Server::start(p, limit));
+        let until = Instant::now() + limit;
+        let slot = lock(&self.mcp_pool.servers)
+            .entry(server.to_owned())
+            .or_default()
+            .clone();
+        // Another call of this server holds it: wait for it, within this call's time.
+        let mut held = loop {
+            match slot.try_lock() {
+                Ok(g) => break g,
+                Err(TryLockError::Poisoned(p)) => break p.into_inner(),
+                Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return (
+                        false,
+                        format!(
+                            "the server «{server}» was busy with another call for its whole time limit"
+                        ),
+                    );
+                }
+            }
+        };
+        if held
+            .as_ref()
+            .is_some_and(|e| !still_fresh(&root, server, e))
+        {
+            *held = None;
+            log_event(&root, server, "stop", "ok", "no longer what was started");
+        }
+        if held.is_none() {
+            let Some((current, version, tree)) = started_as(&root, server) else {
+                return (false, format!("the server «{server}» is not on"));
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            let started = port.start(server).and_then(|p| Server::start(p, left));
             let s = match started {
                 Ok(s) => s,
                 Err(e) => {
@@ -1306,7 +1571,12 @@ impl ToolHost {
                 "ok",
                 if changed { "its tools changed" } else { "" },
             );
-            pool.insert(server.to_owned(), s);
+            *held = Some(Entry {
+                server: s,
+                current,
+                version,
+                tree,
+            });
             if changed
                 && load_state(&root, server)
                     .and_then(|st| st.tools.into_iter().find(|t| t.name == tool))
@@ -1320,10 +1590,11 @@ impl ToolHost {
                 );
             }
         }
-        let Some(s) = pool.get_mut(server) else {
+        let Some(e) = held.as_mut() else {
             return (false, "the server is gone".into());
         };
-        match s.call(tool, arguments, limit) {
+        let left = until.saturating_duration_since(Instant::now());
+        match e.server.call(tool, arguments, left) {
             Ok((text, failed)) => {
                 log_event(
                     &root,
@@ -1338,10 +1609,10 @@ impl ToolHost {
                     (true, text)
                 }
             }
-            Err(e) => {
-                let tail = s.stderr_tail();
-                pool.remove(server);
-                log_event(&root, server, &format!("call {tool}"), "failed", &e);
+            Err(err) => {
+                let tail = e.server.stderr_tail();
+                *held = None;
+                log_event(&root, server, &format!("call {tool}"), "failed", &err);
                 let tail = if tail.is_empty() {
                     String::new()
                 } else {
@@ -1349,7 +1620,7 @@ impl ToolHost {
                 };
                 (
                     false,
-                    format!("the server «{server}» failed and was stopped: {e}{tail}"),
+                    format!("the server «{server}» failed and was stopped: {err}{tail}"),
                 )
             }
         }
@@ -1358,10 +1629,7 @@ impl ToolHost {
     /// The person approved call `args` (set aside by `mcp_call`): it runs exactly as it was shown,
     /// if the server is still on at that version and the tool is still there.
     pub(crate) fn mcp_approved(&self, args: &Value) -> Result<(bool, String), String> {
-        let port = self
-            .mcp
-            .as_ref()
-            .ok_or("MCP servers are not available here")?;
+        let port = self.mcp.as_ref().ok_or_else(|| self.mcp_missing())?;
         let s = |k: &str| args[k].as_str().unwrap_or("");
         let (server, tool, arguments) = (s("server"), s("tool"), &args["arguments"]);
         if call_text(server, tool, arguments) != s("call") {
@@ -1381,7 +1649,8 @@ impl ToolHost {
 
     /// The servers this host started: stopped (the session closes).
     pub(crate) fn mcp_stop_all(&self) {
-        lock(&self.mcp_pool.0).clear();
+        // A call that holds its server keeps it until it returns; then it is dropped (killed).
+        lock(&self.mcp_pool.servers).clear();
     }
 }
 

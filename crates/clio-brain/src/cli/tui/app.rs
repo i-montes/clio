@@ -419,6 +419,14 @@ pub struct Confirm {
 /// what the person was typing when it opened never answers it.
 pub const QUIET_MS: u64 = 1000;
 
+impl Action {
+    /// Under the approval timing rule: a quiet second, `y` arms it (only once a long box's end was
+    /// shown), Enter runs it.
+    pub fn timed(self) -> bool {
+        matches!(self, Self::Approve | Self::ConfirmMcp)
+    }
+}
+
 impl Confirm {
     pub fn new(action: Action, id: String, files: usize, workspace: String) -> Self {
         Self {
@@ -672,7 +680,7 @@ impl App {
         let waiting = self
             .confirm
             .as_ref()
-            .is_some_and(|c| c.action == Action::Approve && !c.armed)
+            .is_some_and(|c| c.action.timed() && !c.armed)
             || self.prompt.as_ref().is_some_and(|p| !p.ready());
         let waiting = waiting && !self.quiet();
         let chat = matches!(self.screen, Screen::Chat | Screen::Sessions)
@@ -886,7 +894,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     // A plain letter: Ctrl-S (save, by habit) or Alt-Y are not an answer.
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
     let yes_key = plain && matches!(k.code, KeyCode::Char('y' | 'Y' | 's' | 'S'));
-    let yes = if c.action == Action::Approve {
+    let yes = if c.action.timed() {
         let no = k.code == KeyCode::Esc || (plain && matches!(k.code, KeyCode::Char('n' | 'N')));
         let enter = plain && k.code == KeyCode::Enter;
         // A block change longer than the box: the arrows move it (and disarm it, as any key);
@@ -937,7 +945,8 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::RemoveSkill => vec![Cmd::Skills(format!("remove {} --yes", c.id))],
         Action::RemoveService => vec![Cmd::Services(format!("remove {} --yes", c.id))],
         Action::RemoveMcp => vec![Cmd::Mcp(format!("remove {} --yes", c.id))],
-        Action::ConfirmMcp => vec![Cmd::Mcp(format!("confirm {} --yes", c.id))],
+        // With the digest of the list shown: refused if it changed meanwhile.
+        Action::ConfirmMcp => vec![Cmd::Mcp(format!("confirm {} {} --yes", c.id, c.workspace))],
         Action::Approve => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -1471,9 +1480,14 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
+        // In line with the other questions: never over one already open.
         Bg::Confirm(r) => {
             match r {
-                Ok(c) => app.confirm = Some(c),
+                Ok(mut c) => {
+                    c.session.clone_from(&app.chat.session_id);
+                    app.asks.push_back(c);
+                    next_ask(app);
+                }
                 Err(e) => app.notice = Some(e),
             }
             vec![]
@@ -2020,10 +2034,14 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
     use super::ask::Part;
     let t = app.theme;
     let w = dialog_inner(area);
-    let mut body: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(format!("Clio set aside {}.", c.id), t.bold())),
-        Line::from(""),
-    ];
+    let mut body: Vec<Line<'static>> = if c.action == Action::Approve {
+        vec![
+            Line::from(Span::styled(format!("Clio set aside {}.", c.id), t.bold())),
+            Line::from(""),
+        ]
+    } else {
+        vec![]
+    };
     for (part, text) in b.parts() {
         let (style, indent) = match part {
             Part::Head => (t.bold(), ""),
@@ -2060,8 +2078,10 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
         Span::styled(
             if c.armed {
                 " goes back"
-            } else {
+            } else if c.action == Action::Approve {
                 " no, reject it"
+            } else {
+                " no, leave it as it is"
             },
             t.dim(),
         ),
@@ -2102,7 +2122,12 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
         rows
     };
     let all: Vec<Line<'static>> = rows.into_iter().chain(foot).collect();
-    dialog_box(f, area, t, " Approval ", all, t.warn());
+    let title = if c.action == Action::Approve {
+        " Approval "
+    } else {
+        " Confirm "
+    };
+    dialog_box(f, area, t, title, all, t.warn());
 }
 
 /// A centered box over the screen: a question or a message that needs a key. The text is wrapped

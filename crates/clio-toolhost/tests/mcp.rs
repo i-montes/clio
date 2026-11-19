@@ -56,6 +56,7 @@ struct Port {
     node: PathBuf,
     views: Mutex<Vec<String>>,
     starts: Mutex<Vec<String>>,
+    pids: Mutex<Vec<u32>>,
 }
 
 fn script() -> PathBuf {
@@ -71,14 +72,17 @@ impl McpPort for Port {
             .lock()
             .unwrap()
             .push(format!("{package}@{version}"));
+        // The shape `npm view <spec> <NPM_FIELDS> --json` really answers (npm 10).
         Ok(json!({
             "name": package, "version": version,
-            "dist": {"integrity": "sha512-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo="},
-            "_npmUser": {"name": "\u{1b}[31mpublisher\u{1b}[0m", "email": "p@example.com"},
-            "maintainers": [{"name": "one"}, {"name": "two"}],
+            "dist.integrity": "sha512-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+            "dist.tarball": format!("https://registry.npmjs.org/{package}/-/x-{version}.tgz"),
+            "_npmUser": "\u{1b}[31mpublisher\u{1b}[0m <p@example.com>",
+            "maintainers": ["one <one@example.com>", "two <two@example.com>"],
             "dependencies": {"a": "1.0.0", "b": "2.0.0"},
-            "license": "MIT",
-            "description": format!("A server. {FLAG}"),
+            "license": format!("MIT {FLAG} and a very long licence text after it"),
+            "repository": {"type": "git", "url": "git+https://github.com/example/x.git"},
+            "deprecated": "use another one",
         }))
     }
     fn start(&self, name: &str) -> Result<Proc, String> {
@@ -99,6 +103,7 @@ impl McpPort for Port {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| e.to_string())?;
+        self.pids.lock().unwrap().push(child.id());
         let scrub = Scrubber::default();
         scrub.add("status-key", KEY);
         Ok(Proc {
@@ -154,6 +159,7 @@ fn env() -> Option<Env> {
         node,
         views: Mutex::default(),
         starts: Mutex::default(),
+        pids: Mutex::default(),
     });
     let mut c = Config::new(&home, &r.join("scratch"), &data.join("runs/r1"));
     c.jail = JailMode::Off;
@@ -183,6 +189,8 @@ fn manifest(name: &str, seconds: u64) -> Manifest {
         description: format!("The test server {name}, for the tests."),
         package: format!("@example/{name}"),
         version: "1.0.0".into(),
+        args: vec![],
+        env: Default::default(),
         network: vec!["api.example.com".into()],
         secrets: vec![SecretUse {
             name: "status-key".into(),
@@ -245,6 +253,7 @@ fn install(e: &Env, name: &str, on: bool, confirmed: bool, seconds: u64) {
         entry: "node_modules/x/index.js".into(),
         tree: "t".into(),
         integrity: "sha512-x".into(),
+        packages: 1,
         confirmed,
         tools: confirmed_tools(),
     };
@@ -338,20 +347,54 @@ fn mcp_propose_sets_aside_with_npm_facts_and_downloads_nothing() {
         ("@example/github-mcp", "1.2.3")
     );
     let npm = &p.args["npm"];
-    assert_eq!(npm["publisher"], "publisher", "escapes are cleaned: {npm}");
+    assert_eq!(npm["publisher"], "publisher", "names only, cleaned: {npm}");
+    assert_eq!(npm["maintainers"], json!(["one", "two"]), "{npm}");
     assert_eq!(npm["dependencies"], 2);
     assert!(npm["integrity"].as_str().unwrap().starts_with("sha512-"));
+    assert_eq!(
+        npm["license"].as_str().unwrap().chars().count(),
+        40,
+        "{npm}"
+    );
+    assert_eq!(npm["repository"], "git+https://github.com/example/x.git");
+    assert_eq!(npm["deprecated"], "use another one");
     // The tool host never installs it: only `clio approve`.
     let err = e.host.approve(&p.id, p.created_ms + 1).unwrap_err();
     assert!(err.contains("clio approve"), "{err}");
-    // An installed server at that exact version is not proposed again.
+    // An installed server exactly as proposed is not proposed again; the same package and
+    // version with other hosts or settings is a new proposal (an update).
     install(&e, "time", true, true, 60);
-    let mut again = propose_args();
-    again["name"] = json!("time");
-    again["package"] = json!("@example/time");
-    again["version"] = json!("1.0.0");
-    let r = call(&e, "s", "c2", "mcp_propose", again);
+    let same = json!({
+        "name": "time",
+        "description": "The test server time, for the tests.",
+        "package": "@example/time",
+        "version": "1.0.0",
+        "network": ["api.example.com"],
+        "secrets": [{"name": "status-key", "env": "STATUS_KEY", "host": "api.example.com"}],
+        "reason": "again",
+    });
+    let r = call(&e, "s", "c2", "mcp_propose", same.clone());
     assert!(!r.ok && r.content.contains("installed"), "{r:?}");
+    let mut other = same.clone();
+    other["env"] = json!({"TZ_DEFAULT": "Europe/Madrid"});
+    other["args"] = json!(["--local-timezone", "Europe/Madrid"]);
+    let r = call(&e, "s", "c3", "mcp_propose", other);
+    assert!(r.ok, "{r:?}");
+    let p = waiting(&e)
+        .into_iter()
+        .find(|p| p.args["name"] == "time")
+        .unwrap();
+    assert_eq!(p.args["update"], true);
+    let m = mcp::check_stored("time", pending::mcp_of(&p).unwrap().2, &[]).unwrap();
+    assert_eq!(m.args, ["--local-timezone", "Europe/Madrid"]);
+    // A different package under an existing name is refused: it would inherit its data.
+    let mut swap = same;
+    swap["package"] = json!("@evil/time");
+    let r = call(&e, "s", "c4", "mcp_propose", swap);
+    assert!(
+        !r.ok && r.content.contains("that name is the server @example/time"),
+        "{r:?}"
+    );
 }
 
 // S-70: a proposal cannot inject npm arguments, a URL, a git source, a file path, a scope trick
@@ -410,7 +453,6 @@ fn a_proposal_cannot_inject_npm_arguments_sources_or_ranges() {
     for (k, v) in [
         ("command", json!("npx -y evil")),
         ("url", json!("https://mcp.example/sse")),
-        ("args", json!(["--registry", "x"])),
     ] {
         let mut a = propose_args();
         a[k] = v;
@@ -430,6 +472,36 @@ fn a_proposal_cannot_inject_npm_arguments_sources_or_ranges() {
     let mut a = propose_args();
     a["description"] = json!("Uses the token ghp_abcdefghijklmnopqrstuvwxyz0123456789 for it.");
     assert!(!call(&e, "s", "c", "mcp_propose", a).ok);
+    // Its fixed arguments and settings: no secret, no hidden character, never Node's own
+    // variables, the shell's, a secret's, or too many.
+    for (k, v, why) in [
+        (
+            "args",
+            json!(["--token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"]),
+            "secret",
+        ),
+        ("args", json!(["a\nb"]), "args"),
+        ("args", json!([""]), "args"),
+        ("args", json!(vec!["x"; 21]), "args"),
+        ("env", json!({"NODE_OPTIONS": "--require /tmp/x.js"}), "env"),
+        ("env", json!({"NODE_TLS_REJECT_UNAUTHORIZED": "0"}), "env"),
+        ("env", json!({"PATH": "/tmp"}), "env"),
+        ("env", json!({"HOME": "/tmp"}), "env"),
+        ("env", json!({"LD_PRELOAD": "/tmp/x.so"}), "env"),
+        ("env", json!({"GITHUB_TOKEN": "x"}), "env"),
+        ("env", json!({"lower": "x"}), "env"),
+        (
+            "env",
+            json!({"API_KEY": "sk-ant-abcdefghijklmnopqrstuvwxyz012345"}),
+            "secret",
+        ),
+        ("env", json!({"X": 1}), "env"),
+    ] {
+        let mut a = propose_args();
+        a[k] = v;
+        let r = call(&e, "s", "c", "mcp_propose", a);
+        assert!(!r.ok && r.content.contains(why), "{k} {why}: {r:?}");
+    }
     assert!(
         e.port.views.lock().unwrap().is_empty(),
         "npm was asked nothing"
@@ -636,14 +708,54 @@ fn an_ask_tool_waits_and_runs_only_as_it_was_shown() {
     std::fs::write(&rec, t.replace("\"enabled\":true", "\"enabled\":false")).unwrap();
     let err = e.host.approve(&p2.id, p2.created_ms + 1).unwrap_err();
     assert!(err.contains("off"), "{err}");
+    // The approval starts a fresh process of the server: a tool it now describes differently
+    // from what the person confirmed does not run, approved or not.
+    install(&e, "changed", true, true, 60);
+    {
+        let _l = mcp::lock_root(&e.root).unwrap();
+        let mut st = mcp::load_state(&e.root, "changed").unwrap();
+        st.tools[0].mode = Mode::Ask;
+        mcp::save_state(&e.root, &st).unwrap();
+    }
+    let r = call(
+        &e,
+        "s",
+        "c3",
+        "mcp_call",
+        json!({"server": "changed", "tool": "echo", "arguments": {"text": "x"}}),
+    );
+    assert!(!r.ok && r.decision.outcome == "ask", "{r:?}");
+    let before = e.port.starts.lock().unwrap().len();
+    let p3 = waiting(&e).pop().unwrap();
+    let done = e.host.approve(&p3.id, p3.created_ms + 1).unwrap();
+    assert_eq!(
+        e.port.starts.lock().unwrap().len(),
+        before + 1,
+        "a fresh process"
+    );
+    match &done.state {
+        pending::State::Done { output_tail, .. } => {
+            assert!(
+                output_tail.contains("differently") && !output_tail.contains("echo: x"),
+                "{output_tail}"
+            );
+        }
+        s => panic!("{s:?}"),
+    }
 }
 
-// S-70: in a `suspect` session every call is set aside, free tools too.
+// S-70: in a `suspect` session every call is set aside, free tools too, and no server is proposed.
 #[test]
 fn a_suspect_session_sets_aside_every_call() {
     let Some(e) = env() else { return };
     install(&e, "time", true, true, 60);
     call(&e, "s", "t", "taint", json!({"suspect": true}));
+    let r = call(&e, "s", "p", "mcp_propose", propose_args());
+    assert!(
+        !r.ok && r.content.contains("no server is proposed"),
+        "{r:?}"
+    );
+    assert!(e.port.views.lock().unwrap().is_empty(), "npm did not run");
     let r = call(
         &e,
         "s",
@@ -838,4 +950,210 @@ fn a_description_that_gives_orders_is_cleaned_and_judged() {
             .contains("[withheld by Clio]"),
         "{f:?}"
     );
+}
+
+fn alive(pid: u32) -> bool {
+    // A process that was killed and waited for is gone from /proc (Linux).
+    !cfg!(target_os = "linux") || Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn set_record(e: &Env, name: &str, f: impl FnOnce(&mut Value)) {
+    let p = e.root.join(format!("records/{name}.json"));
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    f(&mut v);
+    std::fs::write(&p, v.to_string()).unwrap();
+}
+
+// S-70: a copy of a server running in a chat is stopped as soon as it is no longer what was
+// started: turned off, removed, or updated (another version, tree or approved manifest). The next
+// call starts the current one, or fails cleanly.
+#[test]
+fn a_server_turned_off_removed_or_updated_is_stopped_in_a_running_chat() {
+    let Some(e) = env() else { return };
+    install(&e, "time", true, true, 60);
+    let echo = |c: &str| {
+        call(
+            &e,
+            "s",
+            c,
+            "mcp_call",
+            json!({"server": "time", "tool": "echo", "arguments": {"text": "x"}}),
+        )
+    };
+    assert!(echo("c1").ok);
+    let first = *e.port.pids.lock().unwrap().last().unwrap();
+    assert!(alive(first));
+    // Updated: the installed tree (or version) is another.
+    {
+        let _l = mcp::lock_root(&e.root).unwrap();
+        let mut st = mcp::load_state(&e.root, "time").unwrap();
+        st.tree = "t2".into();
+        mcp::save_state(&e.root, &st).unwrap();
+    }
+    assert!(echo("c2").ok);
+    assert_eq!(
+        e.port.starts.lock().unwrap().len(),
+        2,
+        "the current one started"
+    );
+    assert!(!alive(first), "the old copy was stopped");
+    let second = *e.port.pids.lock().unwrap().last().unwrap();
+    // A new approved manifest (same version, other grants).
+    set_record(&e, "time", |r| r["current"] = json!(2));
+    let v2 = e.root.join("versions/time/2");
+    std::fs::create_dir_all(&v2).unwrap();
+    std::fs::write(v2.join(mcp::MANIFEST), mcp::compose(&manifest("time", 30))).unwrap();
+    assert!(echo("c3").ok);
+    assert!(!alive(second));
+    let third = *e.port.pids.lock().unwrap().last().unwrap();
+    // Turned off: the call is refused and the copy stopped.
+    set_record(&e, "time", |r| r["enabled"] = json!(false));
+    assert!(!echo("c4").ok);
+    assert!(!alive(third));
+    // On again, then removed (no record): the same.
+    set_record(&e, "time", |r| r["enabled"] = json!(true));
+    assert!(echo("c5").ok);
+    let fourth = *e.port.pids.lock().unwrap().last().unwrap();
+    std::fs::remove_file(e.root.join("records/time.json")).unwrap();
+    let r = call(&e, "s", "c6", "mcp_tools", json!({}));
+    assert!(r.ok);
+    assert!(!alive(fourth), "mcp_tools stops it too");
+    // Not confirmed any more.
+    install(&e, "time", true, true, 60);
+    assert!(echo("c7").ok);
+    let fifth = *e.port.pids.lock().unwrap().last().unwrap();
+    {
+        let _l = mcp::lock_root(&e.root).unwrap();
+        let mut st = mcp::load_state(&e.root, "time").unwrap();
+        st.confirmed = false;
+        mcp::save_state(&e.root, &st).unwrap();
+    }
+    assert!(!echo("c8").ok);
+    assert!(!alive(fifth));
+}
+
+// S-70: one slow server keeps neither another server nor the session's close waiting: the pool
+// is not held during a start or a call.
+#[test]
+fn a_slow_server_blocks_no_other_server_nor_the_close() {
+    let Some(e) = env() else { return };
+    install(&e, "silent", true, true, 10);
+    install(&e, "time", true, true, 60);
+    std::thread::scope(|sc| {
+        let slow = sc.spawn(|| {
+            call(
+                &e,
+                "s",
+                "c1",
+                "mcp_call",
+                json!({"server": "silent", "tool": "echo", "arguments": {"text": "x"}}),
+            )
+        });
+        // The slow one has started and waits for its answer.
+        let end = Instant::now() + Duration::from_secs(10);
+        while !e.port.starts.lock().unwrap().iter().any(|s| s == "silent") {
+            assert!(Instant::now() < end, "the slow server never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let t = Instant::now();
+        let r = call(
+            &e,
+            "s",
+            "c2",
+            "mcp_call",
+            json!({"server": "time", "tool": "echo", "arguments": {"text": "x"}}),
+        );
+        assert!(r.ok, "{r:?}");
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        let t = Instant::now();
+        e.host.stop(Duration::from_secs(1));
+        assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+        let r = slow.join().unwrap();
+        assert!(!r.ok && r.content.contains("time limit"), "{r:?}");
+    });
+}
+
+// S-70: `mcp_propose` has a brake: at most 6 an hour in a session, counted before npm runs.
+#[test]
+fn proposals_are_braked_per_session() {
+    let Some(e) = env() else { return };
+    for i in 0..mcp::PROPOSALS_PER_HOUR {
+        let mut a = propose_args();
+        a["name"] = json!(format!("srv-{i}"));
+        a["version"] = json!("99.99.99-nope");
+        call(&e, "s", "c", "mcp_propose", a);
+    }
+    let r = call(&e, "s", "c", "mcp_propose", propose_args());
+    assert!(!r.ok && r.content.contains("proposals an hour"), "{r:?}");
+    assert_eq!(e.port.views.lock().unwrap().len(), mcp::PROPOSALS_PER_HOUR);
+    // Another session is not braked by this one.
+    assert!(call(&e, "s2", "c", "mcp_propose", propose_args()).ok);
+}
+
+// S-70: a host-mode tool host whose MCP side cannot be set up (here: the loose binary has none;
+// on a machine: no bwrap, or a Node without npm) starts anyway, and the three tools say why.
+#[test]
+fn a_host_without_its_mcp_side_starts_and_says_why() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let sock = r.join("sock");
+    std::fs::create_dir(&sock).unwrap();
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir(r.join("home")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_clio-toolhost"))
+        .arg("--socket-dir")
+        .arg(&sock)
+        .arg("--scratch")
+        .arg(r.join("scratch"))
+        .arg("--run-dir")
+        .arg(r.join("run"))
+        .args(["--jail", "off"])
+        .arg("--host-home")
+        .arg(r.join("home"))
+        .arg("--host-state")
+        .arg(r.join("state"))
+        .args(["--host-run", "r1"])
+        .arg("--mcp-config")
+        .arg(r.join("config"))
+        .arg("--mcp-data")
+        .arg(r.join("data"))
+        .arg("--mcp-runtime")
+        .arg(r.join("rt"))
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut ready = String::new();
+    out.read_line(&mut ready).unwrap();
+    let path = ready
+        .strip_prefix("READY ")
+        .expect(&ready)
+        .trim()
+        .to_owned();
+    for tool in ["mcp_tools", "mcp_call", "mcp_propose"] {
+        let line = json!({"id": "1", "tool": tool, "args": {"server": "x", "tool": "y"},
+            "session": "s", "call_id": "c"})
+        .to_string();
+        let mut s = UnixStream::connect(&path).unwrap();
+        writeln!(s, "{line}").unwrap();
+        let mut answer = String::new();
+        BufReader::new(s).read_line(&mut answer).unwrap();
+        let resp: Response = serde_json::from_str(&answer).unwrap();
+        assert!(
+            !resp.ok
+                && resp
+                    .content
+                    .contains("MCP servers are not available here: this binary has no MCP servers"),
+            "{tool}: {resp:?}"
+        );
+    }
+    drop(child.stdin.take());
+    let _ = child.wait();
 }

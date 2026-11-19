@@ -988,6 +988,16 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                 ));
                 return vec![];
             }
+            // An MCP tool's call: its whole arguments are in its own box, or in `clio approve`.
+            if what
+                .split_once('»')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with("MCP server «"))
+            {
+                app.flash = Some(format!(
+                    "{id} calls an MCP tool: answer it with `clio approve {id}` in a terminal"
+                ));
+                return vec![];
+            }
             // A skill too: its whole text is in its own box, or in `clio approve`.
             if what.starts_with("«skill") {
                 app.flash = Some(format!(

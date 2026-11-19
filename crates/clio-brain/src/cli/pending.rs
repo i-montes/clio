@@ -337,11 +337,9 @@ fn approve_cmd_with(
         println!("{}", answer_secret(dirs, id, Some(&value))?);
         return Ok(());
     }
+    // A block change, a skill, a service, an MCP server or an MCP call: whole, as its box shows it.
     if let Some(text) = block_text(dirs, &p) {
         println!("{id}:\n{text}\n");
-    }
-    if let Some(rows) = super::mcp_servers::proposal_rows(&p) {
-        println!("{id}:\n  {}\n", rows.join("\n  "));
     }
     let question = if pending::mcp_of(&p).is_some() {
         Some(
