@@ -52,8 +52,11 @@ const MASKED = "clio-guard.masked";
 const WITHHELD = "clio-guard.withheld";
 // The judge is on and did not answer: the chat says it once.
 const JUDGE = "clio-guard.judge";
+// The calls that read a registered, enabled skill of Clio's (S-68): the host said so (`data.skill`).
+// Their result is Clio's own text, not outside data: neither wrapped nor marked.
+const SKILL_READ = "clio-guard.skill-read";
 /** The exact list of tools this extension registers and the only ones allowed to run. */
-export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write"] as const;
+export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write", "skill_write", "skill_report"] as const;
 // Host mode only: the commands `bash` starts in the background (`background: true`).
 export const HOST_TOOL_NAMES = ["job_output", "job_stop"] as const;
 // Review mode: the only tools of a review, always these (its prompt prefix caches).
@@ -93,6 +96,8 @@ export const USE_WHEN: Record<(typeof TOOL_NAMES)[number], string> = {
 	ask_person: "ask the person one question with a few answers to pick from, when the doubt is real",
 	request_secret: "ask the person to put a token or key the task needs into the vault, bound to where it may be sent",
 	todo_write: "keep a short checklist of the steps of a longer job, shown to the person",
+	skill_write: "create or improve a skill: written instructions, with a check that can be run, for a kind of task that comes back",
+	skill_report: "say whether following a skill worked, after using it",
 };
 // The host already wraps what the first two return (source "memory") and the third answers with a
 // fixed line: the final filter only cleans them.
@@ -118,7 +123,7 @@ const BASH_RULE =
 	"bash runs in a jail: no network, no home folder, only the working folder is visible and writable (extensions, skills, .pi, .claude, .git, .agents, .vscode, .husky, .githooks, .cargo and .devcontainer are read-only), with limits on time, processes and output. Do not ask for a command that needs more.";
 const HOST = process.env.CLIO_GUARD_HOST === "1";
 // Tools whose result is Clio's own words or the person's, not outside content.
-const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write"]);
+const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write", "skill_write", "skill_report"]);
 // `todo_write`: the widget the chat draws (the only one it reads) and the marks of its lines.
 const TODO_KEY = "clio-todo";
 const TODO_MARK: Record<string, string> = { done: "[x] ", in_progress: "[>] ", pending: "[ ] " };
@@ -163,6 +168,15 @@ export default function clioGuard(pi: ExtensionAPI) {
 	const prompt = loadPrompt(process.env);
 	const cwd = process.cwd();
 	const state = { session: "", tainted: false };
+	const skillReads = new Set<string>();
+	/** The host served `res` from a registered skill: call `id` is Clio's own text (kept in the session). */
+	const skillRead = (id: string, res: HostResponse) => {
+		if (res.data?.skill === true && !skillReads.has(id)) {
+			skillReads.add(id);
+			pi.appendEntry(SKILL_READ, { id, at: Date.now() });
+		}
+		return res;
+	};
 
 	/** The same refusal the host applies, as an early answer: outside the folder, or a write into a protected one. */
 	function badPath(p: unknown, write: boolean): string | undefined {
@@ -225,7 +239,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 	const rel = (p: string) => (HOST ? resolve(cwd, p) : relative(cwd, p) || ".");
 
 	const readOps = (id: string, signal?: AbortSignal): ReadOperations => ({
-		readFile: async (p) => Buffer.from((await host("fs_read", { path: rel(p) }, id, signal)).content),
+		readFile: async (p) => Buffer.from(skillRead(id, await host("fs_read", { path: rel(p) }, id, signal)).content),
 		access: async (p) => void (await host("fs_stat", { path: rel(p), mode: "r" }, id, signal)),
 	});
 	const writeOps = (id: string, signal?: AbortSignal): WriteOperations => ({
@@ -246,7 +260,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 			if (d.exists !== true) throw new Error("ENOENT");
 			return { isDirectory: () => d.is_dir === true };
 		},
-		readdir: async (p) => (await host("fs_list", { path: rel(p) }, id, signal)).data.entries as string[],
+		readdir: async (p) => skillRead(id, await host("fs_list", { path: rel(p) }, id, signal)).data.entries as string[],
 	});
 	const findOps = (id: string, signal?: AbortSignal): FindOperations => ({
 		exists: async (p) => (await host("fs_stat", { path: rel(p) }, id, signal)).data.exists === true,
@@ -297,7 +311,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 			// biome-ignore lint/suspicious/noExplicitAny: same
 			execute: (id: string, params: any, ...more: any[]) => {
 				const { reason: _reason, ...own } = params ?? {};
-				return d.execute(id, own, ...more);
+				// `skill_write` keeps it: the host stores it with the draft (why this skill).
+				return d.execute(id, d.name === "skill_write" ? (params ?? {}) : own, ...more);
 			},
 		});
 	};
@@ -618,6 +633,69 @@ export default function clioGuard(pi: ExtensionAPI) {
 		}),
 	});
 
+	// Skills (S-68): a draft goes to the host, which checks it, has the judge read it and stores it;
+	// the person's Clio reviews and registers it. Nothing here writes the skills folder.
+	register({
+		name: "skill_write",
+		label: "skill_write",
+		description:
+			"Create a skill, or a new version of one (same name = update): instructions in SKILL.md for a kind of task, optional files (scripts, references) and a check that can be run. It is not registered at once: Clio's judge reads it, a reviewer runs the check in the background, and the result comes by itself with a later message. Before creating one, look at the skills you have: extend the one that already covers the task instead of writing a near-duplicate.",
+		promptSnippet: "Create or update a skill (reviewed before it is registered).",
+		promptGuidelines: [
+			"skill_write: when the person asks for a skill, or the same kind of request keeps coming back; always with a check in `verify` that can be run; never a secret in it. Never write the skills folder another way.",
+		],
+		parameters: {
+			type: "object",
+			properties: {
+				name: { type: "string", pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", maxLength: 64, description: "Lowercase letters, digits and single hyphens (for example pdf-tools). An existing skill's name updates it." },
+				description: { type: "string", minLength: 20, maxLength: 1024, description: "One line: what it does and when to use it. It is all the model sees before opening the skill." },
+				body: { type: "string", minLength: 1, description: "The instructions (Markdown, without frontmatter and without the '## How to verify' section): steps a fresh agent can follow." },
+				verify: { type: "string", minLength: 1, maxLength: 4000, description: "How to verify it works: commands run from the skill's folder that end with success only when it works; written as the '## How to verify' section." },
+				files: {
+					type: "array",
+					maxItems: 10,
+					description: "Other files of the skill, paths relative to its folder (for example scripts/check.sh).",
+					items: {
+						type: "object",
+						properties: {
+							path: { type: "string", minLength: 1, maxLength: 200 },
+							content: { type: "string" },
+						},
+						required: ["path", "content"],
+						additionalProperties: false,
+					},
+				},
+			},
+			required: ["name", "description", "body", "verify"],
+			additionalProperties: false,
+		},
+		execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+			content: [{ type: "text" as const, text: (await host("skill_write", params, id, signal, 60_000)).content }],
+			details: {},
+		}),
+	});
+	register({
+		name: "skill_report",
+		label: "skill_report",
+		description: "After following a skill, say whether it worked. Three failures in a row turn the skill off and the person is told; fix it with skill_write.",
+		promptSnippet: "Report whether following a skill worked.",
+		promptGuidelines: ["skill_report: after following a skill; 'failed' when its steps or its scripts did not do what it says."],
+		parameters: {
+			type: "object",
+			properties: {
+				name: { type: "string", maxLength: 64, description: "The skill's name." },
+				outcome: { type: "string", enum: ["worked", "failed"] },
+				note: { type: "string", maxLength: 500, description: "One line: what happened." },
+			},
+			required: ["name", "outcome", "note"],
+			additionalProperties: false,
+		},
+		execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+			content: [{ type: "text" as const, text: (await host("skill_report", params, id, signal)).content }],
+			details: {},
+		}),
+	});
+
 	// The model's checklist: each call replaces it whole. It lives here, for this session only,
 	// and is shown as Pi's widget `clio-todo` (the chat pins it, `clio run` prints it).
 	let todos: { text: string; status: string }[] = [];
@@ -708,6 +786,11 @@ export default function clioGuard(pi: ExtensionAPI) {
 		state.tainted = ctx.sessionManager
 			.getEntries()
 			.some((e) => e.type === "custom" && e.customType === TAINT && (e.data as { tainted?: boolean } | undefined)?.tainted === true);
+		skillReads.clear();
+		for (const e of ctx.sessionManager.getEntries()) {
+			const id = e.type === "custom" && e.customType === SKILL_READ ? (e.data as { id?: unknown } | undefined)?.id : undefined;
+			if (typeof id === "string") skillReads.add(id);
+		}
 		pi.setActiveTools([...ACTIVE]);
 		// What the launcher checks at start: which tools are active and where each one comes from.
 		pi.appendEntry(TOOLS_ENTRY, {
@@ -747,7 +830,9 @@ export default function clioGuard(pi: ExtensionAPI) {
 		// Memory results come wrapped already; wrapping again would nest them and lose the source.
 		// `ask_person` answers with the person's own words and `request_secret` with the host's own
 		// line: cleaned, never wrapped as outside data.
-		const source = MEMORY_TOOLS.has(event.toolName) || OWN_TOOLS.has(event.toolName) ? undefined : event.toolName === "bash" || event.toolName === "job_output" ? "tool-result" : "file";
+		// A registered skill's file is Clio's own text too (S-68).
+		const own = OWN_TOOLS.has(event.toolName) || skillReads.has(event.toolCallId);
+		const source = MEMORY_TOOLS.has(event.toolName) || own ? undefined : event.toolName === "bash" || event.toolName === "job_output" ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
 			if (v && typeof v === "object") {
@@ -806,6 +891,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 		messages: event.messages.map((m) => {
 			// The person's answer to `ask_person` is theirs, not outside data (it was cleaned in `tool_result`).
 			if (m.role === "toolResult" && m.toolName === "ask_person") return m;
+			// A registered skill's file, as the host served it (S-68): Clio's own instructions.
+			if (m.role === "toolResult" && skillReads.has(m.toolCallId)) return m;
 			if (m.role === "toolResult") return { ...m, content: wrapBlocks(m.content, "tool-result") };
 			if ((m.role === "compactionSummary" || m.role === "branchSummary") && !isWrapped(m.summary)) {
 				return { ...m, summary: wrapUntrusted("summary", m.summary) };
