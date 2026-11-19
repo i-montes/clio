@@ -1,6 +1,6 @@
 # The installer (design, 2026-11-19)
 
-Status: asked for by the owner on 2026-11-19. Nothing here is built.
+Status: asked for by the owner on 2026-11-19. Built on the branch `feat/installer`, except "Default MCP servers" (the setup has an empty, marked step for it). The decisions taken while building it are at the end.
 
 ## What the owner asked for
 
@@ -103,3 +103,21 @@ yet, so the installer says what works there and what does not.
 - Windows.
 - Remote (OAuth) MCP servers: the catalog lists npm servers only.
 - Unattended fleet installs: there is a `--yes` path for tests, nothing more.
+
+## Decisions (as built)
+
+- Release files: plain binaries `clio-<target>` and `clio-vault-<target>` (no archive, so `install.sh` needs no `tar`), plus `SHA256SUMS`, `install.sh` and `VERSION`; the latest release is the one `releases/latest/download/VERSION` names, and every file then comes from `releases/download/v<VERSION>/`, so two releases are never mixed.
+- Linux portability: `cargo zigbuild` against glibc 2.28 (Ubuntu 22.04 has 2.35, Debian 12 2.36); the release checks the highest `GLIBC_` symbol with `objdump` and starts both binaries in `ubuntu:22.04` and `debian:12` containers. Not musl: clio-memory loads ONNX Runtime, a glibc library.
+- `install.sh` uses `mkdir -p` (for `~/.local/bin`) and `rm -rf` (only on the temporary folder it made with `mktemp -d`) besides the tools listed: without them a failed download would leave files behind.
+- `CLIO_RELEASE_BASE` is one release's folder (or URL) with the same file names; with it, `CLIO_VERSION` is not used.
+- The private Node: 22.23.5, the official tarball with its SHA-256 pinned in the binary, unpacked in `~/.local/share/clio/node` (a `.clio-node` mark says which archive); everything that starts Node or npm for Clio (Pi, its install, the reviewer, MCP servers) puts its `bin` first in the `PATH`.
+- clio-memory: the binary of release v0.13.0 (the one Clio's library is pinned to), checked against that release's `SHA256SUMS`, whose own SHA-256 is pinned; a newer one already installed is kept. Its model and ONNX Runtime come from the specs in `clio_memory::setup` (the same URLs and SHA-256 as its own installer), with the runtime's `.sha256` mark, so `clio-memory setup` finds them done.
+- `sudo`: the package manager's install of `bubblewrap` and `loginctl enable-linger` run back to back in one moment, with the screen handed back to the terminal, so `sudo` asks once; Clio never reads the password. As root they run directly; without `sudo`, one line names what to ask an administrator for.
+- The Claude token: `claude setup-token` (the Claude Code Pi brings) runs on the terminal with Pi's home folder; then the screen and its scrollback are cleared and the token is pasted into a masked field. "Later" is always a choice.
+- Secrets go from the installer's process straight to the vault (`Vault::init`, then unlock and put over its socket): never an argument, an environment variable or a child's input.
+- The language is recorded in `config.json` (`ui.language`, `es` or `en`); the first conversation's presentation request asks for that language instead of English while the memory has nothing in a language of its own. The system prompt does not change.
+- Update replaces the binaries first; if they changed, the new `clio` is started in place of the old one (`CLIO_UPDATE_REEXEC`) to bring Node, Pi, clio-memory and the skills to what it pins.
+- Both removals keep clio-memory and its model (other agents may use them); Remove-keeping-data keeps Pi's conversations (`pi/sessions`, `pi/agent`, `pi/home`) and removes Pi's installed versions, the private Node, the binaries and the timer's units.
+- The round learns of a newer release at most once a day (`~/.local/share/clio/update.json`) and adds one line to its data when there is one.
+- Tests use debug-only seams: `CLIO_TEST_PINS` (local fakes in place of the pinned downloads) and `CLIO_TEST_SYSTEM` (fake `sudo`, package manager, `systemctl`, `loginctl`); release builds ignore both.
+- macOS: no jail and no timer yet; the steps say so in one line and go on.

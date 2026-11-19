@@ -142,6 +142,24 @@ The OWASP column names the risk of the [OWASP Top 10 for LLM applications (2025)
 - **In operation, every week**: review in clio-trace the approval rate (above 95 % it is decoration), gateway blocks, attempts to use a secret toward a foreign destination, tainted sessions with a way out, the quarantine, and what the judge withheld.
 - **In operation, every month**: rotate tokens, restore a backup on a clean machine, review the Tailscale rules and the device list, update dependencies and review the spending caps.
 
+### What the installer downloads
+
+`install.sh`, `clio setup` and `clio update` download only these. Each file is checked before it replaces anything: one that does not match, or a download cut short, installs nothing and leaves what was there.
+
+| What | From | Checked against |
+| --- | --- | --- |
+| `clio`, `clio-vault` (`~/.local/bin`) | the GitHub release `releases/download/v<VERSION>/`, the latest named by `releases/latest/download/VERSION`; `CLIO_VERSION` picks one in `install.sh`; `CLIO_RELEASE_BASE` (a URL or a folder) replaces GitHub | that release's `SHA256SUMS`; both are downloaded beside their destination and verified before either is renamed into place |
+| Node 22.23.5 (`~/.local/share/clio/node`) | `https://nodejs.org/dist/v22.23.5/node-v22.23.5-<os>-<arch>.tar.gz` | its SHA-256, pinned in the binary (`crates/clio-brain/src/cli/setup/fetch.rs`, from nodejs.org's `SHASUMS256.txt`); unpacked beside it and swapped in |
+| clio-memory 0.13.0 (`~/.local/bin/clio-memory`) | `https://github.com/i-montes/clio-memory/releases/download/v0.13.0/` | its `SHA256SUMS`, whose own SHA-256 is pinned in the binary; the binary must be what it lists. A newer one already there is kept |
+| clio-memory's model and its ONNX Runtime (`~/.cache/clio-models/`) | the URLs clio-memory pins (Hugging Face; ONNX Runtime's GitHub releases) | the SHA-256 clio-memory pins for each file and archive (`clio_memory::setup`) |
+| Pi and its packages (`~/.local/share/clio/pi/<version>`) | the npm registry | `package-lock.json`'s integrity, with `npm ci --ignore-scripts` (S-42) |
+
+Over https a redirect may not leave https (`curl --proto-redir =https`, `wget --https-only`). What this protects against is a corrupted, cut or swapped file; the root of trust is GitHub over https (the `install.sh` line, the release and its `SHA256SUMS` come from the same account), and the binary's own pins cover what it downloads after that. A release is built only after every gate and the owner's review, and its binaries carry GitHub's build provenance: `gh attestation verify clio-<target> --repo i-montes/clio` checks it by hand (the installer does not; it has no `gh`). `CLIO_TEST_PINS` and `CLIO_TEST_SYSTEM`, the tests' fakes, are read only by debug builds.
+
+**`sudo`.** The installer runs `sudo` at most once, in one moment, and only for two things: installing `bubblewrap` with the system's package manager (`apt-get update` and `apt-get install`, or `dnf`, `pacman`, `zypper`, `apk`) and `loginctl enable-linger <you>`, run back to back so `sudo` asks once. It says what it will run on its own screen first (with `--yes` it does not ask); then the screen is handed to `sudo`, which asks for the password itself: Clio never reads it. As root they run without `sudo`; without `sudo`, one line says what to ask an administrator for. Everything else stays in your home: `~/.local/bin`, `~/.config/clio`, `~/.local/share/clio`, `~/.cache/clio-models` and `~/.config/systemd/user`.
+
+**Secrets.** The vault's passphrase, the model's key and Temis's key come from a masked field, a prompt without echo, or a file a flag names (`--passphrase-file`, `--key-file`, `--temis-key-file`); never from an argument or the environment. They go from the installer's own process to the vault, and are wiped from memory after. For a Claude subscription, `claude setup-token` runs on the terminal with Pi's home folder (`~/.local/share/clio/pi/home`, so `~/.claude` is not touched); after you copy the token, the screen and its scrollback are cleared and you paste it into the masked field.
+
 ### Attack battery
 
 Seeded cases that must always fail. They run before every release, and every new incident adds a case.

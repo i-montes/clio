@@ -464,6 +464,20 @@ In a run's detail, the memory line says what it recalled and what it saved; `Tab
 
 ## Installing and setting up
 
+The one line (Linux x86_64 and aarch64, macOS arm64 and x86_64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/i-montes/clio/main/install.sh | sh
+```
+
+`install.sh` puts `clio` and `clio-vault` of the latest release (or `CLIO_VERSION=x.y.z`) in `~/.local/bin`, verified against the release's `SHA256SUMS`, and starts `clio setup` on the terminal (without one, it prints the command to run). `clio setup` asks the language (Español or English), says what it found, shows what it will do, and does it, one line per step: folders and config, `bubblewrap` and lingering (one `sudo` moment, see below), a private Node 22 in `~/.local/share/clio/node` (Pi uses it first), Pi, clio-memory with its model, the vault (a new passphrase typed twice, or yours to open it), the model (Claude subscription, Anthropic API, OpenCode or later; the key goes masked into the vault), the judge (skipped unless you have your own Temis), the services timer, the shipped skills and the doctor. Then the chat opens, in the language you chose. Each step that is already right says so and changes nothing, so running it again is safe. On an existing installation it offers Update (keeps everything), Repair, Remove Clio but keep my data, and Remove everything (one confirmation that names what is lost; clio-memory and its model stay in both removals). Update and the removals wait while a chat is open.
+
+Without screens: `clio setup --yes --lang es|en`, with `--passphrase-file F`, `--connector claude|anthropic-api|opencode --key-file F`, `--temis-url URL --temis-key-file F`, `--no-model` and `--no-vault`. Secrets come only from those files or from a prompt on the terminal, never from an argument.
+
+`clio update` brings everything that is Clio's up to date with no questions: the binaries (the latest release, verified, each replaced with one rename), the private Node, Pi, clio-memory and its model and the shipped skills; it restarts the timer if it was on, runs the doctor and prints `name from → to` per change, or "already up to date". It never touches the config, the vault, the memory, conversations, your skills, services or MCP servers. `clio update --check` only says whether a newer release exists, and a round mentions it once when one does; Clio never updates by herself. `CLIO_RELEASE_BASE` (a URL or a folder with a release's files) replaces GitHub for both. What is downloaded and how each file is checked: [`security.md`](security.md#what-the-installer-downloads).
+
+By hand, from a checkout:
+
 ```sh
 just install                                        # builds and puts clio and clio-vault in ~/.local/bin
 # (by hand: cargo build --release -p clio-brain -p clio-vault and copy target/release/clio* to ~/.local/bin)
