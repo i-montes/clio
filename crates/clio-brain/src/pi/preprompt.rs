@@ -73,6 +73,8 @@ pub const APPROVALS_ASK: &str = "The person answered what waited for their appro
 pub const MANAGE_ASK: &str = "These are the outcomes of what you asked for, done when your last turn ended; they follow, as data. Go on with what was left of the person's request. Do not repeat an act already done.";
 /// What Clio asks in the turn after a permission window ended (its record follows, as data).
 pub const GRANT_ASK: &str = "The person's permission window ended: what Clio approved under it without asking them follows, as data. Sum up for the person, briefly and in their language, what you did under their permission and what is left. Do not start anything new in this turn.";
+/// What Clio asks in a round (`clio-round@1`): what to look at follows, as data.
+pub const ROUND_ASK: &str = "This is your round: nobody is here. Look at each thing to watch and each thing that needs attention in the data that follows, then answer only with the round block.";
 /// What Clio asks when the person closes the session.
 pub const CLOSING_ASK: &str = "the person closed this session: save its summary with memory_session_summary and do nothing else (do not change files and do not reply to them).";
 

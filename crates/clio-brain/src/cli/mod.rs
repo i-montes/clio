@@ -18,6 +18,7 @@ pub mod mcp_servers;
 pub mod memory;
 pub mod pending;
 pub mod pi;
+pub mod round;
 pub mod runs;
 pub mod services;
 pub mod sessions;

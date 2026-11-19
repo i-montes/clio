@@ -180,6 +180,11 @@ pub fn stop_leftover_units() {
     });
 }
 
+/// The system's `systemd-run`, if it is installed (what `with_user_scopes` uses).
+pub fn systemd_run() -> Option<PathBuf> {
+    find_in_trusted("systemd-run")
+}
+
 fn quiet(cmd: &mut Command) -> &mut Command {
     cmd.env_clear()
         .stdin(Stdio::null())
@@ -260,7 +265,7 @@ impl HostJail {
     /// `with_scope` with the system's `systemd-run`, if it is installed.
     #[must_use]
     pub fn with_user_scopes(self) -> Self {
-        self.with_scope(find_in_trusted("systemd-run"))
+        self.with_scope(systemd_run())
     }
 
     /// The program and arguments that put what follows them in a transient user scope with the

@@ -215,6 +215,64 @@ pub struct Config {
     pub ui: UiCfg,
     #[serde(default)]
     pub approvals: ApprovalsCfg,
+    #[serde(default)]
+    pub round: RoundCfg,
+}
+
+/// The round: Clio looks by herself at what she was asked to watch (`round.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundCfg {
+    /// A round every this many hours, from the services timer; 0: never.
+    #[serde(default = "round_every")]
+    pub every_hours: u64,
+    /// No round between these local times (`HH:MM-HH:MM`, may cross midnight; empty: none).
+    #[serde(default = "round_quiet")]
+    pub quiet: String,
+    #[serde(default = "review_steps")]
+    pub max_steps: u32,
+    #[serde(default = "review_seconds")]
+    pub max_seconds: u64,
+    #[serde(default = "round_cost")]
+    pub max_cost_micro_usd: u64,
+    /// Its model; unset: the session's default (`model.model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+fn round_every() -> u64 {
+    8
+}
+fn round_quiet() -> String {
+    "23:00-07:00".into()
+}
+fn round_cost() -> u64 {
+    500_000
+}
+
+impl RoundCfg {
+    /// As `ReviewCfg::clamp`: a bad `round.*` key never keeps the config from loading; quiet
+    /// hours that do not read are the default ones.
+    fn clamp(&mut self) {
+        self.every_hours = self.every_hours.min(24 * 7);
+        self.max_seconds = self.max_seconds.clamp(30, 3600);
+        self.max_steps = self.max_steps.clamp(1, 200);
+        if !self.quiet.trim().is_empty() && super::round::quiet_hours(&self.quiet).is_none() {
+            self.quiet = round_quiet();
+        }
+    }
+}
+
+impl Default for RoundCfg {
+    fn default() -> Self {
+        Self {
+            every_hours: round_every(),
+            quiet: round_quiet(),
+            max_steps: review_steps(),
+            max_seconds: review_seconds(),
+            max_cost_micro_usd: round_cost(),
+            model: None,
+        }
+    }
 }
 
 /// The permission window: how long a yes of the person lets Clio act without asking.
@@ -431,6 +489,7 @@ impl Config {
             review: ReviewCfg::default(),
             ui: UiCfg::default(),
             approvals: ApprovalsCfg::default(),
+            round: RoundCfg::default(),
         }
     }
 
@@ -456,6 +515,7 @@ impl Config {
         }
         cfg.model.check(&p)?;
         cfg.review.clamp();
+        cfg.round.clamp();
         Ok(cfg)
     }
 

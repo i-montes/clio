@@ -75,6 +75,9 @@ pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
+/// The prompt of a round (Clio looking by herself, nobody there): the host-mode tools.
+pub const ROUND_PROMPT_NAME: &str = "clio-round@1";
+pub const ROUND_PROMPT: &str = include_str!("../../../../prompts/system/clio-round@1.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -158,11 +161,35 @@ pub fn guard_env(
     host: bool,
     person: bool,
 ) -> Result<Vec<(String, String)>, String> {
-    let (name, body) = if host {
+    let prompt = if host {
         (HOST_PROMPT_NAME, HOST_PROMPT)
     } else {
         (PROMPT_NAME, PROMPT)
     };
+    guard_env_with(paths, toolhost, host, person, prompt)
+}
+
+/// `guard_env` for a round: host mode, nobody to ask, its own prompt (`clio-round@1`).
+pub fn round_guard_env(
+    paths: &PiPaths,
+    toolhost: &Toolhost,
+) -> Result<Vec<(String, String)>, String> {
+    guard_env_with(
+        paths,
+        toolhost,
+        true,
+        false,
+        (ROUND_PROMPT_NAME, ROUND_PROMPT),
+    )
+}
+
+fn guard_env_with(
+    paths: &PiPaths,
+    toolhost: &Toolhost,
+    host: bool,
+    person: bool,
+    (name, body): (&str, &str),
+) -> Result<Vec<(String, String)>, String> {
     let mut env = vec![
         (
             "CLIO_GUARD_PROMPT_FILE".into(),
