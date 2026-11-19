@@ -227,3 +227,22 @@ Decisions taken while building it:
 - The manifest has no command: what runs is fixed (Node and the package's entry point), so a proposal cannot name a program.
 - An approved `ask` call runs in its own short-lived process of the server, not in the session's pool: approval happens in the person's `clio`, which has its own tool host.
 - Not built: Python or Docker servers, remote servers, OAuth, resources, prompts, sampling, per-server tools in the model's list, signature or provenance checks of npm packages.
+
+## Clio manages what she creates (2026-11-19)
+
+The model may look after the services, skills and MCP servers she created: `service_manage {name, action, reason}` (status, logs, run, off, on, undo, remove), `skill_manage` (status, off, on, undo, remove) and `mcp_manage` (status, logs, off, on, remove), host-mode chats only, served by the tool host. One line per decision:
+
+- Shape: the tool host writes no registry. It answers `status` and `logs`; `off` and `run` are a line in `<run>/toolhost/manage.jsonl` (0600, session, tool, name, action, reason), which the person's `clio` takes (rename, read, remove) after each turn and when a chat opens and does with the person's own functions; `on`, `undo` and `remove` are pending items (class `service`, `skill` or `mcp`, tool `*_manage`), done by the same functions when approved. Chosen because the pending store already carries hash-bound requests from the jail to the person's process, and a request file for the free acts keeps them free without a second writer.
+- Free: `status`, `logs`, `off`, and `run` of a service that is on (through `Runner::run_checked`: the digest check, the jail; a changed one pauses). They happen when the turn ends, not inside the tool call: the model hears the outcome with the next message, the person sees `Clio did this by herself: …` in the chat.
+- `run` waits for the run to end in the person's `clio`, as `clio services run` does; its note gives the outcome line, not the output (`service_manage logs` shows that, as outside text).
+- Who turned it off is the record's `off` text: `turned off by the person` (every person's command), `turned off by Clio` (the model's `off`); pauses keep their own words.
+- Needs permission: `on`, `undo`, `remove`. The item binds the name, the version it is at, the version `undo` goes back to and, for `on`, who turned it off; the brain checks them again before acting (else nothing is done, saying so), so an item approved later cannot do more than its box said.
+- The window answers a manage item only when it has no always-asks reason (`grant::covers`); the reasons are `on` of what the person turned off, `remove` of a shipped skill and a `suspect` session. The brain refuses the first two under a window too.
+- `logs` for a skill does not exist (skills have no runs); a skill's `status` is Clio's own record text and does not mark the session; a service's or server's `status` and `logs` are outside text and do.
+- Missing name: `there is no service «x»`, refused (`manage/missing`); an act that does not apply (already off, already on, `run` while off, `undo` with no earlier version, `on` of a server whose tools the person never saw) is said plainly and records nothing.
+- Brake: 20 calls an hour per session, all actions counted, in the tool host's memory (it restarts with the session).
+- In a `suspect` session every action but `status` is set aside with the always-asks reason; the request file is not read for a suspect session.
+- `remove` goes to `removed/` through the person's function, which refuses a running service.
+- Never through these tools: registering, a new version, MCP tool modes, confirming a tool list, the services timer, another kind's registry.
+- Prompts `clio-agent@27` and `clio-host@11`: `@26` and `@10` with only the managing sentences changed; the three tools' descriptions and the closing paragraphs of `skill-creator`, `service-creator` and `mcp-installer` say the same. `service_write`'s guideline points at `service_manage`.
+- Not built: managing what the person installed by hand (there is no such thing yet), a reason shown in `/services` beyond `turned off by Clio`, headless `clio run` carrying out free requests (only the chat takes the request file, after each turn and when a session opens).
