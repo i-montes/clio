@@ -1611,3 +1611,150 @@ fn a_resumed_session_never_presents() {
     let said = told_with(&w, "segunda pregunta");
     assert!(!said.contains(PRESENTATION), "{said}");
 }
+
+/// A session on a copy whose first turn writes `out.txt`, then `/review`: `reviewer` is what the
+/// reviewer's model does, and the model then answers the findings.
+fn review_world(reviewer: &[Value]) -> World {
+    let mut script = vec![
+        json!({"tool_calls": [{"name": "write", "arguments": {"reason": "escribir", "path": "out.txt", "content": "hola\n"}}]}),
+        json!({"text": "wrote it"}),
+    ];
+    script.extend(reviewer.iter().cloned());
+    script.push(json!({"text": "fixed per the review"}));
+    World::new_with(&Value::Array(script).to_string(), &["--log-body"])
+}
+
+const FAILS: &str = "```review\nverdict: fails\nran: cat out.txt, it printed hola\nfindings:\n- what: out.txt says hola and nothing else\n  evidence: out.txt line 1 is hola\n```";
+
+/// Runs the `review` scenario and gives back the run folder of the conversation.
+fn reviewed(w: &World) -> PathBuf {
+    let v = w.pty_with(
+        "review",
+        json!({"fixed": "fixed per the review"}),
+        &[],
+        &decoy(),
+    );
+    ok(
+        &v,
+        &[
+            "opened",
+            "answered",
+            "reviewing",
+            "verdict",
+            "evidence",
+            "review_turn",
+            "fixed",
+        ],
+    );
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    w.assert_key_nowhere();
+    std::fs::read_dir(w.home().join(".local/share/clio/runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.join("sandbox").is_dir())
+        .unwrap()
+}
+
+// S-67: the reviewer is a second jailed agent with a clean context and a fixed list of tools; its
+// findings reach the model as data with Clio's request, and the conversation's own prompt and
+// tools do not change
+#[test]
+fn a_review_runs_in_a_clean_context_with_its_own_tools_and_its_findings_come_back_as_data() {
+    if can_run("review", true).is_none() {
+        return;
+    }
+    let w = review_world(&[
+        json!({"tool_calls": [{"name": "bash", "arguments": {"reason": "comprobar", "command": "cat out.txt"}}]}),
+        json!({"text": FAILS}),
+    ]);
+    let run = reviewed(&w);
+    let reqs = w._provider.requests();
+    let is_review = |r: &&Value| r["body"].to_string().contains("You are a reviewer");
+    let review: Vec<&Value> = reqs.iter().filter(is_review).collect();
+    let convo: Vec<&Value> = reqs.iter().filter(|r| !is_review(r)).collect();
+    assert_eq!((review.len(), convo.len()), (2, 3), "{reqs:#?}");
+    for r in &review {
+        let mut tools: Vec<&str> = r["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        tools.sort_unstable();
+        assert_eq!(tools, ["bash", "find", "ls", "read"], "{r:#}");
+        let body = r["body"].to_string();
+        // Never the conversation, the identity or the memory: only the review request.
+        for absent in [
+            IDENTITY_HEADING.trim_end(),
+            "La persona ya se presentó",
+            "Clio's request",
+            "wrote it\"",
+        ] {
+            assert!(!body.contains(absent), "{absent}: {body}");
+        }
+        assert!(body.contains("Review this piece of work"), "{body}");
+        // Its prompt names no tool it does not have.
+        let system = r["body"]["messages"][0].to_string();
+        for absent in [
+            "memory_",
+            "ask_person",
+            "request_secret",
+            "todo_write",
+            "job_output",
+        ] {
+            assert!(!system.contains(absent), "{absent}: {system}");
+        }
+    }
+    // Its prompt and the request, nothing before them.
+    assert_eq!(review[0]["roles"], json!([convo[0]["roles"][0], "user"]));
+    // The conversation: the same system prompt and tools in every request, review or not.
+    let system = |r: &Value| r["body"]["messages"][0].clone();
+    for r in &convo {
+        assert_eq!(r["tools"], convo[0]["tools"]);
+        assert_eq!(system(r), system(convo[0]));
+    }
+    let last = convo[2]["body"].to_string();
+    assert!(
+        last.contains(clio_brain::pi::preprompt::REVIEW_ASK)
+            && last.contains("UNTRUSTED-DATA subagent-summary")
+            && last.contains("out.txt line 1 is hola"),
+        "{last}"
+    );
+    // Its own session, folder and logs: the drawer lists one session.
+    let list =
+        clio_brain::pi::sessions::list_sessions(&w.home().join(".local/share/clio/pi/sessions"));
+    assert_eq!(list.sessions.len(), 1);
+    let dir = run.join("reviews/1");
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("review.json")).unwrap()).unwrap();
+    assert_eq!(kept["verdict"], json!("fails"), "{kept:#}");
+    assert!(dir.join("answer.txt").is_file());
+    assert!(
+        std::fs::read_dir(dir.join("sessions"))
+            .unwrap()
+            .flatten()
+            .count()
+            == 1
+    );
+    // What it ran is in its own effect log, under its own session.
+    let effects = std::fs::read_to_string(dir.join("toolhost/effects.jsonl")).unwrap();
+    assert!(effects.contains("exit_code"), "{effects}");
+    // It read a command's output, so it ended marked, and its findings marked the conversation.
+    assert!(dir.join("toolhost/tainted.json").is_file());
+    assert!(run.join("toolhost/tainted.json").is_file());
+    assert_eq!(kept["marked"], json!(false), "{kept:#}");
+}
+
+// A reviewer that read nothing from outside ends clean, and its findings mark nothing.
+#[test]
+fn a_clean_reviewers_findings_leave_the_conversation_unmarked() {
+    if can_run("review_clean", true).is_none() {
+        return;
+    }
+    let w = review_world(&[json!({"text": FAILS})]);
+    let run = reviewed(&w);
+    assert!(!run.join("reviews/1/toolhost/tainted.json").exists());
+    assert!(!run.join("toolhost/tainted.json").exists());
+}

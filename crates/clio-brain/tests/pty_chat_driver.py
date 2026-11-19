@@ -314,6 +314,24 @@ elif scenario == "reopen_turn":
     send(fd, CTRL_C)  # idle: Ctrl-C leaves
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "review":
+    # A turn that writes a file, `/review`, its verdict on screen, and the turn the review starts
+    # with its findings (cfg "fixed": what the model answers to them); then leave.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, "escribe out.txt", "wrote it")
+    type_text(fd, "/review")
+    send(fd, ENTER)
+    out["reviewing"] = wait_screen(fd, "reviewing", 30)
+    out["verdict"] = wait_screen(fd, "review: fails", 90)
+    out["evidence"] = wait_screen(fd, "evidence: out.txt", 10)
+    out["review_turn"] = wait_screen(fd, "turn started by the review", 30)
+    out["fixed"] = wait_screen(fd, cfg["fixed"], 60) and idle(fd)
+    if not out["fixed"]:
+        out["screen"] = screen()
+    time.sleep(0.5)
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario == "summary":
     # Four messages, the keys to the list, and leave at once: leaving asks for the summary of the
     # open session and waits for it.
