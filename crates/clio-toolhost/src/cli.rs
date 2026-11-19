@@ -20,6 +20,10 @@
 //! `--show D` (host mode, repeatable): a folder inside Clio's masked ones that commands see
 //! read-only (a skill draft's stage, for its reviewer).
 //!
+//! `--mcp-config C --mcp-data D --mcp-runtime R [--mcp-node N]` (host mode): the MCP servers
+//! (S-70), through what the binary's [`McpFactory`] makes of Clio's folders (the loose
+//! `clio-toolhost` has none).
+//!
 //! Host mode: `--host-home H --host-state S --host-run ID [--host-control P]... [--host-rules
 //! FILE]` (the person's `host.json`). `--work` is then not needed: the tools work on `/`.
 
@@ -32,16 +36,38 @@ use clio_core::SystemClock;
 use clio_vault::{Scrubber, VaultClient};
 
 use crate::ask::HostRules;
+use crate::mcp::McpPort;
 use crate::{Config, HostCfg, JailMode, MemoryPort, Server, ToolHost};
 
 /// Builds the memory from its data folder and the vector models' folders (best first; none: text).
 pub type MemoryFactory<'a> = &'a dyn Fn(&Path, &[PathBuf]) -> Result<Arc<dyn MemoryPort>, String>;
 
-pub fn run(args: Vec<String>) -> Result<(), String> {
-    run_with(args, &|_, _| Err("this binary has no memory".into()))
+/// Clio's folders for the MCP servers (`--mcp-*`, the home from `--host-home`), and the Node
+/// Clio runs Pi with.
+pub struct McpDirs {
+    pub config: PathBuf,
+    pub data: PathBuf,
+    pub runtime: PathBuf,
+    pub home: PathBuf,
+    pub node: Option<PathBuf>,
 }
 
-pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), String> {
+/// Builds the MCP servers' port of the person's `clio`.
+pub type McpFactory<'a> = &'a dyn Fn(McpDirs) -> Result<Arc<dyn McpPort>, String>;
+
+pub fn run(args: Vec<String>) -> Result<(), String> {
+    run_with(
+        args,
+        &|_, _| Err("this binary has no memory".into()),
+        &|_| Err("this binary has no MCP servers".into()),
+    )
+}
+
+pub fn run_with(
+    args: Vec<String>,
+    memory: MemoryFactory<'_>,
+    mcp: McpFactory<'_>,
+) -> Result<(), String> {
     let mut args = args.into_iter();
     let (mut dir, mut work, mut scratch, mut run_dir) = (None, None, None, None);
     let (mut rules, mut vault, mut jail) = (None, None, JailMode::Auto);
@@ -52,12 +78,17 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let mut review = false;
     let mut skills = None;
     let mut shows = Vec::new();
+    let (mut mcp_config, mut mcp_data, mut mcp_runtime, mut mcp_node) = (None, None, None, None);
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--review" => review = true,
             "--skills" => skills = Some(PathBuf::from(value()?)),
             "--show" => shows.push(PathBuf::from(value()?)),
+            "--mcp-config" => mcp_config = Some(PathBuf::from(value()?)),
+            "--mcp-data" => mcp_data = Some(PathBuf::from(value()?)),
+            "--mcp-runtime" => mcp_runtime = Some(PathBuf::from(value()?)),
+            "--mcp-node" => mcp_node = Some(PathBuf::from(value()?)),
             "--socket-dir" => dir = Some(PathBuf::from(value()?)),
             "--work" => work = Some(PathBuf::from(value()?)),
             "--scratch" => scratch = Some(PathBuf::from(value()?)),
@@ -143,6 +174,22 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     if review && skills.is_some() {
         return Err("a review (--review) cannot write skills".into());
     }
+    cfg.mcp = match (mcp_config, mcp_data, mcp_runtime, &host) {
+        (None, None, None, _) => None,
+        (Some(config), Some(data), Some(runtime), Some(h)) if !review => Some(mcp(McpDirs {
+            config,
+            data,
+            runtime,
+            home: h.home.clone(),
+            node: mcp_node,
+        })?),
+        _ => {
+            return Err(
+                "--mcp-config, --mcp-data and --mcp-runtime go together, in host mode, not in a review"
+                    .into(),
+            );
+        }
+    };
     cfg.review = review;
     cfg.skills = skills;
     cfg.shows = shows;

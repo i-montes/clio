@@ -197,6 +197,12 @@ pub fn service_of(p: &Pending) -> Option<SkillOf<'_>> {
     made_of(p, Class::Service)
 }
 
+/// An MCP server waiting to be installed (S-70): name, description, its `mcp.json` (kept as
+/// `skill_md`) and no files. npm's facts about it are `p.args["npm"]`.
+pub fn mcp_of(p: &Pending) -> Option<SkillOf<'_>> {
+    made_of(p, Class::Mcp)
+}
+
 fn made_of(p: &Pending, class: Class) -> Option<SkillOf<'_>> {
     let s = |k: &str| p.args.get(k).and_then(Value::as_str).unwrap_or("");
     let files = p.args["files"]
@@ -239,6 +245,18 @@ pub fn set_aside_service(
     set_aside_made(state, (run, session), args, reason, per_day, Class::Service)
 }
 
+/// An MCP server the model proposed, with npm's facts (S-70): it always waits for the person.
+pub fn set_aside_mcp(
+    state: &Path,
+    run: &str,
+    session: &str,
+    args: Value,
+    reason: &str,
+    per_day: u32,
+) -> Result<Pending, String> {
+    set_aside_made(state, (run, session), args, reason, per_day, Class::Mcp)
+}
+
 fn set_aside_made(
     state: &Path,
     (run, session): (&str, &str),
@@ -247,10 +265,10 @@ fn set_aside_made(
     per_day: u32,
     class: Class,
 ) -> Result<Pending, String> {
-    let (tool, rule) = if class == Class::Service {
-        ("service_write", "services/aside")
-    } else {
-        ("skill_write", "skills/aside")
+    let (tool, rule) = match class {
+        Class::Service => ("service_write", "services/aside"),
+        Class::Mcp => ("mcp_propose", "mcp/aside"),
+        _ => ("skill_write", "skills/aside"),
     };
     let now = now_ms();
     let name = args["name"].as_str().unwrap_or("").to_owned();
@@ -287,6 +305,17 @@ pub fn approve_skill(
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
     approve_made(state, id, now_ms, Class::Skill, register)
+}
+
+/// The person approves MCP server `id` (S-70), as `approve_skill`: `install` downloads, checks,
+/// probes and registers it, off.
+pub fn approve_mcp(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    install: impl FnOnce(&Pending) -> Result<String, String>,
+) -> Result<Pending, String> {
+    approve_made(state, id, now_ms, Class::Mcp, install)
 }
 
 /// The person approves service `id` (S-69), as `approve_skill`.
@@ -332,10 +361,10 @@ fn approve_made(
         &p.what,
         false,
         "approved",
-        if class == Class::Service {
-            "services/approved"
-        } else {
-            "skills/approved"
+        match class {
+            Class::Service => "services/approved",
+            Class::Mcp => "mcp/approved",
+            _ => "skills/approved",
         },
         None,
     ) {
@@ -404,6 +433,7 @@ pub fn shown(p: &Pending) -> &str {
     p.args
         .get("command")
         .or_else(|| p.args.get("path"))
+        .or_else(|| p.args.get("call"))
         .or_else(|| p.args.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -529,19 +559,20 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     claim(state, id).map_err(|_| format!("{id} was already answered"))?;
     p.state = State::Rejected;
     save(state, &p)?;
-    if matches!(p.class, Class::Memory | Class::Skill | Class::Service)
-        && let Err(e) = log_line(
-            state,
-            &p.run,
-            &p.session,
-            &p.tool,
-            &p.what,
-            false,
-            "rejected",
-            "host/rejected",
-            None,
-        )
-    {
+    if matches!(
+        p.class,
+        Class::Memory | Class::Skill | Class::Service | Class::Mcp
+    ) && let Err(e) = log_line(
+        state,
+        &p.run,
+        &p.session,
+        &p.tool,
+        &p.what,
+        false,
+        "rejected",
+        "host/rejected",
+        None,
+    ) {
         eprintln!("clio-toolhost: the action log lost a line: {e}");
     }
     Ok(p)
@@ -811,7 +842,7 @@ impl ToolHost {
                 "{id} changes one of your blocks: it is written when approved, not run"
             ));
         }
-        if matches!(p.class, Class::Skill | Class::Service) {
+        if matches!(p.class, Class::Skill | Class::Service | Class::Mcp) {
             return Err(format!(
                 "{id} is a {}: it is registered by `clio approve`, not run",
                 p.class
@@ -824,6 +855,33 @@ impl ToolHost {
             return Err(format!(
                 "{id} changed after it was set aside: it does not run"
             ));
+        }
+        // An MCP call: the exact server, tool and arguments shown, through the session's client.
+        if p.tool == "mcp_call" {
+            claim(state, id).map_err(|_| format!("{id} already ran"))?;
+            let (ok, text) = self.mcp_approved(&p.args).inspect_err(|_| {
+                let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
+            })?;
+            let text = self.clean(&text);
+            if let Err(e) = log_line(
+                state,
+                &p.run,
+                &p.session,
+                "mcp_call",
+                &p.what,
+                false,
+                if ok { "approved" } else { "failed" },
+                "host/approved",
+                None,
+            ) {
+                eprintln!("clio-toolhost: the action log lost a line: {e}");
+            }
+            p.state = State::Done {
+                exit_code: Some(i64::from(!ok)),
+                output_tail: tail(&text),
+            };
+            save(state, &p)?;
+            return Ok(p);
         }
         if p.tool == "exec" {
             self.exec_available()

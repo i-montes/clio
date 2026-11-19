@@ -1083,3 +1083,87 @@ fn a_service_that_reads_nothing_in_the_home_says_so() {
         "{rows:?}"
     );
 }
+
+// S-70: an MCP server's Approval box shows the package and version, npm's facts (publisher,
+// maintainers, integrity, dependencies), the hosts, each secret with the host it is bound to and
+// every host it can reach, the limits, that it is someone else's code holding those credentials,
+// and that its tools are not known yet; it keeps the approval timing: nothing answers it before
+// the quiet second and before its end was shown, and then `y` and Enter approve it.
+#[test]
+fn an_mcp_server_box_shows_what_it_grants_and_is_approved_only_after_its_end() {
+    let b = super::tests_gallery::mcp_ask();
+    let mut a = chat();
+    a.host = true;
+    let (mut a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "m1a2".into(),
+            "«mcp» install".into(),
+            Some(b),
+        )]))],
+    );
+    let (n, c) = feed(
+        a,
+        vec![ch('y'), key(KeyCode::Enter), Input::Paste("y\n".into())],
+    );
+    assert!(c.is_empty(), "{c:?}");
+    a = n;
+    let mut seen = String::new();
+    let mut t = 2_000;
+    for _ in 0..60 {
+        seen.push_str(&box_rows(&screen_text(&a, 80, 24)).join("\n"));
+        seen.push('\n');
+        if a.confirm
+            .as_ref()
+            .unwrap()
+            .block
+            .as_ref()
+            .unwrap()
+            .seen_end
+            .get()
+        {
+            break;
+        }
+        let (n, c) = feed(
+            a,
+            vec![
+                Input::Tick(t),
+                ch('y'),
+                key(KeyCode::Enter),
+                key(KeyCode::Down),
+            ],
+        );
+        assert!(c.is_empty(), "{c:?}");
+        a = n;
+        assert!(!a.confirm.as_ref().unwrap().armed);
+        t += 2_000;
+    }
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "Clio wants to install the MCP server «github».",
+        "package: @example/github-mcp-server@1.4.2 (npm)",
+        "publisher: example-bot · maintainers: example-bot, jdoe",
+        "integrity: sha512-",
+        "7 dependencies",
+        "hosts: api.github.com",
+        "secret gh-token as $GITHUB_TOKEN, bound to mcp:api.github.com; it can reach api.github.com",
+        "limits: 50% of a processor, 1024 MB, 60 s a call",
+        "This is someone else's code: it will hold these credentials and can send them to the hosts above.",
+        "Its tools are not known yet",
+        "--- mcp.json ---",
+        "yes, download it and list its tools",
+    ] {
+        assert!(words.contains(want), "{want}\n{seen}");
+    }
+    let (_, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "m1a2".into(),
+            yes: true
+        }]
+    );
+}

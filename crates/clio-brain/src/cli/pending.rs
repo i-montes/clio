@@ -33,6 +33,12 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
+    if let Some((name, description, manifest, _)) = pending::mcp_of(p) {
+        let at = serde_json::from_str::<clio_toolhost::mcp::Manifest>(manifest)
+            .map(|m| format!(" ({}@{})", m.package, m.version))
+            .unwrap_or_default();
+        return format!("install the MCP server «{name}»{at}: {description}");
+    }
     if let Some((name, description, ..)) = pending::service_of(p) {
         return format!("register the service «{name}»: {description}");
     }
@@ -188,6 +194,12 @@ fn host_for(dirs: &Dirs, run: &str) -> Res<ToolHost> {
         cfg.jail = JailMode::Off;
     }
     cfg.scrubber = Some(super::debug::scrubber(dirs));
+    // An MCP call set aside runs through the person's own servers' port (S-70).
+    if dirs.runtime.is_some()
+        && let Ok(port) = super::mcp_servers::Port::new(dirs.clone(), None)
+    {
+        cfg.mcp = Some(std::sync::Arc::new(port));
+    }
     cfg.host = Some(HostCfg {
         home: dirs.home.clone(),
         state: state(dirs),
@@ -225,7 +237,13 @@ pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     // Before the toolhost is built (folders, the launcher's self-test): one that does not wait
     // stops here.
     let p = pending::check(&state(dirs), id, now_ms())?;
-    let done = if pending::skill_of(&p).is_some() {
+    let done = if pending::mcp_of(&p).is_some() {
+        // Downloaded, checked, probed and registered off only here, by the person's own `clio`
+        // (S-70): never from the jail, never on the model's say-so.
+        pending::approve_mcp(&state(dirs), id, now_ms(), |p| {
+            super::mcp_servers::Port::new(dirs.clone(), None)?.install(p)
+        })?
+    } else if pending::skill_of(&p).is_some() {
         // Registered here, by the person's own `clio`: never from the jail (S-68).
         pending::approve_skill(&state(dirs), id, now_ms(), |p| register_skill(dirs, p))?
     } else if pending::service_of(&p).is_some() {
@@ -322,7 +340,14 @@ fn approve_cmd_with(
     if let Some(text) = block_text(dirs, &p) {
         println!("{id}:\n{text}\n");
     }
-    let question = if pending::service_of(&p).is_some() {
+    if let Some(rows) = super::mcp_servers::proposal_rows(&p) {
+        println!("{id}:\n  {}\n", rows.join("\n  "));
+    }
+    let question = if pending::mcp_of(&p).is_some() {
+        Some(
+            "download this package, list its tools (no network, no secrets) and keep it off until you confirm them?",
+        )
+    } else if pending::service_of(&p).is_some() {
         Some("register this service exactly as shown above? it then runs on its schedule")
     } else {
         pending::skill_of(&p)
@@ -346,6 +371,14 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     let p = reject(dirs, id)?;
     if let Some((name, ..)) = pending::secret_of(&p) {
         println!("declined {}: {name} is not stored", p.id);
+        return Ok(());
+    }
+    if let Some((name, ..)) = pending::mcp_of(&p) {
+        println!(
+            "rejected {}: the MCP server «{}» is not installed",
+            p.id,
+            sanitize::line(name)
+        );
         return Ok(());
     }
     if let Some((name, ..)) = pending::service_of(&p) {

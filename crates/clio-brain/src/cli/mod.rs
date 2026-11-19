@@ -13,6 +13,7 @@ pub mod home;
 pub mod jail;
 pub mod jev;
 pub mod mcp;
+pub mod mcp_servers;
 pub mod memory;
 pub mod pending;
 pub mod pi;

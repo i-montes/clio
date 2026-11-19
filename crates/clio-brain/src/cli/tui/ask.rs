@@ -248,6 +248,9 @@ pub struct SkillAsk {
     /// secrets and every host each can reach, reads, writes, limits), the review's verdict and
     /// its notes; `None` for a skill.
     pub service: Option<Vec<String>>,
+    /// An MCP server (S-70): the package, npm's facts about it, hosts, secrets and every host
+    /// each can reach, reads, writes, limits, and that it is someone else's code; `None` else.
+    pub mcp: Option<Vec<String>>,
 }
 
 /// A service's rows for its box, from the stored item: `None` if its manifest does not read.
@@ -328,8 +331,10 @@ impl BlockAsk {
     pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
         let service = clio_toolhost::pending::service_of(p);
-        if let Some((name, description, md, files)) =
-            clio_toolhost::pending::skill_of(p).or(service.clone())
+        let mcp = clio_toolhost::pending::mcp_of(p);
+        if let Some((name, description, md, files)) = clio_toolhost::pending::skill_of(p)
+            .or(service.clone())
+            .or(mcp.clone())
         {
             return Some(Self {
                 name: clean(name),
@@ -359,6 +364,16 @@ impl BlockAsk {
                         ),
                         None => None,
                     },
+                    mcp: match mcp {
+                        // The first row repeats the name and the description.
+                        Some(_) => Some(
+                            crate::cli::mcp_servers::proposal_rows(p)?
+                                .into_iter()
+                                .skip(1)
+                                .collect(),
+                        ),
+                        None => None,
+                    },
                 }),
             });
         }
@@ -379,7 +394,9 @@ impl BlockAsk {
 
     /// What `y` does, for the keys under the box.
     pub fn yes(&self) -> &'static str {
-        if self.skill.is_some() {
+        if self.skill.as_ref().is_some_and(|s| s.mcp.is_some()) {
+            " yes, download it and list its tools"
+        } else if self.skill.is_some() {
             " yes, register it"
         } else {
             " yes, write it"
@@ -391,6 +408,8 @@ impl BlockAsk {
     fn skill_parts(&self, s: &SkillAsk) -> Vec<(Part, String)> {
         let kind = if s.service.is_some() {
             "service"
+        } else if s.mcp.is_some() {
+            "MCP server"
         } else {
             "skill"
         };
@@ -398,7 +417,12 @@ impl BlockAsk {
             (
                 Part::Head,
                 format!(
-                    "Clio wants to register {} «{}».",
+                    "Clio wants to {} {} «{}».",
+                    if s.mcp.is_some() {
+                        "install"
+                    } else {
+                        "register"
+                    },
                     if s.update {
                         format!("a new version of the {kind}")
                     } else {
@@ -414,8 +438,19 @@ impl BlockAsk {
         for row in s.service.iter().flatten() {
             out.push((Part::Label, row.clone()));
         }
+        // An MCP server: the package and npm's facts, what it is granted, and whose code it is.
+        if let Some(rows) = &s.mcp {
+            let n = rows.len();
+            for (i, row) in rows.iter().enumerate() {
+                // The last two say whose code it is and what approving does: in the warning color.
+                let part = if i + 2 >= n { Part::Warn } else { Part::Label };
+                out.push((part, row.clone()));
+            }
+        }
         let main = if s.service.is_some() {
             clio_toolhost::services::MANIFEST
+        } else if s.mcp.is_some() {
+            clio_toolhost::mcp::MANIFEST
         } else {
             "SKILL.md"
         };

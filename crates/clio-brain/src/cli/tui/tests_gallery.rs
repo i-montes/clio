@@ -732,7 +732,188 @@ fn command_states() -> Vec<(&'static str, App)> {
     a.modal = Some(m);
     out.push(("/skills", a));
     services_states(&mut out);
+    mcp_states(&mut out);
     out
+}
+
+/// An MCP server proposed with `mcp_propose` (S-70), as the box gets it: GitHub's, with its host
+/// and a secret bound to it, and npm's facts.
+pub(super) fn mcp_ask() -> super::ask::BlockAsk {
+    let m = clio_toolhost::mcp::Manifest {
+        name: "github".into(),
+        description: "GitHub's issues and pull requests, for the person's repositories.".into(),
+        package: "@example/github-mcp-server".into(),
+        version: "1.4.2".into(),
+        network: vec!["api.github.com".into()],
+        secrets: vec![clio_toolhost::services::SecretUse {
+            name: "gh-token".into(),
+            env: "GITHUB_TOKEN".into(),
+            host: "api.github.com".into(),
+        }],
+        reads: vec![],
+        writes: vec![],
+        limits: clio_toolhost::mcp::DEFAULT_LIMITS,
+    };
+    let md = clio_toolhost::mcp::compose(&m);
+    let p = clio_toolhost::pending::Pending {
+        id: "m1a2b3c4".into(),
+        class: clio_toolhost::ask::Class::Mcp,
+        tool: "mcp_propose".into(),
+        args: serde_json::json!({"name": m.name, "description": m.description, "skill_md": md,
+            "files": [], "update": false, "sha256": clio_toolhost::skills::digest(&md, &[]),
+            "npm": {"publisher": "example-bot", "maintainers": ["example-bot", "jdoe"],
+                "more_maintainers": 0, "integrity": "sha512-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+                "dependencies": 7, "license": "MIT", "description": "GitHub's MCP server",
+                "repository": "git+https://github.com/example/github-mcp-server.git"}}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        ask: true,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: Some("the person asked for GitHub's tools".into()),
+    };
+    super::ask::BlockAsk::new(&p, false).unwrap()
+}
+
+/// MCP servers (S-70): the approval box of a server with a host and a secret, `/mcp` with one
+/// on, one waiting for its tools to be confirmed and one off after its files changed, the
+/// confirmation of a tool list, and an `ask` call set aside.
+fn mcp_states(out: &mut Vec<(&'static str, App)>) {
+    let mut a = conversation(true);
+    approve_block(&mut a, mcp_ask());
+    let c = a.confirm.as_mut().unwrap();
+    c.id = "m1a2b3c4".into();
+    c.workspace =
+        "«mcp · the person asked for GitHub's tools» install the MCP server «github»".into();
+    out.push(("MCP server waits for approval, with a host and a secret", a));
+    // `/mcp` from a real folder.
+    let t = tempfile::tempdir().unwrap();
+    let d = crate::cli::home::Dirs {
+        config: t.path().join("config"),
+        data: t.path().join("data"),
+        runs: t.path().join("data/runs"),
+        runtime: None,
+        home: t.path().join("home"),
+    };
+    let root = crate::cli::mcp_servers::root(&d);
+    let now = crate::cli::now_ms();
+    let tool = |name: &str, d: &str, ro: bool, flagged: bool| clio_toolhost::mcp::Tool {
+        name: name.into(),
+        description: d.into(),
+        schema: serde_json::json!({"type": "object"}),
+        read_only: ro,
+        mode: if ro && !flagged {
+            clio_toolhost::mcp::Mode::Free
+        } else {
+            clio_toolhost::mcp::Mode::Ask
+        },
+        flagged,
+    };
+    for (name, package, enabled, off, confirmed, tools) in [
+        (
+            "time",
+            "@example/server-time",
+            true,
+            None,
+            true,
+            vec![
+                tool(
+                    "get_current_time",
+                    "The time now in a time zone.",
+                    true,
+                    false,
+                ),
+                tool("convert_time", "Converts a time between zones.", true, true),
+            ],
+        ),
+        (
+            "github",
+            "@example/github-mcp-server",
+            false,
+            Some(crate::cli::skills::WAITING_TOOLS),
+            false,
+            vec![
+                tool("search_issues", "Searches issues.", true, false),
+                tool("create_issue", "Opens an issue.", false, false),
+            ],
+        ),
+        (
+            "notes",
+            "@example/notes-mcp",
+            false,
+            Some(crate::cli::mcp_servers::OFF_CHANGED),
+            true,
+            vec![tool("read_note", "Reads a note.", true, false)],
+        ),
+    ] {
+        let m = clio_toolhost::mcp::Manifest {
+            name: name.into(),
+            description: format!("The {name} server, for the gallery."),
+            package: package.into(),
+            version: "1.0.0".into(),
+            network: if name == "github" {
+                vec!["api.github.com".into()]
+            } else {
+                vec![]
+            },
+            secrets: vec![],
+            reads: vec![],
+            writes: vec![],
+            limits: clio_toolhost::mcp::DEFAULT_LIMITS,
+        };
+        let v = root.join("versions").join(name).join("1");
+        std::fs::create_dir_all(&v).unwrap();
+        std::fs::write(
+            v.join(clio_toolhost::mcp::MANIFEST),
+            clio_toolhost::mcp::compose(&m),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("records")).unwrap();
+        std::fs::write(root.join("records").join(format!("{name}.json")), serde_json::json!({"name": name, "description": m.description, "enabled": enabled, "off": off, "current": 1, "versions": [{"n": 1, "sha256": "x", "at_ms": now - 86_400_000, "by": "person", "verdict": "approved"}]}).to_string()).unwrap();
+        let st = clio_toolhost::mcp::State {
+            name: name.into(),
+            package: package.into(),
+            version: "1.0.0".into(),
+            entry: "node_modules/x/index.js".into(),
+            tree: "t".into(),
+            integrity: "sha512-x".into(),
+            confirmed,
+            tools,
+        };
+        let _l = clio_toolhost::mcp::lock_root(&root).unwrap();
+        clio_toolhost::mcp::save_state(&root, &st).unwrap();
+    }
+    clio_toolhost::mcp::log_event(
+        &root,
+        "notes",
+        "start",
+        "refused",
+        "its installed files changed",
+    );
+    let mut a = conversation(true);
+    a.modal = Some(crate::cli::mcp_servers::chat_command(&d, "").unwrap());
+    out.push((
+        "/mcp: one on, one waiting for its tools, one off after its files changed",
+        a,
+    ));
+    let mut a = conversation(true);
+    a.confirm = Some(crate::cli::mcp_servers::confirm_ask(&d, "github").unwrap());
+    out.push(("/mcp confirm: the tools to read before y", a));
+    let mut a = conversation(true);
+    let mut c = Confirm::new(
+        Action::Approve,
+        "k9l8m7n6".into(),
+        0,
+        "«send · this tool of the server may change something» MCP server «github», tool «create_issue», arguments {\"repo\":\"me/site\",\"title\":\"The contact form is broken\"}".into(),
+    );
+    c.session = "sid".into();
+    a.confirm = Some(c);
+    a.now_ms = 300_000;
+    a.last_key_ms = Some(0);
+    out.push(("an MCP tool that asks, set aside", a));
 }
 
 /// Services (S-69): the Approval box (short; long and scrolled; with hosts, secrets and write

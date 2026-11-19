@@ -48,9 +48,22 @@ const SERVICE_CREATOR_FILES: [(&str, &str); 2] = [
     ),
 ];
 
+/// The third (S-70): how to choose, propose and use an MCP server.
+pub const MCP_INSTALLER: &str = "mcp-installer";
+const MCP_INSTALLER_FILES: [(&str, &str); 2] = [
+    (
+        "SKILL.md",
+        include_str!("../../../../skills/mcp-installer/SKILL.md"),
+    ),
+    (
+        "scripts/check-package.sh",
+        include_str!("../../../../skills/mcp-installer/scripts/check-package.sh"),
+    ),
+];
+
 /// A skill Clio ships: a change to it always waits for the person.
 pub fn is_shipped(name: &str) -> bool {
-    name == BUNDLED || name == SERVICE_CREATOR
+    name == BUNDLED || name == SERVICE_CREATOR || name == MCP_INSTALLER
 }
 
 /// What the folder holds: skills (Pi loads `live/`) or services (stage 3: they run from
@@ -59,6 +72,9 @@ pub fn is_shipped(name: &str) -> bool {
 pub enum Kind {
     Skill,
     Service,
+    /// Stage 4 (S-70): an MCP server's approved manifests. A new one, or a new version, is
+    /// registered off until the person confirms its tools.
+    Mcp,
 }
 
 impl Kind {
@@ -67,6 +83,7 @@ impl Kind {
         match self {
             Self::Skill => "SKILL.md",
             Self::Service => clio_toolhost::services::MANIFEST,
+            Self::Mcp => clio_toolhost::mcp::MANIFEST,
         }
     }
 
@@ -74,6 +91,7 @@ impl Kind {
         match self {
             Self::Skill => "skill",
             Self::Service => "service",
+            Self::Mcp => "MCP server",
         }
     }
 
@@ -81,6 +99,7 @@ impl Kind {
         match self {
             Self::Skill => th::check_stored(name, main, files),
             Self::Service => clio_toolhost::services::check_stored(name, main, files).map(drop),
+            Self::Mcp => clio_toolhost::mcp::check_stored(name, main, files).map(drop),
         }
     }
 
@@ -90,6 +109,12 @@ impl Kind {
             Self::Service => {
                 let t = fs::read_to_string(dir.join(self.main())).ok()?;
                 serde_json::from_str::<clio_toolhost::services::Manifest>(&t)
+                    .ok()
+                    .map(|m| m.description)
+            }
+            Self::Mcp => {
+                let t = fs::read_to_string(dir.join(self.main())).ok()?;
+                serde_json::from_str::<clio_toolhost::mcp::Manifest>(&t)
                     .ok()
                     .map(|m| m.description)
             }
@@ -266,6 +291,8 @@ fn shipped(files: &[(&str, &str)]) -> (String, Vec<SkillFile>) {
 fn shipped_files(name: &str) -> &'static [(&'static str, &'static str)] {
     if name == SERVICE_CREATOR {
         &SERVICE_CREATOR_FILES
+    } else if name == MCP_INSTALLER {
+        &MCP_INSTALLER_FILES
     } else {
         &BUNDLED_FILES
     }
@@ -297,7 +324,7 @@ pub fn ensure(d: &Dirs) -> Res<()> {
 
 fn ensure_in(root: &Path) -> Res<()> {
     let _l = lock(root)?;
-    for name in [BUNDLED, SERVICE_CREATOR] {
+    for name in [BUNDLED, SERVICE_CREATOR, MCP_INSTALLER] {
         let all = shipped_files(name);
         let Some(r) = record(root, name) else {
             if !was_removed(root, name) {
@@ -391,8 +418,13 @@ fn register_kind(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
     r.current = n;
     r.versions.push(version);
     r.failures = 0;
-    // A new version, reviewed, turns back on a skill that failed; not one the person turned off.
-    if r.off.as_deref() != Some(OFF_BY_PERSON) {
+    // An MCP server, new or at a new version, is off until the person confirms its tools.
+    if kind == Kind::Mcp {
+        r.enabled = false;
+        r.off = Some(WAITING_TOOLS.into());
+    } else if r.off.as_deref() != Some(OFF_BY_PERSON) {
+        // A new version, reviewed, turns back on a skill that failed; not one the person turned
+        // off.
         r.enabled = true;
         r.off = None;
     }
@@ -406,7 +438,7 @@ fn register_kind(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
     }
     if let Err(e) = save(root, &r) {
         let back = match &old {
-            _ if kind == Kind::Service => Ok(()),
+            _ if kind != Kind::Skill => Ok(()),
             Some(o) if o.enabled => install(root, s.name, o.current),
             _ => uninstall(root, s.name),
         };
@@ -553,6 +585,8 @@ fn uninstall(root: &Path, name: &str) -> Res<()> {
 }
 
 pub const OFF_BY_PERSON: &str = "turned off by the person";
+/// Why an MCP server is off after it was installed (S-70).
+pub const WAITING_TOOLS: &str = "waiting: confirm its tools";
 
 fn known(root: &Path, name: &str) -> Res<Record> {
     known_kind(root, Kind::Skill, name)
@@ -694,12 +728,26 @@ pub(crate) fn remove_in(root: &Path, kind: Kind, name: &str) -> Res<String> {
     }
     let rec = record_path(root, name);
     fs::rename(&rec, to.join("record.json")).map_err(|e| io_err(&rec, &e))?;
-    // A service's state and runs go with it: a later one of the same name starts empty.
-    if kind == Kind::Service {
-        for (from, keep) in [
+    // A service's state and runs go with it (an MCP server's installed files, state, data and
+    // log): a later one of the same name starts empty.
+    let goes = match kind {
+        Kind::Skill => vec![],
+        Kind::Service => vec![
             (root.join("state").join(name), "state"),
             (root.join("runs").join(format!("{name}.json")), "runs.json"),
-        ] {
+        ],
+        Kind::Mcp => vec![
+            (root.join("servers").join(name), "servers"),
+            (
+                root.join("state").join(format!("{name}.json")),
+                "state.json",
+            ),
+            (root.join("data").join(name), "data"),
+            (root.join("logs").join(format!("{name}.json")), "log.json"),
+        ],
+    };
+    {
+        for (from, keep) in goes {
             if from.exists() {
                 fs::rename(&from, to.join(keep)).map_err(|e| io_err(&from, &e))?;
             }
@@ -1194,6 +1242,34 @@ mod tests {
 
     // S-69: the service-creator skill ships with the binary beside skill-creator, installed by
     // `ensure` like it, and passes its own check from its folder.
+    // S-70: the mcp-installer skill ships beside them, installed by `ensure`, and passes its own
+    // check from its folder.
+    #[test]
+    fn the_mcp_installer_ships_and_passes_its_own_check() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        ensure_in(&root).unwrap();
+        let r = record(&root, MCP_INSTALLER).unwrap();
+        assert!(r.enabled && r.versions[0].by == "bundled", "{r:?}");
+        assert!(is_shipped(MCP_INSTALLER));
+        let live = root.join("live").join(MCP_INSTALLER);
+        let md = fs::read_to_string(live.join("SKILL.md")).unwrap();
+        let cmd = md
+            .split("## How to verify")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("check-package.sh"))
+            .unwrap()
+            .trim();
+        let out = std::process::Command::new("bash")
+            .args(["-c", cmd])
+            .current_dir(&live)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {out:?}");
+    }
+
     #[test]
     fn the_service_creator_ships_and_passes_its_own_check() {
         let t = tempfile::tempdir().unwrap();

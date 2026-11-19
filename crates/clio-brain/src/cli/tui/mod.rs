@@ -1315,6 +1315,14 @@ impl Ctx {
                 move |d, _| super::services::chat_command(d, &args),
                 |r| Bg::Modal(r.and_then(|x| x)),
             ),
+            Cmd::Mcp(args) => self.spawn(
+                move |d, _| super::mcp_servers::chat_command(d, &args),
+                |r| Bg::Modal(r.and_then(|x| x)),
+            ),
+            Cmd::McpConfirm(name) => self.spawn(
+                move |d, _| super::mcp_servers::confirm_ask(d, &name),
+                |r| Bg::Confirm(r.and_then(|x| x)),
+            ),
             Cmd::ReviewStop => {
                 if let Ok(c) = self.review_cancel.lock() {
                     c.cancel();

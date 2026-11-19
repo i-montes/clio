@@ -200,6 +200,10 @@ pub enum Cmd {
     Skills(String),
     /// `/services [...]`: the person's (a removal was confirmed already).
     Services(String),
+    /// `/mcp [...]`: the person's (a removal or a confirmation was confirmed already).
+    Mcp(String),
+    /// `/mcp confirm <name>`: its tools are read, then asked about (`Action::ConfirmMcp`).
+    McpConfirm(String),
     /// `/review stop`.
     ReviewStop,
     /// The automatic turn that gives a review's findings to the model (as data), and the
@@ -286,6 +290,8 @@ pub enum Bg {
     Pending(Result<Waiting, String>),
     /// Lines to show in a box with that title.
     Modal(Result<Modal, String>),
+    /// A question that needs a `y`, built from what was read (`/mcp confirm`).
+    Confirm(Result<Confirm, String>),
     /// What the turn about to settle changed (it changed something).
     TurnWork(Box<crate::cli::chat::TurnWork>),
     /// Skills, after a turn: the drafts to review (id, name) and notes for the person.
@@ -381,6 +387,11 @@ pub enum Action {
     RemoveSkill,
     /// `/services remove`: `Confirm::id` is the service's name.
     RemoveService,
+    /// `/mcp remove`: `Confirm::id` is the server's name.
+    RemoveMcp,
+    /// `/mcp confirm`: `Confirm::id` is the server's name, `Confirm::names` its tools as it
+    /// described them. `y` confirms them and turns it on.
+    ConfirmMcp,
 }
 
 /// A question that needs a `y`.
@@ -925,6 +936,8 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::UndoSession => vec![Cmd::UndoSession { id: c.id }],
         Action::RemoveSkill => vec![Cmd::Skills(format!("remove {} --yes", c.id))],
         Action::RemoveService => vec![Cmd::Services(format!("remove {} --yes", c.id))],
+        Action::RemoveMcp => vec![Cmd::Mcp(format!("remove {} --yes", c.id))],
+        Action::ConfirmMcp => vec![Cmd::Mcp(format!("confirm {} --yes", c.id))],
         Action::Approve => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -1458,6 +1471,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
+        Bg::Confirm(r) => {
+            match r {
+                Ok(c) => app.confirm = Some(c),
+                Err(e) => app.notice = Some(e),
+            }
+            vec![]
+        }
         Bg::SessionUndone(r) => {
             match r {
                 Ok(lines) => {
@@ -1914,6 +1934,14 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         ),
         Action::RemoveService => format!(
             "Remove the service «{}»? It stops running; its versions are kept.",
+            clean(&c.id)
+        ),
+        Action::RemoveMcp => format!(
+            "Remove the MCP server «{}»? Its files, data and record go to removed/.",
+            clean(&c.id)
+        ),
+        Action::ConfirmMcp => format!(
+            "Confirm the tools of the MCP server «{}» and turn it on? These descriptions are its own text:",
             clean(&c.id)
         ),
     };

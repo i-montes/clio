@@ -46,22 +46,29 @@ pub const GUARD_TOOLS: [&str; 24] = [
     "skill_write",
     "skill_report",
 ];
-/// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools
-/// and the services' (S-69).
-pub const HOST_GUARD_TOOLS: [&str; 4] =
-    ["job_output", "job_stop", "service_write", "service_status"];
+/// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools,
+/// the services' (S-69) and the MCP servers' (S-70).
+pub const HOST_GUARD_TOOLS: [&str; 7] = [
+    "job_output",
+    "job_stop",
+    "service_write",
+    "service_status",
+    "mcp_propose",
+    "mcp_tools",
+    "mcp_call",
+];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@24";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@24.md");
+pub const PROMPT_NAME: &str = "clio-agent@25";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@25.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@8";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@8.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@9";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@9.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -230,6 +237,17 @@ pub struct ToolhostOpts<'a> {
     /// Host mode: a folder inside Clio's data that its commands see read-only (`clio toolhost
     /// --show`): a skill draft's stage, for its reviewer only.
     pub show: Option<&'a Path>,
+    /// Host mode, a chat: the MCP servers (S-70), `clio toolhost --mcp-*`.
+    pub mcp: Option<McpOpts<'a>>,
+}
+
+/// The `--mcp-*` options of `clio toolhost`: Clio's folders, and the Node Pi runs with.
+#[derive(Clone, Copy)]
+pub struct McpOpts<'a> {
+    pub config: &'a Path,
+    pub data: &'a Path,
+    pub runtime: &'a Path,
+    pub node: &'a Path,
 }
 
 /// The `--host-*` options of `clio toolhost`.
@@ -282,6 +300,7 @@ impl Toolhost {
             review,
             skills,
             show,
+            mcp,
         } = opts;
         // Units a `clio` killed before it could stop them do not run forever as the person.
         // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
@@ -357,6 +376,16 @@ impl Toolhost {
         }
         if let Some(s) = show {
             cmd.arg("--show").arg(s);
+        }
+        if let Some(m) = mcp {
+            cmd.arg("--mcp-config")
+                .arg(m.config)
+                .arg("--mcp-data")
+                .arg(m.data)
+                .arg("--mcp-runtime")
+                .arg(m.runtime)
+                .arg("--mcp-node")
+                .arg(m.node);
         }
         let mut child = cmd
             .arg("--socket-dir")
@@ -493,14 +522,42 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 24\n"));
-        assert!(HOST_PROMPT.starts_with("version: 8\n"));
+        assert!(PROMPT.starts_with("version: 25\n"));
+        assert!(HOST_PROMPT.starts_with("version: 9\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
-        // S-69: the services' tools are the host's only.
-        for t in ["service_write", "service_status"] {
+        // S-69: the services' tools are the host's only; S-70: the MCP servers' too.
+        for t in [
+            "service_write",
+            "service_status",
+            "mcp_propose",
+            "mcp_tools",
+            "mcp_call",
+        ] {
             assert!(HOST_PROMPT.contains(&format!("`{t}`")) && !PROMPT.contains(&format!("`{t}`")));
+        }
+    }
+
+    // S-70: the new prompts are the old ones plus one MCP servers section, nothing else changed.
+    #[test]
+    fn the_new_prompts_only_add_an_mcp_section() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was) in [
+            (PROMPT, old("clio-agent@24.md")),
+            (HOST_PROMPT, old("clio-host@8.md")),
+        ] {
+            let start = new.find("\nMCP servers\n").expect("an MCP servers section");
+            let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
+            let without = format!("{}{}", &new[..start + 1], &new[end + 1..]);
+            let first = |t: &str| t.split_once('\n').map(|(_, r)| r.to_owned()).unwrap();
+            assert_eq!(first(&without), first(&was));
         }
     }
 
@@ -515,8 +572,8 @@ mod tests {
             .unwrap()
         };
         for (new, was) in [
-            (PROMPT, old("clio-agent@23.md")),
-            (HOST_PROMPT, old("clio-host@7.md")),
+            (old("clio-agent@24.md"), old("clio-agent@23.md")),
+            (old("clio-host@8.md"), old("clio-host@7.md")),
         ] {
             let start = new.find("\nServices\n").expect("a Services section");
             let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;

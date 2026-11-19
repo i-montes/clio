@@ -373,6 +373,7 @@ fn started(
             review: true,
             skills: None,
             show,
+            mcp: None,
         },
     )
     .map_err(fail)?;

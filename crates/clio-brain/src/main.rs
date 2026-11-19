@@ -33,6 +33,9 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
                                               Clio's services (programs run on a schedule): list them, look at one,
                                               turn one off or on, run one now; enable/disable the timer that runs them
+  clio mcp [show|on|off|confirm|remove|logs <name> | allow|ask <name> <tool>] [--yes]
+                                              MCP servers (npm packages the model proposed and you approved):
+                                              list them, confirm their tools, turn one on or off, set a tool free or ask
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
                                               picks the model (opencode, your Claude subscription or the Anthropic API) and keeps its key in the vault
@@ -129,6 +132,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "actions"
             | "skills"
             | "services"
+            | "mcp"
             | "vault"
             | "connect"
             | "doctor"
@@ -157,7 +161,19 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             }
             Ok(std::sync::Arc::new(port) as std::sync::Arc<dyn clio_toolhost::MemoryPort>)
         };
-        return clio_toolhost::cli::run_with(args.into_raw(), &memory).map(|()| 0);
+        // The MCP servers (S-70): started by the person's `clio`, in a service's jail.
+        let mcp = |m: clio_toolhost::cli::McpDirs| {
+            let dirs = Dirs {
+                runs: m.data.join("runs"),
+                config: m.config,
+                data: m.data,
+                runtime: Some(m.runtime),
+                home: m.home,
+            };
+            cli::mcp_servers::Port::new(dirs, m.node)
+                .map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn clio_toolhost::mcp::McpPort>)
+        };
+        return clio_toolhost::cli::run_with(args.into_raw(), &memory, &mcp).map(|()| 0);
     }
     // Internal: inside Pi's jail, the forwarder to the egress proxy that starts Pi (ADR 0009).
     if cmd == "pi-net" {
@@ -265,6 +281,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 rest.push("--yes".into());
             }
             cli::services::cmd(&dirs, &rest)?;
+        }
+        "mcp" => {
+            let yes = args.flag("--yes");
+            let mut rest = args.rest()?;
+            if yes {
+                rest.push("--yes".into());
+            }
+            cli::mcp_servers::cmd(&dirs, &rest)?;
         }
         "vault" => vault::run(&dirs, args.into_raw())?,
         "connect" => return connect::run(&dirs, args.into_raw()),

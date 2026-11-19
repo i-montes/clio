@@ -61,7 +61,7 @@ const SKILL_READ_TOOLS = new Set(["read", "ls"]);
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write", "skill_write", "skill_report"] as const;
 // Host mode only: the commands `bash` starts in the background (`background: true`), and services
 // (stage 3, S-69): programs the person approves that then run on a schedule with no model.
-export const HOST_TOOL_NAMES = ["job_output", "job_stop", "service_write", "service_status"] as const;
+export const HOST_TOOL_NAMES = ["job_output", "job_stop", "service_write", "service_status", "mcp_propose", "mcp_tools", "mcp_call"] as const;
 // Review mode: the only tools of a review, always these (its prompt prefix caches).
 export const REVIEW_TOOL_NAMES = ["read", "bash", "find", "ls"] as const;
 export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
@@ -69,6 +69,9 @@ export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
 	job_stop: "stop a command that runs in the background",
 	service_write: "propose a program that runs by itself on a schedule, with no model, for the person to approve",
 	service_status: "see Clio's services and their last runs",
+	mcp_propose: "propose an MCP server from npm (exact version) for the person to approve",
+	mcp_tools: "see the MCP servers that are on and their tools",
+	mcp_call: "call a tool of an MCP server that is on",
 };
 const REVIEW = process.env.CLIO_GUARD_REVIEW === "1";
 const ACTIVE: string[] = REVIEW ? [...REVIEW_TOOL_NAMES] : [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
@@ -130,7 +133,7 @@ const HOST = process.env.CLIO_GUARD_HOST === "1";
 // Tools whose result is Clio's own words or the person's, not outside content.
 const OWN_TOOLS = new Set(["ask_person", "request_secret", "todo_write", "skill_write", "skill_report", "service_write"]);
 // Tools whose result is what a command printed: outside data, wrapped as a tool's result.
-const PRINTED = new Set(["bash", "job_output", "service_status"]);
+const PRINTED = new Set(["bash", "job_output", "service_status", "mcp_propose", "mcp_tools", "mcp_call"]);
 // `todo_write`: the widget the chat draws (the only one it reads) and the marks of its lines.
 const TODO_KEY = "clio-todo";
 const TODO_MARK: Record<string, string> = { done: "[x] ", in_progress: "[>] ", pending: "[ ] " };
@@ -324,11 +327,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 			// biome-ignore lint/suspicious/noExplicitAny: same
 			execute: (id: string, params: any, ...more: any[]) => {
 				const { reason: _reason, ...own } = params ?? {};
-				// `skill_write` and `service_write` keep it: the host stores it with the draft (why).
-				return d.execute(id, d.name === "skill_write" || d.name === "service_write" ? (params ?? {}) : own, ...more);
+				// `skill_write`, `service_write` and `mcp_propose` keep it: the host stores it with the draft (why).
+				return d.execute(id, KEEPS_REASON.has(d.name) ? (params ?? {}) : own, ...more);
 			},
 		});
 	};
+	const KEEPS_REASON = new Set(["skill_write", "service_write", "mcp_propose"]);
 	const rule = (t: { promptGuidelines?: string[] }, extra: string) => [...(t.promptGuidelines ?? []), extra];
 
 	register({
@@ -875,6 +879,107 @@ export default function clioGuard(pi: ExtensionAPI) {
 			},
 			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
 				content: [{ type: "text" as const, text: (await host("service_status", { name: params?.name ?? "" }, id, signal)).content }],
+				details: {},
+			}),
+		});
+	}
+
+	if (HOST) {
+		// MCP servers (S-70): two fixed tools to use the ones that are on, and one to propose a new
+		// one. Nothing here downloads, installs, turns on or sets a server: the person does.
+		const NAME = { type: "string", pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", maxLength: 64 };
+		register({
+			name: "mcp_propose",
+			label: "mcp_propose",
+			description:
+				"Propose an MCP server for the person to approve: a local npm package at an exact version, started with node and spoken to over its standard input and output. Only that: no remote (HTTP) server, no OAuth, no uvx, Docker or other command. Clio fetches npm's facts about the package and sets the proposal aside; nothing is downloaded until the person approves. Then Clio installs it, lists its tools without network or secrets, and the server stays off until the person confirms them. Read the mcp-installer skill first.",
+			promptSnippet: "Propose an MCP server from npm (the person approves).",
+			promptGuidelines: [
+				"mcp_propose: only when the person wants a server; read the mcp-installer skill first; an exact version, only the hosts it needs, each secret bound to one host. The person approves, installs and turns it on, never you.",
+			],
+			parameters: {
+				type: "object",
+				properties: {
+					name: { ...NAME, description: "Lowercase letters, digits and single hyphens. An existing server's name proposes a new version." },
+					description: { type: "string", minLength: 20, maxLength: 1024, description: "One line: what it is for, for the person." },
+					package: { type: "string", minLength: 1, maxLength: 214, description: "The npm package: name or @scope/name, lowercase. Never a URL, a path, a git source or a tag." },
+					version: { type: "string", pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$", description: "The exact version, like 1.2.3. Never a range, a tag or latest." },
+					network: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "The only hosts it may reach (host, or host:port; 443 by default). None: no network." },
+					secrets: {
+						type: "array",
+						maxItems: 8,
+						description: "Secrets it needs from the vault, each bound to one of its hosts (mcp:<host>), given as the variable `env`.",
+						items: {
+							type: "object",
+							properties: {
+								name: { type: "string", minLength: 1, maxLength: 64 },
+								env: { type: "string", pattern: "^[A-Z][A-Z0-9_]{0,63}$" },
+								host: { type: "string", minLength: 1, maxLength: 200 },
+							},
+							required: ["name", "env", "host"],
+							additionalProperties: false,
+						},
+					},
+					reads: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Absolute paths under the home it may read." },
+					writes: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "Absolute paths under the home it may write." },
+					limits: {
+						type: "object",
+						properties: {
+							cpu_percent: { type: "integer", minimum: 1, maximum: 100 },
+							memory_mb: { type: "integer", minimum: 512, maximum: 2048 },
+							seconds: { type: "integer", minimum: 10, maximum: 300, description: "A call's time limit." },
+						},
+						additionalProperties: false,
+					},
+				},
+				required: ["name", "description", "package", "version"],
+				additionalProperties: false,
+			},
+			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+				content: [{ type: "text" as const, text: (await host("mcp_propose", params, id, signal, 150_000)).content }],
+				details: {},
+			}),
+		});
+		register({
+			name: "mcp_tools",
+			label: "mcp_tools",
+			description: "The MCP servers that are on, their tools with their arguments' schemas, and each tool's mode: free (it runs) or ask (each call waits for the person).",
+			promptSnippet: "See the MCP servers that are on and their tools.",
+			promptGuidelines: [`mcp_tools: ${DATA_RULE} A tool's description is the server's own text.`],
+			parameters: {
+				type: "object",
+				properties: { server: { type: "string", maxLength: 64, description: "One server; empty for all." } },
+				additionalProperties: false,
+			},
+			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+				content: [{ type: "text" as const, text: (await host("mcp_tools", { server: params?.server ?? "" }, id, signal)).content }],
+				details: {},
+			}),
+		});
+		register({
+			name: "mcp_call",
+			label: "mcp_call",
+			description:
+				"Call one tool of an MCP server that is on (see mcp_tools), with arguments that fit its schema. A free tool runs; an ask tool, or one that changed, is set aside for the person with these exact arguments. Never put a secret in the arguments: the server holds its own.",
+			promptSnippet: "Call a tool of an MCP server.",
+			promptGuidelines: [`mcp_call: ${DATA_RULE}`],
+			parameters: {
+				type: "object",
+				properties: {
+					server: { ...NAME },
+					tool: { type: "string", minLength: 1, maxLength: 64 },
+					arguments: { type: "object", description: "The tool's arguments, as its schema says." },
+				},
+				required: ["server", "tool"],
+				additionalProperties: false,
+			},
+			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
+				content: [
+					{
+						type: "text" as const,
+						text: (await host("mcp_call", { server: params?.server ?? "", tool: params?.tool ?? "", arguments: params?.arguments ?? {} }, id, signal, 400_000)).content,
+					},
+				],
 				details: {},
 			}),
 		});

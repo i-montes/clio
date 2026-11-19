@@ -28,6 +28,7 @@ pub mod cli;
 pub mod host;
 mod jobs;
 mod judge;
+pub mod mcp;
 mod memory;
 mod ops;
 pub mod pending;
@@ -198,6 +199,8 @@ pub struct Config {
     /// Host mode: more folders inside Clio's masked ones that commands see read-only, besides
     /// the skills' `live/` (a skill draft's stage, for its reviewer).
     pub shows: Vec<PathBuf>,
+    /// Host mode: the MCP servers (S-70), through the person's `clio`.
+    pub mcp: Option<Arc<dyn mcp::McpPort>>,
 }
 
 impl Config {
@@ -218,6 +221,7 @@ impl Config {
             review: false,
             skills: None,
             shows: Vec::new(),
+            mcp: None,
         }
     }
 }
@@ -271,6 +275,9 @@ pub struct ToolHost {
     work: PathBuf,
     skills: Option<PathBuf>,
     shows: Vec<PathBuf>,
+    mcp: Option<Arc<dyn mcp::McpPort>>,
+    /// The MCP servers this host started, each once (S-70).
+    mcp_pool: mcp::Pool,
 }
 
 /// The folders host-mode commands see read-only inside Clio's masked ones: the skills' `live/`
@@ -424,6 +431,10 @@ impl ToolHost {
         let mut sandbox = Sandbox::new(&root, &cfg.scratch).map_err(|x| e(&x))?;
         // A program that runs in the folder can edit files in place: snapshots must be copies.
         sandbox.set_copy_snapshots(true);
+        let pool = mcp::Pool::default();
+        if cfg.mcp.is_some() {
+            pool.reap_idle();
+        }
         Ok(Self {
             gateway,
             executor: Executor {
@@ -455,6 +466,8 @@ impl ToolHost {
             work: cfg.work,
             skills: cfg.skills,
             shows: cfg.shows,
+            mcp: cfg.mcp,
+            mcp_pool: pool,
         })
     }
 
@@ -490,6 +503,7 @@ impl ToolHost {
         }
         // Background commands too: none outlives the session.
         self.stop_jobs(until.saturating_duration_since(std::time::Instant::now()));
+        self.mcp_stop_all();
     }
 
     pub fn telemetry(&self) -> Telemetry {
@@ -713,6 +727,9 @@ impl ToolHost {
             "skill_report" => return self.skill_report(&req, &map),
             "service_write" => return self.service_write(&req, &map),
             "service_status" => return self.service_status(&req, &map),
+            "mcp_propose" => return self.mcp_propose(&req, &map),
+            "mcp_tools" => return self.mcp_tools(&req, &map),
+            "mcp_call" => return self.mcp_call(&req, &map),
             _ => {}
         }
         if map

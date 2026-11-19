@@ -36,6 +36,7 @@ pub enum Run {
     Review,
     Skills,
     Services,
+    Mcp,
     Copy,
     Memory,
     Doctor,
@@ -178,6 +179,14 @@ pub const COMMANDS: &[Command] = &[
         "Clio's services, run on a schedule: list them, look at one, turn one off, run one now",
         false,
         Run::Services,
+    ),
+    c(
+        "mcp",
+        &[],
+        "[show | on | off | confirm | remove | logs <name> | allow | ask <name> <tool>]",
+        "MCP servers you approved: list them, confirm their tools, turn one on or off",
+        false,
+        Run::Mcp,
     ),
     c(
         "copy",
@@ -619,6 +628,20 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             }
             _ => vec![Cmd::Services(args.to_owned())],
         },
+        Run::Mcp => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["remove", name] => {
+                app.confirm = Some(Confirm::new(
+                    Action::RemoveMcp,
+                    (*name).to_owned(),
+                    0,
+                    String::new(),
+                ));
+                vec![]
+            }
+            // The tools as the server described them are read from disk first, then asked about.
+            ["confirm", name] => vec![Cmd::McpConfirm((*name).to_owned())],
+            _ => vec![Cmd::Mcp(args.to_owned())],
+        },
         Run::Actions => vec![Cmd::LoadActions { run: id }],
         Run::Undo => {
             let mut c = Confirm::new(Action::UndoSession, id, 0, app.chat.workspace.clone());
@@ -955,6 +978,13 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
             if what.starts_with("«memory»") {
                 app.flash = Some(format!(
                     "{id} changes one of your blocks: answer it with `clio approve {id}` in a terminal"
+                ));
+                return vec![];
+            }
+            // An MCP server: its facts and grants are in its own box, or in `clio approve`.
+            if what.starts_with("«mcp") {
+                app.flash = Some(format!(
+                    "{id} installs an MCP server: answer it with `clio approve {id}` in a terminal"
                 ));
                 return vec![];
             }

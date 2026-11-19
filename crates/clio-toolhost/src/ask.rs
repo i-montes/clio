@@ -39,6 +39,10 @@ pub enum Class {
     /// Not an action: a service draft that passed its review (S-69). Every new service and every
     /// new version waits as this; approved, the person's `clio` registers it as shown; never run.
     Service,
+    /// Not an action: an MCP server the model proposed (S-70), with npm's facts about it. Every
+    /// new server and every new version waits as this; approved, the person's `clio` installs,
+    /// probes and registers it (off until its tools are confirmed); never run.
+    Mcp,
 }
 
 impl fmt::Display for Class {
@@ -52,6 +56,7 @@ impl fmt::Display for Class {
             Class::Memory => "memory",
             Class::Skill => "skill",
             Class::Service => "service",
+            Class::Mcp => "mcp",
         })
     }
 }
@@ -96,7 +101,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -1234,6 +1239,8 @@ mod tests {
             "clio services run backup",
             "clio services enable",
             "clio services on backup",
+            "clio mcp on time",
+            "clio mcp confirm time",
             "systemctl --user enable --now clio-services.timer",
             "systemctl --user start clio-services.service",
             "ln -s ~/.config/systemd/user/clio-services.timer ~/.config/systemd/user/timers.target.wants/",

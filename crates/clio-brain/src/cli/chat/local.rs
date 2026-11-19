@@ -37,7 +37,8 @@ use clio_brain::pi::level::{self, Assessor, run_assessed_with};
 use clio_brain::pi::preprompt::PrePrompt;
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
-    GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
+    GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
+    guard_env,
 };
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use clio_gateway::Source;
@@ -279,9 +280,10 @@ impl SessionSource for LocalSource {
         // The service has Pi's HOME, so it cannot find the vector model by itself.
         let models = MemoryLink::model_dirs(&d.home);
         let memory = Some((d.data.as_path(), models.as_slice()));
+        let runtime_dir = d.need_runtime()?;
         let toolhost = Toolhost::start(
             &exe,
-            d.need_runtime()?,
+            runtime_dir,
             &paths,
             &run_dir,
             &work,
@@ -307,6 +309,13 @@ impl SessionSource for LocalSource {
                 review: false,
                 skills: skills.as_deref(),
                 show: None,
+                // MCP servers (S-70): a host-mode chat, with a person to approve and confirm.
+                mcp: (host && self.presentation).then(|| McpOpts {
+                    config: &d.config,
+                    data: &d.data,
+                    runtime: runtime_dir,
+                    node: &node.path,
+                }),
             },
         )?;
         // 3. Pi
@@ -371,6 +380,8 @@ impl SessionSource for LocalSource {
         }
         // A service paused or asking for attention since the last chat (S-69): a quiet note.
         notes.extend(crate::cli::services::take_notices(d));
+        // An MCP server turned off because its installed files changed (S-70).
+        notes.extend(crate::cli::mcp_servers::take_notices(d));
         let session_file =
             session_file.or_else(|| pi.state.session_file.clone().map(PathBuf::from));
         // What Pi offers this connector, kept for `/model` before a session's first message.
@@ -1170,6 +1181,10 @@ impl Session for ChatSession {
                         clio_toolhost::pending::service_of(p)
                             .map(|s| format!("the service «{}» is not registered", s.0))
                     })
+                    .or_else(|| {
+                        clio_toolhost::pending::mcp_of(p)
+                            .map(|s| format!("the MCP server «{}» is not installed", s.0))
+                    })
             });
         if let Some(refused) = block {
             let note = if yes {
@@ -1199,6 +1214,10 @@ impl Session for ChatSession {
             return Ok(format!("rejected {id}: it is not run"));
         }
         let p = pending::approve(&h.dirs, id)?;
+        // An MCP server's answer is outside text: the session is marked before the model reads it.
+        if p.tool == "mcp_call" {
+            jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
+        }
         let what = pending::outcome(&p);
         // What it printed is outside text: the judge reads it before the model does.
         let (shown, flagged) = jev::judged_for_model(
