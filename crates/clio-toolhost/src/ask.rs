@@ -403,6 +403,7 @@ impl HostRules {
         if p.starts_with("/etc/sudoers")
             || p.contains("authorized_keys")
             || p.contains("/.config/systemd/")
+            || p.contains("/.local/share/systemd/")
         {
             Some(Control)
         } else if path.exists()
@@ -1212,6 +1213,13 @@ mod tests {
         assert_eq!(
             r.classify_write(Path::new(
                 "/home/u/.config/systemd/user/clio-services.timer"
+            )),
+            Some(Control)
+        );
+        // The second folder the user manager loads units from: a drop-in there replaces a unit.
+        assert_eq!(
+            r.classify_write(Path::new(
+                "/home/u/.local/share/systemd/user/clio-services.service.d/x.conf"
             )),
             Some(Control)
         );
