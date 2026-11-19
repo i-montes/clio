@@ -136,6 +136,14 @@ impl Fx {
         write(&f.p("secrets/pass"), format!("{PASS}\n").as_bytes());
         write(&f.p("secrets/key"), format!("{KEY}\n").as_bytes());
         write(&f.p("secrets/temis"), TEMIS_KEY.as_bytes());
+        for s in ["pass", "key", "temis"] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                f.p("secrets").join(s),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
         script(&f.p("host-check.sh"), "exit 0");
         f
     }
@@ -159,9 +167,7 @@ impl Fx {
         let _ = std::fs::remove_dir_all(&dir);
         let mut sums = String::new();
         for name in ["clio-vault", "clio"] {
-            let body = format!(
-                "#!/bin/sh\necho \"{name} {version} $* ${{CLIO_UPDATE_REEXEC:-}}\" >> \"$HOME/reexec.log\"\n"
-            );
+            let body = format!("#!/bin/sh\necho \"{name} {version} $*\" >> \"$HOME/reexec.log\"\n");
             let asset = format!("{name}-{}", target());
             write(&dir.join(&asset), body.as_bytes());
             let listed = if wrong.contains(&name) {
@@ -175,7 +181,7 @@ impl Fx {
         write(&dir.join("VERSION"), format!("{version}\n").as_bytes());
     }
 
-    /// Pins of local fakes: Node `node`, clio-memory 0.13.0, a model of one file and a runtime.
+    /// Pins of local fakes: Node `node`, clio-memory 0.14.0, a model of one file and a runtime.
     fn pins(&self, node: &str) {
         let src = self.p("src");
         let top = format!("node-v{node}-linux");
@@ -184,7 +190,7 @@ impl Fx {
         tar(&src, &top, &tgz);
         let mem = src.join("memory");
         let asset = format!("clio-memory-{}", target());
-        let body = "#!/bin/sh\necho clio-memory 0.13.0\n";
+        let body = "#!/bin/sh\necho clio-memory 0.14.0\n";
         write(&mem.join(&asset), body.as_bytes());
         let sums = format!("{}  {asset}\n", sha(body.as_bytes()));
         write(&mem.join("SHA256SUMS"), sums.as_bytes());
@@ -197,7 +203,7 @@ impl Fx {
                 "url": tgz, "sha256": sha(&std::fs::read(&tgz).unwrap()), "version": node,
             },
             "memory": {
-                "version": "0.13.0", "base": mem, "sums_sha256": sha(sums.as_bytes()), "asset": asset,
+                "version": "0.14.0", "base": mem, "sums_sha256": sha(sums.as_bytes()), "asset": asset,
             },
             "model": {
                 "dir": ".cache/clio-models/fake",
@@ -222,7 +228,7 @@ impl Fx {
         script(
             &d.join("apt-get"),
             &format!(
-                "{log}\nif [ \"$1\" = install ]; then printf '#!/bin/sh\\nexit 0\\n' > \"$D/bwrap\"; chmod +x \"$D/bwrap\"; fi"
+                "{log}\ncase \"$*\" in *' install '*) printf '#!/bin/sh\\nexit 0\\n' > \"$D/bwrap\"; chmod +x \"$D/bwrap\";; esac"
             ),
         );
         script(
@@ -297,6 +303,26 @@ fn setup_installs_everything_and_a_second_run_changes_nothing() {
         "--temis-key-file",
         &temis,
     ];
+    // A secret file other users can read is refused before anything is done.
+    let open = f.p("open-pass");
+    write(&open, PASS.as_bytes());
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let o = f.clio(&[
+        "setup",
+        "--yes",
+        "--passphrase-file",
+        &open.display().to_string(),
+    ]);
+    assert!(
+        !o.status.success() && all(&o).contains("can be read by other users"),
+        "{}",
+        all(&o)
+    );
+    assert!(!f.data().exists());
+    std::fs::remove_file(&open).unwrap();
     let o = f.setup(&extra);
     assert!(o.status.success(), "{}", all(&o));
     let out = all(&o);
@@ -312,7 +338,7 @@ fn setup_installs_everything_and_a_second_run_changes_nothing() {
                 .stdout
         )
         .trim(),
-        "clio-memory 0.13.0"
+        "clio-memory 0.14.0"
     );
     assert_eq!(
         std::fs::read(home.join(".cache/clio-models/fake/model.onnx")).unwrap(),
@@ -342,10 +368,18 @@ fn setup_installs_everything_and_a_second_run_changes_nothing() {
     let calls = f.calls();
     let sudo: Vec<&str> = calls.lines().filter(|l| l.starts_with("sudo ")).collect();
     assert_eq!(sudo.len(), 3, "{calls}");
-    assert!(sudo[0].ends_with("apt-get update -qq"), "{calls}");
     assert!(
-        sudo[1].ends_with("apt-get install -y -qq bubblewrap"),
+        sudo[0].ends_with("apt-get -o DPkg::Lock::Timeout=300 update -qq"),
         "{calls}"
+    );
+    assert!(
+        sudo[1].ends_with("apt-get -o DPkg::Lock::Timeout=300 install -y -qq bubblewrap"),
+        "{calls}"
+    );
+    // Each command is printed before it runs.
+    assert!(
+        out.contains("$ sudo ") && out.contains("enable-linger"),
+        "{out}"
     );
     assert!(sudo[2].contains("/loginctl enable-linger "), "{calls}");
     assert!(
@@ -510,7 +544,7 @@ fn update_replaces_both_binaries_or_neither_and_goes_on_in_the_new_one() {
     let o = f.clio(&["update"]);
     assert!(o.status.success(), "{}", all(&o));
     let log = std::fs::read_to_string(f.home().join("reexec.log")).unwrap();
-    assert_eq!(log.trim(), "clio 9.9.9 update 1");
+    assert_eq!(log.trim(), "clio 9.9.9 update --reexec");
     assert!(
         std::fs::read_to_string(f.bin().join("clio-vault"))
             .unwrap()
@@ -655,7 +689,7 @@ fn an_update_killed_mid_download_leaves_a_working_install() {
         std::fs::read_to_string(f.home().join("reexec.log"))
             .unwrap()
             .trim(),
-        "clio 9.9.9 update 1"
+        "clio 9.9.9 update --reexec"
     );
     assert!(!stage.exists());
 }
@@ -683,7 +717,7 @@ fn without_a_terminal_setup_says_what_to_run_and_exits_0() {
     let out = all(&o);
     assert_eq!(o.status.code(), Some(0), "{out}");
     assert!(
-        out.contains("corre «clio setup» en una") && out.contains("run `clio setup` in one"),
+        out.contains("ejecuta «clio setup» en una") && out.contains("run `clio setup` in one"),
         "{out}"
     );
     assert!(!f.home().join(".config/clio").exists() && !f.data().exists());
@@ -773,6 +807,8 @@ fn real_flow() {
         .unwrap();
     println!("{}", all(&o));
     let setup_ok = o.status.success();
+    // The model and its runtime came (a failure there is only a warning, so it is checked here).
+    let model_ok = !all(&o).contains("search by meaning: finishes later");
     // The doctor of a copy-mode Clio (host mode would try the console with the real sudo).
     let cfg = f.home().join(".config/clio/config.json");
     let mut c: Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
@@ -793,6 +829,7 @@ fn real_flow() {
         .output()
         .unwrap();
     println!("{}", text(&m.stdout).trim());
-    assert!(text(&m.stdout).contains("0.13.0"));
+    assert!(text(&m.stdout).contains("0.14.0"));
     assert!(setup_ok, "a step failed: see above");
+    assert!(model_ok, "the memory's model did not install: see above");
 }

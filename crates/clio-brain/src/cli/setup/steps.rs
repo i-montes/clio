@@ -1,8 +1,9 @@
 //! The installer's steps. Each one is idempotent (what is already right is said and left alone),
-//! and `clio update` runs the same functions as the wizard's Update.
+//! and `clio update` runs the same functions as the wizard's Update. Every question comes first
+//! (`Run::ask_all`, the sudo moment last); then the steps run (`Run::all`) and ask nothing.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clio_brain::connector::{Connector, by_name, by_provider};
 use clio_vault::SecretValue;
@@ -79,9 +80,13 @@ impl Action {
             Self::Install => vec![
                 Folders, System, Node, Pi, Memory, Vault, Model, Judge, Timer, Skills, Mcp, Doctor,
             ],
-            Self::Update => vec![Binaries, Node, Pi, Memory, Skills, Timer, Doctor],
+            // The vault and the model too: an install left half done (a skipped passphrase, a
+            // failed run, a reboot that stopped the vault) is finished by running it again.
+            Self::Update => vec![
+                Binaries, Node, Pi, Memory, Vault, Model, Skills, Timer, Doctor,
+            ],
             Self::Repair => vec![
-                Folders, System, Node, Pi, Memory, Vault, Timer, Skills, Mcp, Doctor,
+                Folders, System, Node, Pi, Memory, Vault, Model, Timer, Skills, Mcp, Doctor,
             ],
             Self::RemoveKeep => vec![StopVault, RemoveTimer, RemoveNodePi, RemoveBinaries],
             Self::RemoveAll => vec![
@@ -110,6 +115,21 @@ enum Out {
     Skip(String),
 }
 
+/// What the person answered before the work started, for the steps to use.
+#[derive(Default)]
+pub struct Answers {
+    /// A new vault's passphrase.
+    pass: Option<SecretValue>,
+    /// Opening the existing vault failed.
+    vault: Option<Fail>,
+    /// The connector chosen, and its key (`None`: later).
+    model: Option<(&'static Connector, Option<SecretValue>)>,
+    /// Temis's address, and its key.
+    temis: Option<(String, Option<SecretValue>)>,
+    /// How the sudo moment ended: the system step's row.
+    system: Option<Out>,
+}
+
 /// A run of the installer's steps.
 pub struct Run<'a> {
     pub dirs: Dirs,
@@ -120,6 +140,9 @@ pub struct Run<'a> {
     pub ui: &'a mut dyn Ui,
     /// The one thing left for the person, said on the last screen.
     pub left: Option<M>,
+    /// The jail cannot start here: what to ask an administrator for. The chat does not open.
+    pub blocked: Option<M>,
+    pub answers: Answers,
     pub failed: bool,
     /// What changed, `name from → to`, for `clio update`.
     pub changes: Vec<String>,
@@ -136,6 +159,45 @@ impl Run<'_> {
 
     fn f(&self, m: M, args: &[&str]) -> String {
         m.fill(self.lang, args)
+    }
+
+    /// Notes `m` as the thing left, unless one that comes first is already noted.
+    fn leave(&mut self, m: M) {
+        let rank = |m: M| {
+            [M::LeftVault, M::LeftClaude, M::LeftModel]
+                .iter()
+                .position(|x| *x == m)
+                .unwrap_or(0)
+        };
+        if self.left.is_none_or(|l| rank(m) < rank(l)) {
+            self.left = Some(m);
+        }
+    }
+
+    /// Every question of `steps`, before any of them runs: the vault's passphrase, the model,
+    /// the judge, and last the sudo moment (which runs its commands right then, while the person
+    /// is at the terminal). An update that will replace this binary asks nothing: the new one
+    /// asks, after it took over.
+    pub fn ask_all(&mut self, steps: &[Step]) {
+        if steps.contains(&Step::Binaries)
+            && !self.opts.reexec
+            && Release::find(&self.opts.bin).is_ok_and(|r| r.is_newer())
+        {
+            return;
+        }
+        if steps.contains(&Step::Vault) {
+            self.ask_vault();
+        }
+        if steps.contains(&Step::Model) {
+            self.ask_model();
+        }
+        if steps.contains(&Step::Judge) {
+            self.ask_judge();
+        }
+        if steps.contains(&Step::System) {
+            let out = self.sudo_moment();
+            self.answers.system = Some(out);
+        }
     }
 
     /// Runs `steps`, each row updated as it goes; a failed one does not stop the others.
@@ -172,7 +234,11 @@ impl Run<'_> {
         match step {
             Step::Binaries => self.binaries(i),
             Step::Folders => self.folders(),
-            Step::System => self.system(),
+            Step::System => Ok(self
+                .answers
+                .system
+                .take()
+                .unwrap_or_else(|| Out::Skip(self.t(M::NoteSkipped)))),
             Step::Node => self.node(i),
             Step::Pi => self.pi(),
             Step::Memory => self.memory(i),
@@ -265,15 +331,20 @@ impl Run<'_> {
 
     // ---- the system: bubblewrap and lingering, with one sudo moment --------------------------
 
-    fn system(&mut self) -> FRes<Out> {
+    /// Bubblewrap, lingering and, where the kernel needs it, bubblewrap's AppArmor profile: one
+    /// moment with the exact commands shown, then the jail is tried. When it still cannot start,
+    /// `blocked` says what to ask an administrator for.
+    fn sudo_moment(&mut self) -> Out {
         if !self.sys.linux {
-            return Ok(Out::Warn(self.t(M::NoteMac)));
+            return Out::Warn(self.t(M::NoteMac));
         }
         let bwrap = self.sys.find("bwrap").is_none();
         let linger = self.sys.linger_off();
-        if !bwrap && !linger {
-            return Ok(Out::Done(self.t(M::NoteThere)));
-        }
+        // Only where the kernel restricts user namespaces, no profile names bwrap yet, and the jail
+        // does not start already: a second profile for the same path breaks bwrap.
+        let profile = self.sys.userns_restricted()
+            && !self.sys.bwrap_profiled()
+            && (bwrap || !self.sys.jail_ready());
         let pm = self.sys.package_manager();
         let mut cmds: Vec<Vec<String>> = Vec::new();
         if bwrap && let Some((_, install)) = &pm {
@@ -282,35 +353,79 @@ impl Run<'_> {
         if linger && let (Some(lc), Some(u)) = (self.sys.find("loginctl"), self.sys.user.clone()) {
             cmds.push(vec![lc.display().to_string(), "enable-linger".into(), u]);
         }
-        let wanted = || {
-            let mut w = Vec::new();
-            if bwrap {
-                w.push("bubblewrap");
-            }
-            if linger {
-                w.push("loginctl enable-linger");
-            }
-            w.join(", ")
+        let file = self.sys.apparmor.join("clio-bwrap").display().to_string();
+        let profile_cmds = match (
+            profile,
+            self.sys.find("tee"),
+            self.sys.find("apparmor_parser"),
+        ) {
+            (true, Some(tee), Some(parser)) => vec![
+                vec![tee.display().to_string(), file.clone()],
+                vec![parser.display().to_string(), "-r".into(), file],
+            ],
+            _ => Vec::new(),
         };
-        if cmds.is_empty() {
-            return Ok(Out::Warn(self.t(M::NoteNoPkg)));
+        let out = self.moment(bwrap, linger, pm.as_ref(), &cmds, &profile_cmds);
+        if self.sys.jail_ready() {
+            return out;
+        }
+        self.blocked = Some(if self.sys.find("bwrap").is_none() {
+            M::LeftJailBwrap
+        } else if self.sys.userns_restricted() {
+            M::LeftJailUserns
+        } else {
+            M::LeftJailOther
+        });
+        match out {
+            Out::Done(_) => Out::Warn(self.t(M::NoteNoJail)),
+            o => o,
+        }
+    }
+
+    fn moment(
+        &mut self,
+        bwrap: bool,
+        linger: bool,
+        pm: Option<&(String, Vec<Vec<String>>)>,
+        cmds: &[Vec<String>],
+        profile_cmds: &[Vec<String>],
+    ) -> Out {
+        if !bwrap && !linger && profile_cmds.is_empty() {
+            return Out::Done(self.t(M::NoteThere));
+        }
+        if cmds.is_empty() && profile_cmds.is_empty() {
+            return Out::Warn(self.t(M::NoteNoPkg));
         }
         let sudo = if self.sys.root {
             None
         } else {
             match self.sys.find("sudo") {
                 Some(s) => Some(s),
-                None => return Ok(Out::Warn(self.f(M::NoteNoSudo, &[&wanted()]))),
+                None if bwrap => return Out::Warn(self.t(M::NoteNoSudo)),
+                None if linger => return Out::Warn(self.t(M::NoteNoSudoLinger)),
+                None => return Out::Warn(self.t(M::NoteNoJail)),
             }
+        };
+        let shown = |c: &[String]| {
+            format!(
+                "{}{}",
+                if sudo.is_some() { "sudo " } else { "" },
+                c.join(" ")
+            )
         };
         if !self.opts.yes {
             let mut lines = Vec::new();
             if bwrap {
-                let name = pm.as_ref().map_or("", |(n, _)| n.as_str());
-                lines.push(self.f(M::SudoBwrap, &[name]));
+                lines.push(self.f(M::SudoBwrap, &[pm.map_or("", |(n, _)| n.as_str())]));
             }
             if linger {
                 lines.push(self.t(M::SudoLinger));
+            }
+            lines.push(self.t(M::SudoRuns));
+            lines.extend(cmds.iter().map(|c| format!("  {}", shown(c))));
+            if !profile_cmds.is_empty() {
+                lines.push(self.t(M::SudoProfile));
+                lines.extend(profile_cmds.iter().map(|c| format!("  {}", shown(c))));
             }
             lines.push(self.t(M::SudoHow));
             let q = Ask::Choice {
@@ -320,37 +435,37 @@ impl Run<'_> {
                 default: 0,
             };
             if !matches!(self.ui.ask(q), Some(Answer::Choice(0))) {
-                return Ok(Out::Warn(self.t(M::NoteSysSkipped)));
+                return Out::Warn(self.t(M::NoteSysSkipped));
             }
         }
         // The terminal is the person's while these run: `sudo` asks there, once (its own
-        // timestamp covers the next command), and Clio never reads the password.
+        // timestamp covers the next command), and Clio never reads the password. Each command is
+        // printed before it runs.
         let mut failed = None;
+        let sys = &self.sys;
         self.ui.outside(&mut || {
-            for c in &cmds {
-                let mut cmd = match &sudo {
-                    Some(s) => {
-                        let mut c0 = Command::new(s);
-                        c0.args(c);
-                        c0
-                    }
-                    None => {
-                        let mut c0 = Command::new(&c[0]);
-                        c0.args(&c[1..]);
-                        c0
-                    }
-                };
-                if !cmd.status().is_ok_and(|s| s.success()) {
+            for c in cmds {
+                println!("$ {}", shown(c));
+                // One broken repository fails `apt-get update`; the install may still work.
+                if !as_root(sudo.as_deref(), c, None) && !c.iter().any(|a| a == "update") {
                     failed = Some(fetch::name_of(&c[0]));
                     break;
                 }
             }
+            if failed.is_none() && !profile_cmds.is_empty() && !sys.jail_ready() {
+                for (i, c) in profile_cmds.iter().enumerate() {
+                    println!("$ {}", shown(c));
+                    let text = (i == 0).then_some(super::BWRAP_PROFILE);
+                    if !as_root(sudo.as_deref(), c, text) {
+                        failed = Some(fetch::name_of(&c[0]));
+                        break;
+                    }
+                }
+            }
         });
         match failed {
-            Some(what) if self.sys.find("bwrap").is_none() => {
-                Ok(Out::Warn(self.f(M::NoteSysFailed, &[&what])))
-            }
-            _ => Ok(Out::Done(self.t(M::NoteDone))),
+            Some(what) => Out::Warn(self.f(M::NoteSysFailed, &[&what])),
+            None => Out::Done(self.t(M::NoteDone)),
         }
     }
 
@@ -435,21 +550,29 @@ impl Run<'_> {
         let bin = self.dirs.home.join(".local/bin");
         let ui = &mut *self.ui;
         let replaced = fetch::install_memory(&bin, &m, &mut |n| Self::progress(ui, i, n, 0))?;
-        if let Some(model) = self.pins.model.clone() {
+        // Without its model the memory searches by text: a failure here is said and left for the
+        // next update, which tries again (what was verified stays).
+        let model_ok = self.pins.model.clone().is_none_or(|model| {
             let total = fetch::model_size(&model);
             let ui = &mut *self.ui;
             fetch::install_model(&self.dirs.home, &model, &mut |n| {
                 Self::progress(ui, i, n, total.max(n));
-            })?;
-        }
+            })
+            .is_ok()
+        });
         let have = fetch::memory_installed(&bin).unwrap_or_else(|| m.version.clone());
-        Ok(Out::Done(match replaced {
+        let note = match replaced {
             Some(old) => self.changed("clio-memory", &old, &m.version),
             None if fetch::version(&have) > fetch::version(&m.version) => {
                 self.f(M::NoteNewer, &[&have])
             }
             None => have,
-        }))
+        };
+        Ok(if model_ok {
+            Out::Done(note)
+        } else {
+            Out::Warn(self.t(M::NoteModelLater))
+        })
     }
 
     // ---- the vault, the model and the judge --------------------------------------------------
@@ -468,19 +591,22 @@ impl Run<'_> {
         }
     }
 
-    fn vault(&mut self) -> FRes<Out> {
-        if self.opts.no_vault {
-            self.left = Some(M::LeftVault);
-            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+    /// Whether there will be an open vault to keep a key in.
+    fn vault_coming(&self) -> bool {
+        self.answers.pass.is_some() || vault::unlocked(&self.dirs).is_ok()
+    }
+
+    /// A new vault's passphrase (kept for the vault step), or the existing one's, opened right
+    /// away: a mistyped one is asked again.
+    fn ask_vault(&mut self) {
+        if self.opts.no_vault || self.dirs.runtime.is_none() {
+            return;
         }
-        self.dirs
-            .need_runtime()
-            .map_err(|_| Fail::Said(M::FailRuntime, M::FixRuntime))?;
-        let state = vault::state(&self.dirs);
-        if state == vault::State::Open {
-            return Ok(Out::Done(self.t(M::NoteOpened)));
-        }
-        let new = state == vault::State::Missing;
+        let new = match vault::state(&self.dirs) {
+            vault::State::Open => return,
+            vault::State::Missing => true,
+            _ => false,
+        };
         let file = self.opts.passphrase_file.clone();
         let mut error = None;
         for _ in 0..3 {
@@ -500,28 +626,48 @@ impl Run<'_> {
                 error: error.take(),
             };
             let Some(pass) = self.secret(file.as_ref(), q) else {
-                self.left = Some(M::LeftVault);
-                return Ok(Out::Warn(self.t(M::NoteLater)));
+                return;
             };
+            if new {
+                self.answers.pass = Some(pass);
+                return;
+            }
             match vault::start_with(&self.dirs, &pass) {
-                Ok(_) => {
-                    return Ok(Out::Done(self.t(if new {
-                        M::NoteNewVault
-                    } else {
-                        M::NoteOpened
-                    })));
-                }
-                Err(e) if !new && e.contains("wrong passphrase") && file.is_none() => {
+                Ok(_) => return,
+                Err(e) if e.contains("wrong passphrase") && file.is_none() => {
                     error = Some(self.t(M::ErrWrongPass));
                 }
-                Err(e) if e.contains("wrong passphrase") => {
-                    return Err(Fail::Said(M::FailPass, M::FixPass));
+                Err(e) if e.contains("wrong passphrase") => break,
+                Err(e) => {
+                    self.answers.vault = Some(Fail::Other(e));
+                    return;
                 }
-                Err(e) => return Err(Fail::Other(e)),
             }
         }
-        self.left = Some(M::LeftVault);
-        Err(Fail::Said(M::FailPass, M::FixPass))
+        self.answers.vault = Some(Fail::Said(M::FailPass, M::FixPass));
+    }
+
+    fn vault(&mut self) -> FRes<Out> {
+        if self.opts.no_vault {
+            self.leave(M::LeftVault);
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        }
+        self.dirs
+            .need_runtime()
+            .map_err(|_| Fail::Said(M::FailRuntime, M::FixRuntime))?;
+        if let Some(e) = self.answers.vault.take() {
+            self.leave(M::LeftVault);
+            return Err(e);
+        }
+        if vault::state(&self.dirs) == vault::State::Open {
+            return Ok(Out::Done(self.t(M::NoteOpened)));
+        }
+        let Some(pass) = self.answers.pass.take() else {
+            self.leave(M::LeftVault);
+            return Ok(Out::Warn(self.t(M::NoteLater)));
+        };
+        vault::start_with(&self.dirs, &pass).map_err(Fail::Other)?;
+        Ok(Out::Done(self.t(M::NoteNewVault)))
     }
 
     /// The connector of the config, when the vault already has its key.
@@ -532,17 +678,9 @@ impl Run<'_> {
         vault::has_model_key(&self.dirs, c).then_some(c)
     }
 
-    fn model(&mut self) -> FRes<Out> {
-        if self.opts.no_model {
-            self.left.get_or_insert(M::LeftModel);
-            return Ok(Out::Skip(self.t(M::NoteSkipped)));
-        }
-        if vault::unlocked(&self.dirs).is_err() {
-            self.left = Some(M::LeftVault);
-            return Ok(Out::Skip(self.t(M::NoteNoVault)));
-        }
-        if let Some(c) = self.connected() {
-            return Ok(Out::Done(c.name.into()));
+    fn ask_model(&mut self) {
+        if self.opts.no_model || !self.vault_coming() || self.connected().is_some() {
+            return;
         }
         let c = if self.opts.yes {
             self.opts.connector.as_deref().and_then(by_name)
@@ -566,17 +704,8 @@ impl Run<'_> {
             }
         };
         let Some(c) = c else {
-            self.left = Some(M::LeftModel);
-            return Ok(Out::Warn(self.t(M::NoteLater)));
+            return;
         };
-        if crate::cli::home::lacks_bridge(&self.dirs, c) {
-            return Err(Fail::Other(
-                "the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install".into(),
-            ));
-        }
-        if c.name == "claude" && !self.opts.yes {
-            self.claude_login();
-        }
         let hint = match c.name {
             "claude" => M::KeyClaudeHint,
             "anthropic-api" => M::KeyApiHint,
@@ -592,57 +721,58 @@ impl Run<'_> {
                 error: error.take(),
             };
             let Some(k) = self.secret(file.as_ref(), q) else {
-                self.left = Some(M::LeftModel);
-                return Ok(Out::Warn(self.t(M::NoteLater)));
+                break None;
             };
-            if k.expose().trim().starts_with(c.key_prefix) {
-                break SecretValue::new(k.expose().trim().to_owned());
-            }
-            if file.is_some() {
-                return Err(Fail::Other(self.f(M::ErrPrefix, &[c.key_prefix])));
+            // A file's value is checked when it is stored: the step says what is wrong.
+            if file.is_some() || k.expose().trim().starts_with(c.key_prefix) {
+                break Some(k);
             }
             error = Some(self.f(M::ErrPrefix, &[c.key_prefix]));
         };
+        self.answers.model = Some((c, key));
+    }
+
+    fn model(&mut self) -> FRes<Out> {
+        if self.opts.no_model {
+            self.leave(M::LeftModel);
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        }
+        if vault::unlocked(&self.dirs).is_err() {
+            self.leave(M::LeftVault);
+            return Ok(Out::Skip(self.t(M::NoteNoVault)));
+        }
+        if let Some(c) = self.connected() {
+            return Ok(Out::Done(c.name.into()));
+        }
+        let Some((c, key)) = self.answers.model.take() else {
+            self.leave(M::LeftModel);
+            return Ok(Out::Warn(self.t(M::NoteLater)));
+        };
+        if crate::cli::home::lacks_bridge(&self.dirs, c) {
+            return Err(Fail::Other(
+                "the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install".into(),
+            ));
+        }
+        let Some(key) = key else {
+            self.leave(if c.name == "claude" {
+                M::LeftClaude
+            } else {
+                M::LeftModel
+            });
+            return Ok(Out::Warn(self.t(M::NoteLater)));
+        };
+        if !key.expose().trim().starts_with(c.key_prefix) {
+            return Err(Fail::Other(self.f(M::ErrPrefix, &[c.key_prefix])));
+        }
+        let key = SecretValue::new(key.expose().trim().to_owned());
         crate::cli::connect::store_key(&self.dirs, c, &key)?;
         crate::cli::connect::switch_config(&self.dirs, c, c.default_model)?;
         Ok(Out::Done(c.name.into()))
     }
 
-    /// Claude Code's own `setup-token`, on the terminal, when the person wants a token now. It
-    /// runs with Pi's home folder for Clio, so the person's own `~/.claude` is not touched; what
-    /// it shows (the token) is wiped from the terminal before the wizard comes back.
-    fn claude_login(&mut self) {
-        let q = Ask::Choice {
-            title: self.t(M::ClaudeTitle),
-            lines: vec![self.t(M::ClaudeHint)],
-            options: vec![self.t(M::ClaudeGet), self.t(M::ClaudeHave)],
-            default: 0,
-        };
-        if !matches!(self.ui.ask(q), Some(Answer::Choice(0))) {
+    fn ask_judge(&mut self) {
+        if Config::load(&self.dirs).is_ok_and(|c| c.jev.enabled) || !self.vault_coming() {
             return;
-        }
-        let Ok(claude) = crate::cli::home::claude_code(&self.dirs) else {
-            return;
-        };
-        let home = crate::cli::pi::paths(&self.dirs).home_dir();
-        let copy = self.t(M::ClaudeCopy);
-        self.ui.outside(&mut || {
-            let _ = Command::new(&claude)
-                .arg("setup-token")
-                .env("HOME", &home)
-                .status();
-            println!("\n{copy}");
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
-            // The screen and its scrollback: the token never stays on the terminal.
-            print!("\x1b[3J\x1b[H\x1b[2J");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-        });
-    }
-
-    fn judge(&mut self) -> FRes<Out> {
-        if Config::load(&self.dirs).is_ok_and(|c| c.jev.enabled) {
-            return Ok(Out::Done(self.t(M::NoteThere)));
         }
         let url = if self.opts.yes {
             match (&self.opts.temis_url, &self.opts.temis_key_file) {
@@ -677,6 +807,28 @@ impl Run<'_> {
             }
         };
         let Some(url) = url else {
+            return;
+        };
+        let key = if temis_ok(&url) {
+            let q = Ask::Secret {
+                title: self.t(M::TemisKeyTitle),
+                lines: vec![self.t(M::TemisKeyHint)],
+                labels: vec![self.t(M::FieldKey)],
+                error: None,
+            };
+            let file = self.opts.temis_key_file.clone();
+            self.secret(file.as_ref(), q)
+        } else {
+            None
+        };
+        self.answers.temis = Some((url, key));
+    }
+
+    fn judge(&mut self) -> FRes<Out> {
+        if Config::load(&self.dirs).is_ok_and(|c| c.jev.enabled) {
+            return Ok(Out::Done(self.t(M::NoteThere)));
+        }
+        let Some((url, key)) = self.answers.temis.take() else {
             return Ok(Out::Skip(self.t(M::NoteSkipped)));
         };
         if !temis_ok(&url) {
@@ -685,14 +837,7 @@ impl Run<'_> {
         if vault::unlocked(&self.dirs).is_err() {
             return Ok(Out::Skip(self.t(M::NoteNoVault)));
         }
-        let q = Ask::Secret {
-            title: self.t(M::TemisKeyTitle),
-            lines: vec![self.t(M::TemisKeyHint)],
-            labels: vec![self.t(M::FieldKey)],
-            error: None,
-        };
-        let file = self.opts.temis_key_file.clone();
-        let Some(key) = self.secret(file.as_ref(), q) else {
+        let Some(key) = key else {
             return Ok(Out::Skip(self.t(M::NoteSkipped)));
         };
         let (secret, domain) = crate::cli::jev::key_for(Some(&url));
@@ -732,7 +877,11 @@ impl Run<'_> {
         if on {
             return Ok(Out::Done(self.t(M::NoteOn)));
         }
-        crate::cli::services::enable_in(home, &self.opts.exe, Some(&sc))?;
+        // No systemd user session (a container, WSL): said, and the unit files just written go.
+        if crate::cli::services::enable_in(home, &self.opts.exe, Some(&sc)).is_err() {
+            let _ = crate::cli::services::disable_in(home, Some(&sc));
+            return Ok(Out::Warn(self.t(M::NoteTimerLater)));
+        }
         Ok(Out::Done(self.t(M::NoteOn)))
     }
 
@@ -740,20 +889,23 @@ impl Run<'_> {
         if !self.opts.doctor {
             return Out::Skip(self.t(M::NoteSkipped));
         }
+        // In the person's language: the doctor's own lines are English, and `clio doctor` has
+        // them all.
         let r = crate::cli::doctor::collect_with(&self.dirs, false);
-        let fail = r
+        let bad = r
             .checks
             .iter()
-            .find(|c| c.level == crate::cli::ui::Level::Fail);
-        let line = match fail {
-            None => self.t(M::NoteDoctorOk),
-            Some(c) => sanitize::line(&c.msg),
-        };
-        self.doctor = Some(line.clone());
-        if fail.is_none() {
-            Out::Done(line)
+            .any(|c| c.level == crate::cli::ui::Level::Fail);
+        let line = self.t(if bad {
+            M::NoteDoctorIssues
         } else {
+            M::NoteDoctorOk
+        });
+        self.doctor = Some(line.clone());
+        if bad {
             Out::Warn(line)
+        } else {
+            Out::Done(line)
         }
     }
 
@@ -807,6 +959,32 @@ pub(crate) fn said(lang: Lang, e: &Fail) -> (String, String) {
         Fail::Said(why, fix) => (why.get(lang).into(), fix.get(lang).into()),
         Fail::Other(s) => (sanitize::line(s), M::FixOther.get(lang).into()),
     }
+}
+
+/// Runs `c` as root (through `sudo` unless this is root), with `input` on its standard input.
+fn as_root(sudo: Option<&Path>, c: &[String], input: Option<&str>) -> bool {
+    let mut cmd = match sudo {
+        Some(s) => {
+            let mut x = Command::new(s);
+            x.args(c);
+            x
+        }
+        None => {
+            let mut x = Command::new(&c[0]);
+            x.args(&c[1..]);
+            x
+        }
+    };
+    let Some(text) = input else {
+        return cmd.status().is_ok_and(|s| s.success());
+    };
+    let Ok(mut child) = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn() else {
+        return false;
+    };
+    if let Some(mut i) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut i, text.as_bytes());
+    }
+    child.wait().is_ok_and(|s| s.success())
 }
 
 /// Removes a file or a folder; one that is not there is fine.

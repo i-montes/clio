@@ -111,7 +111,6 @@ impl Opts {
         let bin = exe.parent().map(Path::to_path_buf).unwrap_or_default();
         Ok(Self {
             doctor: true,
-            reexec: std::env::var_os(REEXEC).is_some(),
             exe,
             bin,
             ..Self::default()
@@ -119,12 +118,11 @@ impl Opts {
     }
 }
 
-/// Set by an update in the new binary it starts.
-const REEXEC: &str = "CLIO_UPDATE_REEXEC";
-
 /// In a debug build, `CLIO_TEST_SYSTEM`: a folder of fake system programs (`sudo`, a package
-/// manager, `systemctl`, `loginctl`, `bwrap`) used in place of the real ones, and its `linger`
-/// folder in place of systemd's. Release builds never read it.
+/// manager, `systemctl`, `loginctl`, `bwrap`, `tee`, `apparmor_parser`) used in place of the real
+/// ones; its `linger` folder in place of systemd's, its `apparmor.d` in place of
+/// `/etc/apparmor.d`, its `userns_restrict` file in place of the sysctl, and its `bwrap` run to
+/// tell whether the jail starts. Release builds never read it.
 pub fn test_system() -> Option<PathBuf> {
     std::env::var_os("CLIO_TEST_SYSTEM")
         .filter(|_| cfg!(debug_assertions))
@@ -136,10 +134,19 @@ pub fn test_system() -> Option<PathBuf> {
 pub struct Sys {
     pub dirs: Vec<PathBuf>,
     pub linger: PathBuf,
+    /// `kernel.apparmor_restrict_unprivileged_userns`, and the folder of AppArmor's profiles.
+    pub userns: PathBuf,
+    pub apparmor: PathBuf,
     pub root: bool,
     pub user: Option<String>,
     pub linux: bool,
+    /// The fake system of the tests: whether the jail starts is its `bwrap`'s answer.
+    pub fake: bool,
 }
+
+/// The AppArmor profile that lets `/usr/bin/bwrap` make its user namespace where the kernel
+/// restricts them (Ubuntu 23.10 and newer). Fixed text: nothing of this machine goes in it.
+pub const BWRAP_PROFILE: &str = "abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile clio-bwrap /usr/bin/bwrap flags=(unconfined) {\n  userns,\n}\n";
 
 impl Sys {
     pub fn from_env() -> Self {
@@ -148,10 +155,13 @@ impl Sys {
         if let Some(d) = test_system() {
             return Self {
                 linger: d.join("linger"),
+                userns: d.join("userns_restrict"),
+                apparmor: d.join("apparmor.d"),
                 dirs: vec![d],
                 root: false,
                 user,
                 linux,
+                fake: true,
             };
         }
         Self {
@@ -166,10 +176,44 @@ impl Sys {
             .map(PathBuf::from)
             .to_vec(),
             linger: "/var/lib/systemd/linger".into(),
+            userns: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns".into(),
+            apparmor: "/etc/apparmor.d".into(),
             root: rustix::process::getuid().is_root(),
             user,
             linux,
+            fake: false,
         }
+    }
+
+    /// Whether Pi's jail starts here (switched off on purpose counts: the person chose it).
+    pub fn jail_ready(&self) -> bool {
+        use clio_brain::pi::jail::{Status, status};
+        if self.fake {
+            return self.find("bwrap").is_some_and(|b| {
+                std::process::Command::new(b)
+                    .args(["--ro-bind", "/", "/", "true"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success())
+            });
+        }
+        matches!(status(), Status::Ready(_) | Status::Off)
+    }
+
+    /// The kernel keeps unprivileged programs from making user namespaces.
+    pub fn userns_restricted(&self) -> bool {
+        std::fs::read_to_string(&self.userns).is_ok_and(|v| v.trim() == "1")
+    }
+
+    /// A profile already names `/usr/bin/bwrap`: a second one for the same path breaks it.
+    pub fn bwrap_profiled(&self) -> bool {
+        std::fs::read_dir(&self.apparmor)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("/usr/bin/bwrap")))
     }
 
     pub fn find(&self, name: &str) -> Option<PathBuf> {
@@ -194,11 +238,16 @@ impl Sys {
                 .collect::<Vec<_>>()
         };
         if let Some(p) = self.find("apt-get") {
+            // Right after boot unattended-upgrades holds the lock: wait for it, up to 5 minutes.
+            let lock = ["-o", "DPkg::Lock::Timeout=300"];
             return Some((
                 "apt".into(),
                 vec![
-                    cmd(&p, &["update", "-qq"]),
-                    cmd(&p, &["install", "-y", "-qq", "bubblewrap"]),
+                    cmd(&p, &[&lock[..], &["update", "-qq"]].concat()),
+                    cmd(
+                        &p,
+                        &[&lock[..], &["install", "-y", "-qq", "bubblewrap"]].concat(),
+                    ),
                 ],
             ));
         }
@@ -281,7 +330,7 @@ impl Ui for Plain {
                 s.arrow()
             ),
         };
-        println!("{}", super::tui::sanitize::multiline(&line));
+        println!("{}", text::say(&super::tui::sanitize::multiline(&line)));
     }
 
     fn ask(&mut self, q: Ask) -> Option<Answer> {
@@ -298,7 +347,7 @@ impl Ui for Plain {
                 None => first = Some(v),
                 Some(f) if f.expose() == v.expose() => {}
                 Some(_) => {
-                    println!("{}", M::ErrMismatch.get(self.lang));
+                    println!("{}", text::say(M::ErrMismatch.get(self.lang)));
                     return None;
                 }
             }
@@ -348,7 +397,9 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
     opts.yes = a.flag("--yes");
     opts.no_model = a.flag("--no-model");
     opts.no_vault = a.flag("--no-vault");
+    // Hidden: the new binary an update started goes on where the old one stopped.
     let resume = a.flag("--resume-update");
+    opts.reexec = resume;
     let lang = a
         .value("--lang")?
         .map(|l| Lang::from_code(&l).ok_or("--lang is es or en"))
@@ -367,12 +418,26 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
     {
         return Err(USAGE.into());
     }
+    // A secret in a file anyone on the machine can read is already out: refused, not used.
+    for f in [&opts.passphrase_file, &opts.key_file, &opts.temis_key_file]
+        .into_iter()
+        .flatten()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(f).map_err(|e| super::io_err(f, &e))?;
+        if m.permissions().mode() & 0o077 != 0 {
+            return Err(format!(
+                "{} can be read by other users: chmod 600 it first",
+                f.display()
+            ));
+        }
+    }
     let terminal = attach_terminal(!opts.yes);
     if !opts.yes && !terminal {
         println!(
             "{}\n{}",
-            M::NoTerminal.get(Lang::Es),
-            M::NoTerminal.get(Lang::En)
+            text::say(M::NoTerminal.get(Lang::Es)),
+            text::say(M::NoTerminal.get(Lang::En))
         );
         return Ok(0);
     }
@@ -400,7 +465,7 @@ fn plain(
     action: Action,
 ) -> Res<i32> {
     if action != Action::Install && super::pending::any_open(dirs) {
-        println!("{}", M::UpdateChatOpen.get(lang));
+        println!("{}", text::say(M::UpdateChatOpen.get(lang)));
         return Ok(1);
     }
     opts.update = action == Action::Update;
@@ -414,10 +479,12 @@ fn plain(
         rows,
         quiet: false,
     };
-    let (failed, replaced, left) = {
+    let (failed, replaced, left, blocked) = {
         let mut r = run_with(dirs, lang, sys, pins, opts.clone(), &mut ui);
-        r.all(&action.steps());
-        (r.failed, r.replaced, r.left)
+        let steps = action.steps();
+        r.ask_all(&steps);
+        r.all(&steps);
+        (r.failed, r.replaced, r.left, r.blocked)
     };
     if replaced {
         return reexec(
@@ -425,13 +492,15 @@ fn plain(
             &["setup", "--yes", "--lang", lang.code(), "--resume-update"],
         );
     }
-    if !failed && action != Action::RemoveAll {
+    // Not when the jail cannot start: the next run offers Repair, which tries it again.
+    if !failed && blocked.is_none() && action != Action::RemoveAll {
         mark_version(dirs);
     }
-    if let Some(m) = left {
-        println!("{}", M::DoneLeft.fill(lang, &[m.get(lang)]));
+    // The one thing left, in one line: what keeps the chat from starting first.
+    if let Some(m) = blocked.or(left) {
+        println!("{}", text::say(&M::DoneLeft.fill(lang, &[m.get(lang)])));
     }
-    Ok(i32::from(failed))
+    Ok(i32::from(failed || blocked.is_some()))
 }
 
 pub(crate) fn run_with<'a>(
@@ -450,6 +519,8 @@ pub(crate) fn run_with<'a>(
         opts,
         ui,
         left: None,
+        blocked: None,
+        answers: steps::Answers::default(),
         failed: false,
         changes: Vec::new(),
         replaced: false,
@@ -469,9 +540,6 @@ pub(crate) fn mark_version(dirs: &Dirs) {
 /// binary. Only returns on failure.
 pub(crate) fn reexec(exe: &Path, args: &[&str]) -> Res<i32> {
     use std::os::unix::process::CommandExt;
-    let e = std::process::Command::new(exe)
-        .args(args)
-        .env(REEXEC, "1")
-        .exec();
+    let e = std::process::Command::new(exe).args(args).exec();
     Err(format!("{}: {e}", exe.display()))
 }

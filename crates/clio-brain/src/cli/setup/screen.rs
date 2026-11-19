@@ -342,10 +342,11 @@ pub fn lines(v: &View, t: Theme, w: usize) -> Vec<Line<'static>> {
             out.push(title(tt, if *ok { t.ok() } else { t.fail() }));
             out.push(Line::default());
             text(&mut out, lines, t.plain());
-            if !v.rows.is_empty() {
+            // Only what failed: what is left is the one line above.
+            if v.rows.iter().any(|(_, st)| matches!(st, St::Failed(..))) {
                 out.push(Line::default());
                 for (label, st) in &v.rows {
-                    if matches!(st, St::Failed(..) | St::Warn(_)) {
+                    if matches!(st, St::Failed(..)) {
                         out.extend(row(label, st, t, w, v.now));
                     }
                 }
@@ -376,12 +377,21 @@ pub fn draw(f: &mut ratatui::Frame, v: &View, t: Theme) {
         height: a.height.saturating_sub(1),
         ..a
     };
-    f.render_widget(Paragraph::new(lines(v, t, w)), body);
+    let mut ls = lines(v, t, w);
+    // A locale that is not UTF-8 gets plain ASCII, not broken characters.
+    if !t.unicode {
+        for l in &mut ls {
+            for sp in &mut l.spans {
+                sp.content = super::text::ascii(&sp.content).into();
+            }
+        }
+    }
+    f.render_widget(Paragraph::new(ls), body);
     let k = keys(v);
     let k = if t.unicode {
         k.to_owned()
     } else {
-        k.replace("↑↓", "up/down")
+        super::text::ascii(k)
     };
     f.render_widget(
         Paragraph::new(Line::styled(
@@ -430,8 +440,13 @@ impl Tui {
         event::poll(wait).ok()?.then(event::read)?.ok()
     }
 
-    /// Shows `page` until Enter (it comes back as the person left it) or Esc (`None`).
+    /// Shows `page` until Enter (it comes back as the person left it) or Esc (`None`). Keys
+    /// pressed before it showed (during a download, `sudo`'s output) are dropped: they were not
+    /// meant for it.
     fn show(&mut self, page: Page) -> Option<Page> {
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            let _ = event::read();
+        }
         self.view.page = page;
         let lang = self.view.lang.unwrap_or(Lang::En);
         loop {
@@ -704,10 +719,13 @@ pub fn wizard(
     ui.view.rows = labels.into_iter().map(|l| (l, St::Waiting)).collect();
     ui.view.page = Page::Doing;
     opts.update = action == Action::Update;
-    let (failed, replaced, left) = {
+    // Every question first; after the last answer nothing stops until the last screen.
+    let (failed, replaced, left, blocked) = {
         let mut r = super::run_with(dirs, lang, sys, pins, opts.clone(), &mut ui);
-        r.all(&action.steps());
-        (r.failed, r.replaced, r.left)
+        let steps = action.steps();
+        r.ask_all(&steps);
+        r.all(&steps);
+        (r.failed, r.replaced, r.left, r.blocked)
     };
     if replaced {
         ui.close();
@@ -716,15 +734,24 @@ pub fn wizard(
             &["setup", "--lang", lang.code(), "--resume-update"],
         );
     }
-    if !failed && action != Action::RemoveAll {
+    // Not when the jail cannot start: the next run offers Repair, which tries it again.
+    if !failed && blocked.is_none() && action != Action::RemoveAll {
         super::mark_version(dirs);
     }
     let removed = matches!(action, Action::RemoveKeep | Action::RemoveAll);
-    let page = done_page(dirs, lang, action, failed, left);
-    let chat = !failed && !removed;
+    let on_path =
+        std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d == opts.bin));
+    let end = End {
+        failed,
+        blocked,
+        left,
+        new_path: !on_path && !removed,
+    };
+    let page = done_page(dirs, lang, action, &end);
+    let chat = !failed && !removed && blocked.is_none();
     let go = ui.show(page).is_some();
     ui.close();
-    if failed {
+    if failed || blocked.is_some() {
         return Ok(1);
     }
     if go && chat {
@@ -775,15 +802,31 @@ pub fn found_page(dirs: &Dirs, sys: &Sys, lang: Lang) -> Page {
             t(M::RemoveKeep),
             t(M::RemoveAll),
         ],
-        sel: 0,
+        // No version noted: a run that did not finish (or a removal that kept the data, or a
+        // build from source): Repair goes through every step.
+        sel: usize::from(f.version.is_none()),
     }
 }
 
-/// The last screen.
-pub fn done_page(dirs: &Dirs, lang: Lang, action: Action, failed: bool, left: Option<M>) -> Page {
+/// How a run ended, for the last screen.
+pub struct End {
+    pub failed: bool,
+    /// The jail cannot start: what to ask an administrator for.
+    pub blocked: Option<M>,
+    pub left: Option<M>,
+    /// `clio`'s folder was not on the PATH: the next terminal finds it.
+    pub new_path: bool,
+}
+
+/// The last screen: its title, the one thing left (if any) in one line, and where `clio` is
+/// found from now on.
+pub fn done_page(dirs: &Dirs, lang: Lang, action: Action, end: &End) -> Page {
     let t = |m: M| m.get(lang).to_owned();
-    let (title, lines) = if failed {
+    let left = |m: M| M::DoneLeft.fill(lang, &[m.get(lang)]);
+    let (title, mut lines) = if end.failed {
         (t(M::DoneFailed), vec![t(M::DoneFailedLine)])
+    } else if let Some(b) = end.blocked {
+        (t(M::DoneBlocked), vec![left(b)])
     } else if action == Action::RemoveKeep {
         let kept = format!("{} · {}", dirs.config.display(), dirs.data.display());
         (
@@ -793,17 +836,16 @@ pub fn done_page(dirs: &Dirs, lang: Lang, action: Action, failed: bool, left: Op
     } else if action == Action::RemoveAll {
         (t(M::RemovedTitle), vec![t(M::RemovedMemory)])
     } else {
-        (
-            t(M::DoneTitle),
-            left.map(|m| M::DoneLeft.fill(lang, &[m.get(lang)]))
-                .into_iter()
-                .collect(),
-        )
+        (t(M::DoneTitle), end.left.map(left).into_iter().collect())
     };
+    if end.new_path {
+        lines.push(t(M::DonePath));
+    }
+    let ok = !end.failed && end.blocked.is_none();
     Page::Done {
         title,
-        ok: !failed,
+        ok,
         lines,
-        chat: !failed && !matches!(action, Action::RemoveKeep | Action::RemoveAll),
+        chat: ok && !matches!(action, Action::RemoveKeep | Action::RemoveAll),
     }
 }

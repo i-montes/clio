@@ -99,9 +99,12 @@ fn fake_sys(dir: &Path) -> Sys {
     Sys {
         dirs: vec![dir.into()],
         linger: dir.join("linger"),
+        userns: dir.join("userns_restrict"),
+        apparmor: dir.join("apparmor.d"),
         root: false,
         user: Some("someone".into()),
         linux: true,
+        fake: true,
     }
 }
 
@@ -138,17 +141,26 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
             .collect();
         v
     };
+    let end = |blocked, left| screen::End {
+        failed: false,
+        blocked,
+        left,
+        new_path: true,
+    };
     let mut done = view(screen::done_page(
         &dirs(&installed),
         lang,
         Action::Install,
-        false,
-        Some(M::LeftModel),
+        &end(None, Some(M::LeftModel)),
     ));
-    done.rows = vec![(
-        t(M::StSystem),
-        St::Warn(M::NoteNoSudo.fill(lang, &["bubblewrap, loginctl enable-linger"])),
-    )];
+    // A warning is not repeated on the last screen: only the one thing left.
+    done.rows = vec![(t(M::StSystem), St::Warn(t(M::NoteNoSudoLinger)))];
+    let blocked = view(screen::done_page(
+        &dirs(&installed),
+        lang,
+        Action::Install,
+        &end(Some(M::LeftJailUserns), None),
+    ));
     let mut language = View::new(None);
     language.page = Page::Language { sel: 0 };
     vec![
@@ -176,10 +188,7 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
             "progress",
             doing(vec![
                 (Step::Folders, St::Done(t(M::NoteCreated))),
-                (
-                    Step::System,
-                    St::Warn(M::NoteNoSudo.fill(lang, &["bubblewrap, loginctl enable-linger"])),
-                ),
+                (Step::System, St::Warn(t(M::NoteNoSudo))),
                 (Step::Node, St::Working(Some((12_400_000, 30_000_000)))),
             ]),
         ),
@@ -212,6 +221,27 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
             }),
         ),
         (
+            "sudo",
+            view(Page::Choice {
+                title: t(M::SudoTitle),
+                lines: vec![
+                    M::SudoBwrap.fill(lang, &["apt"]),
+                    t(M::SudoLinger),
+                    t(M::SudoRuns),
+                    "  sudo /usr/bin/apt-get -o DPkg::Lock::Timeout=300 update -qq".into(),
+                    "  sudo /usr/bin/apt-get -o DPkg::Lock::Timeout=300 install -y -qq bubblewrap"
+                        .into(),
+                    "  sudo /usr/bin/loginctl enable-linger someone".into(),
+                    t(M::SudoProfile),
+                    "  sudo /usr/bin/tee /etc/apparmor.d/clio-bwrap".into(),
+                    "  sudo /usr/sbin/apparmor_parser -r /etc/apparmor.d/clio-bwrap".into(),
+                    t(M::SudoHow),
+                ],
+                options: vec![t(M::SudoGo), t(M::SudoSkip)],
+                sel: 0,
+            }),
+        ),
+        (
             "failed-step",
             doing(vec![
                 (Step::Folders, St::Done(t(M::NoteCreated))),
@@ -227,6 +257,7 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
             ]),
         ),
         ("done", done),
+        ("blocked", blocked),
     ]
 }
 
@@ -539,7 +570,7 @@ fn memory_release(dir: &Path, version: &str) -> MemoryPin {
 fn clio_memory_is_checked_against_its_pinned_sums() {
     let t = tempfile::tempdir().unwrap();
     let bin = t.path().join("bin");
-    let mut m = memory_release(&t.path().join("rel"), "0.13.0");
+    let mut m = memory_release(&t.path().join("rel"), "0.14.0");
     let good = m.sums_sha256.clone();
     // SHA256SUMS is not the one pinned: nothing.
     m.sums_sha256 = sha(b"other");
@@ -565,7 +596,7 @@ fn clio_memory_is_checked_against_its_pinned_sums() {
         fetch::install_memory(&bin, &m, &mut |_| {}).unwrap(),
         Some(String::new())
     );
-    assert_eq!(fetch::memory_installed(&bin).as_deref(), Some("0.13.0"));
+    assert_eq!(fetch::memory_installed(&bin).as_deref(), Some("0.14.0"));
     assert_eq!(fetch::install_memory(&bin, &m, &mut |_| {}).unwrap(), None);
     // One the person updated on their own is newer: it stays.
     script(&bin.join("clio-memory"), "echo clio-memory 0.14.0");
@@ -604,6 +635,72 @@ fn the_model_files_are_kept_when_right_and_replaced_only_when_verified() {
     write(&src, b"weights");
     assert!(fetch::install_model(&home, &m, &mut |_| {}).unwrap());
     assert_eq!(std::fs::read(&file).unwrap(), b"weights");
+}
+
+// The runtime comes first: when it cannot be downloaded, no model folder is left (a folder without
+// its runtime would fail every time the memory opens it), and the model step ends as a warning.
+#[test]
+fn a_missing_runtime_leaves_no_model_folder_and_only_warns() {
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("src/model.onnx");
+    write(&src, b"weights");
+    let m = fetch::ModelPin {
+        dir: ".cache/clio-models/granite".into(),
+        files: vec![fetch::ModelFile {
+            url: src.display().to_string(),
+            name: "model.onnx".into(),
+            sha256: sha(b"weights"),
+            size: 7,
+        }],
+        runtime_dir: ".cache/clio-models/onnxruntime".into(),
+        runtime: vec![fetch::Runtime {
+            url: t.path().join("src/gone.tgz").display().to_string(),
+            sha256: sha(b"x"),
+            into: "cpu".into(),
+        }],
+    };
+    let home = t.path().join("home");
+    assert!(fetch::install_model(&home, &m, &mut |_| {}).is_err());
+    assert!(!home.join(".cache/clio-models/granite").exists());
+
+    // The memory step: the binary installs, the model is left for later, nothing failed.
+    let mem = t.path().join("mem");
+    let pin = memory_release(&mem, "0.14.0");
+    let mut ui = FakeUi::default();
+    let mut r = run_on(&home, fake_sys(&t.path().join("sys")), &mut ui);
+    r.pins.memory = Some(pin);
+    r.pins.model = Some(m);
+    r.all(&[Step::Memory]);
+    assert!(!r.failed);
+    drop(r);
+    assert_eq!(
+        ui.rows.get(&0),
+        Some(&St::Warn(M::NoteModelLater.get(Lang::En).into()))
+    );
+    assert!(!home.join(".cache/clio-models/granite").exists());
+}
+
+// No systemd user session: the timer is a warning, and its unit files do not stay behind.
+#[test]
+fn a_timer_that_cannot_start_only_warns_and_leaves_no_units() {
+    let t = tempfile::tempdir().unwrap();
+    let sys_dir = t.path().join("sys");
+    script(&sys_dir.join("systemctl"), "exit 1");
+    let mut ui = FakeUi::default();
+    let mut r = run_on(t.path(), fake_sys(&sys_dir), &mut ui);
+    r.opts.exe = t.path().join(".local/bin/clio");
+    r.all(&[Step::Timer]);
+    assert!(!r.failed);
+    drop(r);
+    assert_eq!(
+        ui.rows.get(&0),
+        Some(&St::Warn(M::NoteTimerLater.get(Lang::En).into()))
+    );
+    assert!(
+        !t.path()
+            .join(".config/systemd/user/clio-services.timer")
+            .exists()
+    );
 }
 
 // ---- removing ----------------------------------------------------------------------------------
@@ -711,18 +808,163 @@ fn the_steps_of_each_choice() {
     for a in [Action::Update, Action::RemoveKeep] {
         assert!(!a.steps().contains(&Step::RemoveData), "{a:?}");
     }
-    // An update never asks: no vault, model or judge step; it replaces Clio first.
+    // An update replaces Clio first; it finishes a half-done install (the vault, the model) but
+    // never asks for the judge or the system.
     let u = Action::Update.steps();
     assert_eq!(u[0], Step::Binaries);
-    for s in [
-        Step::Vault,
-        Step::Model,
-        Step::Judge,
-        Step::Folders,
-        Step::System,
-    ] {
+    for s in [Step::Vault, Step::Model] {
+        assert!(
+            u.contains(&s) && Action::Repair.steps().contains(&s),
+            "{s:?}"
+        );
+    }
+    for s in [Step::Judge, Step::Folders, Step::System] {
         assert!(!u.contains(&s), "{s:?}");
     }
-    assert!(!Action::Repair.steps().contains(&Step::Model));
     assert_eq!(Action::RemoveAll.steps().last(), Some(&Step::RemoveData));
+}
+
+// No version noted (a run that did not finish): Repair is the choice offered first.
+#[test]
+fn an_install_without_its_version_offers_repair_first() {
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs(t.path());
+    write(&d.config_file(), b"{}");
+    let sys = fake_sys(&t.path().join("sys"));
+    let sel = |d: &Dirs| match screen::found_page(d, &sys, Lang::En) {
+        Page::Choice { sel, .. } => sel,
+        _ => panic!("not the existing-install page"),
+    };
+    assert_eq!(sel(&d), 1);
+    write(&d.data.join("version"), b"0.2.0");
+    assert_eq!(sel(&d), 0);
+}
+
+// ---- asking first, and the sudo moment ---------------------------------------------------------
+
+fn run_on<'a>(home: &Path, sys: Sys, ui: &'a mut FakeUi) -> super::steps::Run<'a> {
+    let opts = Opts {
+        bin: home.join(".local/bin"),
+        ..Opts::default()
+    };
+    let pins = super::fetch::Pins {
+        node: None,
+        memory: None,
+        model: None,
+    };
+    super::run_with(&dirs(home), Lang::En, sys, pins, opts, ui)
+}
+
+/// A fake system whose `bwrap` starts only once `ok` (a path) exists, and whose apt-get puts it in
+/// place; `tee` and `apparmor_parser` log, `tee` writes what it reads.
+fn jail_sys(dir: &Path, ok: &Path, restricted: bool) -> Sys {
+    let log = "D=$(dirname \"$0\"); echo \"$(basename \"$0\") $*\" >> \"$D/calls.log\"";
+    script(&dir.join("sudo"), &format!("{log}\nexec \"$@\""));
+    script(
+        &dir.join("apt-get"),
+        &format!(
+            "{log}\ncase \"$*\" in *install*) printf '#!/bin/sh\\n[ -e {} ]\\n' > \"$D/bwrap\"; chmod +x \"$D/bwrap\";; esac",
+            ok.display()
+        ),
+    );
+    script(&dir.join("tee"), &format!("{log}\ncat > \"$1\""));
+    script(
+        &dir.join("apparmor_parser"),
+        &format!("{log}\ntouch {}", ok.display()),
+    );
+    std::fs::create_dir_all(dir.join("apparmor.d")).unwrap();
+    if restricted {
+        write(&dir.join("userns_restrict"), b"1\n");
+    }
+    fake_sys(dir)
+}
+
+// Every question is asked before any step runs, the sudo moment last; then the steps ask nothing.
+#[test]
+fn every_question_comes_before_the_work() {
+    let t = tempfile::tempdir().unwrap();
+    let sys_dir = t.path().join("sys");
+    let ok = t.path().join("ok");
+    std::fs::write(&ok, "").unwrap();
+    script(&sys_dir.join("systemctl"), "exit 0");
+    script(
+        &sys_dir.join("loginctl"),
+        "D=$(dirname \"$0\"); echo \"loginctl $*\" >> \"$D/calls.log\"",
+    );
+    let sys = jail_sys(&sys_dir, &ok, false);
+    let mut ui = FakeUi {
+        answers: [
+            Answer::Secret(SecretValue::new(PASS.into())),
+            Answer::Choice(3),
+            Answer::Choice(0),
+            Answer::Choice(0),
+        ]
+        .into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys, &mut ui);
+        r.ask_all(&Action::Install.steps());
+        assert!(r.blocked.is_none());
+    }
+    assert!(ui.rows.is_empty(), "a step ran while asking: {:?}", ui.rows);
+    let en = |m: M| m.get(Lang::En).to_owned();
+    assert_eq!(
+        ui.asked,
+        [
+            en(M::VaultNewTitle),
+            en(M::ModelTitle),
+            en(M::JudgeTitle),
+            en(M::SudoTitle)
+        ]
+    );
+    // The moment ran right then: bubblewrap installed, lingering on, no profile (not restricted).
+    let calls = std::fs::read_to_string(sys_dir.join("calls.log")).unwrap();
+    assert!(calls.contains("install -y -qq bubblewrap"), "{calls}");
+    assert!(calls.contains("enable-linger someone"), "{calls}");
+    assert!(!calls.contains("tee"), "{calls}");
+}
+
+// Where the kernel restricts user namespaces and the jail does not start, the AppArmor profile is
+// part of the same moment, as fixed text; where the jail already starts, it is never written.
+#[test]
+fn the_apparmor_profile_is_written_only_when_the_jail_needs_it() {
+    let t = tempfile::tempdir().unwrap();
+    // Restricted, bwrap missing: installed, still not starting, so the profile goes in.
+    let sys_dir = t.path().join("sys");
+    let ok = t.path().join("ok");
+    let mut ui = FakeUi::default();
+    let mut r = run_on(t.path(), jail_sys(&sys_dir, &ok, true), &mut ui);
+    r.opts.yes = true;
+    r.ask_all(&[Step::System]);
+    assert!(r.blocked.is_none());
+    let profile = sys_dir.join("apparmor.d/clio-bwrap");
+    assert_eq!(
+        std::fs::read_to_string(&profile).unwrap(),
+        super::BWRAP_PROFILE
+    );
+    let calls = std::fs::read_to_string(sys_dir.join("calls.log")).unwrap();
+    assert!(
+        calls.contains("sudo ") && calls.contains("apparmor_parser -r "),
+        "{calls}"
+    );
+    drop(r);
+
+    // Again: the jail starts, so nothing is written or run.
+    std::fs::remove_file(sys_dir.join("calls.log")).unwrap();
+    let mut r = run_on(t.path(), jail_sys(&sys_dir, &ok, true), &mut ui);
+    r.opts.yes = true;
+    r.ask_all(&[Step::System]);
+    assert!(r.blocked.is_none());
+    assert!(!sys_dir.join("calls.log").exists());
+    drop(r);
+
+    // The jail still does not start and a profile already names bwrap: none is added, and the
+    // last screen says what to ask an administrator for.
+    std::fs::remove_file(&ok).unwrap();
+    let mut r = run_on(t.path(), jail_sys(&sys_dir, &ok, true), &mut ui);
+    r.opts.yes = true;
+    r.ask_all(&[Step::System]);
+    assert_eq!(r.blocked, Some(M::LeftJailUserns));
+    assert!(!sys_dir.join("calls.log").exists());
 }
