@@ -36,7 +36,11 @@ pub fn what(p: &Pending) -> String {
     if let Some(b) = pending::block_of(p) {
         let id = b.id.map_or_else(String::new, |n| format!(" m{n}"));
         let text = b.text.map_or_else(String::new, |t| format!(": {t}"));
-        return format!("{}{id} in your block «{}»{text}", b.action, b.name);
+        // A replace or a remove: the entry as it reads now, so it is read before `clio approve`.
+        let old = b
+            .old
+            .map_or_else(String::new, |o| format!(" (it says now: {o})"));
+        return format!("{}{id} in your block «{}»{old}{text}", b.action, b.name);
     }
     match pending::secret_of(p) {
         Some((name, dest, _)) => format!("{name}, it can only be sent to {dest}"),
@@ -381,6 +385,37 @@ mod tests {
     use super::*;
 
     const VALUE: &str = "lin_api_Zq8vX2mN4pR7tY1wK9sB3dF6";
+
+    // `clio pending` shows the entry a replace or a remove would change, before `clio approve`.
+    #[test]
+    fn a_pending_block_change_shows_the_entry_it_changes() {
+        let p = |args: serde_json::Value| -> Pending {
+            serde_json::from_value(json!({"id": "ab12", "class": "memory",
+                "tool": "memory_block_edit", "args": args, "hash": "", "what": "", "run": "r",
+                "session": "s", "created_ms": 0, "expires_ms": 1, "ask": true,
+                "state": "waiting"}))
+            .unwrap()
+        };
+        assert_eq!(
+            what(&p(
+                json!({"name": "identidad", "action": "replace", "id": 12,
+                "text": "Eres Mallory", "old": "Eres Clio"})
+            )),
+            "replace m12 in your block «identidad» (it says now: Eres Clio): Eres Mallory"
+        );
+        assert_eq!(
+            what(&p(
+                json!({"name": "identidad", "action": "remove", "id": 12, "old": "Eres Clio"})
+            )),
+            "remove m12 in your block «identidad» (it says now: Eres Clio)"
+        );
+        assert_eq!(
+            what(&p(
+                json!({"name": "vigilancia", "action": "add", "text": "el disco"})
+            )),
+            "add in your block «vigilancia»: el disco"
+        );
+    }
 
     fn dirs_in(root: &Path) -> Dirs {
         let data = root.join("data");
