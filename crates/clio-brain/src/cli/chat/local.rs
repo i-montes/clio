@@ -821,6 +821,8 @@ fn hold(run_dir: &Path) -> Result<std::fs::File, String> {
         .mode(0o600)
         .open(run_dir.join("session.lock"))
         .map_err(text)?;
+    // 0600 whatever the umask (S-23).
+    crate::cli::set_mode(&run_dir.join("session.lock"), 0o600)?;
     rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| OPEN_ELSEWHERE.to_owned())?;
     Ok(f)
@@ -849,11 +851,19 @@ fn digest(file: &Path) -> (u64, String) {
 /// Writes the seal of `file` as it is now (an empty one when there is no file yet). Written when
 /// the session opens too, so a session Clio never closed does not match it.
 fn seal(d: &Dirs, run_dir: &Path, file: Option<&Path>) {
+    use std::os::unix::fs::OpenOptionsExt;
     let (size, sha256) = file.map_or_else(|| digest(Path::new("")), digest);
-    let _ = std::fs::OpenOptions::new()
+    let since = d.data.join(SEALS_SINCE);
+    // Made once (its time is what counts), 0600 whatever the umask (S-23).
+    if std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(d.data.join(SEALS_SINCE));
+        .mode(0o600)
+        .open(&since)
+        .is_ok()
+    {
+        let _ = crate::cli::set_mode(&since, 0o600);
+    }
     let _ = crate::cli::write_private(
         &run_dir.join(SEAL),
         json!({"size": size, "sha256": sha256})
@@ -1134,6 +1144,35 @@ mod tests {
         );
         std::fs::write(&other, "x forged").unwrap();
         assert!(changed_since_close(d, &old, &other));
+    }
+
+    // S-23: what the seals and the lock leave behind is private whatever the umask: the marker in
+    // the data folder, the seal and the lock in the run folder, after an open and after a close.
+    #[test]
+    fn the_seal_the_marker_and_the_lock_are_private() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let (src, sessions) = local_source(&home);
+        let d = &*src.dirs;
+        let run = d.runs.join("20261118-cccc");
+        std::fs::create_dir_all(&run).unwrap();
+        let file = sessions.join("c.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        let modes = || {
+            [
+                crate::cli::mode(&d.data.join(SEALS_SINCE)),
+                crate::cli::mode(&run.join(SEAL)),
+                crate::cli::mode(&run.join("session.lock")),
+            ]
+        };
+        // Open: the lock, then the seal of the file as it is.
+        let lock = hold(&run).unwrap();
+        seal(d, &run, Some(&file));
+        assert_eq!(modes(), [Some(0o600); 3]);
+        // Close: sealed again, the lock released.
+        seal(d, &run, Some(&file));
+        drop(lock);
+        assert_eq!(modes(), [Some(0o600); 3]);
     }
 
     // Two `clio` on one conversation: the second cannot hold it while the first does.
