@@ -1004,7 +1004,7 @@ pub fn local_offset(now: i64) -> i64 {
 }
 
 /// `HH:MM` local of `ms`, with the day when it is not today.
-fn when(ms: i64, now: i64, offset: i64) -> String {
+pub(crate) fn when(ms: i64, now: i64, offset: i64) -> String {
     let day = |t: i64| (t / 1000 + offset).div_euclid(86_400);
     let t = (ms / 1000 + offset).rem_euclid(86_400);
     let hm = format!("{:02}:{:02}", t / 3600, t / 60 % 60);

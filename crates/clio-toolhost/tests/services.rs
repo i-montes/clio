@@ -322,3 +322,284 @@ fn service_status_is_outside_data_that_marks_the_session() {
     let copy = env_with(false, true);
     assert!(!call(&copy, "s", "service_status", json!({})).ok);
 }
+
+/// Beside `backup`: the skills `notes` (versions 1 and 2) and `skill-creator` (shipped), the MCP
+/// servers `time` (turned off by the person) and `clock` (turned off by Clio), as the person's
+/// `clio` writes them.
+fn with_kinds(e: &Env) {
+    let rec = |root: &Path, name: &str, enabled: bool, off: Option<&str>, n: u64| {
+        for v in 1..=n {
+            std::fs::create_dir_all(root.join(format!("versions/{name}/{v}"))).unwrap();
+        }
+        std::fs::create_dir_all(root.join("records")).unwrap();
+        let versions: Vec<Value> = (1..=n)
+            .map(
+                |v| json!({"n": v, "sha256": "x", "at_ms": v, "by": "person", "verdict": "passes"}),
+            )
+            .collect();
+        std::fs::write(
+            root.join(format!("records/{name}.json")),
+            json!({"name": name, "description": format!("The {name} one, for the tests."),
+                "enabled": enabled, "off": off, "current": n, "versions": versions})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    let (skills, mcp) = (e.data.join("skills"), e.data.join("mcp"));
+    rec(&skills, "notes", true, None, 2);
+    rec(&skills, "skill-creator", true, None, 1);
+    rec(
+        &mcp,
+        "time",
+        false,
+        Some(clio_toolhost::manage::OFF_BY_PERSON),
+        1,
+    );
+    rec(
+        &mcp,
+        "clock",
+        false,
+        Some(clio_toolhost::manage::OFF_BY_CLIO),
+        1,
+    );
+    for name in ["time", "clock"] {
+        std::fs::create_dir_all(mcp.join("state")).unwrap();
+        std::fs::write(
+            mcp.join(format!("state/{name}.json")),
+            json!({"name": name, "package": "mcp-server-time", "version": "1.0.0", "entry": "x",
+                "tree": "t", "integrity": "sha512-x", "packages": 1, "confirmed": true, "tools": []})
+            .to_string(),
+        )
+        .unwrap();
+    }
+}
+
+fn manage(e: &Env, session: &str, tool: &str, name: &str, action: &str) -> Response {
+    call(
+        e,
+        session,
+        tool,
+        json!({"name": name, "action": action, "reason": "Tidy up"}),
+    )
+}
+
+fn waiting(e: &Env) -> Vec<clio_toolhost::pending::Pending> {
+    clio_toolhost::pending::list(&e.data.join("host"))
+}
+
+// S-68 S-69 S-70: the manage tools never write a registry. `status` and `logs` answer at once
+// (a service's or a server's text is outside data that marks the session; a skill's record is
+// not); `off` and `run` are recorded for the person's `clio` and need no permission; `on`,
+// `undo` and `remove` are set aside, hash-bound, and a window may answer them except `on` of what
+// the person turned off and `remove` of a shipped skill. They cannot register, set a tool's mode,
+// touch the timer or reach another kind's registry; a bad name is refused, a missing one said
+// plainly; copy mode has none of it.
+#[test]
+fn manage_records_or_sets_aside_and_never_writes_a_registry() {
+    let e = env_with(true, true);
+    with_kinds(&e);
+    let before = tree(&e.data.join("services"));
+    let (skills_before, mcp_before) = (tree(&e.data.join("skills")), tree(&e.data.join("mcp")));
+
+    let r = manage(&e, "k", "skill_manage", "notes", "status");
+    assert!(
+        r.ok && !r.external && r.content.contains("notes [on] version 2"),
+        "{r:?}"
+    );
+    let r = manage(&e, "k", "skill_manage", "", "status");
+    assert!(r.ok && r.content.contains("skill-creator [on]"), "{r:?}");
+    assert!(
+        !e.host.is_tainted("k"),
+        "a skill's record is not outside text"
+    );
+    let r = manage(&e, "s", "service_manage", "backup", "logs");
+    assert!(
+        r.ok && r.external && r.content.contains("copied 3 files"),
+        "{r:?}"
+    );
+    assert!(e.host.is_tainted("s"), "a run's output marks the session");
+    let r = manage(&e, "m", "mcp_manage", "time", "status");
+    assert!(
+        r.ok && r.external && r.content.contains("time [off (turned off by the person)]"),
+        "{r:?}"
+    );
+
+    // Free: recorded, nothing set aside.
+    for action in ["off", "run"] {
+        let r = manage(&e, "s", "service_manage", "backup", action);
+        assert!(r.ok && r.decision.rule == "manage/free", "{action}: {r:?}");
+        assert!(r.content.contains("needs no approval"), "{r:?}");
+    }
+    let r = manage(&e, "s", "skill_manage", "notes", "off");
+    assert!(r.ok && r.decision.rule == "manage/free", "{r:?}");
+    let asked = std::fs::read_to_string(clio_toolhost::manage::requests_file(
+        &e.data.join("runs/r1"),
+    ))
+    .unwrap();
+    assert_eq!(asked.lines().count(), 3, "{asked}");
+    assert!(waiting(&e).is_empty());
+
+    // Set aside: hash-bound items a window may answer.
+    let r = manage(&e, "s", "service_manage", "backup", "remove");
+    assert_eq!(r.decision.outcome, "ask", "{r:?}");
+    assert!(r.content.contains("permission window is open"), "{r:?}");
+    let r = manage(&e, "s", "skill_manage", "notes", "undo");
+    assert_eq!(r.decision.outcome, "ask", "{r:?}");
+    let r = manage(&e, "s", "mcp_manage", "clock", "on");
+    assert_eq!(r.decision.outcome, "ask", "{r:?}");
+    // Always the person's: `on` of what they turned off, `remove` of a shipped skill.
+    let r = manage(&e, "s", "mcp_manage", "time", "on");
+    assert!(
+        r.content.contains(clio_toolhost::manage::PERSON_OFF),
+        "{r:?}"
+    );
+    let r = manage(&e, "s", "skill_manage", "skill-creator", "remove");
+    assert!(r.content.contains(clio_toolhost::manage::SHIPPED), "{r:?}");
+    let w = waiting(&e);
+    assert_eq!(w.len(), 5);
+    let of = |name: &str, action: &str| {
+        w.iter()
+            .find(|p| p.args["name"] == name && p.args["action"] == action)
+            .unwrap()
+            .clone()
+    };
+    for (name, action, covered) in [
+        ("backup", "remove", true),
+        ("notes", "undo", true),
+        ("clock", "on", true),
+        ("time", "on", false),
+        ("skill-creator", "remove", false),
+    ] {
+        let p = of(name, action);
+        assert!(clio_toolhost::manage::is_manage(&p));
+        assert_eq!(clio_toolhost::grant::covers(&p), covered, "{name} {action}");
+        // Its box reads from its arguments: what it is at, and what it goes back to.
+        assert!(!p.hash.is_empty() && p.args["why"] == "Tidy up");
+        assert!(clio_toolhost::pending::skill_of(&p).is_none());
+        assert!(clio_toolhost::pending::service_of(&p).is_none());
+        assert!(clio_toolhost::pending::mcp_of(&p).is_none());
+    }
+    let undo = of("notes", "undo");
+    assert_eq!(
+        (undo.args["version"].as_u64(), undo.args["to"].as_u64()),
+        (Some(2), Some(1))
+    );
+    let (does, why) = clio_toolhost::manage::what(&undo).unwrap();
+    assert_eq!(
+        does,
+        "take the skill «notes» back to version 1 (it is at version 2 now)"
+    );
+    assert_eq!(why, "Tidy up");
+    let (does, _) = clio_toolhost::manage::what(&of("backup", "remove")).unwrap();
+    assert!(
+        does.contains("its versions, record, state and runs go to removed/"),
+        "{does}"
+    );
+    // The tool host cannot carry one out: only the person's `clio` does.
+    assert!(e.host.approve(&undo.id, undo.created_ms + 1).is_err());
+
+    // What does not apply, plainly; what is not theirs, refused.
+    assert!(
+        manage(&e, "s", "service_manage", "backup", "undo")
+            .content
+            .contains("no earlier version")
+    );
+    assert!(
+        manage(&e, "s", "service_manage", "backup", "on")
+            .content
+            .contains("already on")
+    );
+    let r = manage(&e, "s", "service_manage", "nope", "remove");
+    assert_eq!(r.content, "there is no service «nope»", "{r:?}");
+    let r = manage(&e, "s", "service_manage", "notes", "off");
+    assert_eq!(
+        r.content, "there is no service «notes»",
+        "another kind's registry: {r:?}"
+    );
+    assert!(
+        manage(&e, "s", "mcp_manage", "backup", "off")
+            .content
+            .contains("no MCP server")
+    );
+    for (tool, name, action) in [
+        ("service_manage", "../backup", "off"),
+        ("service_manage", "Backup", "status"),
+        ("service_manage", "backup", "enable"),
+        ("service_manage", "backup", "disable"),
+        ("service_manage", "backup", "write"),
+        ("skill_manage", "notes", "logs"),
+        ("skill_manage", "notes", "run"),
+        ("mcp_manage", "time", "allow"),
+        ("mcp_manage", "time", "ask"),
+        ("mcp_manage", "time", "confirm"),
+        ("mcp_manage", "time", "undo"),
+    ] {
+        let r = manage(&e, "x", tool, name, action);
+        assert!(
+            !r.ok && r.content.contains("Nothing was done"),
+            "{tool} {name} {action}: {r:?}"
+        );
+    }
+    let r = call(
+        &e,
+        "x",
+        "service_manage",
+        json!({"name": "backup", "action": "off"}),
+    );
+    assert!(r.content.contains("reason"), "a reason is required: {r:?}");
+    assert_eq!(waiting(&e).len(), 5);
+
+    assert_eq!(
+        tree(&e.data.join("services")),
+        before,
+        "nothing wrote the services"
+    );
+    assert_eq!(
+        tree(&e.data.join("skills")),
+        skills_before,
+        "nor the skills"
+    );
+    assert_eq!(tree(&e.data.join("mcp")), mcp_before, "nor the MCP servers");
+
+    let copy = env_with(false, true);
+    with_kinds(&copy);
+    assert!(!manage(&copy, "s", "skill_manage", "notes", "status").ok);
+}
+
+// S-36 S-69: in a `suspect` session every action but `status` is set aside and always asks;
+// at most 20 manage calls an hour per session.
+#[test]
+fn a_suspect_session_asks_for_all_but_status_and_the_brake_holds() {
+    let e = env_with(true, true);
+    with_kinds(&e);
+    let t = call(&e, "s", "taint", json!({"suspect": true}));
+    assert!(t.tainted, "{t:?}");
+    assert!(manage(&e, "s", "service_manage", "backup", "status").ok);
+    for (tool, name, action) in [
+        ("service_manage", "backup", "off"),
+        ("service_manage", "backup", "run"),
+        ("service_manage", "backup", "logs"),
+        ("skill_manage", "notes", "off"),
+        ("mcp_manage", "clock", "on"),
+    ] {
+        let r = manage(&e, "s", tool, name, action);
+        assert_eq!(r.decision.outcome, "ask", "{action}: {r:?}");
+        assert!(r.content.contains(clio_toolhost::SUSPECT_REASON), "{r:?}");
+    }
+    let w = waiting(&e);
+    assert_eq!(w.len(), 5);
+    assert!(w.iter().all(|p| !clio_toolhost::grant::covers(p)));
+    assert!(!clio_toolhost::manage::requests_file(&e.data.join("runs/r1")).exists());
+
+    // The brake: 20 calls an hour in a session, whatever they are; another session has its own.
+    let b = env_with(true, true);
+    for i in 0..clio_toolhost::manage::PER_HOUR {
+        assert!(
+            manage(&b, "s", "service_manage", "backup", "status").ok,
+            "call {i}"
+        );
+    }
+    let r = manage(&b, "s", "service_manage", "backup", "status");
+    assert!(!r.ok && r.content.contains("an hour"), "{r:?}");
+    assert!(manage(&b, "t", "service_manage", "backup", "status").ok);
+}

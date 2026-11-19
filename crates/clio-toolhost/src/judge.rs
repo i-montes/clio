@@ -93,6 +93,8 @@ pub(crate) fn tool_of(op: &str) -> &'static str {
         "exec" | "job_output" => "bash",
         "mcp_call" => "mcp_call",
         "mcp_tools" => "mcp_tools",
+        "service_manage" => "service_manage",
+        "mcp_manage" => "mcp_manage",
         "fs_list" => "ls",
         "fs_glob" => "find",
         _ => "read",
