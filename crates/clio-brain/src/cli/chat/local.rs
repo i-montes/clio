@@ -34,7 +34,7 @@ use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
 use clio_brain::pi::level::{self, Assessor, run_assessed_with};
-use clio_brain::pi::preprompt::PrePrompt;
+use clio_brain::pi::preprompt::{APPROVALS_ASK, PrePrompt};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
@@ -941,6 +941,17 @@ impl Session for ChatSession {
             .chain(notes)
             .collect::<Vec<_>>()
             .join("\n\n");
+        // A turn the approvals started: only what came of them, with Clio's request. With
+        // nothing to give (the outcomes went with another message), there is no turn.
+        if text.is_empty() && findings.is_none() && !self.pre.presenting() {
+            if data.is_empty() {
+                return Ok(RunSummary {
+                    handled: true,
+                    ..RunSummary::default()
+                });
+            }
+            self.pre.reviewed(APPROVALS_ASK);
+        }
         let mut given = Vec::new();
         if !data.is_empty() {
             given.push((Source::ToolResult, data.as_str()));
@@ -1206,7 +1217,9 @@ impl Session for ChatSession {
         }
         if !yes {
             pending::reject(&h.dirs, id)?;
-            return Ok(format!("rejected {id}: it is not run"));
+            let note = format!("rejected {id}: it is not run");
+            locked(&h.notes).push(format!("the person {note}"));
+            return Ok(note);
         }
         let p = pending::approve(&h.dirs, id)?;
         let what = pending::outcome(&p);

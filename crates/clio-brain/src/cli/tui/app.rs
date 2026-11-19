@@ -740,6 +740,7 @@ pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
         cmds.extend(super::review::next_skill(&mut app));
         cmds.extend(super::review::after_turn(&mut app));
         cmds.extend(super::review::deliver(&mut app));
+        cmds.extend(super::approvals::deliver(&mut app));
         cmds.extend(super::approvals::check(&mut app));
     }
     (app, cmds)
@@ -1373,6 +1374,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             app.answering = app.answering.saturating_sub(1);
             let a = &mut app.chat.approvals;
             a.waiting = a.waiting.saturating_sub(1);
+            a.answered |= r.is_ok();
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),

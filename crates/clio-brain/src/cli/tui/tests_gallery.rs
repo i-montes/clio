@@ -6,7 +6,7 @@
 
 use clio_brain::pi::rpc::Event;
 
-use super::app::{Action, App, Confirm, Screen};
+use super::app::{Action, App, Bg, Confirm, Input, Screen};
 use super::chat::{Chat, Item, ToolState};
 use super::home::{Header, KeyState};
 use super::tests::THEME;
@@ -398,6 +398,28 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     out.push(("review fails, its findings", fails()));
     let (a, _) = super::tests::feed(fails(), vec![super::tests_continuous::settled(Some(1000))]);
     out.push(("the turn started by the review", a));
+    // Not yet time to ask: one quiet line, the count in the status line.
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![Input::Bg(Bg::Approvals {
+            session: "sid".into(),
+            waiting: 2,
+            opened: false,
+        })],
+    );
+    out.push(("actions wait for approval, not asked yet", a));
+    // The person answered both boxes: one turn gives the model what came of them.
+    let mut a = conversation(true);
+    a.answering = 2;
+    let ok = |m: &str| Input::Bg(Bg::ChatAnswered(Ok(m.into())));
+    let (a, _) = super::tests::feed(
+        a,
+        vec![
+            ok("approved a1b2: removed 3 volumes, 4.2 GB freed"),
+            ok("rejected c3d4: it is not run"),
+        ],
+    );
+    out.push(("the turn started by the approvals", a));
     for (name, typed, suspect) in [
         ("Clio asks for a secret, empty", 0, false),
         ("Clio asks for a secret, with characters", 23, true),

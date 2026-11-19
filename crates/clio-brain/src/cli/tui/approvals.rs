@@ -3,7 +3,7 @@
 //! rest of the time what waits stays in `/pending`, the chat says so in one quiet line and the
 //! status line counts it.
 
-use super::app::{App, Cmd, chat_waits};
+use super::app::{App, Cmd, Screen, chat_waits};
 use super::chat::Item;
 
 /// The chat's approvals (one session's).
@@ -14,6 +14,36 @@ pub struct Approvals {
     /// What waits for the person in this session, as of the last check, less what was answered
     /// since: the status line.
     pub waiting: usize,
+    /// The person answered a box since the last turn: once nothing else waits, a turn gives the
+    /// model what came of them.
+    pub answered: bool,
+}
+
+/// The note of a turn the approvals started.
+pub const APPROVALS_TURN: &str = "turn started by the approvals: Clio says what came of them";
+
+/// The person answered what waited and the chat is idle: one turn, with no words of the person,
+/// gives the model what came of each answer (the runtime adds Clio's request). Nothing typed,
+/// no menu, box or notice in the way, as for the review's turn, and the keys in the chat: one
+/// who went to the sessions may be leaving, and the outcomes then wait for this session.
+pub fn deliver(app: &mut App) -> Vec<Cmd> {
+    if !app.chat.approvals.answered
+        || app.screen != Screen::Chat
+        || chat_waits(app)
+        || app.chat.failed.is_some()
+        || !app.chat.input.is_empty()
+        || app.chat.menu.is_some()
+        || app.modal.is_some()
+        || app.notice.is_some()
+    {
+        return vec![];
+    }
+    app.chat.items.push(Item::Note(APPROVALS_TURN.into()));
+    app.chat.scroll = 0;
+    app.chat.start_turn(app.now_ms);
+    vec![Cmd::ChatSend {
+        text: String::new(),
+    }]
 }
 
 /// The chat is idle and something asked for a check: the runtime looks at what waits and at the
@@ -59,10 +89,11 @@ mod tests {
 
     use crossterm::event::KeyCode;
 
-    use super::super::app::{Action, App, Bg, Cmd, Input};
+    use super::super::app::{Action, App, Bg, Cmd, Input, Screen};
     use super::super::ask::Prompt;
     use super::super::commands::{Modal, Pick};
     use super::super::tests::{feed, key};
+    use super::super::tests_continuous::settled;
     use super::super::tests_gallery::{screen_text, skill_ask, skill_md};
     use super::super::tests_review::idle;
 
@@ -156,5 +187,79 @@ mod tests {
         let a = modal(Pick::new("a1b2", "«delete» rm -r /srv/old"));
         let c = a.confirm.as_ref().unwrap();
         assert_eq!((c.id.as_str(), c.block.is_none()), ("a1b2", true));
+    }
+
+    fn answered(r: Result<&str, &str>) -> Input {
+        Input::Bg(Bg::ChatAnswered(
+            r.map(str::to_owned).map_err(str::to_owned),
+        ))
+    }
+
+    fn approvals_turns(cmds: &[Cmd]) -> usize {
+        cmds.iter()
+            .filter(|c| {
+                **c == Cmd::ChatSend {
+                    text: String::new(),
+                }
+            })
+            .count()
+    }
+
+    // Two boxes answered: once the last answer is back and the chat is idle, ONE turn gives the
+    // model what came of them, and the chat says who started it.
+    #[test]
+    fn one_turn_after_a_batch_of_answers() {
+        let mut a = idle();
+        a.answering = 2;
+        let (a, cmds) = feed(a, vec![answered(Ok("approved a1b2: done"))]);
+        assert_eq!(approvals_turns(&cmds), 0, "one answer is still on its way");
+        let (a, cmds) = feed(a, vec![answered(Ok("rejected c3d4: it is not run"))]);
+        assert_eq!(approvals_turns(&cmds), 1, "{cmds:?}");
+        assert!(a.chat.running);
+        assert_eq!(
+            notes(&a).last().map(String::as_str),
+            Some(super::APPROVALS_TURN)
+        );
+        let (a, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 0, "once per batch");
+        assert_eq!(
+            notes(&a)
+                .iter()
+                .filter(|n| *n == super::APPROVALS_TURN)
+                .count(),
+            1
+        );
+    }
+
+    // The person's own message goes first and carries what came of the answers: no turn after.
+    // An answer that failed is no outcome.
+    #[test]
+    fn a_message_of_the_person_carries_the_outcomes_and_a_failure_is_none() {
+        let mut a = idle();
+        a.answering = 1;
+        a.chat.set_input("and now?".into());
+        let (a, cmds) = feed(a, vec![answered(Ok("approved a1b2: done"))]);
+        assert_eq!(approvals_turns(&cmds), 0, "something is typed");
+        let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+        assert!(cmds.contains(&Cmd::ChatSend {
+            text: "and now?".into()
+        }));
+        let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 0);
+
+        let mut a = idle();
+        a.answering = 1;
+        let (_, cmds) = feed(a, vec![answered(Err("a1b2: gone"))]);
+        assert_eq!(approvals_turns(&cmds), 0);
+
+        // In the sessions the person may be leaving: the turn waits for the chat.
+        let mut a = idle();
+        a.answering = 1;
+        a.screen = Screen::Sessions;
+        let (mut a, cmds) = feed(a, vec![answered(Ok("approved a1b2: done"))]);
+        assert_eq!(approvals_turns(&cmds), 0);
+        a.screen = Screen::Chat;
+        let (_, cmds) = feed(a, vec![key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 1);
     }
 }
