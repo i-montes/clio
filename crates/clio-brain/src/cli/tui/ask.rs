@@ -200,6 +200,9 @@ impl SecretAsk {
     }
 }
 
+/// `BlockAsk::action` of a request about what Clio created (`*_manage`).
+pub const MANAGE: &str = "manage";
+
 /// The warning a box shows when the judge flagged the session (`suspect`).
 pub const SUSPECT_LINE: &str =
     "this session read content that tried to give orders: be sure you want this";
@@ -335,6 +338,30 @@ impl BlockAsk {
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
         if p.tool == "mcp_call" {
             return Some(Self::mcp_call(p, suspect));
+        }
+        // What the model asked of what it created: the act in plain words and Clio's reason.
+        if let Some((does, why)) = clio_toolhost::manage::what(p) {
+            let mut head = clean(&does);
+            if let Some(c) = head.get(..1) {
+                head = format!("{}{}?", c.to_uppercase(), &head[1..]);
+            }
+            // The box's label line already says why it always asks, when it does.
+            let rows = vec![
+                (Part::Head, head),
+                (Part::Label, format!("Clio's reason: {}", clean(&why))),
+            ];
+            let yes = match p.args["action"].as_str().unwrap_or("") {
+                "remove" => " yes, remove it",
+                "undo" => " yes, go back",
+                "on" => " yes, turn it on",
+                "off" => " yes, turn it off",
+                "run" => " yes, run it",
+                _ => " yes, show it",
+            };
+            let mut b = Self::rows(p.args["name"].as_str().unwrap_or(""), rows, yes);
+            b.action = MANAGE.into();
+            b.suspect = suspect;
+            return Some(b);
         }
         let service = clio_toolhost::pending::service_of(p);
         let mcp = clio_toolhost::pending::mcp_of(p);

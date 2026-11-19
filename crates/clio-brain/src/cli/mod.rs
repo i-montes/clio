@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod home;
 pub mod jail;
 pub mod jev;
+pub mod manage;
 pub mod mcp;
 pub mod mcp_servers;
 pub mod memory;

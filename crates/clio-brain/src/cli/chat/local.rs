@@ -1205,11 +1205,25 @@ impl Session for ChatSession {
     }
 
     fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
-        let Some(root) = &self.skills else {
-            return (vec![], vec![]);
-        };
         let th = self.run_dir.join("toolhost");
-        let notes = crate::cli::skills::apply_reports(root, &th);
+        // What the model asked of what it created, free (`off`, `run`): done now, said in the
+        // chat, and told to the model with the next message.
+        let mut notes = Vec::new();
+        if let Some(h) = &self.host {
+            for (chat, model) in crate::cli::manage::take_requests(
+                &h.dirs,
+                &th,
+                (&h.run, &self.pi.session_id),
+                self.suspect(),
+            ) {
+                locked(&h.notes).push(model);
+                notes.push(chat);
+            }
+        }
+        let Some(root) = &self.skills else {
+            return (vec![], notes);
+        };
+        notes.extend(crate::cli::skills::apply_reports(root, &th));
         let dir = clio_toolhost::skills::drafts_dir(&th);
         let taken = clio_toolhost::skills::taken_dir(&th);
         let mut handed = locked(&self.skill_handed);

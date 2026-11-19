@@ -63,7 +63,7 @@ const MCP_INSTALLER_FILES: [(&str, &str); 2] = [
 
 /// A skill Clio ships: a change to it always waits for the person.
 pub fn is_shipped(name: &str) -> bool {
-    name == BUNDLED || name == SERVICE_CREATOR || name == MCP_INSTALLER
+    clio_toolhost::manage::SHIPPED_SKILLS.contains(&name)
 }
 
 /// What the folder holds: skills (Pi loads `live/`) or services (stage 3: they run from
@@ -580,7 +580,7 @@ fn uninstall(root: &Path, name: &str) -> Res<()> {
     }
 }
 
-pub const OFF_BY_PERSON: &str = "turned off by the person";
+pub const OFF_BY_PERSON: &str = clio_toolhost::manage::OFF_BY_PERSON;
 /// Why an MCP server is off after it was installed (S-70).
 pub const WAITING_TOOLS: &str = "waiting: confirm its tools";
 
