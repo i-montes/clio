@@ -159,3 +159,12 @@ Then Telegram and the round, which will use all four.
 - Whether the reviewer shares the session's tool host or gets its own, given the tool host's
   per-session budgets and marks.
 - The exact closed question for Temis and its threshold, measured the way the other questions were.
+
+Stage 1, as built (2026-11-18):
+
+- Tool host: the reviewer gets its own (`clio toolhost --review`), started with the session's work folder, host rules and judge, its run id `<run>.review-<n>`: a shared one would make the chat and the review wait for each other (one call at a time) and mark the conversation from the reviewer's reads. It starts with the session's marks and spends from the same day's budget.
+- Reduced list: `read`, `bash`, `find`, `ls` (`CLIO_GUARD_REVIEW=1`), fixed whatever the mode so its prefix caches; in host mode `bash` without `background`. Not a gateway subagent (S-17 would deny its `bash`): it runs under the session's own rules.
+- A set-aside action is refused in the review's tool host, logged, and nothing is stored as pending.
+- Verdict format: the whole final message is one fenced `review` block with `verdict:`, `ran:` and `findings: none` or `- what:` / `  evidence:` items; a finding without evidence is dropped, at most 20 are kept; anything else is `could_not_check` with the raw text cleaned and capped.
+- The judge's question (not measured against the real judge yet): `needs_review`, "The work listed in `done` was carried out on this machine to answer `person_request`. It needs an independent check by someone else: it changes code, configuration, a service or data, a mistake in it could go unnoticed, and it is not trivial to see at a glance that it is right.", threshold `review.threshold` (0.8).
+- Model: `review.model`, by default `claude-opus-5-5` with the `claude` connector and the session's model with the others; when the connector's list (what Pi offered last, or the catalog) does not have it, the session's model, said in the result.
