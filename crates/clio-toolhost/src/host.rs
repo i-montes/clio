@@ -136,7 +136,7 @@ impl Host {
 
 /// `Host::log` without the host: a background command writes its last line from its own thread.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn log_line(
+pub fn log_line(
     state: &Path,
     run: &str,
     session: &str,

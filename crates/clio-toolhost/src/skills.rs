@@ -350,7 +350,7 @@ pub fn drafts_in(dir: &Path) -> Vec<Draft> {
 }
 
 /// The files of `args["files"]`, or why they are not.
-fn files_of(args: &Map<String, Value>) -> Result<Vec<SkillFile>, String> {
+pub(crate) fn files_of(args: &Map<String, Value>) -> Result<Vec<SkillFile>, String> {
     match args.get("files") {
         None | Some(Value::Null) => Ok(vec![]),
         Some(Value::Array(a)) => a

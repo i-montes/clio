@@ -188,6 +188,16 @@ pub type SkillOf<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, &'a str)>);
 /// What a skill waiting to be registered is, read from its arguments: name, description, SKILL.md
 /// and its files (`path`, `content`).
 pub fn skill_of(p: &Pending) -> Option<SkillOf<'_>> {
+    made_of(p, Class::Skill)
+}
+
+/// A service waiting to be registered (S-69), read the same way: name, description, its
+/// `service.json` (kept as `skill_md`) and its files.
+pub fn service_of(p: &Pending) -> Option<SkillOf<'_>> {
+    made_of(p, Class::Service)
+}
+
+fn made_of(p: &Pending, class: Class) -> Option<SkillOf<'_>> {
     let s = |k: &str| p.args.get(k).and_then(Value::as_str).unwrap_or("");
     let files = p.args["files"]
         .as_array()
@@ -200,7 +210,7 @@ pub fn skill_of(p: &Pending) -> Option<SkillOf<'_>> {
                 .collect()
         })
         .unwrap_or_default();
-    (p.class == Class::Skill).then(|| (s("name"), s("description"), s("skill_md"), files))
+    (p.class == class).then(|| (s("name"), s("description"), s("skill_md"), files))
 }
 
 /// The person's `clio` sets aside a reviewed skill draft (S-68): `args` holds the whole draft
@@ -214,12 +224,40 @@ pub fn set_aside_skill(
     reason: &str,
     per_day: u32,
 ) -> Result<Pending, String> {
+    set_aside_made(state, (run, session), args, reason, per_day, Class::Skill)
+}
+
+/// A reviewed service draft, as `set_aside_skill` (S-69): it always waits for the person.
+pub fn set_aside_service(
+    state: &Path,
+    run: &str,
+    session: &str,
+    args: Value,
+    reason: &str,
+    per_day: u32,
+) -> Result<Pending, String> {
+    set_aside_made(state, (run, session), args, reason, per_day, Class::Service)
+}
+
+fn set_aside_made(
+    state: &Path,
+    (run, session): (&str, &str),
+    args: Value,
+    reason: &str,
+    per_day: u32,
+    class: Class,
+) -> Result<Pending, String> {
+    let (tool, rule) = if class == Class::Service {
+        ("service_write", "services/aside")
+    } else {
+        ("skill_write", "skills/aside")
+    };
     let now = now_ms();
     let name = args["name"].as_str().unwrap_or("").to_owned();
     let p = Pending {
         id: String::new(),
-        class: Class::Skill,
-        tool: "skill_write".into(),
+        class,
+        tool: tool.into(),
         args,
         hash: String::new(),
         what: name,
@@ -233,15 +271,7 @@ pub fn set_aside_skill(
     };
     let p = set_aside(state, p, per_day)?;
     if let Err(e) = log_line(
-        state,
-        run,
-        session,
-        &p.tool,
-        &p.what,
-        false,
-        "aside",
-        "skills/aside",
-        None,
+        state, run, session, &p.tool, &p.what, false, "aside", rule, None,
     ) {
         eprintln!("clio-toolhost: the action log lost a line: {e}");
     }
@@ -256,9 +286,29 @@ pub fn approve_skill(
     now_ms: i64,
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
+    approve_made(state, id, now_ms, Class::Skill, register)
+}
+
+/// The person approves service `id` (S-69), as `approve_skill`.
+pub fn approve_service(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    register: impl FnOnce(&Pending) -> Result<String, String>,
+) -> Result<Pending, String> {
+    approve_made(state, id, now_ms, Class::Service, register)
+}
+
+fn approve_made(
+    state: &Path,
+    id: &str,
+    now_ms: i64,
+    class: Class,
+    register: impl FnOnce(&Pending) -> Result<String, String>,
+) -> Result<Pending, String> {
     let mut p = check(state, id, now_ms)?;
-    if p.class != Class::Skill {
-        return Err(format!("{id} is not a skill"));
+    if p.class != class {
+        return Err(format!("{id} is not a {class}"));
     }
     if hash_of(&p.tool, &p.args) != p.hash {
         return Err(format!(
@@ -282,7 +332,11 @@ pub fn approve_skill(
         &p.what,
         false,
         "approved",
-        "skills/approved",
+        if class == Class::Service {
+            "services/approved"
+        } else {
+            "skills/approved"
+        },
         None,
     ) {
         eprintln!("clio-toolhost: the action log lost a line: {e}");
@@ -376,7 +430,7 @@ fn hash_of(tool: &str, args: &Value) -> String {
 }
 
 /// `date` in the local time zone: there is no date crate here.
-fn local(ms: i64, fmt: &str) -> Option<String> {
+pub(crate) fn local(ms: i64, fmt: &str) -> Option<String> {
     let o = std::process::Command::new("/usr/bin/date")
         .arg(format!("--date=@{}", ms.div_euclid(1000)))
         .arg(format!("+{fmt}"))
@@ -475,7 +529,7 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     claim(state, id).map_err(|_| format!("{id} was already answered"))?;
     p.state = State::Rejected;
     save(state, &p)?;
-    if matches!(p.class, Class::Memory | Class::Skill)
+    if matches!(p.class, Class::Memory | Class::Skill | Class::Service)
         && let Err(e) = log_line(
             state,
             &p.run,
@@ -757,9 +811,10 @@ impl ToolHost {
                 "{id} changes one of your blocks: it is written when approved, not run"
             ));
         }
-        if p.class == Class::Skill {
+        if matches!(p.class, Class::Skill | Class::Service) {
             return Err(format!(
-                "{id} is a skill: it is registered by `clio approve`, not run"
+                "{id} is a {}: it is registered by `clio approve`, not run",
+                p.class
             ));
         }
         if p.run != h.cfg.run {

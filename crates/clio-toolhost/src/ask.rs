@@ -36,6 +36,9 @@ pub enum Class {
     /// from a marked session or one whose check could not run. Approved, the person's `clio`
     /// registers it exactly as it was shown; never run.
     Skill,
+    /// Not an action: a service draft that passed its review (S-69). Every new service and every
+    /// new version waits as this; approved, the person's `clio` registers it as shown; never run.
+    Service,
 }
 
 impl fmt::Display for Class {
@@ -48,6 +51,7 @@ impl fmt::Display for Class {
             Class::Secret => "secret",
             Class::Memory => "memory",
             Class::Skill => "skill",
+            Class::Service => "service",
         })
     }
 }
@@ -92,7 +96,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -114,6 +118,8 @@ const FACTORY: &[(Class, &str)] = &[
     // The person's service manager (and the system's) reached over D-Bus runs things outside
     // the launcher, unmasked: `systemd-run --user clio approve …`.
     (Control, r"^(systemd-run|gdbus|dbus-send|busctl)\b"),
+    // The services' timer (S-69) is the person's to turn on or off: anything that names it.
+    (Control, r"\bclio-services\.(timer|service)\b"),
 ];
 
 /// How a command may spell each of `paths`: absolute, or under `home` as `~/rel`, `$HOME/rel`,
@@ -393,7 +399,11 @@ impl HostRules {
 
     pub fn classify_write(&self, path: &Path) -> Option<Class> {
         let p = path.to_string_lossy();
-        if p.starts_with("/etc/sudoers") || p.contains("authorized_keys") {
+        // The person's own service manager's units (S-69: the services' timer among them).
+        if p.starts_with("/etc/sudoers")
+            || p.contains("authorized_keys")
+            || p.contains("/.config/systemd/")
+        {
             Some(Control)
         } else if path.exists()
             && path
@@ -1198,6 +1208,31 @@ mod tests {
             r.classify_write(Path::new("/home/u/.ssh/authorized_keys")),
             Some(Control)
         );
+        // S-69: a unit of the person's service manager, the services' timer first.
+        assert_eq!(
+            r.classify_write(Path::new(
+                "/home/u/.config/systemd/user/clio-services.timer"
+            )),
+            Some(Control)
+        );
+    }
+
+    // S-69: the model never runs, turns on or off a service or its timer: `clio services` and
+    // anything that names the timer's units are the person's.
+    #[test]
+    fn the_services_commands_and_their_timer_are_control() {
+        let r = HostRules::factory();
+        for c in [
+            "clio services run backup",
+            "clio services enable",
+            "clio services on backup",
+            "systemctl --user enable --now clio-services.timer",
+            "systemctl --user start clio-services.service",
+            "ln -s ~/.config/systemd/user/clio-services.timer ~/.config/systemd/user/timers.target.wants/",
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+        }
+        assert_eq!(r.classify_command("systemctl status nginx"), None);
     }
 
     #[test]

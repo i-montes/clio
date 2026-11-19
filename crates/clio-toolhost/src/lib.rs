@@ -33,6 +33,7 @@ mod ops;
 pub mod pending;
 mod sanitize;
 mod server;
+pub mod services;
 pub mod skills;
 
 use std::collections::HashMap;
@@ -710,6 +711,8 @@ impl ToolHost {
         match req.tool.as_str() {
             "skill_write" => return self.skill_write(&req, &map),
             "skill_report" => return self.skill_report(&req, &map),
+            "service_write" => return self.service_write(&req, &map),
+            "service_status" => return self.service_status(&req, &map),
             _ => {}
         }
         if map
