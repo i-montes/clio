@@ -24,10 +24,18 @@ exist only in a chat on the person's own machine (host mode).
 
 ## The parts of mcp_propose
 
-- `name`: a short lowercase name for the server in Clio (`github`, `time`). The same name proposes
-  a new version of one already installed.
+- `name`: a short lowercase name for the server in Clio (`github`, `time`). The same name with the
+  same package proposes a new version of one already installed (or the same version with other
+  hosts, secrets, paths or settings); a name already taken by another package is refused: choose
+  another name.
 - `description`: one line, what it is for, in the person's words.
 - `package`, `version`: as above.
+- `args`: fixed arguments the server needs, passed after its entry point, when its README says it
+  needs them (`["stdio"]`, `["--read-only"]`). Each is shown to the person. Never a secret, never a
+  path it should not see.
+- `env`: settings that are not secret, as variables (`{"LOG_LEVEL": "warn"}`): UPPER_CASE names,
+  never `NODE_*`, `PATH`, `HOME`, `LD_*` or a secret's variable. A token, a password or a key goes
+  in `secrets`, never here.
 - `network`: only the hosts it must reach (`api.github.com`, or `host:port` when not 443). Leave it
   out when it needs none: then it has no network at all. It reaches them only through Clio's
   proxy, at public addresses; anything else fails.
@@ -37,8 +45,10 @@ exist only in a chat on the person's own machine (host mode).
   any host in `network`, so give a server with a secret only the hosts that secret is for. Ask the
   person to store it with request_secret, destination `mcp:<host>`. Never put a secret's value
   anywhere yourself.
-- `reads`, `writes`: absolute paths under the home it must read or write, only when it needs
-  them (a server that works on files). Nothing else of the home is visible to it.
+- `reads`, `writes`: absolute paths it must read (under the home, or under `/var`, `/srv`, `/opt`,
+  `/mnt`, `/media`, `/root` or another home, never one of those folders itself) or write (under
+  the home), only when it needs them (a server that works on files). It sees the system's programs
+  and settings (`/usr`, `/etc`) and nothing else of the machine's data.
 - `limits`: `{"cpu_percent": 50, "memory_mb": 1024, "seconds": 60}` are the defaults; `seconds`
   is each call's time limit (at most 300); `memory_mb` at least 512 (Node needs it).
 - `reason`: why this server, in one line.
@@ -46,13 +56,19 @@ exist only in a chat on the person's own machine (host mode).
 ## What the person is shown
 
 Before anything is downloaded, Clio asks npm (from the person's own process) about the package
-and shows the person: the package and version, its publisher and maintainers, its integrity hash
-and how many dependencies it has, the hosts, each secret and every host it can reach, the paths,
-the limits, and that this is someone else's code that will hold those credentials. If they
-approve, Clio installs exactly that version with no install scripts, starts it once without
-network or secrets to list its tools, and keeps it off until the person has read the tool list and
-confirmed it (`/mcp confirm <name>`). The result comes by itself, later: do not propose it again
-meanwhile.
+and shows the person: the package and version, the registry's deprecation warning if it has one,
+its publisher and maintainers, its integrity hash and how many direct dependencies it has, what
+the package says of its repository and license, the hosts, each secret and every host it can
+reach, the paths, the arguments and settings, the limits, and that this is someone else's code
+that will hold those credentials. If they approve, Clio installs exactly that version with no
+install scripts, starts it once without network or secrets and with an empty home to list its
+tools, and keeps it off until the person has read the whole tool list and confirmed it (`/mcp
+confirm <name>`). A tool the server says only reads starts as "runs without asking"; every other
+asks each time. The result comes by itself, later: do not propose it again meanwhile. If it
+failed, you hear only at which step; the person reads why with `/mcp logs <name>`.
+
+At most 6 proposals an hour in a session, one npm at a time (if npm is busy, try again in a
+minute), and none from a session that read text Clio's judge flagged.
 
 ## Using a server that is on
 

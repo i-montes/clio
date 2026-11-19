@@ -1270,6 +1270,67 @@ mod tests {
         assert!(out.status.success(), "{cmd}: {out:?}");
     }
 
+    // S-70: the shipped check-package.sh takes and refuses exactly what mcp_propose does.
+    #[test]
+    fn check_package_agrees_with_the_proposals_own_check() {
+        let script = MCP_INSTALLER_FILES[1].1;
+        let packages = [
+            "time",
+            "@modelcontextprotocol/server-everything",
+            "a.b_c-d",
+            "@s/node_modules",
+            "@s/favicon.ico",
+            "node_modules",
+            "favicon.ico",
+            "Upper",
+            ".dot",
+            "_u",
+            "-x",
+            "@/x",
+            "@s/",
+            "@s/a/b",
+            "a b",
+            "git+https://x.example/a.git",
+            "",
+        ];
+        let versions = [
+            "1.0.0",
+            "0.0.0",
+            "2025.1.14",
+            "1.0.0-beta.2",
+            "1.0.0-0",
+            "1.0.0-01",
+            "1.0.0-beta.01",
+            "1.0.0-x-y.1",
+            "1.0.0-",
+            "1.0.0-a..b",
+            "01.0.0",
+            "1.0",
+            "1.0.0+b",
+            "123456789.0.0",
+            "1234567890.0.0",
+            "^1.0.0",
+            "latest",
+        ];
+        let long = format!("1.0.0-{}", "a".repeat(60));
+        let mut cases: Vec<(String, String)> = packages
+            .iter()
+            .map(|p| ((*p).to_owned(), "1.0.0".to_owned()))
+            .collect();
+        cases.extend(versions.iter().map(|v| ("x".to_owned(), (*v).to_owned())));
+        cases.push(("x".into(), long));
+        cases.push(("a".repeat(215), "1.0.0".into()));
+        for (p, v) in cases {
+            let rust =
+                clio_toolhost::mcp::valid_package(&p) && clio_toolhost::mcp::exact_version(&v);
+            let out = std::process::Command::new("bash")
+                .args(["-c", script, "check-package.sh", &p, &v])
+                .output()
+                .unwrap();
+            assert_eq!(out.status.success(), rust, "{p:?} {v:?}: {out:?}");
+        }
+    }
+
     #[test]
     fn the_service_creator_ships_and_passes_its_own_check() {
         let t = tempfile::tempdir().unwrap();
