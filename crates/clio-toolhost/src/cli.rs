@@ -76,6 +76,7 @@ pub fn run_with(
     let (mut host_control, mut host_rules) = (Vec::new(), None);
     let (mut secret_state, mut secret_run, mut vault_person) = (None, None, None);
     let mut review = false;
+    let mut unattended = false;
     let mut skills = None;
     let mut shows = Vec::new();
     let (mut mcp_config, mut mcp_data, mut mcp_runtime, mut mcp_node) = (None, None, None, None);
@@ -83,6 +84,7 @@ pub fn run_with(
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--review" => review = true,
+            "--unattended" => unattended = true,
             "--skills" => skills = Some(PathBuf::from(value()?)),
             "--show" => shows.push(PathBuf::from(value()?)),
             "--mcp-config" => mcp_config = Some(PathBuf::from(value()?)),
@@ -131,9 +133,10 @@ pub fn run_with(
                 control: host_control,
                 rules,
                 run: host_run.ok_or("--host-run is required")?,
-                // A review's commands: only under bwrap (its own pid namespace, /tmp and no Unix
-                // sockets), never under the systemd launcher, which shares the person's.
-                launcher: review.then_some(clio_node::Launcher::Bwrap),
+                // A review's and a round's commands: only under bwrap (its own pid namespace and
+                // /tmp), never under the systemd launcher, which shares the person's: through
+                // another process's `/proc/<pid>/root` the machine would not be read-only.
+                launcher: (review || unattended).then_some(clio_node::Launcher::Bwrap),
             })
         }
         None if host_state.is_some()
@@ -163,6 +166,9 @@ pub fn run_with(
     };
     if review && cfg.secrets.is_some() {
         return Err("a review (--review) cannot ask the person for a secret".into());
+    }
+    if unattended && (review || host.is_none() || cfg.secrets.is_some()) {
+        return Err("--unattended is a round's: host mode, not a review, nobody to ask".into());
     }
     if review && skills.is_some() {
         return Err("a review (--review) cannot write skills".into());
@@ -194,6 +200,7 @@ pub fn run_with(
         }
     };
     cfg.review = review;
+    cfg.unattended = unattended;
     cfg.skills = skills;
     cfg.shows = shows;
     cfg.host = host;

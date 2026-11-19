@@ -618,6 +618,7 @@ fn a_reviews_stage_is_shown_read_only_to_its_reviewer_and_to_nobody_else() {
                     masks: vec![e.data.clone()],
                     shows: h.windows(),
                     read_only: shown,
+                    sockets: false,
                 };
                 let (_, a) = sd.args(&job).unwrap();
                 let bind = format!("BindReadOnlyPaths={}", st.display());

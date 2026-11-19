@@ -33,6 +33,7 @@ fn job(dir: &Path, command: &str) -> HostJob {
         masks: vec![],
         shows: vec![],
         read_only: false,
+        sockets: false,
     }
 }
 
@@ -556,6 +557,59 @@ fn bwrap_for_real_a_review_reaches_no_socket_and_reads_only_the_stage() {
     );
 }
 
+// S-71: a round's command (read-only with sockets) has the machine read-only, a `/tmp` of its
+// own and no new privileges, like a review's, but `/run` stays visible and Unix sockets work, so
+// `systemctl status` and `docker ps` are not blocked by Clio. For real with `bwrap`: it reaches a
+// socket in the home, writes nothing there, and `sudo` cannot work.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rounds_job_reads_through_sockets_and_writes_nothing() {
+    for l in [Launcher::Bwrap, Launcher::Systemd] {
+        let Some(h) = with(l) else { continue };
+        let d = TempDir::new().unwrap();
+        let mut j = job(d.path(), "true");
+        (j.read_only, j.sockets) = (true, true);
+        let (_, a) = h.args(&j).unwrap();
+        match l {
+            Launcher::Bwrap => {
+                assert_eq!(after(&a, "--ro-bind"), ["/"], "{a:?}");
+                assert!(after(&a, "--tmpfs").contains(&"/tmp"), "{a:?}");
+                assert!(!after(&a, "--tmpfs").contains(&"/run"), "{a:?}");
+                assert!(!a.contains(&"--seccomp".to_owned()), "{a:?}");
+            }
+            Launcher::Systemd => {
+                let props = after(&a, "-p");
+                for p in ["ReadOnlyPaths=/", "PrivateTmp=yes", "NoNewPrivileges=yes"] {
+                    assert!(props.contains(&p), "{p} missing from {a:?}");
+                }
+                assert!(!props.contains(&"TemporaryFileSystem=/run:ro"), "{a:?}");
+            }
+        }
+    }
+    let Some(h) = bwrap() else { return };
+    if !Path::new("/usr/bin/python3").is_file() {
+        eprintln!("SKIPPED (no python3 to connect with; nothing was tested)");
+        return;
+    }
+    let Some(home) = outside_tmp() else { return };
+    let home_path = home.path().canonicalize().unwrap();
+    let sock = home_path.join("s.sock");
+    let _l = listening(&sock);
+    let probe = format!(
+        "{}touch x 2>/dev/null && echo write yes || echo write no; sudo -n true >/dev/null 2>&1 && echo sudo yes || echo sudo no; test -d /run && echo run yes",
+        connects(&sock, "socket"),
+    );
+    let mut j = job(&home_path, &probe);
+    (j.read_only, j.sockets) = (true, true);
+    let o = h.run(&j).unwrap();
+    assert_eq!(
+        o.stdout.lines().collect::<Vec<_>>(),
+        ["socket yes", "write no", "sudo no", "run yes"],
+        "{o:?}"
+    );
+    assert!(!home_path.join("x").exists());
+}
+
 // ---- services (stage 3, S-69) -----------------------------------------------------------------
 
 use clio_node::host::ServiceRun;
@@ -590,6 +644,7 @@ fn service(d: &Path, command: &str) -> ServiceRun {
             masks: vec![c(data), c(d.join("home/.ssh"))],
             shows: vec![c(files)],
             read_only: false,
+            sockets: false,
         },
         writable: vec![c(state), c(d.join("out"))],
         cpu_percent: 50,
