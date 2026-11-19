@@ -8,7 +8,7 @@
 //! the Pi harness draws its own column under the top bar (`chat::draw_screen`).
 
 use clio_brain::agent::Event;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -462,6 +462,8 @@ pub struct App {
     pub answering: usize,
     /// When the last key (or paste) came, for the quiet rule of a set-aside question.
     pub last_key_ms: Option<u64>,
+    /// The chat: the last key was a Ctrl-C that did not quit, so the next one quits.
+    pub quit_armed: bool,
     /// When the judge's reviews of the last hour started (`review.max_per_hour`).
     pub reviews_at: Vec<u64>,
     /// A short line of feedback at the bottom.
@@ -503,6 +505,7 @@ impl App {
             prompts: std::collections::VecDeque::new(),
             answering: 0,
             last_key_ms: None,
+            quit_armed: false,
             reviews_at: Vec::new(),
             flash: None,
             notice: None,
@@ -780,55 +783,78 @@ fn step(app: &mut App, input: Input) -> Vec<Cmd> {
             app.flash = None;
             super::sessions::mouse(app, &m)
         }
-        Input::Key(k) if k.kind == KeyEventKind::Release => vec![],
         Input::Key(k) => {
-            app.flash = None;
-            // Every key counts for the quiet rule, even one pressed before the question opened;
-            // and the question itself must have been on screen for the quiet second.
-            let quiet = app.quiet();
-            app.last_key_ms = Some(app.now_ms);
-            // The keys that work everywhere, even over a message.
-            match keys::lookup(app.ctx(), &k) {
-                Some(Act::Debug) => {
-                    app.debug = !app.debug;
-                    app.flash = Some(if app.debug {
-                        "debug on (Tab for live; debug.log is written in the run folder)".into()
-                    } else {
-                        "debug off".into()
-                    });
-                    return vec![Cmd::Debug(app.debug)];
-                }
-                Some(Act::Redraw) => return vec![Cmd::Redraw],
-                _ => {}
-            }
-            if app.notice.take().is_some() {
+            // A release, or a modifier alone, is not a key: it must not disarm or answer anything.
+            let Some(k) = keys::person_key(k) else {
+                return vec![];
+            };
+            // The chat: Ctrl-C twice always quits, whatever runs or is on screen (leaving stops
+            // it, as closing does).
+            let ctrl_c = app.pi && keys::Key::Ctrl('c').matches(&k);
+            if ctrl_c && app.quit_armed {
+                app.quit = true;
                 return vec![];
             }
-            if app.confirm.is_some() {
-                let cmds = answer(app, &k, quiet);
-                next_ask(app);
-                return cmds;
+            let cmds = key(app, k);
+            app.quit_armed = ctrl_c && !app.quit;
+            if app.quit_armed {
+                app.flash = Some(match app.flash.take() {
+                    Some(f) => format!("{f} · Ctrl-C again quits"),
+                    None => "Ctrl-C again quits".into(),
+                });
             }
-            if app.prompt.is_some() {
-                let cmds = super::ask::key(app, &k, quiet);
-                next_ask(app);
-                return cmds;
-            }
-            if app.modal.is_some() {
-                return super::commands::modal_key(app, &k);
-            }
-            match app.screen {
-                Screen::Home => super::home::key(app, &k),
-                Screen::NewRun => super::new_run::key(app, &k),
-                Screen::Live => super::live::key(app, &k),
-                Screen::Detail => super::detail::key(app, &k),
-                Screen::Doctor => super::doctor::key(app, &k),
-                Screen::Memory => super::memory::key(app, &k),
-                Screen::Sessions => super::sessions::key(app, &k),
-                Screen::Chat => super::chat::key(app, &k),
-                Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
-            }
+            cmds
         }
+    }
+}
+
+/// A key the person pressed: what it does where they are.
+fn key(app: &mut App, k: KeyEvent) -> Vec<Cmd> {
+    app.flash = None;
+    // Every key counts for the quiet rule, even one pressed before the question opened;
+    // and the question itself must have been on screen for the quiet second.
+    let quiet = app.quiet();
+    app.last_key_ms = Some(app.now_ms);
+    // The keys that work everywhere, even over a message.
+    match keys::lookup(app.ctx(), &k) {
+        Some(Act::Debug) => {
+            app.debug = !app.debug;
+            app.flash = Some(if app.debug {
+                "debug on (Tab for live; debug.log is written in the run folder)".into()
+            } else {
+                "debug off".into()
+            });
+            return vec![Cmd::Debug(app.debug)];
+        }
+        Some(Act::Redraw) => return vec![Cmd::Redraw],
+        _ => {}
+    }
+    if app.notice.take().is_some() {
+        return vec![];
+    }
+    if app.confirm.is_some() {
+        let cmds = answer(app, &k, quiet);
+        next_ask(app);
+        return cmds;
+    }
+    if app.prompt.is_some() {
+        let cmds = super::ask::key(app, &k, quiet);
+        next_ask(app);
+        return cmds;
+    }
+    if app.modal.is_some() {
+        return super::commands::modal_key(app, &k);
+    }
+    match app.screen {
+        Screen::Home => super::home::key(app, &k),
+        Screen::NewRun => super::new_run::key(app, &k),
+        Screen::Live => super::live::key(app, &k),
+        Screen::Detail => super::detail::key(app, &k),
+        Screen::Doctor => super::doctor::key(app, &k),
+        Screen::Memory => super::memory::key(app, &k),
+        Screen::Sessions => super::sessions::key(app, &k),
+        Screen::Chat => super::chat::key(app, &k),
+        Screen::Context | Screen::Usage | Screen::Help => meter::key(app, &k),
     }
 }
 

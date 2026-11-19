@@ -23,6 +23,8 @@ scenario = sys.argv[1]
 cfg = json.loads(sys.argv[2])
 buf = b""
 ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+# The keyboard's legacy mode, pushed while the TUI runs and popped when it gives the terminal back.
+LEGACY_PUSH, LEGACY_POP = b"\x1b[>0u", b"\x1b[<1u"
 CHILDREN = []
 
 
@@ -304,6 +306,7 @@ elif scenario == "memory":
     out["after"] = modes(fd)
 else:
     sys.exit("unknown scenario")
+out["legacy_keys"] = buf.rfind(LEGACY_POP) > buf.find(LEGACY_PUSH) >= 0
 out["q_retries"] = RETRIES
 if SCREEN_TAIL:
     out["screen_tail"] = SCREEN_TAIL

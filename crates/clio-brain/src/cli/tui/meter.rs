@@ -450,7 +450,11 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
     // Each section: its title, its keys and what they do, and its notes.
     type Section<'a> = (&'a str, Vec<(String, String)>, Vec<&'a str>);
     let mut sections: Vec<Section> = vec![
-        ("the chat", chat, vec![]),
+        (
+            "the chat",
+            chat,
+            vec!["Ctrl-C twice always quits, stopping what runs as closing does; /quit too."],
+        ),
         (
             "the sessions",
             binds(keys::Ctx::Sessions, &|a| a != Act::Help),

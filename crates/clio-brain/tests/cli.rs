@@ -908,6 +908,10 @@ fn pty_the_tui_opens_in_the_alternate_screen_and_q_restores_the_terminal() {
         assert_eq!(v["during"]["canonical"], false, "raw mode while open: {v}");
         assert_eq!(v["after"]["canonical"], true, "cooked mode back: {v}");
         assert_eq!(v["after"]["echo"], true, "echo back: {v}");
+        assert_eq!(
+            v["legacy_keys"], true,
+            "legacy keys pushed, then popped: {v}"
+        );
     }
 }
 
@@ -923,6 +927,7 @@ fn pty_sigterm_and_sighup_give_the_terminal_back() {
         assert_eq!(v["alt_off_after_on"], true, "{scenario}: {v}");
         assert_eq!(v["after"]["canonical"], true, "{scenario}: {v}");
         assert_eq!(v["after"]["echo"], true, "{scenario}: {v}");
+        assert_eq!(v["legacy_keys"], true, "{scenario}: {v}");
     }
 }
 
@@ -983,6 +988,7 @@ fn pty_a_panic_still_gives_the_terminal_back() {
     );
     assert_eq!(v["after"]["canonical"], true, "{v}");
     assert_eq!(v["after"]["echo"], true, "{v}");
+    assert_eq!(v["legacy_keys"], true, "{v}");
 }
 
 #[test]

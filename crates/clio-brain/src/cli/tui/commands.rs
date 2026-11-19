@@ -197,8 +197,8 @@ pub const COMMANDS: &[Command] = &[
         Run::Doctor,
     ),
     c("help", &[], "", "keys and commands", false, Run::Help),
-    // Like Ctrl-C: not in the middle of a turn, an open or an approval.
-    c("quit", &["exit"], "", "close Clio", true, Run::Quit),
+    // Like Ctrl-C twice: always, stopping what runs as closing does.
+    c("quit", &["exit"], "", "close Clio", false, Run::Quit),
 ];
 
 /// Pi's level for what the person typed (`off` … `max`, as Pi calls them).
@@ -511,12 +511,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
     let custom = match target {
         Target::Custom(i) => Some(app.chat.customs[i].clone()),
         Target::Builtin(run) => {
-            let busy = if run == Run::Quit {
-                app.busy_to_quit()
-            } else {
-                app.busy()
-            };
-            if command(run).idle && busy {
+            if command(run).idle && app.busy() {
                 return vec![];
             }
             None

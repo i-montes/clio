@@ -2010,3 +2010,130 @@ fn y_and_the_old_s_both_arm_the_question_after_its_quiet_second() {
         );
     }
 }
+
+// A terminal left in kitty's "report all keys" mode, without alternate keys: Shift+a comes as
+// `a` with SHIFT and is typed as `A` (a shifted symbol is not guessed); Ctrl alone, its repeat
+// and any release come as events of their own and are no key: they do not disarm the armed
+// quit, do not count for the quiet rule of an approval, and do not close the menu.
+#[test]
+fn a_kitty_terminal_types_capitals_and_a_modifier_alone_is_no_key() {
+    use crossterm::event::{KeyEventKind, ModifierKeyCode};
+    let shift = |c| Input::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT));
+    let (a, _) = feed(
+        super::tests_gallery::pi(true),
+        vec![shift('a'), ch('b'), shift('-')],
+    );
+    assert_eq!(a.chat.input, "Ab-");
+    let ctrl_alone = |kind| {
+        let mut k = KeyEvent::new(
+            KeyCode::Modifier(ModifierKeyCode::LeftControl),
+            KeyModifiers::CONTROL,
+        );
+        k.kind = kind;
+        Input::Key(k)
+    };
+    let release = || {
+        let mut k = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        k.kind = KeyEventKind::Release;
+        Input::Key(k)
+    };
+    let not_keys = || {
+        vec![
+            ctrl_alone(KeyEventKind::Press),
+            ctrl_alone(KeyEventKind::Repeat),
+            ctrl_alone(KeyEventKind::Release),
+            release(),
+        ]
+    };
+    // A turn runs: the first Ctrl-C stops it and arms; Ctrl alone does not disarm.
+    let mut a = super::tests_gallery::conversation(true);
+    a.chat.running = true;
+    let (a, cmds) = feed(a, vec![ctrl('c')]);
+    assert_eq!(cmds, vec![Cmd::ChatAbort]);
+    assert!(!a.quit && a.quit_armed, "{:?}", a.flash);
+    assert!(
+        a.flash
+            .as_deref()
+            .is_some_and(|f| f.contains("Ctrl-C again quits"))
+    );
+    let (a, _) = feed(a, not_keys());
+    assert!(a.quit_armed);
+    let (a, _) = feed(a, vec![ctrl('c')]);
+    assert!(a.quit, "the second Ctrl-C quits");
+    // Another key between the two does disarm.
+    let mut a = super::tests_gallery::conversation(true);
+    a.chat.running = true;
+    let (a, _) = feed(a, vec![ctrl('c'), ch('x'), ctrl('c')]);
+    assert!(!a.quit && a.quit_armed);
+    // An approval on screen: Ctrl alone is not "the last key" of its quiet rule.
+    let mut a = super::tests_gallery::conversation(true);
+    let mut c = super::app::Confirm::new(Action::Approve, "a1b2".into(), 0, "x".into());
+    c.session = "sid".into();
+    a.confirm = Some(c);
+    a.last_key_ms = None;
+    let (a, _) = feed(a, not_keys());
+    assert_eq!(a.last_key_ms, None);
+    // The menu stays open.
+    let (a, _) = feed(super::tests_gallery::pi(true), vec![ch('/')]);
+    assert!(a.chat.menu.is_some());
+    let (a, _) = feed(a, not_keys());
+    assert!(a.chat.menu.is_some());
+}
+
+// Ctrl-C twice always quits the chat, whatever is running or on screen; `/quit` always does.
+#[test]
+fn ctrl_c_twice_always_quits_and_so_does_quit() {
+    use super::app::Confirm;
+    type Set = fn(&mut App);
+    let cases: [(&str, Set); 7] = [
+        ("idle", |_| {}),
+        ("a turn", |a| a.chat.running = true),
+        ("a compaction", |a| a.chat.compacting = true),
+        ("an approved action", |a| a.answering = 1),
+        ("a review", |a| a.chat.review.running = Some(0)),
+        ("an approval box", |a| {
+            let mut c = Confirm::new(Action::Approve, "a1b2".into(), 0, "x".into());
+            c.session = "sid".into();
+            a.confirm = Some(c);
+        }),
+        ("a box of lines", |a| {
+            a.modal = Some(super::commands::Modal::text("Usage", vec!["x".into()]));
+        }),
+    ];
+    for (what, set) in cases {
+        let mut a = super::tests_gallery::conversation(true);
+        set(&mut a);
+        let (a, _) = feed(a, vec![ctrl('c'), ctrl('c')]);
+        assert!(a.quit, "{what}");
+        let mut a = super::tests_gallery::conversation(true);
+        set(&mut a);
+        a.modal = None;
+        a.confirm = None;
+        a.chat.set_input("/quit".into());
+        let (a, _) = feed(a, vec![key(KeyCode::Enter)]);
+        assert!(a.quit, "/quit, {what}");
+    }
+}
+
+// The terminal is put in the keyboard's legacy mode while Clio runs (on the screen it was on
+// and on the alternate one), and both are popped when it is given back.
+#[test]
+fn taking_the_terminal_asks_for_legacy_keys_and_giving_it_back_pops_them() {
+    let (mut on, mut off) = (Vec::new(), Vec::new());
+    super::take(&mut on, false).unwrap();
+    super::give_back(&mut off).unwrap();
+    let (on, off) = (
+        String::from_utf8(on).unwrap(),
+        String::from_utf8(off).unwrap(),
+    );
+    let alt = on.find("\x1b[?1049h").unwrap();
+    assert_eq!(on.matches("\x1b[>0u").count(), 2, "{on:?}");
+    assert!(on.find("\x1b[>0u").unwrap() < alt && on.rfind("\x1b[>0u").unwrap() > alt);
+    assert!(!on.contains("\x1b[?1000h"), "no mouse unless asked: {on:?}");
+    let alt = off.find("\x1b[?1049l").unwrap();
+    assert_eq!(off.matches("\x1b[<1u").count(), 2, "{off:?}");
+    assert!(off.find("\x1b[<1u").unwrap() < alt && off.rfind("\x1b[<1u").unwrap() > alt);
+    let mut on = Vec::new();
+    super::take(&mut on, true).unwrap();
+    assert!(String::from_utf8(on).unwrap().contains("\x1b[?1000h"));
+}

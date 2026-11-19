@@ -429,7 +429,6 @@ fn a_command_that_changes_the_session_waits_and_one_that_reads_does_not() {
             "/new",
             "/name t",
             "/undo",
-            "/quit",
         ] {
             let mut a = open();
             match busy {

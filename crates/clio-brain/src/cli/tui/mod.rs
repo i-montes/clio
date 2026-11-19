@@ -59,11 +59,14 @@ use clio_brain::memory_link::{EmbedModel, MemoryLink};
 use clio_brain::pi::rpc::Cancel;
 use clio_brain::pi::sessions::{HISTORY_TURNS, read_history};
 use clio_memory::Signal;
-use crossterm::event::{self, Event as Term, KeyEventKind};
+use crossterm::event::{
+    self, Event as Term, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{cursor, execute};
+use crossterm::{cursor, execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -98,14 +101,41 @@ pub fn restore_terminal() {
     if !out.is_terminal() || !IN_TUI.swap(false, Ordering::SeqCst) {
         return;
     }
-    let _ = execute!(
+    let _ = give_back(&mut out);
+    let _ = disable_raw_mode();
+}
+
+/// What the TUI writes when it takes the terminal: the alternate screen, bracketed paste, the
+/// mouse if asked, and the keyboard's legacy mode, pushed on the screen it was on and on the
+/// alternate one (kitty keeps a stack for each): a "report all keys" mode another program left
+/// on would turn Shift+a into `a`. Terminals that do not know the protocol ignore it.
+fn take(out: &mut impl std::io::Write, mouse: bool) -> std::io::Result<()> {
+    let legacy = || PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty());
+    queue!(
+        out,
+        legacy(),
+        EnterAlternateScreen,
+        legacy(),
+        crossterm::event::EnableBracketedPaste
+    )?;
+    if mouse {
+        queue!(out, crossterm::event::EnableMouseCapture)?;
+    }
+    out.flush()
+}
+
+/// Undoes `take`, each stack popped on its own screen.
+fn give_back(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    queue!(
         out,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
+        PopKeyboardEnhancementFlags,
         cursor::Show
-    );
-    let _ = disable_raw_mode();
+    )?;
+    out.flush()
 }
 
 /// A panic on the main thread must not leave the terminal in the alternate screen in raw mode:
@@ -159,15 +189,7 @@ impl Guard {
         IN_TUI.store(true, Ordering::SeqCst);
         let guard = Self;
         let mut out = std::io::stdout();
-        execute!(
-            out,
-            EnterAlternateScreen,
-            crossterm::event::EnableBracketedPaste
-        )
-        .map_err(e)?;
-        if mouse {
-            execute!(out, crossterm::event::EnableMouseCapture).map_err(e)?;
-        }
+        take(&mut out, mouse).map_err(e)?;
         let term = Terminal::new(CrosstermBackend::new(out)).map_err(e)?;
         Ok((guard, term))
     }
