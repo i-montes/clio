@@ -121,8 +121,8 @@ In host mode (`"mode": "host"`, `clio --host`, and the factory mode since 2026-1
 - **Pi stays in its jail** (ADR 0009): in host mode its working folder is an empty folder; it sees neither your files, nor the vault, nor the network except the provider. Only the tool service acts.
 - **Clio's folders** (configuration, data, runtime, the memory): the file tools refuse them by direct path, by link and by `..` (`host/control`), a command that names them is set aside (`control`), and a command sees them empty and read-only (except as said above).
 - **Fail closed.** Without a launcher that passes its self-test (Clio's folders masked, network cut without `network`) there is no `exec`; it never runs unmasked.
-- **Four classes need the person's approval** (delete, spend, send, control): outside a permission window they are set aside and do not run until the person says yes (the one box at the end of the turn, `/pending` or `clio approve`), they run once and exactly as saved (same hash), and they expire after 24 hours. Inside a window see "The permission window" below.
-- **The judge at the door.** With Jev on, what a tool brought in from outside (a foreign folder, a networked command, a program that reaches out, logs) is judged before the model reads it. An injection is withheld: the model gets only its size and source, the text is kept for the person (`runs/<id>/toolhost/withheld/`, 0600), the session becomes `suspect`: its background jobs with the network are stopped, and from then on every command that asks for the network, reaches out by itself (such as `ssh`, `docker`, `crontab` or `nsenter`) or names `sudo` is set aside as send, with the reason shown. Off, down or silent: as before.
+- **Four classes need the person's approval** (delete, spend, send, control): outside a permission window they are set aside and do not run until the person says yes (the one box at the end of the turn, `/pending` or `clio approve`), they run once and exactly as saved (same hash), and they expire after 24 hours. Inside a window `delete`, `spend` and `send` may run without the person, `control` never: see "The permission window" below.
+- **The judge at the door.** With Jev on, what a tool brought in from outside (a foreign folder, a networked command, a program that reaches out, logs) is judged before the model reads it. An injection is withheld: the model gets only its size and source, the text is kept for the person (`runs/<id>/toolhost/withheld/`, 0600), the session becomes `suspect`: its background jobs with the network are stopped, and from then on every command that asks for the network, reaches out by itself (such as `ssh`, `docker` or `nsenter`; a scheduler such as `crontab` is `control`, always) or names `sudo` is set aside as send, with the reason shown. Off, down or silent: as before.
 - **Secrets.** The model sees names, never values. When a task needs one, `request_secret` leaves a request of class `secret`; the person types the value into the chat's masked box (or `clio approve <id>` at a terminal) and it goes to the vault's person socket from Clio's own process, never through Pi, the guard, the tool host, the model, a log or the pending file. Today no tool of the model sends a stored secret anywhere.
 - **Everything is logged** (`actions.jsonl`, 0600): a line before and after every command and write, with known keys struck out; without the line before, it does not run. Background jobs log `start`, then `done` or `stopped`; what the judge withheld gets its own line.
 - **The mark.** Reading a foreign folder (`/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas` and those `host.json` adds), a command with the network or one that reads logs (`journalctl`, `docker logs`…) marks the session; a marked session does not change the person's blocks by itself (`memory_block_edit` is set aside for the person's approval). The output still arrives cleaned and wrapped as data. Case 62 of the battery.
@@ -132,19 +132,33 @@ In host mode (`"mode": "host"`, `clio --host`, and the factory mode since 2026-1
 
 ### The permission window: a yes is worth four hours (S-36)
 
-When the person says yes in the approval box (or with `clio approve`), Clio may act **without asking** for `approvals.grant_hours` (4 by default; 0 turns it off). Said plainly: **inside a window, the actions of a fooled model run without the person.** A model that an injection steered past the judge can delete, send, spend or touch Clio's setup, change the person's blocks in a tainted session, call an `ask` MCP tool, and have a reviewed skill, service or MCP server registered, and nobody is asked before it happens.
+When the person says yes in the approval box (or with `clio approve` at a terminal), Clio may approve by herself, for `approvals.grant_hours` (4 by default; 0 turns it off), **what ends with the act**. Said plainly: **inside a window, those actions of a fooled model run without the person.**
 
-What still limits it:
+What runs without the person inside a window (and only what was set aside after it opened):
 
-- **The judge.** An injection the judge flags makes the session `suspect`, and that **closes the window for every conversation**; a `suspect` session never acts under a window (a yes in its box approves only what it lists). A reviewer's flag closes it too.
-- **The reviews.** A skill, a service or an MCP server still goes through the tool host's checks, the judge and the reviewer; a `fails` review never registers; what registers is byte for byte what was reviewed (hash and digest checks as for the person's yes).
-- **The jails.** Commands, services and MCP servers keep their jails, masks, proxies and limits; Clio's folders stay refused, so nothing from the jail can open, extend or forge a window (`grant.json` is Clio's data, written only by the person's `clio`).
-- **Secrets.** Never answered by a window: only the person types one.
-- **The record and the summary.** Every act is recorded in the window's record before it runs, with what it was, its class and session, then its outcome, besides the action log; when the window ends Clio sums it up for the person, once, in a turn that cannot open or extend a window. `clio grant` prints the last windows and what each approved.
-- **Undo.** File changes are backed up and undoable as always; a block change keeps its log; a skill keeps its previous version.
-- **The window's length.** It ends at its time whether `clio` runs or not; a clock set back does not extend it; a yes while one is open does not extend it; `/grant off` or `clio grant off` close it at once.
+- a command or write of class `delete`, `spend` or `send` (the list's, or the person's `host.json`);
+- a call of an MCP tool in `ask` mode (never one that changed since the person confirmed it);
+- a skill that would wait (reviewed; registered byte for byte as reviewed).
 
-What it does **not** limit: what a deletion destroyed or what was sent is not undone by the summary. The person who opens a window accepts that, for its hours, the judge and the jails are the line, not their own eyes.
+What **always asks the person**, window or not (their yes to it opens a window like any other yes):
+
+- **`control`**: Clio's own commands and folders, the service manager (`systemctl`, `systemd-run`, user units), D-Bus, `sudoers`, `authorized_keys`, who may use the machine, turning it off, and the schedulers (`crontab`, `at`, `batch`). This is the line that keeps a window from feeding itself: the chat's commands run as the person, and where they have `sudo` the masks are not a wall (see the limits above: `sudo`, `/proc/<pid>/root`). A fooled model that could run `systemd-run --user …`, write a user unit or schedule a job could, from there, rewrite `grant.json`, erase the window's record, or schedule `clio approve` to reopen a window forever. So nothing of class `control` ever runs under a window, and `clio approve` opens a window only when its standard input is a terminal (a piped or scheduled one, `--yes` included, approves only its item).
+- **a secret**: only the person types one.
+- **a change to the person's blocks**: it becomes the person's own words and Clio's standing rules.
+- **a service**: unattended code that outlives the window.
+- **an MCP server** (install or update): someone else's code that outlives the window.
+- **what waited from before the window opened**: the person never saw it; it keeps its box.
+
+What still limits what does run:
+
+- **The judge.** No window opens while the judge is off (`jev.enabled`), and a window found open with the judge off closes at the next act: the judge is what closes a window. An injection the judge flags makes the session `suspect`, and that **closes the window for every conversation**; a `suspect` session never acts under a window (a yes in its box approves only what it lists). A reviewer that ends `suspect` closes it too, when it ends.
+- **The reviews.** A skill still goes through the tool host's checks, the judge and the reviewer; a `fails` review never registers; what registers is byte for byte what was reviewed.
+- **The jails.** Commands and MCP servers keep their jails, masks, proxies and limits; the window's file and record are refused to the file tools and named by no command the list lets run unasked, but that is a list and masks, not a wall where a command has `sudo`: what keeps the window from being forged or stretched from the jail is that `control` never runs under it.
+- **The record and the summary.** Every act is recorded in the window's record before it runs, with what it was, its class, session and run, then its outcome in fixed words (`done (exit N)`, `failed (exit N)`, `failed: <reason>`), never what it printed; when the window ends Clio sums it up for the person, once, in a turn she starts by herself (never mixed with a typed message), told by a conversation that took part (another only when none that did is open), claimed when sent and owed again if the send fails; that turn marks the session like approved output, and cannot open or extend a window. `clio grant` prints the last windows and what each approved.
+- **Undo.** File changes are backed up and undoable as always; a skill keeps its previous version.
+- **The window's length.** It ends at its time whether `clio` runs or not; it never outlives the boot it opened in, and never lasts longer than its length by the wall clock or by the time since boot (a clock set back and a reboot do not stretch it); a yes while one is open does not extend it; `/grant off` or `clio grant off` close it at once.
+
+What it does **not** limit: what a deletion destroyed or what was sent is not undone by the summary. The person who opens a window accepts that, for its hours, the judge and the jails are the line for deletes, spending, sending, `ask` MCP calls and skills, not their own eyes.
 
 ### The reviewer: a second jailed agent (S-67)
 
