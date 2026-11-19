@@ -305,6 +305,15 @@ fn started(
         return Err((None, "it was stopped".into()));
     }
     let d = p.dirs;
+    // In host mode a reviewer's commands run only under bwrap (S-67): without it, nothing runs.
+    if p.host {
+        clio_node::HostJail::with(clio_node::Launcher::Bwrap).map_err(|e| {
+            (
+                None,
+                format!("a review's commands run only under bwrap, and bwrap cannot run here: {e}"),
+            )
+        })?;
+    }
     let cfg = session_cfg(d, p.model).map_err(|e| (None, e))?;
     let (model, fallback) = model_for(d, &cfg, &p.model.model);
     out.model.clone_from(&model);

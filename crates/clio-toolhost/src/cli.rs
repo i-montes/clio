@@ -12,7 +12,8 @@
 //! `request_secret`: `--secret-state S --secret-run ID --vault-person P` (where requests wait, the
 //! run, the vault's person socket); without them nobody can be asked for a secret.
 //!
-//! `--review`: the service of a review, which cannot ask the person (see `Config::review`).
+//! `--review`: the service of a review, which cannot ask the person (see `Config::review`); in
+//! host mode its commands run only under bwrap.
 //!
 //! `--skills D`: Clio's skills folder (`skill_write`, `skill_report`, reading a registered skill).
 //!
@@ -99,7 +100,9 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
                 control: host_control,
                 rules,
                 run: host_run.ok_or("--host-run is required")?,
-                launcher: None,
+                // A review's commands: only under bwrap (its own pid namespace, /tmp and no Unix
+                // sockets), never under the systemd launcher, which shares the person's.
+                launcher: review.then_some(clio_node::Launcher::Bwrap),
             })
         }
         None if host_state.is_some()

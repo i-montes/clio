@@ -111,6 +111,18 @@ fn actions(e: &Env) -> Vec<Value> {
         .collect()
 }
 
+/// A folder outside `/tmp` (the build's own tmp folder): a review's commands have a `/tmp` of
+/// their own and would not find a home under the host's. `None` (and why) when the build is
+/// under `/tmp` itself.
+fn outside_tmp() -> Option<tempfile::TempDir> {
+    let t = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    if t.path().canonicalize().unwrap().starts_with("/tmp") {
+        eprintln!("SKIPPED (the build folder is under /tmp, which a review does not see)");
+        return None;
+    }
+    Some(t)
+}
+
 /// `exec` only if the launcher passed its self-test here.
 fn exec_ok(e: &Env) -> bool {
     match e.host.exec_available() {
@@ -560,7 +572,7 @@ fn write_backup(e: &Env, name: &str, content: &str) -> Response {
 // S-67: a review cannot ask the person: what would wait is refused, logged, and nothing is pending
 #[test]
 fn a_review_refuses_what_would_wait_for_the_person_and_leaves_nothing_pending() {
-    let t = tempfile::tempdir().unwrap();
+    let Some(t) = outside_tmp() else { return };
     let r = t.path().canonicalize().unwrap();
     let mut c = cfg(&r);
     c.review = true;
@@ -620,7 +632,7 @@ fn a_review_refuses_what_would_wait_for_the_person_and_leaves_nothing_pending() 
 // command still runs
 #[test]
 fn a_review_has_no_network_and_no_sudo_and_a_local_command_runs() {
-    let t = tempfile::tempdir().unwrap();
+    let Some(t) = outside_tmp() else { return };
     let r = t.path().canonicalize().unwrap();
     let mut c = cfg(&r);
     c.review = true;
