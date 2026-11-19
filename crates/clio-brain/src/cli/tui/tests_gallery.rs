@@ -497,12 +497,19 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     let mut a = conversation(true);
     a.screen = Screen::Sessions;
     a.sessions.sel = 2;
-    a.confirm = Some(Confirm::new(
-        Action::DeleteSession,
-        "/s/2_b.jsonl".into(),
-        0,
-        "\"What weighs the most on the disk?\": the conversation and its working copy".into(),
-    ));
+    // As the drawer builds it: the plan of the delete comes back, the dialog asks.
+    let (a, _) = super::app::update(
+        a,
+        super::app::Input::Bg(super::app::Bg::SessionPlan(Ok((
+            "/s/2_b.jsonl".into(),
+            "What weighs the most on the disk?".into(),
+            "the conversation and its working copy".into(),
+        )))),
+    );
+    assert_eq!(
+        a.confirm.as_ref().map(|c| c.action),
+        Some(Action::DeleteSession)
+    );
     out.push(("delete a session", a));
     let mut a = conversation(true);
     a.chat.items.truncate(1);

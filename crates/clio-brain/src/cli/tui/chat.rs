@@ -2386,6 +2386,61 @@ mod tests {
         );
     }
 
+    // The delete dialog names the conversation (title, age, messages: the drawer row's three
+    // things), says it goes to the trash for 30 days, and keeps its key rule; after the delete
+    // one note in the chat says where it went.
+    #[test]
+    fn the_delete_dialog_shows_the_conversation_and_says_it_goes_to_the_trash() {
+        let title = "What weighs the most on the disk?";
+        let asked = || {
+            let mut app = super::super::tests_gallery::conversation(true);
+            app.screen = Screen::Sessions;
+            super::super::app::update(
+                app,
+                super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
+                    "/s/2_b.jsonl".into(),
+                    title.into(),
+                    "the conversation only".into(),
+                )))),
+            )
+            .0
+        };
+        let app = asked();
+        let shown = super::super::tests::screen_text(&app, 100, 30);
+        for want in [
+            title,
+            "26 min ago",
+            "3 msgs",
+            "trash for 30 days",
+            "clio sessions restore",
+        ] {
+            assert!(shown.contains(want), "{want}\n{shown}");
+        }
+        assert!(!shown.contains("cannot be undone"), "{shown}");
+        // Any other key cancels; y asks for the delete.
+        let (cancelled, cmds) = press(asked(), KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(cmds.is_empty() && cancelled.confirm.is_none());
+        let (_, cmds) = press(asked(), KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(matches!(&cmds[..], [Cmd::DeleteSession { .. }]));
+        // After it: the note, once, and the drawer's own line.
+        let note = "deleted \"t\": it is in the trash for 30 days, `clio sessions restore abc` brings it back";
+        let (app, _) = super::super::app::update(
+            app,
+            super::super::app::Input::Bg(super::super::app::Bg::SessionDeleted(
+                Ok(note.into()),
+                vec![],
+            )),
+        );
+        let notes = app
+            .chat
+            .items
+            .iter()
+            .filter(|i| **i == Item::Note(note.into()))
+            .count();
+        assert_eq!(notes, 1);
+        assert!(app.flash.as_deref().is_some_and(|f| f.contains("trash")));
+    }
+
     #[test]
     fn the_selector_opens_new_existing_and_explains_what_cannot_open() {
         use crate::cli::chat::{Row, RowKind};

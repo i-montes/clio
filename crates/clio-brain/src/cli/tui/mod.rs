@@ -222,6 +222,11 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
             resume = sessions::resume(&mut app);
         }
     }
+    // Old deleted conversations leave the trash; in the background, errors ignored.
+    let trash = crate::cli::sessions::trash_dir(&ctx.dirs);
+    let _ = std::thread::Builder::new()
+        .name("clio-worker".into())
+        .spawn(move || crate::cli::sessions::purge_trash(&trash, &clio_core::SystemClock));
     for c in app.start_cmds().into_iter().chain(resume) {
         ctx.exec(c);
     }
@@ -1015,7 +1020,11 @@ impl Ctx {
                         let done = session_by_file(d, &reference).and_then(|(dir, s)| {
                             let p = crate::cli::sessions::plan(d, &dir, &s)?;
                             crate::cli::sessions::delete(&p)?;
-                            Ok(format!("session deleted: {}", sanitize::line(&s.title)))
+                            Ok(format!(
+                                "deleted \"{}\": it is in the trash for 30 days, `clio sessions restore {}` brings it back",
+                                sanitize::line(&s.title),
+                                p.id
+                            ))
                         });
                         (
                             done,

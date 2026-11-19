@@ -1067,6 +1067,37 @@ mod tests {
         );
     }
 
+    // A trash with deleted conversations in it is private all through (S-23), even when the
+    // session file was 0644 when it was deleted.
+    #[test]
+    fn a_populated_trash_passes_the_private_mode_check() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let file = t.path().join("2026_r1.jsonl");
+        std::fs::write(&file, "{}").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let p = super::super::sessions::Plan {
+            file,
+            trash: data.join("trash/sessions"),
+            id: "r1".into(),
+            title: "t".into(),
+            run: None,
+            unapplied: Some(0),
+            claude: vec![],
+        };
+        super::super::sessions::delete(&p).unwrap();
+        let mut o = Report::default();
+        check_tree(&mut o, &data, 0);
+        assert!(
+            o.checks.is_empty(),
+            "{:?}",
+            o.checks.iter().map(|c| &c.msg).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn jev_is_off_by_default_and_an_old_config_without_it_still_loads() {
         assert!(!super::super::home::JevCfg::default().enabled);

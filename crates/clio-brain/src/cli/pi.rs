@@ -187,7 +187,10 @@ fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i
     for p in &plans {
         super::sessions::delete(p)?;
     }
-    println!("deleted {} session(s)", plans.len());
+    println!(
+        "deleted {} session(s): they stay 30 days in the trash, `clio sessions restore` lists them and brings one back",
+        plans.len()
+    );
     Ok(0)
 }
 

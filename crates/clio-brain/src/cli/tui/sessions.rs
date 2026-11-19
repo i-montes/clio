@@ -180,6 +180,18 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
     }
 }
 
+/// The second line of a row: how long ago and how many messages (the delete dialog shows it too).
+pub fn age_and_count(r: &Row, now_ms: i64, dot: &str) -> String {
+    let mut when = r.last_ms.map_or_else(String::new, |ms| ago(now_ms, ms));
+    if r.messages > 0 {
+        if !when.is_empty() {
+            when.push_str(&format!(" {dot} "));
+        }
+        when.push_str(&format!("{} msgs", r.messages));
+    }
+    when
+}
+
 /// A click on a row opens it (as Enter), a click outside the open drawer closes it, and the wheel
 /// scrolls the pane under the pointer. `step` never lets a click reach a question or a message.
 pub fn mouse(app: &mut App, m: &MouseEvent) -> Vec<Cmd> {
@@ -277,16 +289,12 @@ pub fn draw_drawer(f: &mut Frame, area: Rect, app: &App) {
                     t.warn(),
                 ),
                 (_, Some(why)) => (clean(&r.title), t.plain(), clean(why), t.warn()),
-                _ => {
-                    let mut when = r.last_ms.map_or_else(String::new, |ms| ago(now, ms));
-                    if r.messages > 0 {
-                        if !when.is_empty() {
-                            when.push_str(&format!(" {} ", t.dot()));
-                        }
-                        when.push_str(&format!("{} msgs", r.messages));
-                    }
-                    (clean(&r.title), t.plain(), when, t.dim())
-                }
+                _ => (
+                    clean(&r.title),
+                    t.plain(),
+                    age_and_count(r, now, t.dot()),
+                    t.dim(),
+                ),
             }
         };
         let mark = if open == Some(pos) {

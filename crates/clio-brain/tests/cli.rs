@@ -1970,3 +1970,53 @@ fn a_named_workspace_is_a_copy_under_the_host_default() {
         "{o:?}"
     );
 }
+
+// A deleted conversation waits in the trash, doctor's private-mode check (S-23) still passes with
+// it there, `clio sessions restore` lists it and brings it back byte for byte, and it is listed
+// again (where the drawer reads it); a file of that name in the way refuses the restore.
+#[test]
+fn a_deleted_session_is_restored_from_the_trash_byte_for_byte() {
+    let e = Env::new();
+    let dir = e.home().join(".local/share/clio/pi/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [&dir, dir.parent().unwrap()] {
+        std::fs::set_permissions(d, PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let body = "{\"type\":\"session\",\"id\":\"abc-123\",\"cwd\":\"/x\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hola mundo\"}}\n";
+    let file = dir.join("2026-11-18T10-00-00-000Z_abc-123.jsonl");
+    std::fs::write(&file, body).unwrap();
+    let out = e.clio(&["pi", "sessions", "rm", "abc-123", "--yes"]);
+    assert!(out.contains("clio sessions restore"), "{out}");
+    assert!(!file.exists());
+    let o = e.try_clio(&["doctor", "--json"]);
+    let v: Value = serde_json::from_str(&text(&o.stdout)).unwrap();
+    let bad: Vec<&Value> = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["message"].as_str().unwrap().contains("(S-23)"))
+        .collect();
+    assert!(bad.is_empty(), "{bad:?}");
+    let list = e.clio(&["sessions", "restore"]);
+    assert!(
+        list.contains("hola mundo") && list.contains("abc-123"),
+        "{list}"
+    );
+    // A file of that name in the way: refused, nothing moves.
+    std::fs::write(&file, "mine").unwrap();
+    let o = e.try_clio(&["sessions", "restore", "abc"]);
+    assert!(!o.status.success() && text(&o.stderr).contains("already there"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
+    std::fs::remove_file(&file).unwrap();
+    e.clio(&["sessions", "restore", "abc"]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), body);
+    assert!(e.clio(&["pi", "sessions"]).contains("hola mundo"));
+    assert!(
+        e.clio(&["sessions", "restore"])
+            .contains("the trash is empty")
+    );
+    assert!(
+        e.clio(&["sessions"])
+            .contains("usage: clio sessions restore")
+    );
+}

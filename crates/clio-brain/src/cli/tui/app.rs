@@ -1169,11 +1169,21 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 // A turn, an open or an approval that started meanwhile: no delete now.
                 Ok(_) if dropped(app, "what would be deleted") || app.busy() => {}
                 Ok((file, title, what)) if app.screen == Screen::Sessions => {
+                    // The title whole (the dialog wraps it), then what the drawer row shows.
+                    let when = app
+                        .sessions
+                        .rows
+                        .iter()
+                        .find(|r| r.reference == file)
+                        .map(|r| {
+                            super::sessions::age_and_count(r, crate::cli::now_ms(), app.theme.dot())
+                        })
+                        .unwrap_or_default();
                     app.confirm = Some(Confirm::new(
                         Action::DeleteSession,
                         file,
                         0,
-                        format!("\"{title}\": {what}"),
+                        format!("\"{title}\" {} {when}: {what}", app.theme.dot()),
                     ));
                 }
                 Ok(_) => {}
@@ -1184,7 +1194,11 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::SessionDeleted(r, rows) => {
             app.sessions.set(rows);
             app.flash = Some(match r {
-                Ok(m) | Err(m) => m,
+                Ok(m) => {
+                    app.chat.items.push(super::chat::Item::Note(m));
+                    "session deleted: it is in the trash".to_owned()
+                }
+                Err(m) => m,
             });
             vec![]
         }
@@ -1880,7 +1894,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         ),
         Action::Archive => format!("Archive memory m{} (it will no longer be remembered)", c.id),
         Action::DeleteSession => {
-            "Delete the session (this cannot be undone); it removes:".to_owned()
+            "Delete the session? The conversation goes to the trash for 30 days (`clio sessions restore` brings it back); the working copy, if it has one, is removed for good:".to_owned()
         }
         Action::Approve => format!("Clio set aside {}. Run it?", c.id),
         Action::UndoSession => "Undo this session's file changes in".to_owned(),

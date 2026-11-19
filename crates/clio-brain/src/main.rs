@@ -36,6 +36,8 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio vault start|stop|status|put NAME --dest TOOL:DOMAIN|list|revoke NAME
   clio memory search|list|show|remember|promote|archive|feedback|export|stats
                                               what Clio remembers (clio memory --help)
+  clio sessions restore [id]                  the conversations you deleted are kept 30 days in the trash: lists them,
+                                              or brings one back to the sessions folder
   clio doctor [--json]                        checks permissions, key, sockets and the machine
   clio --version                              the version
   clio pi doctor|install|sessions [--json]    Pi (the agent's harness): status, installation, sessions
@@ -127,6 +129,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "connect"
             | "doctor"
             | "memory"
+            | "sessions"
             | "pi"
             | "toolhost"
             | "pi-net"
@@ -255,6 +258,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         "connect" => return connect::run(&dirs, args.into_raw()),
         "memory" => return memory::run(&dirs, args.into_raw()),
         "pi" => return pi::run(&dirs, args.into_raw()),
+        "sessions" => return cli::sessions::run(&dirs, &args.into_raw()),
         "doctor" => {
             let json = args.flag("--json");
             args.rest()?;
