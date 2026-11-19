@@ -10,8 +10,9 @@
 //!
 //! `clio skills` and `/skills` list them and turn them off, on, back or away.
 
+use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use clio_toolhost::skills::{self as th, SkillFile};
@@ -152,49 +153,85 @@ fn lock(root: &Path) -> Res<fs::File> {
     Ok(f)
 }
 
-/// The skills folder exists (Pi's jail mounts `live`), with the shipped skill when it never was
-/// there (one the person removed stays removed).
-pub fn ensure(d: &Dirs) -> Res<()> {
-    let root = root(d);
-    let _l = lock(&root)?;
-    let removed = fs::read_dir(root.join("removed"))
+/// The person removed a skill of `name` (`removed/<name>-<ms>/`; `skill-creator-v2-1` is
+/// another name's).
+pub fn was_removed(root: &Path, name: &str) -> bool {
+    fs::read_dir(root.join("removed"))
         .into_iter()
         .flatten()
         .flatten()
         .any(|e| {
             e.file_name()
-                .to_string_lossy()
-                .starts_with(&format!("{BUNDLED}-"))
-        });
-    if record(&root, BUNDLED).is_some() || removed {
-        return Ok(());
-    }
-    let files: Vec<SkillFile> = BUNDLED_FILES[1..]
+                .to_str()
+                .and_then(|n| n.strip_prefix(name)?.strip_prefix('-'))
+                .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// The shipped skill's description and its other files, as the binary has them.
+fn bundled() -> (String, Vec<SkillFile>) {
+    let files = BUNDLED_FILES[1..]
         .iter()
         .map(|(p, c)| SkillFile {
             path: (*p).into(),
             content: (*c).into(),
         })
         .collect();
-    let md = BUNDLED_FILES[0].1;
-    let description = md
+    let description = BUNDLED_FILES[0]
+        .1
         .lines()
         .nth(2)
         .and_then(|l| l.strip_prefix("description: "))
         .and_then(|d| serde_json::from_str::<String>(d).ok())
         .unwrap_or_default();
+    (description, files)
+}
+
+/// Registers the binary's text of the shipped skill (the lock held).
+fn install_bundled(root: &Path) -> Res<u32> {
+    let (description, files) = bundled();
     register_locked(
-        &root,
+        root,
         &New {
             name: BUNDLED,
             description: &description,
-            skill_md: md,
+            skill_md: BUNDLED_FILES[0].1,
             files: &files,
             by: "bundled",
             verdict: "shipped with Clio",
         },
     )
-    .map(drop)
+}
+
+/// The skills folder exists (Pi's jail mounts `live`), with the shipped skill: installed when it
+/// never was there (one the person removed stays removed), and updated to this binary's text
+/// when what is installed is an earlier shipped text, unchanged (one the person or the model
+/// changed, or the person took back to an earlier version, is left as it is). Runs at `clio init`
+/// and when a chat session opens.
+pub fn ensure(d: &Dirs) -> Res<()> {
+    ensure_in(&root(d))
+}
+
+fn ensure_in(root: &Path) -> Res<()> {
+    let _l = lock(root)?;
+    let Some(r) = record(root, BUNDLED) else {
+        if !was_removed(root, BUNDLED) {
+            install_bundled(root)?;
+        }
+        return Ok(());
+    };
+    let (_, files) = bundled();
+    let shipped = th::digest(BUNDLED_FILES[0].1, &files);
+    let latest = r.versions.iter().map(|v| v.n).max();
+    let stale = r
+        .versions
+        .iter()
+        .find(|v| v.n == r.current)
+        .is_some_and(|v| v.by == "bundled" && v.sha256 != shipped);
+    if latest == Some(r.current) && stale {
+        install_bundled(root)?;
+    }
+    Ok(())
 }
 
 /// Registers `s` as a new version (the first, or the next): written to `versions`, then to `live`
@@ -207,16 +244,36 @@ pub fn register(root: &Path, s: &New<'_>) -> Res<u32> {
 fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
     th::check_stored(s.name, s.skill_md, s.files)?;
     let old = record(root, s.name);
+    // One more than any version the record or the folder has: a folder a failed registration
+    // left behind never blocks the name.
+    let folders = root.join(th::VERSIONS).join(s.name);
     let n = old
-        .as_ref()
-        .and_then(|r| r.versions.iter().map(|v| v.n).max())
+        .iter()
+        .flat_map(|r| r.versions.iter().map(|v| v.n))
+        .chain(
+            fs::read_dir(&folders)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok()),
+        )
+        .max()
         .unwrap_or(0)
         + 1;
+    match fs::symlink_metadata(&folders) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(format!("{} is not a folder", folders.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_dir(&folders)?,
+        Err(e) => return Err(io_err(&folders, &e)),
+    }
     let dir = version_dir(root, s.name, n);
     let tmp = dir.with_file_name(format!(".tmp-{n}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    write_tree(&tmp, s.skill_md, s.files)?;
-    fs::rename(&tmp, &dir).map_err(|e| io_err(&dir, &e))?;
+    clear(&tmp)?;
+    let built = write_tree(&tmp, s.skill_md, s.files)
+        .and_then(|()| fs::rename(&tmp, &dir).map_err(|e| io_err(&dir, &e)));
+    if let Err(e) = built {
+        return Err(also(e, clear(&tmp)));
+    }
     let version = Version {
         n,
         sha256: th::digest(s.skill_md, s.files),
@@ -224,7 +281,7 @@ fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
         by: s.by.into(),
         verdict: s.verdict.into(),
     };
-    let mut r = old.unwrap_or_else(|| Record {
+    let mut r = old.clone().unwrap_or_else(|| Record {
         name: s.name.into(),
         description: String::new(),
         enabled: true,
@@ -243,55 +300,105 @@ fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
         r.enabled = true;
         r.off = None;
     }
-    if r.enabled {
-        install(root, &r.name, n)?;
+    // Live first, then the record; either failing puts back what was there and takes the new
+    // version's folder away.
+    if r.enabled
+        && let Err(e) = install(root, &r.name, n)
+    {
+        return Err(also(e, clear(&dir)));
     }
-    save(root, &r)?;
+    if let Err(e) = save(root, &r) {
+        let back = match &old {
+            Some(o) if o.enabled => install(root, s.name, o.current),
+            _ => uninstall(root, s.name),
+        };
+        return Err(also(also(e, back), clear(&dir)));
+    }
     Ok(n)
 }
 
-/// SKILL.md and the files under `dir` (new): folders 0700, a script (`#!`) 0700, the rest 0600.
+/// `e`, and what went wrong putting things back, if anything did.
+fn also(e: String, undo: Res<()>) -> String {
+    match undo {
+        Ok(()) => e,
+        Err(u) => format!("{e} (and then: {u})"),
+    }
+}
+
+/// Removes `p` (a folder, or a link itself, never what it points to) if it is there.
+fn clear(p: &Path) -> Res<()> {
+    match fs::remove_dir_all(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(p, &e)),
+        _ => Ok(()),
+    }
+}
+
+/// A new folder (0700), made here: never one that exists or a link, and never its parents.
+pub(crate) fn new_dir(p: &Path) -> Res<()> {
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(p)
+        .map_err(|e| io_err(p, &e))
+}
+
+/// A new file: never one that exists, never through a link.
+fn new_file(p: &Path, mode: u32, bytes: &[u8]) -> Res<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(p)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, bytes))
+        .map_err(|e| io_err(p, &e))
+}
+
+/// SKILL.md and the files under `dir`, which this call makes: every folder made here one level at
+/// a time (none that exists, no link followed), every file new; folders 0700, a script (`#!`)
+/// 0700, the rest 0600. Any failure is an error.
 pub(crate) fn write_tree(dir: &Path, skill_md: &str, files: &[SkillFile]) -> Res<()> {
-    mkdir_private(dir)?;
+    new_dir(dir)?;
+    let mut made = HashSet::new();
     for (path, content) in std::iter::once(("SKILL.md", skill_md))
         .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
     {
         th::valid_path(path).or_else(|e| if path == "SKILL.md" { Ok(()) } else { Err(e) })?;
-        let p = dir.join(path);
-        if let Some(parent) = p.parent() {
-            mkdir_private(parent)?;
+        let mut at = dir.to_path_buf();
+        for part in Path::new(path)
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+        {
+            at.push(part);
+            if made.insert(at.clone()) {
+                new_dir(&at)?;
+            }
         }
         let mode = if content.starts_with("#!") {
             0o700
         } else {
             0o600
         };
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&p)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
-            .map_err(|e| io_err(&p, &e))?;
+        new_file(&dir.join(path), mode, content.as_bytes())?;
     }
     Ok(())
 }
 
-/// Copies a folder of plain files and folders (what `write_tree` made), modes kept.
+/// Copies a folder of plain files and folders (what `write_tree` made) to `to` (new), modes kept;
+/// anything else in it (a link) is an error.
 fn copy_tree(from: &Path, to: &Path) -> Res<()> {
-    mkdir_private(to)?;
-    for e in fs::read_dir(from).map_err(|e| io_err(from, &e))?.flatten() {
+    new_dir(to)?;
+    for e in fs::read_dir(from).map_err(|e| io_err(from, &e))? {
+        let e = e.map_err(|e| io_err(from, &e))?;
         let (src, dst) = (e.path(), to.join(e.file_name()));
         let meta = fs::symlink_metadata(&src).map_err(|e| io_err(&src, &e))?;
         if meta.is_dir() {
             copy_tree(&src, &dst)?;
         } else if meta.is_file() {
-            fs::copy(&src, &dst).map_err(|e| io_err(&dst, &e))?;
-            fs::set_permissions(
-                &dst,
-                fs::Permissions::from_mode(meta.permissions().mode() & 0o700),
-            )
-            .map_err(|e| io_err(&dst, &e))?;
+            let bytes = fs::read(&src).map_err(|e| io_err(&src, &e))?;
+            new_file(&dst, meta.permissions().mode() & 0o700, &bytes)?;
+        } else {
+            return Err(format!("{}: not a plain file", src.display()));
         }
     }
     Ok(())
@@ -307,15 +414,24 @@ fn install(root: &Path, name: &str, n: u32) -> Res<()> {
         live.join(format!(".old-{name}-{pid}")),
         live.join(name),
     );
-    let _ = fs::remove_dir_all(&tmp);
-    let _ = fs::remove_dir_all(&old);
-    copy_tree(&version_dir(root, name, n), &tmp)?;
-    if at.exists() {
-        fs::rename(&at, &old).map_err(|e| io_err(&at, &e))?;
+    clear(&tmp)?;
+    clear(&old)?;
+    if let Err(e) = copy_tree(&version_dir(root, name, n), &tmp) {
+        return Err(also(e, clear(&tmp)));
     }
-    fs::rename(&tmp, &at).map_err(|e| io_err(&at, &e))?;
-    let _ = fs::remove_dir_all(&old);
-    Ok(())
+    let had = fs::symlink_metadata(&at).is_ok();
+    if had && let Err(e) = fs::rename(&at, &old) {
+        return Err(also(io_err(&at, &e), clear(&tmp)));
+    }
+    if let Err(e) = fs::rename(&tmp, &at) {
+        let back = if had {
+            fs::rename(&old, &at).map_err(|e| io_err(&old, &e))
+        } else {
+            Ok(())
+        };
+        return Err(also(also(io_err(&at, &e), back), clear(&tmp)));
+    }
+    clear(&old)
 }
 
 fn uninstall(root: &Path, name: &str) -> Res<()> {
@@ -336,6 +452,13 @@ fn known(root: &Path, name: &str) -> Res<Record> {
 /// `off` / `on`: what Pi loads from the next session, and whether its files read as Clio's.
 pub fn set_enabled(root: &Path, name: &str, on: bool, why: &str) -> Res<String> {
     let _l = lock(root)?;
+    // The shipped skill, removed: `on` installs it again, as this binary has it.
+    if on && name == BUNDLED && record(root, name).is_none() {
+        let n = install_bundled(root)?;
+        return Ok(format!(
+            "«{name}» is installed again as Clio ships it (version {n}): from the next session"
+        ));
+    }
     let mut r = known(root, name)?;
     r.enabled = on;
     r.off = (!on).then(|| why.to_owned());
@@ -489,9 +612,19 @@ pub fn lines(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// The judge is off: Clio's `skill_write` refuses every draft (S-68), so the list says so.
+pub const JUDGE_OFF: &str = "the judge is off (jev.enabled in config.json): Clio cannot write or change skills until it is on";
+
+fn judge_off(d: &Dirs) -> bool {
+    super::home::Config::load(d).is_ok_and(|c| !c.jev.enabled)
+}
+
 /// `clio skills [list|off|on|undo|remove NAME [--yes]]`. The person's: never the model's.
 pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
     let root = root(d);
+    if judge_off(d) {
+        println!("{JUDGE_OFF}");
+    }
     let name = || {
         args.get(1)
             .cloned()
@@ -541,6 +674,10 @@ pub fn chat_command(d: &Dirs, args: &str) -> Res<super::tui::commands::Modal> {
         _ => return Err("/skills [off|on|undo|remove <name>]".into()),
     };
     let mut lines = lines(&root);
+    if judge_off(d) {
+        lines.push(String::new());
+        lines.push(JUDGE_OFF.into());
+    }
     if let Some(m) = done {
         lines.insert(0, String::new());
         lines.insert(0, m);
@@ -661,6 +798,173 @@ mod tests {
         }];
         assert!(register(&root, &new("x", &md("x", "b"), &bad)).is_err());
         assert!(!t.path().join("escape").exists());
+    }
+
+    // S-68: a registration writes only new folders and files: a link or a folder already where it
+    // writes is an error, never followed or reused.
+    #[test]
+    fn a_tree_is_written_only_into_new_folders_and_never_through_a_link() {
+        let t = tempfile::tempdir().unwrap();
+        let decoy = t.path().join("decoy");
+        fs::create_dir(&decoy).unwrap();
+        let files = [SkillFile {
+            path: "scripts/a.sh".into(),
+            content: "#!/bin/bash\n".into(),
+        }];
+        // The folder exists, or is a link to the decoy: refused.
+        let at = t.path().join("s");
+        fs::create_dir(&at).unwrap();
+        assert!(write_tree(&at, "md", &files).is_err());
+        let link = t.path().join("l");
+        std::os::unix::fs::symlink(&decoy, &link).unwrap();
+        assert!(write_tree(&link, "md", &files).is_err());
+        assert_eq!(fs::read_dir(&decoy).unwrap().count(), 0);
+        // Two files of one folder: the folder is made once, here.
+        let ok = t.path().join("ok");
+        let two = [
+            files[0].clone(),
+            SkillFile {
+                path: "scripts/b.md".into(),
+                content: "b".into(),
+            },
+        ];
+        write_tree(&ok, "md", &two).unwrap();
+        assert_eq!(tree(&ok).len(), 3);
+        // A file where a folder must go: an error, not a partial success.
+        let clash = [
+            SkillFile {
+                path: "a".into(),
+                content: "x".into(),
+            },
+            SkillFile {
+                path: "a/b".into(),
+                content: "y".into(),
+            },
+        ];
+        assert!(write_tree(&t.path().join("c"), "md", &clash).is_err());
+    }
+
+    // S-68: a version folder a failed registration left behind does not block the name; a
+    // registration that fails takes its folder away and leaves what was live.
+    #[test]
+    fn an_orphan_version_folder_does_not_jam_the_name_and_a_failure_cleans_up() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        let m1 = md("hi", "First.");
+        fs::create_dir_all(root.join("versions/hi/1")).unwrap();
+        fs::write(root.join("versions/hi/1/junk"), "left").unwrap();
+        assert_eq!(register(&root, &new("hi", &m1, &[])).unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap(),
+            m1
+        );
+        // The record cannot be saved: nothing of version 3 stays, version 2 stays live.
+        fs::create_dir_all(root.join("records/hi.json.tmp")).unwrap();
+        let m2 = md("hi", "Second.");
+        assert!(register(&root, &new("hi", &m2, &[])).is_err());
+        assert!(!root.join("versions/hi/3").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap(),
+            m1
+        );
+        assert_eq!(record(&root, "hi").unwrap().current, 2);
+        fs::remove_dir(root.join("records/hi.json.tmp")).unwrap();
+        // A new skill whose record cannot be saved is not left live.
+        fs::create_dir_all(root.join("records/yo.json.tmp")).unwrap();
+        assert!(register(&root, &new("yo", &md("yo", "b"), &[])).is_err());
+        assert!(!root.join("live/yo").exists() && !root.join("versions/yo/1").exists());
+    }
+
+    // S-68: the shipped skill is installed when missing, updated when what is installed is an
+    // earlier shipped text left as it was, and left alone when it was changed, taken back or
+    // removed; `on` brings a removed one back as shipped. Only `<name>-<digits>` is a removal.
+    #[test]
+    fn the_shipped_skill_installs_updates_and_stays_out_when_removed() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("skills");
+        let (description, files) = bundled();
+        let shipped = th::digest(BUNDLED_FILES[0].1, &files);
+        let current = |root: &Path| {
+            let r = record(root, BUNDLED).unwrap();
+            let v = r
+                .versions
+                .iter()
+                .find(|v| v.n == r.current)
+                .unwrap()
+                .clone();
+            (r.current, v.by, v.sha256)
+        };
+        // A removed `skill-creator-v2` is another name.
+        fs::create_dir_all(root.join(format!("removed/{BUNDLED}-v2-123"))).unwrap();
+        assert!(!was_removed(&root, BUNDLED));
+        ensure_in(&root).unwrap();
+        assert_eq!(current(&root), (1, "bundled".into(), shipped.clone()));
+        ensure_in(&root).unwrap();
+        assert_eq!(current(&root).0, 1, "the same text is not registered again");
+        // An older shipped text, unchanged: the binary's replaces it.
+        let old = th::compose(
+            BUNDLED,
+            &description,
+            "Old steps.",
+            "bash scripts/check-skill.sh .",
+        );
+        let mut n = New {
+            name: BUNDLED,
+            description: &description,
+            skill_md: &old,
+            files: &files,
+            by: "bundled",
+            verdict: "shipped with Clio",
+        };
+        register(&root, &n).unwrap();
+        ensure_in(&root).unwrap();
+        assert_eq!(current(&root), (3, "bundled".into(), shipped.clone()));
+        // Changed through a review: left as it is.
+        n.by = "review";
+        register(&root, &n).unwrap();
+        ensure_in(&root).unwrap();
+        assert_eq!(current(&root).0, 4);
+        // Taken back to the earlier shipped text (version 2): left as it is.
+        undo(&root, BUNDLED).unwrap();
+        undo(&root, BUNDLED).unwrap();
+        ensure_in(&root).unwrap();
+        assert_eq!(current(&root).0, 2);
+        // Removed: it stays out; `on` brings it back as shipped.
+        remove(&root, BUNDLED).unwrap();
+        assert!(was_removed(&root, BUNDLED));
+        ensure_in(&root).unwrap();
+        assert!(record(&root, BUNDLED).is_none());
+        assert!(
+            set_enabled(&root, BUNDLED, true, "")
+                .unwrap()
+                .contains("installed again")
+        );
+        assert_eq!(current(&root).2, shipped);
+        assert!(root.join("live").join(BUNDLED).join("SKILL.md").is_file());
+        assert!(set_enabled(&root, "ghost", true, "").is_err());
+    }
+
+    // S-68: with the judge off no draft is accepted; `/skills` (and `clio skills`) say so.
+    #[test]
+    fn the_list_says_when_the_judge_is_off() {
+        use super::super::home::Config;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let d = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        fs::create_dir_all(&d.config).unwrap();
+        let mut cfg = Config::default_with(vec![]);
+        for on in [false, true] {
+            cfg.jev.enabled = on;
+            fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+            let m = chat_command(&d, "").unwrap();
+            assert_eq!(m.lines.iter().any(|l| l == JUDGE_OFF), !on, "{:?}", m.lines);
+        }
     }
 
     // S-68: three failed reports in a row turn a skill off; one that worked in between resets.
