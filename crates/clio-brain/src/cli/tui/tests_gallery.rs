@@ -811,7 +811,52 @@ fn command_states() -> Vec<(&'static str, App)> {
     services_states(&mut out);
     mcp_states(&mut out);
     manage_states(&mut out);
+    round_states(&mut out);
     out
+}
+
+/// The round: its notices when a chat opens, what it set aside in the one box, and `/round`.
+fn round_states(out: &mut Vec<(&'static str, App)>) {
+    let mut a = pi(true);
+    for n in [
+        "the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I can clear it; it waits for your yes.",
+        "the round at 08:00: «backup-notes» resolved: The backup ran again last night.",
+        "the round at 08:00: 1 action(s) it found wait for your yes: the approval box asks when a chat opens (or clio pending)",
+    ] {
+        a.chat.items.push(Item::Note(n.into()));
+    }
+    out.push(("the round's notices when a chat opens", a));
+    let mut p = manage_item("service_manage", serde_json::json!({}), None);
+    p.class = clio_toolhost::ask::Class::Delete;
+    p.tool = "exec".into();
+    p.args = serde_json::json!({"command": "rm -rf /home/ivan/.cache/build", "reason": "Free 48 GB on /"});
+    p.reason = Some("set aside by the round at 08:00".into());
+    out.push(("what a round set aside, in the one box", manage_box(&p)));
+    let t = tempfile::tempdir().unwrap();
+    let d = crate::cli::home::Dirs {
+        config: t.path().join("config"),
+        data: t.path().join("data"),
+        runs: t.path().join("data/runs"),
+        runtime: None,
+        home: t.path().join("home"),
+    };
+    let now = crate::cli::now_ms();
+    let root = crate::cli::round::root(&d);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("state.json"),
+        serde_json::json!({"last_start_ms": now - 3_600_000, "rounds": [
+            {"start_ms": now - 9 * 3_600_000, "ms": 74_000, "by": "timer", "run": "20261119-000000-a1b2", "outcome": "nothing to tell"},
+            {"start_ms": now - 3_600_000, "ms": 131_000, "by": "timer", "run": "20261119-080000-c3d4", "outcome": "2 thing(s) found, 2 told", "aside": 1,
+             "notices": ["the round at 08:00: «disk-root» The root disk is at 86 % (df -h /); the build cache takes 48 GB. I can clear it; it waits for your yes.",
+                         "the round at 08:00: 1 action(s) it found wait for your yes: the approval box asks when a chat opens (or clio pending)"]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut a = conversation(true);
+    a.modal = Some(crate::cli::round::chat_command(&d));
+    out.push(("/round: the last rounds", a));
 }
 
 /// An MCP server proposed with `mcp_propose` (S-70), as the box gets it: GitHub's, with its host

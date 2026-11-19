@@ -37,6 +37,7 @@ pub enum Run {
     Review,
     Skills,
     Services,
+    Round,
     Mcp,
     Copy,
     Memory,
@@ -189,6 +190,14 @@ pub const COMMANDS: &[Command] = &[
         "Clio's services, run on a schedule: list them, look at one, turn one off, run one now",
         false,
         Run::Services,
+    ),
+    c(
+        "round",
+        &[],
+        "",
+        "Clio's rounds: when she last looked by herself, and what she told you",
+        false,
+        Run::Round,
     ),
     c(
         "mcp",
@@ -651,6 +660,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             }
             _ => vec![Cmd::Services(args.to_owned())],
         },
+        Run::Round => vec![Cmd::Round],
         Run::Mcp => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["remove", name] => {
                 app.confirm = Some(Confirm::new(

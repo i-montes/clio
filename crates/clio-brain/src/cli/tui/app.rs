@@ -219,6 +219,8 @@ pub enum Cmd {
     Skills(String),
     /// `/services [...]`: the person's (a removal was confirmed already).
     Services(String),
+    /// `/round`: the last rounds.
+    Round,
     /// `/mcp [...]`: the person's (a removal or a confirmation was confirmed already).
     Mcp(String),
     /// `/mcp confirm <name>`: its tools are read, then asked about (`Action::ConfirmMcp`).

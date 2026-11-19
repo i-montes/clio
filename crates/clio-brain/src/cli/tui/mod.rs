@@ -555,7 +555,8 @@ fn send_grant(d: &Dirs, session: &str, s: &dyn Session, tx: &Sender<Input>) {
 
 /// Clio asks about everything that waits: the secrets each in their own box, the rest in ONE
 /// box (a block change, a skill, a service, an MCP server or a call shown whole).
-fn offer(waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
+/// `suspect`: the chat's mark; an item a flagged round set aside is asked as `suspect` too.
+fn offer(d: &Dirs, waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
     let (secrets, aside): (Vec<_>, Vec<_>) = waiting
         .iter()
         .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
@@ -572,7 +573,7 @@ fn offer(waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender
     let asks: Vec<_> = aside
         .into_iter()
         .map(|p| {
-            let k = pick(p, suspect);
+            let k = pick(p, suspect || super::pending::suspect_run(d, &p.run));
             (k.id, k.what, k.block)
         })
         .collect();
@@ -1509,6 +1510,7 @@ impl Ctx {
                 move |d, _| super::services::chat_command(d, &args),
                 |r| Bg::Modal(r.and_then(|x| x)),
             ),
+            Cmd::Round => self.spawn(move |d, _| super::round::chat_command(d), Bg::Modal),
             Cmd::Mcp(args) => self.spawn(
                 move |d, _| super::mcp_servers::chat_command(d, &args),
                 |r| Bg::Modal(r.and_then(|x| x)),
@@ -1655,7 +1657,7 @@ impl Ctx {
                         let now = crate::cli::now_ms();
                         let others = super::pending::waiting(d)
                             .iter()
-                            .filter(|p| p.session != session)
+                            .filter(|p| p.session != session && !super::round::is_round(d, &p.run))
                             .count();
                         let Some(s) = open.filter(|_| !session.is_empty()) else {
                             return (vec![], vec![], others);
@@ -1664,7 +1666,10 @@ impl Ctx {
                         let mine = s
                             .waiting()
                             .iter()
-                            .map(|p| (super::pending::line(p, now), pick(p, suspect)))
+                            .map(|p| {
+                                let marked = suspect || super::pending::suspect_run(d, &p.run);
+                                (super::pending::line(p, now), pick(p, marked))
+                            })
                             .collect();
                         let cut = super::pending::interrupted(d)
                             .iter()
@@ -1711,7 +1716,7 @@ impl Ctx {
                         }
                         send_grant(d, &session, s.as_ref(), tx);
                         let waiting = s.waiting();
-                        offer(&waiting, suspect, tx);
+                        offer(d, &waiting, suspect, tx);
                         Bg::Approvals {
                             session,
                             waiting: waiting.len(),
