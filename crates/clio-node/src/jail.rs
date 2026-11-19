@@ -431,6 +431,7 @@ impl Jail {
             None,
             &|| false,
             None,
+            None,
         )
     }
 }
@@ -439,6 +440,7 @@ impl Jail {
 /// its output. `Err` means it could not start; a command that fails or is killed is an `Ok`.
 /// Runs `cmd` to its end, or until `timeout` (none: no limit), a flood of output, or `cancel`
 /// says so (asked every 10 ms); then kills everything it started.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_command(
     mut cmd: Command,
     timeout: Option<Duration>,
@@ -447,10 +449,15 @@ pub(crate) fn run_command(
     stop: Option<&[String]>,
     cancel: &dyn Fn() -> bool,
     sink: Option<&Sink>,
+    input: Option<Vec<u8>>,
 ) -> Result<JailOutput, String> {
     let program = PathBuf::from(cmd.get_program());
     cmd.env_clear()
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
@@ -464,6 +471,14 @@ pub(crate) fn run_command(
         kill,
         stop,
     };
+    // What it reads on its input, written from a thread of its own and then closed.
+    if let (Some(bytes), Some(mut pipe)) = (input, reaper.child.stdin.take()) {
+        std::thread::spawn(move || {
+            let mut bytes = bytes;
+            let _ = std::io::Write::write_all(&mut pipe, &bytes);
+            bytes.fill(0);
+        });
+    }
     // A command with a sink keeps its own capped record of what it wrote: no flood to stop.
     let flood_at = if sink.is_some() {
         usize::MAX

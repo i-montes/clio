@@ -465,3 +465,218 @@ fn a_read_only_job_writes_only_tmp() {
     assert!(!outside.path().join("x").exists());
     assert!(inside.path().join("y").exists());
 }
+
+// ---- services (stage 3, S-69) -----------------------------------------------------------------
+
+use clio_node::host::ServiceRun;
+
+/// A service's run in `d`: its files in `files` (cwd), Clio's data `data` masked with its state
+/// folder `data/services/state/svc` writable inside, `out` declared, everything else read-only.
+fn service(d: &Path, command: &str) -> ServiceRun {
+    let data = d.join("data");
+    let state = data.join("services/state/svc");
+    let files = data.join("services/versions/svc/1");
+    for p in [
+        &state,
+        &files,
+        &data.join("services/state/other"),
+        &d.join("out"),
+        &d.join("home/.ssh"),
+    ] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    std::fs::write(data.join("vault.bin"), "the vault").unwrap();
+    std::fs::write(data.join("services/state/other/token"), "other's state").unwrap();
+    std::fs::write(d.join("home/.ssh/id_ed25519"), "a key").unwrap();
+    let c = |p: PathBuf| p.canonicalize().unwrap();
+    ServiceRun {
+        job: HostJob {
+            command: command.into(),
+            cwd: c(files.clone()),
+            home: c(d.join("home")),
+            network: false,
+            timeout: Some(Duration::from_secs(20)),
+            max_output: 64 * 1024,
+            masks: vec![c(data), c(d.join("home/.ssh"))],
+            shows: vec![c(files)],
+            read_only: false,
+        },
+        writable: vec![c(state), c(d.join("out"))],
+        cpu_percent: 50,
+        memory_mb: 256,
+        env: vec![(
+            "CLIO_STATE_DIR".into(),
+            c(d.join("data/services/state/svc")).display().to_string(),
+        )],
+    }
+}
+
+// S-69: a service's limits and its only writable paths are in both launchers' arguments; a run
+// with a network of its own, no time limit or a writable path through a link is refused.
+#[test]
+fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
+    let d = TempDir::new().unwrap();
+    let s = service(d.path(), "true");
+    let (state, out) = (
+        s.writable[0].display().to_string(),
+        s.writable[1].display().to_string(),
+    );
+    let mask = s.job.masks[0].display().to_string();
+    let mut any = false;
+    if let Some(h) = with(Launcher::Bwrap) {
+        any = true;
+        let (_, a) = h.service_args(&s).unwrap();
+        assert_eq!(after(&a, "--ro-bind")[0], "/", "{a:?}");
+        // Only the state folder (inside the mask) and the declared path, never `/`.
+        assert_eq!(after(&a, "--bind"), [state.as_str(), out.as_str()], "{a:?}");
+        assert!(
+            after(&a, "--tmpfs").contains(&"/tmp"),
+            "a private /tmp: {a:?}"
+        );
+        assert!(after(&a, "--tmpfs").contains(&mask.as_str()));
+        for flag in [
+            "--unshare-net",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--clearenv",
+            "--die-with-parent",
+        ] {
+            assert!(a.contains(&flag.to_owned()), "{flag} missing from {a:?}");
+        }
+        assert!(!a.contains(&"--dev-bind".to_owned()), "{a:?}");
+        // Per process: address space and CPU seconds (20 s at 50 %), at the lowest priority.
+        let i = a
+            .iter()
+            .position(|x| x.ends_with("/prlimit"))
+            .expect("prlimit");
+        assert_eq!(a[i + 1], format!("--as={}", 256 * 1024 * 1024));
+        assert_eq!(a[i + 2], "--cpu=10");
+        assert!(
+            a[i + 4].ends_with("/nice") && a[i + 5] == "-n" && a[i + 6] == "19",
+            "{a:?}"
+        );
+        assert!(after(&a, "--setenv").contains(&"CLIO_STATE_DIR"));
+    }
+    if let Some(h) = with(Launcher::Systemd) {
+        any = true;
+        let (_, a) = h.service_args(&s).unwrap();
+        let props = after(&a, "-p");
+        for p in [
+            "ReadOnlyPaths=/".to_owned(),
+            "PrivateTmp=yes".into(),
+            "PrivateDevices=yes".into(),
+            "NoNewPrivileges=yes".into(),
+            "PrivateNetwork=yes".into(),
+            "CPUQuota=50%".into(),
+            "MemoryMax=256M".into(),
+            "MemorySwapMax=0".into(),
+            "RuntimeMaxSec=20".into(),
+            format!("BindPaths={state}"),
+            format!("ReadWritePaths={out}"),
+            format!("TemporaryFileSystem={mask}:ro"),
+        ] {
+            assert!(props.contains(&p.as_str()), "{p} missing from {a:?}");
+        }
+        assert!(!props.contains(&"ReadWritePaths=/tmp"), "{a:?}");
+        assert!(
+            a.iter().any(|x| x.starts_with("--uid=")),
+            "it runs as this user: {a:?}"
+        );
+    }
+    if !any {
+        return;
+    }
+    let h = with(Launcher::Bwrap)
+        .or_else(|| with(Launcher::Systemd))
+        .unwrap();
+    let mut bad = s.clone();
+    bad.job.network = true;
+    assert!(h.service_args(&bad).is_err());
+    let mut bad = s.clone();
+    bad.job.timeout = None;
+    assert!(h.service_args(&bad).is_err());
+    let link = d.path().join("link");
+    std::os::unix::fs::symlink(d.path().join("out"), &link).unwrap();
+    let mut bad = s.clone();
+    bad.writable.push(link);
+    assert!(h.service_args(&bad).is_err());
+}
+
+// S-69, for real with `bwrap`: a run writes its state folder and its declared path and nothing
+// else; it cannot read Clio's data, another service's state or ~/.ssh; it has no network and no
+// new privileges; its /tmp is its own; its secret comes on its input; it ends at its time limit
+// and cannot go past its memory.
+#[test]
+fn bwrap_for_real_a_service_run_stays_in_its_bounds() {
+    let Some(h) = bwrap() else { return };
+    // Not under /tmp: the run's /tmp is its own, empty.
+    let d = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let m = marker();
+    let elsewhere = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let cmd = format!(
+        "IFS= read -r -d '' TOKEN || exit 75; export TOKEN; exec </dev/null; \
+         t() {{ if eval \"$1\" >/dev/null 2>&1; then echo \"$2 yes\"; else echo \"$2 no\"; fi; }}; \
+         t 'echo s > \"$CLIO_STATE_DIR/s\"' state; \
+         t 'echo o > {out}/o' out; \
+         t 'echo e > {else}/e' elsewhere; \
+         t 'echo h > $HOME/h' home; \
+         t 'echo {m} > /tmp/{m}' tmp; \
+         t 'cat {data}/vault.bin' vault; \
+         t 'cat {data}/services/state/other/token' other; \
+         t 'cat {ssh}/id_ed25519' ssh; \
+         t 'exec 3<>/dev/tcp/1.1.1.1/443' network; \
+         grep -q 'NoNewPrivs:[[:space:]]*1' /proc/self/status && echo nnp yes; \
+         echo \"token ${{#TOKEN}}\"",
+        out = d.path().canonicalize().unwrap().join("out").display(),
+        else = elsewhere.path().display(),
+        data = d.path().canonicalize().unwrap().join("data").display(),
+        ssh = d.path().canonicalize().unwrap().join("home/.ssh").display(),
+    );
+    let s = service(d.path(), &cmd);
+    let o = h.run_service(&s, b"abc\0".to_vec(), &|| false).unwrap();
+    assert!(o.success(), "{o:?}");
+    let lines: Vec<&str> = o.stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "state yes",
+            "out yes",
+            "elsewhere no",
+            "home no",
+            "tmp yes",
+            "vault no",
+            "other no",
+            "ssh no",
+            "network no",
+            "nnp yes",
+            "token 3"
+        ],
+        "{o:?}"
+    );
+    assert!(d.path().join("data/services/state/svc/s").is_file());
+    assert!(d.path().join("out/o").is_file());
+    assert!(!elsewhere.path().join("e").exists());
+    assert!(!Path::new("/tmp").join(&m).exists(), "its /tmp is its own");
+
+    // Its time limit: everything it started ends with it.
+    let m = marker();
+    let mut s = service(
+        d.path(),
+        &format!("(sleep 300; echo {m}) & sleep 300; echo {m}"),
+    );
+    s.job.timeout = Some(Duration::from_secs(2));
+    let t = Instant::now();
+    let o = h.run_service(&s, vec![], &|| false).unwrap();
+    assert!(o.timed_out && !o.success(), "{o:?}");
+    assert!(t.elapsed() < Duration::from_secs(15));
+    gone(&m, "a service's time limit");
+
+    // Its memory: 64 MB of address space cannot hold 200 MB.
+    let mut s = service(
+        d.path(),
+        "python3 -c 'x = bytearray(200 * 1024 * 1024)' && echo allocated",
+    );
+    s.memory_mb = 64;
+    let o = h.run_service(&s, vec![], &|| false).unwrap();
+    assert!(!o.success() && !o.stdout.contains("allocated"), "{o:?}");
+}

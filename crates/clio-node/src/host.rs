@@ -65,6 +65,23 @@ pub struct HostJob {
     pub read_only: bool,
 }
 
+/// A service's run (stage 3, S-69): `job` (its command, its files' folder as `cwd`, masks, the
+/// windows it may read and its time limit) with the whole machine read-only but `writable`, a
+/// private `/tmp` and `/dev`, no new privileges and no network of its own: `job.network` must be
+/// false, and its only way out is a proxy socket in one of `job.shows`. Limits: with `Systemd`,
+/// `CPUQuota`, `MemoryMax` (no swap) and `RuntimeMaxSec`; with `Bwrap`, `prlimit --as` and
+/// `--cpu` on each process and `nice -n 19` (no cgroup: per process, not for the whole run).
+#[derive(Debug, Clone)]
+pub struct ServiceRun {
+    pub job: HostJob,
+    /// Its state folder and the paths it declared: the only ones it may write. Absolute, existing.
+    pub writable: Vec<PathBuf>,
+    pub cpu_percent: u32,
+    pub memory_mb: u64,
+    /// Variables besides the launcher's own. Never a secret: they are in the arguments.
+    pub env: Vec<(String, String)>,
+}
+
 fn unit_name() -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let nanos = std::time::SystemTime::now()
@@ -221,10 +238,28 @@ impl HostJail {
 
     /// The program and argv that would run `job`. Public so tests (and a reviewer) can read them.
     pub fn args(&self, job: &HostJob) -> Result<(PathBuf, Vec<String>), String> {
-        self.build(job, &unit_name())
+        self.build(job, &unit_name(), None)
     }
 
-    fn build(&self, job: &HostJob, unit: &str) -> Result<(PathBuf, Vec<String>), String> {
+    /// The program and argv that would run a service's `run`.
+    pub fn service_args(&self, run: &ServiceRun) -> Result<(PathBuf, Vec<String>), String> {
+        self.build(&run.job, &unit_name(), Some(run))
+    }
+
+    fn build(
+        &self,
+        job: &HostJob,
+        unit: &str,
+        svc: Option<&ServiceRun>,
+    ) -> Result<(PathBuf, Vec<String>), String> {
+        if let Some(s) = svc {
+            if job.network || job.timeout.is_none() || job.read_only {
+                return Err("a service runs with no network of its own and a time limit".into());
+            }
+            if s.cpu_percent == 0 || s.memory_mb == 0 {
+                return Err("a service needs a processor and a memory limit".into());
+            }
+        }
         let cwd = job
             .cwd
             .canonicalize()
@@ -249,33 +284,81 @@ impl HostJail {
         };
         let masks = canon(&job.masks, "mask")?;
         let shows = canon(&job.shows, "shown folder")?;
-        let env = [
+        // A service's writable paths: each must exist and be named as it is (no link in it).
+        let mut writable = Vec::new();
+        for w in svc.map_or(&[][..], |s| &s.writable[..]) {
+            let c = w
+                .canonicalize()
+                .map_err(|e| format!("writable path {}: {e}", w.display()))?;
+            if !w.is_absolute() || c != *w {
+                return Err(format!(
+                    "writable path {} is not absolute or goes through a link",
+                    w.display()
+                ));
+            }
+            writable.push(c.to_string_lossy().into_owned());
+        }
+        let inside = |w: &str| masks.iter().any(|m| Path::new(w).starts_with(m));
+        let mut env: Vec<(String, String)> = [
             ("HOME", job.home.to_string_lossy().into_owned()),
             ("USER", self.user.clone()),
             ("LOGNAME", self.user.clone()),
             ("LANG", "C.UTF-8".into()),
             ("PATH", PATH.into()),
             ("XDG_RUNTIME_DIR", format!("/run/user/{}", self.uid)),
-        ];
-        let shell = [
+        ]
+        .map(|(k, v)| (k.to_owned(), v))
+        .to_vec();
+        env.extend(svc.iter().flat_map(|s| s.env.iter().cloned()));
+        let mut shell = vec![
             self.bash.to_string_lossy().into_owned(),
             "-lc".into(),
             job.command.clone(),
         ];
+        // Bwrap has no cgroup of its own: each process gets the limits, and the lowest priority.
+        if let (Some(s), Tools::Bwrap(_)) = (svc, &self.tools) {
+            let need = |n: &str| {
+                find_in_trusted(n).ok_or_else(|| {
+                    format!("{n} is not installed: a service's limits cannot be enforced")
+                })
+            };
+            let secs = job.timeout.map_or(0, |t| t.as_secs());
+            let cpu = (secs * u64::from(s.cpu_percent)).div_ceil(100).max(1);
+            let mut pre = vec![
+                need("prlimit")?.to_string_lossy().into_owned(),
+                format!("--as={}", s.memory_mb * 1024 * 1024),
+                format!("--cpu={cpu}"),
+                "--".into(),
+                need("nice")?.to_string_lossy().into_owned(),
+                "-n".into(),
+                "19".into(),
+            ];
+            pre.append(&mut shell);
+            shell = pre;
+        }
         let mut a: Vec<String> = Vec::new();
         let program = match &self.tools {
             Tools::Bwrap(bwrap) => {
                 // Its own pid namespace: when its first process dies, everything it started dies.
-                let root = if job.read_only { "--ro-bind" } else { "--bind" };
+                let root = if job.read_only || svc.is_some() {
+                    "--ro-bind"
+                } else {
+                    "--bind"
+                };
                 a.extend([root, "/", "/"].map(String::from));
                 if job.read_only {
                     a.extend(["--bind", "/tmp", "/tmp"].map(String::from));
                 }
+                // A service: a /tmp and a /dev of its own (the host's /dev/shm is writable).
+                if svc.is_some() {
+                    a.extend(
+                        ["--tmpfs", "/tmp", "--dev", "/dev", "--unshare-ipc"].map(String::from),
+                    );
+                } else {
+                    a.extend(["--dev-bind", "/dev", "/dev"].map(String::from));
+                }
                 a.extend(
                     [
-                        "--dev-bind",
-                        "/dev",
-                        "/dev",
                         "--unshare-pid",
                         "--proc",
                         "/proc",
@@ -294,10 +377,16 @@ impl HostJail {
                     for w in shows.iter().filter(|w| Path::new(w).starts_with(m)) {
                         a.extend(["--ro-bind".into(), w.clone(), w.clone()]);
                     }
+                    for w in writable.iter().filter(|w| Path::new(w).starts_with(m)) {
+                        a.extend(["--bind".into(), w.clone(), w.clone()]);
+                    }
                     a.extend(["--remount-ro".into(), m.clone()]);
                 }
+                for w in writable.iter().filter(|w| !inside(w)) {
+                    a.extend(["--bind".into(), w.clone(), w.clone()]);
+                }
                 for (k, v) in env {
-                    a.extend(["--setenv".into(), k.into(), v]);
+                    a.extend(["--setenv".into(), k, v]);
                 }
                 a.extend(["--chdir".into(), cwd, "--".into()]);
                 bwrap.clone()
@@ -305,7 +394,7 @@ impl HostJail {
             Tools::Systemd { sudo, run, .. } => {
                 // `TemporaryFileSystem=` splits on spaces and colons and unquotes: such a path
                 // would not be masked as written.
-                if let Some(m) = masks.iter().chain(&shows).find(|m| {
+                if let Some(m) = masks.iter().chain(&shows).chain(&writable).find(|m| {
                     m.chars().any(|c| {
                         c.is_whitespace() || c.is_control() || matches!(c, ':' | '"' | '\'' | '\\')
                     })
@@ -330,7 +419,33 @@ impl HostJail {
                 // this process dies and nobody stops the unit. No limit asked: none here either;
                 // whoever started it stops its units (`stop_units_of`).
                 if let Some(t) = job.timeout {
-                    a.extend(["-p".into(), format!("RuntimeMaxSec={}", t.as_secs() + 10)]);
+                    // A service's limit is the unit's own: it does not outlive it.
+                    let slack = if svc.is_some() { 0 } else { 10 };
+                    a.extend([
+                        "-p".into(),
+                        format!("RuntimeMaxSec={}", t.as_secs() + slack),
+                    ]);
+                }
+                if let Some(s) = svc {
+                    for p in [
+                        "ReadOnlyPaths=/".to_owned(),
+                        "PrivateTmp=yes".into(),
+                        "PrivateDevices=yes".into(),
+                        "NoNewPrivileges=yes".into(),
+                        format!("CPUQuota={}%", s.cpu_percent),
+                        format!("MemoryMax={}M", s.memory_mb),
+                        "MemorySwapMax=0".into(),
+                    ] {
+                        a.extend(["-p".into(), p]);
+                    }
+                    for w in &writable {
+                        let key = if inside(w) {
+                            "BindPaths"
+                        } else {
+                            "ReadWritePaths"
+                        };
+                        a.extend(["-p".into(), format!("{key}={w}")]);
+                    }
                 }
                 if !job.network {
                     a.extend(["-p".into(), "PrivateNetwork=yes".into()]);
@@ -392,14 +507,36 @@ impl HostJail {
         self.run_inner(job, cancel, Some(&sink))
     }
 
+    /// Runs a service's `run` and waits for it; `input` is its standard input (the secrets it
+    /// reads into its variables: never an argument, never a file).
+    pub fn run_service(
+        &self,
+        run: &ServiceRun,
+        input: Vec<u8>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<JailOutput, String> {
+        self.run_inner_with(&run.job, cancel, None, Some(run), Some(input))
+    }
+
     fn run_inner(
         &self,
         job: &HostJob,
         cancel: &dyn Fn() -> bool,
         sink: Option<&Sink>,
     ) -> Result<JailOutput, String> {
+        self.run_inner_with(job, cancel, sink, None, None)
+    }
+
+    fn run_inner_with(
+        &self,
+        job: &HostJob,
+        cancel: &dyn Fn() -> bool,
+        sink: Option<&Sink>,
+        svc: Option<&ServiceRun>,
+        input: Option<Vec<u8>>,
+    ) -> Result<JailOutput, String> {
         let unit = unit_name();
-        let (program, args) = self.build(job, &unit)?;
+        let (program, args) = self.build(job, &unit, svc)?;
         // Killing the `sudo` client does not stop the unit: systemd has to.
         let stop = match &self.tools {
             Tools::Systemd { sudo, ctl, .. } => vec![
@@ -421,6 +558,7 @@ impl HostJail {
             (!stop.is_empty()).then_some(&stop[..]),
             cancel,
             sink,
+            input,
         )
     }
 
