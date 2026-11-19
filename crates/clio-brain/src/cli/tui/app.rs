@@ -182,6 +182,22 @@ pub enum Cmd {
         file: String,
         before: usize,
     },
+    /// A review of the session `session` (`/review`, or the judge's when `auto`: the judge is
+    /// asked first). `what`: the description; `work`: the last turn that changed something.
+    Review {
+        session: String,
+        what: Option<String>,
+        work: Option<crate::cli::chat::TurnWork>,
+        auto: bool,
+    },
+    /// `/review stop`.
+    ReviewStop,
+    /// The automatic turn that gives a review's findings to the model (as data), and the
+    /// reviewer's mark.
+    ReviewTurn {
+        findings: String,
+        marked: Option<bool>,
+    },
     /// Debug was switched; the agent reads the switch at every call.
     Debug(bool),
     /// Clear the terminal and draw everything again.
@@ -258,6 +274,21 @@ pub enum Bg {
     Pending(Result<Waiting, String>),
     /// Lines to show in a box with that title.
     Modal(Result<Modal, String>),
+    /// What the turn about to settle changed (it changed something).
+    TurnWork(Box<crate::cli::chat::TurnWork>),
+    /// A review of `session` started (`auto`: the judge asked for it).
+    ReviewStarted {
+        session: String,
+        auto: bool,
+    },
+    /// The judge said no (or did not answer): no review.
+    ReviewSkipped {
+        session: String,
+    },
+    Reviewed {
+        session: String,
+        result: Result<Box<crate::cli::chat::Reviewed>, String>,
+    },
     /// The run ended; `refresh` is Pi's own totals if it could still give them.
     ChatSettled {
         result: Result<clio_brain::pi::rpc::RunSummary, String>,
@@ -411,6 +442,8 @@ pub struct App {
     pub answering: usize,
     /// When the last key (or paste) came, for the quiet rule of a set-aside question.
     pub last_key_ms: Option<u64>,
+    /// When the judge's reviews of the last hour started (`review.max_per_hour`).
+    pub reviews_at: Vec<u64>,
     /// A short line of feedback at the bottom.
     pub flash: Option<String>,
     /// An error or a longer message in a box, closed by any key.
@@ -450,6 +483,7 @@ impl App {
             prompts: std::collections::VecDeque::new(),
             answering: 0,
             last_key_ms: None,
+            reviews_at: Vec::new(),
             flash: None,
             notice: None,
             check_seq: 0,
@@ -611,7 +645,7 @@ impl App {
             || self.prompt.as_ref().is_some_and(|p| !p.ready());
         let waiting = waiting && !self.quiet();
         let chat = matches!(self.screen, Screen::Chat | Screen::Sessions)
-            && (self.chat.opening || self.chat.running);
+            && (self.chat.opening || self.chat.running || self.chat.review.running.is_some());
         let live = (self.screen == Screen::Live
             || matches!(self.screen, Screen::Context | Screen::Usage) && self.back == Screen::Live)
             && self.live.outcome.is_none();
@@ -661,7 +695,11 @@ impl App {
 }
 
 pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
-    let cmds = step(&mut app, input);
+    let mut cmds = step(&mut app, input);
+    // A review's findings wait for the chat to be idle: whatever made it so, they go now.
+    if app.pi {
+        cmds.extend(super::review::deliver(&mut app));
+    }
     (app, cmds)
 }
 
@@ -899,15 +937,12 @@ pub(super) fn next_ask(app: &mut App) {
     }
 }
 
-/// A turn ended: a context over the cap is compacted now, as `/compact` does, if nothing waits
-/// (a question, an approval, a message, an action still running). Once per turn that ends.
-fn over_cap(app: &mut App) -> Vec<Cmd> {
-    let cap = app.context_cap();
-    let c = &mut app.chat;
-    let Some(tokens) = c.meter.context.and_then(|x| x.tokens) else {
-        return vec![];
-    };
-    let waits = c.running
+/// Something keeps the chat from being idle: a turn, a compaction, an open, a message waiting,
+/// an approval running, a question on screen or waiting. What Clio starts between turns (the
+/// automatic compaction, a review, its findings) waits for none of them to be there.
+pub fn chat_waits(app: &App) -> bool {
+    let c = &app.chat;
+    c.running
         || c.compacting
         || c.opening
         || c.queued.is_some()
@@ -916,7 +951,18 @@ fn over_cap(app: &mut App) -> Vec<Cmd> {
         || app.confirm.is_some()
         || !app.asks.is_empty()
         || app.prompt.is_some()
-        || !app.prompts.is_empty();
+        || !app.prompts.is_empty()
+}
+
+/// A turn ended: a context over the cap is compacted now, as `/compact` does, if nothing waits
+/// (a question, an approval, a message, an action still running). Once per turn that ends.
+fn over_cap(app: &mut App) -> Vec<Cmd> {
+    let cap = app.context_cap();
+    let waits = chat_waits(app);
+    let c = &mut app.chat;
+    let Some(tokens) = c.meter.context.and_then(|x| x.tokens) else {
+        return vec![];
+    };
     if tokens <= cap {
         c.over_cap_said = false;
     }
@@ -1380,6 +1426,23 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
+        Bg::TurnWork(w) => {
+            app.chat.review.work = Some(*w);
+            app.chat.review.changed = true;
+            vec![]
+        }
+        Bg::ReviewStarted { session, auto } => {
+            super::review::started(app, &session, auto);
+            vec![]
+        }
+        Bg::ReviewSkipped { session } => {
+            super::review::skipped(app, &session);
+            vec![]
+        }
+        Bg::Reviewed { session, result } => {
+            super::review::ended(app, &session, result);
+            vec![]
+        }
         Bg::ChatSettled { result, refresh } => {
             app.chat.running = false;
             // A question lives inside its turn: Pi answered it by itself if the turn ended. A
@@ -1420,6 +1483,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             // The list beside the chat: a new session shows up, a title changes.
             if app.pi {
                 let mut cmds = vec![Cmd::LoadSessions];
+                // Before the compaction: it would make the chat look busy.
+                cmds.extend(super::review::after_turn(app));
                 if refreshed {
                     cmds.extend(over_cap(app));
                 }

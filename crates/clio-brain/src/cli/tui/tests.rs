@@ -107,6 +107,7 @@ pub(super) fn with_runs() -> App {
         window: 128_000,
         window_known: true,
         context_cap: 200_000,
+        review: crate::cli::home::ReviewCfg::default(),
     });
     a.home.doctor = Some((12, 3, 0));
     a.home.last_usage = super::tests_views::usage_with_context();

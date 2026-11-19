@@ -33,6 +33,7 @@ pub enum Run {
     Pending,
     Actions,
     Undo,
+    Review,
     Copy,
     Memory,
     Doctor,
@@ -151,6 +152,14 @@ pub const COMMANDS: &[Command] = &[
         "undo this session's file changes",
         true,
         Run::Undo,
+    ),
+    c(
+        "review",
+        &[],
+        "[what | stop]",
+        "have a second agent check the last change (or what you say)",
+        false,
+        Run::Review,
     ),
     c(
         "copy",
@@ -567,6 +576,7 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             vec![]
         }
         Run::Pending => vec![Cmd::LoadPending { session: id }],
+        Run::Review => super::review::command(app, args),
         Run::Actions => vec![Cmd::LoadActions { run: id }],
         Run::Undo => {
             let mut c = Confirm::new(Action::UndoSession, id, 0, app.chat.workspace.clone());
@@ -665,6 +675,9 @@ fn numbers(app: &App, context: bool) -> Modal {
             format!("time          {}", usage::duration(s.secs)),
             format!("context       {pct}"),
         ]
+        .into_iter()
+        .chain(super::review::usage_line(app))
+        .collect()
     };
     Modal::text(if context { "Context" } else { "Usage" }, lines)
 }

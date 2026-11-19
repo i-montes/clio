@@ -213,6 +213,8 @@ pub struct Chat {
     pub resume: bool,
     /// How many times an answer's markdown was parsed (a test counts it).
     pub(super) parsed: Cell<usize>,
+    /// The reviews of this session.
+    pub review: super::review::Review,
 }
 
 impl Default for Chat {
@@ -268,6 +270,7 @@ impl Chat {
             from_file: false,
             resume: false,
             parsed: Cell::new(0),
+            review: super::review::Review::default(),
         }
     }
 
@@ -374,7 +377,11 @@ impl Chat {
             Some("user") if !text.is_empty() => {
                 // What the person sees is what they typed: the brain's envelope stays out.
                 let typed = clio_brain::pi::envelope::strip(&text);
-                if !typed.is_empty() {
+                // A turn the review started has no words of the person: only its findings.
+                if typed.trim_start().starts_with(super::review::FINDINGS_MARK) {
+                    self.items
+                        .push(Item::Note(super::review::REVIEW_TURN.into()));
+                } else if !typed.is_empty() {
                     self.items.push(Item::User(typed.to_owned()));
                 }
             }
@@ -1324,6 +1331,16 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
             ),
             t.dim(),
         ));
+    }
+    if let Some(r) = super::review::status(app) {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled(
+            format!("{} ", t.spinner(app.now_ms)),
+            t.accent_line(),
+        ));
+        spans.push(Span::styled(r, t.dim()));
     }
     if c.jobs > 0 {
         if spans.len() > 1 {

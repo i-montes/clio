@@ -33,6 +33,7 @@ pub(super) fn pi(host: bool) -> App {
         window: 200_000,
         window_known: true,
         context_cap: 200_000,
+        review: crate::cli::home::ReviewCfg::default(),
     });
     a.home.doctor = Some((36, 1, 0));
     a.sessions.set(rows());
@@ -270,6 +271,30 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
         "2 background commands are still running; all stop when the session ends".into(),
     ));
     out.push(("background commands", a));
+    // The reviewer: running, a pass, the findings of a failure, and the turn that answers them.
+    let mut a = conversation(true);
+    a.chat.review.running = Some(a.now_ms - 48_000);
+    out.push(("reviewing in the background", a));
+    let mut a = conversation(true);
+    a.now_ms = 10 * 3_600_000;
+    let (a, _) = super::tests::feed(
+        a,
+        vec![super::tests_review::reviewed(
+            super::tests_review::PASSES,
+            None,
+        )],
+    );
+    out.push(("review passes", a));
+    let fails = || {
+        let mut a = conversation(true);
+        a.now_ms = 10 * 3_600_000;
+        a.chat.start_turn(a.now_ms);
+        let r = super::tests_review::reviewed(super::tests_review::FAILS, None);
+        super::tests::feed(a, vec![r]).0
+    };
+    out.push(("review fails, its findings", fails()));
+    let (a, _) = super::tests::feed(fails(), vec![super::tests_continuous::settled(Some(1000))]);
+    out.push(("the turn started by the review", a));
     for (name, typed, suspect) in [
         ("Clio asks for a secret, empty", 0, false),
         ("Clio asks for a secret, with characters", 23, true),

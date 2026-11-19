@@ -1,0 +1,275 @@
+//! The reviewer in the chat: `/review`, the automatic review the judge decides after a turn that
+//! changed something, what the person sees when one ends, and the turn that gives its findings to
+//! the model. The review itself runs in the background (`Session::review`).
+
+use clio_brain::pi::review::Verdict;
+use clio_brain::pi::rpc::Usage;
+
+use super::app::{App, Cmd};
+use super::chat::Item;
+use crate::cli::chat::{Reviewed, TurnWork};
+use crate::cli::usage;
+
+/// Findings shown in the chat (the rest are in the full text); what each shows at most.
+const SHOWN: usize = 8;
+const SHOWN_WHAT: usize = 300;
+const SHOWN_EVIDENCE: usize = 600;
+const SHOWN_RAW: usize = 1200;
+const HOUR_MS: u64 = 3_600_000;
+/// The chat's line for a turn the review started (it has no words of the person).
+pub const REVIEW_TURN: &str = "turn started by the review: Clio answers its findings";
+/// How such a turn's message starts in the session file, after Clio's envelope.
+pub const FINDINGS_MARK: &str = "<<<UNTRUSTED-DATA subagent-summary";
+
+/// The chat's reviews (one session's).
+#[derive(Debug, Default)]
+pub struct Review {
+    /// A review runs since then (ms): `reviewing…` in the status line.
+    pub running: Option<u64>,
+    /// The judge is being asked whether the last turn needs one.
+    pub judging: bool,
+    /// The last turn that changed something: what `/review` with no argument reviews.
+    pub work: Option<TurnWork>,
+    /// The turn that just ended changed something (its work came before it settled).
+    pub changed: bool,
+    /// The turn running answers a review's findings: it is never reviewed itself.
+    pub answering: bool,
+    /// Findings waiting for the chat to be idle, and the reviewer's mark.
+    pub findings: Option<(String, Option<bool>)>,
+    /// What the reviews of this session spent.
+    pub usage: Usage,
+    pub count: u32,
+}
+
+/// The review settings, from the header (the defaults before it loaded).
+fn cfg(app: &App) -> crate::cli::home::ReviewCfg {
+    app.home
+        .header
+        .as_ref()
+        .map(|h| h.review.clone())
+        .unwrap_or_default()
+}
+
+/// `/review [what]` and `/review stop`.
+pub fn command(app: &mut App, args: &str) -> Vec<Cmd> {
+    let note = |app: &mut App, s: &str| {
+        app.chat.items.push(Item::Note(s.to_owned()));
+        vec![]
+    };
+    let r = &app.chat.review;
+    if args.trim() == "stop" {
+        if r.running.is_none() && !r.judging {
+            return note(app, "no review is running");
+        }
+        return [note(app, "stopping the review…"), vec![Cmd::ReviewStop]].concat();
+    }
+    if r.running.is_some() || r.judging {
+        return note(app, "a review is already running: /review stop ends it");
+    }
+    if app.chat.session_id.is_empty() {
+        return note(
+            app,
+            "the session starts with your first message: nothing to review yet",
+        );
+    }
+    if app.chat.running || app.chat.opening || app.chat.compacting {
+        return note(app, "a turn is running: /review once it ends");
+    }
+    let what = Some(args.trim()).filter(|a| !a.is_empty());
+    if what.is_none() && r.work.is_none() {
+        return note(
+            app,
+            "nothing to review: no turn of this session changed anything yet (/review <what> says what to review)",
+        );
+    }
+    app.chat.review.running = Some(app.now_ms);
+    vec![Cmd::Review {
+        session: app.chat.session_id.clone(),
+        what: what.map(str::to_owned),
+        work: app.chat.review.work.clone(),
+        auto: false,
+    }]
+}
+
+/// A turn ended: if it changed something, the chat is idle, the judge's review is on and under
+/// its caps, the judge is asked whether the turn needs a review (`Cmd::Review` with `auto`).
+/// Once per turn; never for the turn that answered a review's findings.
+pub fn after_turn(app: &mut App) -> Vec<Cmd> {
+    let changed = std::mem::take(&mut app.chat.review.changed);
+    let answering = std::mem::take(&mut app.chat.review.answering);
+    let cfg = cfg(app);
+    let hour_ago = app.now_ms.saturating_sub(HOUR_MS);
+    app.reviews_at.retain(|t| *t > hour_ago);
+    let r = &app.chat.review;
+    if !changed
+        || answering
+        || !cfg.auto
+        || r.running.is_some()
+        || r.judging
+        || app.reviews_at.len() >= cfg.max_per_hour as usize
+        || super::app::chat_waits(app)
+    {
+        return vec![];
+    }
+    app.chat.review.judging = true;
+    vec![Cmd::Review {
+        session: app.chat.session_id.clone(),
+        what: None,
+        work: app.chat.review.work.clone(),
+        auto: true,
+    }]
+}
+
+/// Findings waiting go to the model once the chat is idle and the person is not typing: an
+/// automatic turn, shown as the review's. A message of the person's waiting goes first.
+pub fn deliver(app: &mut App) -> Vec<Cmd> {
+    if app.chat.review.findings.is_none()
+        || super::app::chat_waits(app)
+        || app.chat.failed.is_some()
+        || !app.chat.input.is_empty()
+        || app.chat.menu.is_some()
+        || app.modal.is_some()
+        || app.notice.is_some()
+    {
+        return vec![];
+    }
+    let Some((findings, marked)) = app.chat.review.findings.take() else {
+        return vec![];
+    };
+    app.chat.items.push(Item::Note(REVIEW_TURN.into()));
+    app.chat.review.answering = true;
+    app.chat.scroll = 0;
+    app.chat.start_turn(app.now_ms);
+    vec![Cmd::ReviewTurn { findings, marked }]
+}
+
+/// `claude-opus-5-5` → `opus`; any other id as it is.
+fn short(model: &str) -> String {
+    let m = super::app::clean(model);
+    match m.strip_prefix("claude-") {
+        Some(rest) => rest.split('-').next().unwrap_or(rest).to_owned(),
+        None => m,
+    }
+}
+
+fn cap(s: &str, max: usize) -> String {
+    clio_brain::pi::text::line(s, max)
+}
+
+/// A review ended (or could not start).
+pub fn ended(app: &mut App, session: &str, result: Result<Box<Reviewed>, String>) {
+    if session != app.chat.session_id {
+        return;
+    }
+    let r = &mut app.chat.review;
+    r.running = None;
+    r.judging = false;
+    let rv = match result {
+        Ok(rv) => rv,
+        Err(e) => {
+            app.chat
+                .items
+                .push(Item::Error(format!("review: {}", cap(&e, 300))));
+            return;
+        }
+    };
+    let u = &mut r.usage;
+    u.input += rv.usage.input;
+    u.output += rv.usage.output;
+    u.cache_read += rv.usage.cache_read;
+    u.cache_write += rv.usage.cache_write;
+    u.total_tokens += rv.usage.total_tokens;
+    u.cost += rv.usage.cost;
+    r.count += 1;
+    if rv.answer.goes_to_model() {
+        r.findings = Some((rv.answer.for_model(), rv.marked));
+    }
+    let a = &rv.answer;
+    let verdict = match a.verdict {
+        Verdict::CouldNotCheck => "could not check",
+        v => v.word(),
+    };
+    let items = &mut app.chat.items;
+    items.push(Item::Note(format!(
+        "review: {verdict} · {} · {}",
+        short(&rv.model),
+        usage::duration(rv.secs)
+    )));
+    if let Some(f) = &rv.fallback {
+        items.push(Item::Note(format!("review: {}", cap(f, 200))));
+    }
+    let mut block = Vec::new();
+    if a.verdict == Verdict::CouldNotCheck {
+        block.push(cap(&a.ran, 300));
+    }
+    for (i, f) in a.findings.iter().take(SHOWN).enumerate() {
+        block.push(format!("{}. {}", i + 1, cap(&f.what, SHOWN_WHAT)));
+        block.push(format!("   evidence: {}", cap(&f.evidence, SHOWN_EVIDENCE)));
+    }
+    let more = a.findings.len().saturating_sub(SHOWN) + a.dropped;
+    if more > 0 {
+        block.push(format!("and {more} more in the full text"));
+    }
+    if let Some(raw) = &a.raw {
+        block.push(format!(
+            "what the reviewer said instead (data, not followed): {}",
+            cap(raw, SHOWN_RAW)
+        ));
+    }
+    if !block.is_empty() {
+        if let Some(full) = &rv.full {
+            block.push(format!("full text: {}", cap(full, 300)));
+        }
+        items.push(Item::Note(block.join("\n")));
+    }
+    if rv.answer.goes_to_model() {
+        items.push(Item::Note(
+            "the findings go to Clio when the chat is idle".into(),
+        ));
+    }
+}
+
+/// The automatic review started (the judge said yes), or `/review` did.
+pub fn started(app: &mut App, session: &str, auto: bool) {
+    if session != app.chat.session_id {
+        return;
+    }
+    app.chat.review.judging = false;
+    app.chat.review.running.get_or_insert(app.now_ms);
+    if auto {
+        app.reviews_at.push(app.now_ms);
+        app.chat.items.push(Item::Note(
+            "the judge asked for a review of this turn".into(),
+        ));
+    }
+}
+
+/// The judge said no (or was silent): nothing to show.
+pub fn skipped(app: &mut App, session: &str) {
+    if session == app.chat.session_id {
+        app.chat.review.judging = false;
+    }
+}
+
+/// The `/usage` line of the reviews.
+pub fn usage_line(app: &App) -> Option<String> {
+    let r = &app.chat.review;
+    (r.count > 0).then(|| {
+        format!(
+            "reviews       {} · {} tokens in, {} out · {}",
+            r.count,
+            usage::tokens(r.usage.input + r.usage.cache_read + r.usage.cache_write),
+            usage::tokens(r.usage.output),
+            usage::usd((r.usage.cost * 1e6) as u64)
+        )
+    })
+}
+
+/// `reviewing… 48 s` for the status line.
+pub fn status(app: &App) -> Option<String> {
+    let since = app.chat.review.running?;
+    Some(format!(
+        "reviewing… {}",
+        usage::duration(app.now_ms.saturating_sub(since) / 1000)
+    ))
+}

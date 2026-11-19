@@ -21,6 +21,7 @@ pub mod markdown;
 pub mod memory;
 pub mod meter;
 pub mod new_run;
+pub mod review;
 pub mod sanitize;
 pub mod sessions;
 pub mod status;
@@ -40,6 +41,8 @@ mod tests_continuous;
 mod tests_gallery;
 #[cfg(test)]
 mod tests_memory;
+#[cfg(test)]
+mod tests_review;
 #[cfg(test)]
 mod tests_views;
 
@@ -193,6 +196,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         sources: Arc::new(super::chat::sources(dirs.clone(), mode)),
         chat: Arc::default(),
         chat_cancel: Mutex::new(Cancel::new()),
+        review_cancel: Mutex::new(Cancel::new()),
         dirs,
         tx,
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
@@ -414,6 +418,8 @@ struct Ctx {
     sources: Arc<Vec<Box<dyn SessionSource>>>,
     chat: Arc<Mutex<Slot>>,
     chat_cancel: Mutex<Cancel>,
+    /// The review running (`/review stop`, or the session it reviews goes away).
+    review_cancel: Mutex<Cancel>,
     dirs: Arc<Dirs>,
     tx: Sender<Input>,
     cancel: Mutex<Arc<AtomicBool>>,
@@ -481,10 +487,12 @@ fn has_key(dirs: &Dirs, c: &clio_brain::connector::Connector) -> bool {
 
 fn header(dirs: &Dirs) -> Header {
     let mut context_cap = crate::cli::home::CONTEXT_CAP;
+    let mut review = crate::cli::home::ReviewCfg::default();
     let (provider, model, thinking, config_error, limits) = match Config::load(dirs) {
         Ok(c) => {
             let l = RunLimits::of(&c);
             context_cap = c.session.context_cap_tokens;
+            review = c.review.clone();
             (c.model.provider, c.model.model, c.model.thinking, None, l)
         }
         Err(e) => (
@@ -524,6 +532,7 @@ fn header(dirs: &Dirs) -> Header {
         window,
         window_known,
         context_cap,
+        review,
     }
 }
 
@@ -862,6 +871,10 @@ impl Ctx {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.latest = latest;
+        // A review runs for the session that goes: it stops with it.
+        if let Ok(c) = self.review_cancel.lock() {
+            c.cancel();
+        }
         g.session.take()
     }
 
@@ -1097,6 +1110,10 @@ impl Ctx {
                         let result = session
                             .run_prompt(&text, &cancel, &mut forward)
                             .map_err(|e| e.to_string());
+                        // What the turn changed, before it settles: the judge's review asks.
+                        if let Some(w) = session.last_work() {
+                            let _ = tx.send(Input::Bg(Bg::TurnWork(Box::new(w))));
+                        }
                         // Host mode: what the turn set aside is asked now, one question each;
                         // and the secrets it asked for (within the day's questions), one box each.
                         let (secrets, aside): (Vec<_>, Vec<_>) = session
@@ -1190,6 +1207,66 @@ impl Ctx {
                 if let Some(session) = self.current_chat() {
                     session.ui_respond(&id, value.as_deref());
                 }
+            }
+            Cmd::Review {
+                session: id,
+                what,
+                work,
+                auto,
+            } => {
+                let Some(s) = self.current_chat() else {
+                    self.send(Bg::Reviewed {
+                        session: id,
+                        result: Err("no session is open".into()),
+                    });
+                    return;
+                };
+                let cancel = Cancel::new();
+                if let Ok(mut c) = self.review_cancel.lock() {
+                    *c = cancel.clone();
+                }
+                let sid = id.clone();
+                self.spawn(
+                    move |_, tx| {
+                        // The judge's: asked first, and nothing at all when it says no.
+                        if auto && !work.as_ref().is_some_and(|w| s.needs_review(w)) {
+                            return None;
+                        }
+                        let _ = tx.send(Input::Bg(Bg::ReviewStarted {
+                            session: sid.clone(),
+                            auto,
+                        }));
+                        let req = crate::cli::chat::ReviewRequest::of_work(
+                            what.as_deref(),
+                            work.as_ref(),
+                        );
+                        Some(s.review(&req, &cancel))
+                    },
+                    move |r| match r {
+                        Ok(None) => Bg::ReviewSkipped { session: id },
+                        Ok(Some(r)) => Bg::Reviewed {
+                            session: id,
+                            result: r.map(Box::new),
+                        },
+                        Err(e) => Bg::Reviewed {
+                            session: id,
+                            result: Err(e),
+                        },
+                    },
+                );
+            }
+            Cmd::ReviewStop => {
+                if let Ok(c) = self.review_cancel.lock() {
+                    c.cancel();
+                }
+            }
+            Cmd::ReviewTurn { findings, marked } => {
+                if let Some(s) = self.current_chat() {
+                    s.queue_findings(&findings, marked);
+                }
+                self.exec(Cmd::ChatSend {
+                    text: String::new(),
+                });
             }
             Cmd::ChatAbort => {
                 if let Ok(c) = self.chat_cancel.lock() {

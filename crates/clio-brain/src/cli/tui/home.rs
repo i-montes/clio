@@ -38,6 +38,8 @@ pub struct Header {
     pub window_known: bool,
     /// `session.context_cap_tokens`.
     pub context_cap: u64,
+    /// `review.*`.
+    pub review: crate::cli::home::ReviewCfg,
 }
 
 #[derive(Default)]
