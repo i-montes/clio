@@ -110,6 +110,45 @@ fn a_registered_skill_is_listed_and_reads_unwrapped_without_marking() {
     assert_eq!(std::fs::read_to_string(&skill).unwrap(), MD);
 }
 
+// S-68: the provider names the calls: a result whose id an earlier skill read had is outside data
+// again (and so is that earlier one, from then on); only `read` and `ls` can be skill reads.
+#[test]
+fn a_call_id_used_again_is_not_a_skill_read() {
+    let Some(node) = pi_available() else {
+        return;
+    };
+    let w = world();
+    let root = skills_of(&w);
+    let skill = root.join("live/demo/SKILL.md");
+    w.put("notes.txt", "a note\n");
+    let model = FakeModel::scripted(vec![
+        call("read", json!({"path": p(&skill), "__id": "dup"})),
+        Turn::Text("read it".into()),
+        call("read", json!({"path": "notes.txt", "__id": "dup"})),
+    ]);
+    let o = Opts {
+        skills: Some(root.clone()),
+        ..Opts::default()
+    };
+    let mut s = stack(&node, &w, &model, false, &o);
+    s.pi.prompt("read the skill");
+    let first = last_tool_text(&model.requests()[1]).unwrap();
+    assert!(!first.contains("UNTRUSTED-DATA"), "{first}");
+    s.pi.prompt("and the notes");
+    let reqs = model.requests();
+    let note = last_tool_text(reqs.last().unwrap()).unwrap();
+    assert!(
+        note.contains("UNTRUSTED-DATA") && note.contains("a note"),
+        "{note}"
+    );
+    let all = reqs.last().unwrap()["messages"].to_string();
+    let at = all.find("Say hello, then the date.").unwrap();
+    assert!(
+        all[..at].contains("UNTRUSTED-DATA"),
+        "the earlier result of that id is wrapped now: {all}"
+    );
+}
+
 // S-68: the guard's write tools refuse the skills folder, and Pi's `skill_write` stores only a
 // draft (with no judge it stores nothing): the folder is unchanged.
 #[test]

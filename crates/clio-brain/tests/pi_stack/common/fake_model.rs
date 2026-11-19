@@ -180,10 +180,15 @@ fn serve(mut conn: TcpStream, handler: &Mutex<Handler>, reqs: &Mutex<Vec<Value>>
                 .map(|(i, (name, args))| {
                     // The guard requires `reason` on every call; a test may leave it out.
                     let mut args = args.clone();
+                    // A test may name the call (`__id`), as a provider does.
+                    let mut id = format!("call_{}_{i}", lock(reqs).len());
                     if let Some(o) = args.as_object_mut() {
                         o.entry("reason").or_insert(json!("test"));
+                        if let Some(Value::String(named)) = o.remove("__id") {
+                            id = named;
+                        }
                     }
-                    json!({"index":i,"id":format!("call_{}_{i}", lock(reqs).len()),"type":"function",
+                    json!({"index":i,"id":id,"type":"function",
                            "function":{"name":name,"arguments":args.to_string()}})
                 })
                 .collect();

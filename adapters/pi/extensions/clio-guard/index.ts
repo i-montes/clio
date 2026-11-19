@@ -55,6 +55,8 @@ const JUDGE = "clio-guard.judge";
 // The calls that read a registered, enabled skill of Clio's (S-68): the host said so (`data.skill`).
 // Their result is Clio's own text, not outside data: neither wrapped nor marked.
 const SKILL_READ = "clio-guard.skill-read";
+// The only tools whose result can be a skill's file: the exemption never applies to another.
+const SKILL_READ_TOOLS = new Set(["read", "ls"]);
 /** The exact list of tools this extension registers and the only ones allowed to run. */
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write", "skill_write", "skill_report"] as const;
 // Host mode only: the commands `bash` starts in the background (`background: true`).
@@ -171,12 +173,18 @@ export default function clioGuard(pi: ExtensionAPI) {
 	const skillReads = new Set<string>();
 	/** The host served `res` from a registered skill: call `id` is Clio's own text (kept in the session). */
 	const skillRead = (id: string, res: HostResponse) => {
-		if (res.data?.skill === true && !skillReads.has(id)) {
+		if (res.data?.skill === true && id !== "" && !skillReads.has(id)) {
 			skillReads.add(id);
 			pi.appendEntry(SKILL_READ, { id, at: Date.now() });
 		}
 		return res;
 	};
+	/** The provider names the calls: an id used again is no longer a skill read (kept in the session). */
+	const forgetSkillRead = (id: string) => {
+		if (skillReads.delete(id)) pi.appendEntry(SKILL_READ, { id, revoked: true, at: Date.now() });
+	};
+	/** A result is Clio's own skill text only for a reading tool whose call the host said so of. */
+	const isSkillRead = (tool: string, id: string) => SKILL_READ_TOOLS.has(tool) && id !== "" && skillReads.has(id);
 
 	/** The same refusal the host applies, as an early answer: outside the folder, or a write into a protected one. */
 	function badPath(p: unknown, write: boolean): string | undefined {
@@ -788,8 +796,10 @@ export default function clioGuard(pi: ExtensionAPI) {
 			.some((e) => e.type === "custom" && e.customType === TAINT && (e.data as { tainted?: boolean } | undefined)?.tainted === true);
 		skillReads.clear();
 		for (const e of ctx.sessionManager.getEntries()) {
-			const id = e.type === "custom" && e.customType === SKILL_READ ? (e.data as { id?: unknown } | undefined)?.id : undefined;
-			if (typeof id === "string") skillReads.add(id);
+			const d = e.type === "custom" && e.customType === SKILL_READ ? (e.data as { id?: unknown; revoked?: unknown } | undefined) : undefined;
+			if (typeof d?.id !== "string" || d.id === "") continue;
+			if (d.revoked === true) skillReads.delete(d.id);
+			else skillReads.add(d.id);
 		}
 		pi.setActiveTools([...ACTIVE]);
 		// What the launcher checks at start: which tools are active and where each one comes from.
@@ -807,6 +817,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
+		// A new call that reuses an id: whatever it returns is not a skill read unless the host says so again.
+		forgetSkillRead(event.toolCallId);
 		try {
 			if (!ALLOWED.has(event.toolName)) return report(event.toolName, `${event.toolName} is not a Clio tool`);
 			const input = event.input as Record<string, unknown> | null;
@@ -831,7 +843,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		// `ask_person` answers with the person's own words and `request_secret` with the host's own
 		// line: cleaned, never wrapped as outside data.
 		// A registered skill's file is Clio's own text too (S-68).
-		const own = OWN_TOOLS.has(event.toolName) || skillReads.has(event.toolCallId);
+		const own = OWN_TOOLS.has(event.toolName) || isSkillRead(event.toolName, event.toolCallId);
 		const source = MEMORY_TOOLS.has(event.toolName) || own ? undefined : event.toolName === "bash" || event.toolName === "job_output" ? "tool-result" : "file";
 		const strings: { holder: Record<string, unknown>; key: string }[] = [];
 		const collect = (v: unknown) => {
@@ -887,17 +899,22 @@ export default function clioGuard(pi: ExtensionAPI) {
 
 	// Whatever reaches the model from a tool is marked as external data, never as the person's
 	// words (the host already wraps it; this is the guarantee that nothing slips through).
-	pi.on("context", (event) => ({
-		messages: event.messages.map((m) => {
-			// The person's answer to `ask_person` is theirs, not outside data (it was cleaned in `tool_result`).
-			if (m.role === "toolResult" && m.toolName === "ask_person") return m;
-			// A registered skill's file, as the host served it (S-68): Clio's own instructions.
-			if (m.role === "toolResult" && skillReads.has(m.toolCallId)) return m;
-			if (m.role === "toolResult") return { ...m, content: wrapBlocks(m.content, "tool-result") };
-			if ((m.role === "compactionSummary" || m.role === "branchSummary") && !isWrapped(m.summary)) {
-				return { ...m, summary: wrapUntrusted("summary", m.summary) };
-			}
-			return m;
-		}),
-	}));
+	pi.on("context", (event) => {
+		// An id two results share is no skill read for either: one of them may be outside data.
+		const seen = new Map<string, number>();
+		for (const m of event.messages) if (m.role === "toolResult") seen.set(m.toolCallId, (seen.get(m.toolCallId) ?? 0) + 1);
+		return {
+			messages: event.messages.map((m) => {
+				// The person's answer to `ask_person` is theirs, not outside data (it was cleaned in `tool_result`).
+				if (m.role === "toolResult" && m.toolName === "ask_person") return m;
+				// A registered skill's file, as the host served it (S-68): Clio's own instructions.
+				if (m.role === "toolResult" && seen.get(m.toolCallId) === 1 && isSkillRead(m.toolName, m.toolCallId)) return m;
+				if (m.role === "toolResult") return { ...m, content: wrapBlocks(m.content, "tool-result") };
+				if ((m.role === "compactionSummary" || m.role === "branchSummary") && !isWrapped(m.summary)) {
+					return { ...m, summary: wrapUntrusted("summary", m.summary) };
+				}
+				return m;
+			}),
+		};
+	});
 }
