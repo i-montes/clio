@@ -594,6 +594,7 @@ fn service(d: &Path, command: &str) -> ServiceRun {
         writable: vec![c(state), c(d.join("out"))],
         cpu_percent: 50,
         memory_mb: 256,
+        nice: true,
         env: vec![(
             "CLIO_STATE_DIR".into(),
             c(d.join("data/services/state/svc")).display().to_string(),
@@ -651,6 +652,11 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
             a[i + 5].ends_with("/nice") && a[i + 6] == "-n" && a[i + 7] == "19",
             "{a:?}"
         );
+        // What the person waits on (an MCP server's npm and calls) keeps its priority.
+        let mut waited = s.clone();
+        waited.nice = false;
+        let (_, w) = h.service_args(&waited, false).unwrap();
+        assert!(!w.iter().any(|x| x.ends_with("/nice")), "{w:?}");
         // `bash -c`: no login files.
         assert!(a.ends_with(&["-c".into(), "true".into()]), "{a:?}");
         assert!(after(&a, "--setenv").contains(&"CLIO_STATE_DIR"));

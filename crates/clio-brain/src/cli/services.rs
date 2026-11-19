@@ -764,6 +764,8 @@ impl Runner<'_> {
             cpu_percent: s.cpu_percent,
             memory_mb: s.memory_mb,
             env,
+            // A service runs with nobody waiting; an MCP server's npm, probe and calls are waited on.
+            nice: s.tool != "mcp",
         };
         Ok(Prepared::Ready {
             job,

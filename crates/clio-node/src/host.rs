@@ -81,7 +81,7 @@ pub struct HostJob {
 /// and `RuntimeMaxSec`; with `Bwrap`, inside a transient user scope when one starts
 /// (`with_scope`: `MemoryMax`, `MemorySwapMax=0`, `CPUQuota`, `TasksMax`, cgroup limits for the
 /// whole run), else `prlimit --as`, `--cpu` and `--nproc` on each process (per process, not for
-/// the whole run); always `nice -n 19`.
+/// the whole run); `nice -n 19` when `nice`.
 #[derive(Debug, Clone)]
 pub struct ServiceRun {
     pub job: HostJob,
@@ -91,6 +91,9 @@ pub struct ServiceRun {
     pub memory_mb: u64,
     /// Variables besides the launcher's own. Never a secret: they are in the arguments.
     pub env: Vec<(String, String)>,
+    /// The lowest priority (`nice -n 19`): what runs with nobody waiting for it. Off for what the
+    /// person waits on (an MCP server's install and its calls), which a busy machine would starve.
+    pub nice: bool,
 }
 
 fn unit_name() -> String {
@@ -403,7 +406,7 @@ impl HostJail {
             job.command.clone(),
         ];
         // Bwrap has no cgroup of its own: in a scope the cgroup holds the limits; without one each
-        // process gets them. Always the lowest priority.
+        // process gets them. The lowest priority when `nice`.
         if let (Some(s), Tools::Bwrap(_)) = (svc, &self.tools) {
             let need = |n: &str| {
                 find_in_trusted(n).ok_or_else(|| {
@@ -422,11 +425,13 @@ impl HostJail {
                     "--".into(),
                 ]);
             }
-            pre.extend([
-                need("nice")?.to_string_lossy().into_owned(),
-                "-n".into(),
-                "19".into(),
-            ]);
+            if s.nice {
+                pre.extend([
+                    need("nice")?.to_string_lossy().into_owned(),
+                    "-n".into(),
+                    "19".into(),
+                ]);
+            }
             pre.append(&mut shell);
             shell = pre;
         }
