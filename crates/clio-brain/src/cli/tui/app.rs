@@ -311,13 +311,15 @@ pub enum Bg {
         session: String,
         waiting: usize,
     },
-    /// The permission window as read now: when it ends, the hours a yes is worth, and whether
-    /// the session is `suspect` (its boxes open no window).
+    /// The permission window as read now: when it ends (wall clock, ms), the hours a yes is
+    /// worth, whether the session is `suspect` (its boxes open no window) and whether the judge
+    /// is on (off: no window opens).
     Grant {
         session: String,
         ends: Option<i64>,
         hours: u64,
         suspect: bool,
+        judge: bool,
     },
     /// What the permission window approved: a quiet note (or why it could not).
     Granted(Result<String, String>),
@@ -1564,16 +1566,15 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             ends,
             hours,
             suspect,
+            judge,
         } => {
-            super::approvals::grant_state(app, &session, ends, hours, suspect);
+            super::approvals::grant_state(app, &session, ends, hours, (suspect, judge));
             vec![]
         }
-        // Not an answer of the person's: no turn of its own; it rides with the next message.
+        // Not an answer of the person's: no turn of its own; it rides with the next message. The
+        // count of what waits comes with the check (`Bg::Approvals`): an act approved inline was
+        // never counted.
         Bg::Granted(r) => {
-            if r.is_ok() {
-                let a = &mut app.chat.approvals;
-                a.waiting = a.waiting.saturating_sub(1);
-            }
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),

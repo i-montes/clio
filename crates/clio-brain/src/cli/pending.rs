@@ -70,19 +70,56 @@ pub fn suspect_run(dirs: &Dirs, run: &str) -> bool {
             .is_ok_and(|t| t.contains("\"suspect\""))
 }
 
-/// The person said yes to `ids` in an approval box or with `clio approve`: a permission window of
-/// `approvals.grant_hours` opens (none when it is 0, when one is open already, or when the
-/// session the yes belongs to is `suspect`: a yes there approves only what it lists). The only
-/// two callers are the chat's answer to a box (`Cmd::ChatAnswer`) and `approve_cmd`: nothing the
-/// model, a tool, a review, a notice or a summary turn reaches opens a window.
+/// Whether the judge is on (`jev.enabled`): no permission window opens, or acts, without it.
+pub fn judge_on(dirs: &Dirs) -> bool {
+    super::home::Config::load(dirs).is_ok_and(|c| c.jev.enabled)
+}
+
+/// What a yes says when the judge is off.
+pub const JUDGE_OFF_YES: &str = "the judge is off: this approves only what is listed";
+
+/// The permission window open now, if the judge is on: one found open with the judge off closes
+/// (the judge is what closes a window on an injection; without it there is none).
+pub fn window_now(dirs: &Dirs) -> Option<grant::Window> {
+    let st = state(dirs);
+    let w = grant::current(&st)?;
+    if judge_on(dirs) {
+        return Some(w);
+    }
+    if let Err(e) = grant::close(&st, grant::JUDGE_OFF) {
+        eprintln!("clio: the permission window could not be closed: {e}");
+    }
+    None
+}
+
+/// The person said yes to `ids` in an approval box or with `clio approve`, and the first of them
+/// was approved: a permission window of `approvals.grant_hours` opens (none when it is 0, when
+/// one is open already, when the judge is off, or when the session the yes belongs to is
+/// `suspect`: a yes there approves only what it lists). The only two callers are the chat's
+/// answer to a box (`Ctx::answer`) and `approve_cmd` at a terminal: nothing the model, a tool, a
+/// review, a notice, a summary turn or a piped `clio approve` reaches opens a window.
 pub fn person_said_yes(dirs: &Dirs, ids: &[String], suspect: bool) -> Option<grant::Window> {
-    if suspect {
+    if suspect || !judge_on(dirs) {
         return None;
     }
     grant::open(&state(dirs), grant_hours(dirs), ids)
         .inspect_err(|e| eprintln!("clio: the permission window did not open: {e}"))
         .ok()
         .flatten()
+}
+
+/// May the conversation of run `run` tell the summary of a window with `acts`: it took part, or
+/// none that did is open now (another `clio` holds its run folder's lock).
+pub fn may_tell(dirs: &Dirs, acts: &[grant::Act], run: &str) -> bool {
+    acts.iter().any(|a| a.run == run) || !acts.iter().any(|a| run_open(dirs, &a.run))
+}
+
+/// A conversation of run `run` is open in some `clio` (it holds `session.lock`).
+fn run_open(dirs: &Dirs, run: &str) -> bool {
+    valid_id(run)
+        && std::fs::File::open(dirs.runs.join(run).join("session.lock")).is_ok_and(|f| {
+            rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockShared).is_err()
+        })
 }
 
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
@@ -213,22 +250,28 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
         println!("{}", interrupted_line(p));
     }
     if !list.is_empty() {
-        println!(
-            "\nclio approve <id> runs it (and lets Clio act without asking for {} h) · clio reject <id> drops it",
-            grant_hours(dirs)
-        );
+        let window = match grant_hours(dirs) {
+            h if h > 0 && judge_on(dirs) => format!(
+                " (and, at a terminal, lets Clio approve by herself what ends with the act for {h} h)"
+            ),
+            _ => String::new(),
+        };
+        println!("\nclio approve <id> runs it{window} · clio reject <id> drops it");
     }
     Ok(())
 }
 
 /// The permission window in one line: open and how long is left, or that none is.
 pub fn grant_line(dirs: &Dirs) -> String {
-    match grant::current(&state(dirs)) {
+    match window_now(dirs) {
         Some(w) => format!(
-            "a permission window is open: {} left (until {}); Clio acts without asking, and `off` closes it",
+            "a permission window is open: {} left (until {}); Clio approves by herself what deletes, spends or sends, `ask` MCP calls and skills (control, secrets, your blocks, services and MCP servers always ask you), and `off` closes it",
             grant::left_text(w.ends_ms - now_ms()),
             pending::local(w.ends_ms, "%H:%M").unwrap_or_default()
         ),
+        None if !judge_on(dirs) => {
+            "no permission window: the judge is off (jev.enabled), so a yes approves only what it lists".into()
+        }
         None => match grant_hours(dirs) {
             0 => "no permission window: every item asks (approvals.grant_hours is 0)".into(),
             h => format!(
@@ -428,15 +471,18 @@ pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
 
 /// `clio approve ID`. A secret request asks for the value here, with no echo.
 /// `clio approve ID [--yes]`: a skill is printed whole, then registered only after the person says
-/// yes to what they read (`--yes` skips the question).
+/// yes to what they read (`--yes` skips the question). Only at a terminal (standard input one)
+/// does a yes open a permission window: a piped or scheduled `clio approve` approves only `ID`.
 pub fn approve_cmd(dirs: &Dirs, id: &str, yes: bool) -> Res<()> {
-    approve_cmd_with(dirs, id, yes, super::apply::confirm)
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal();
+    approve_cmd_with(dirs, id, (yes, tty), super::apply::confirm)
 }
 
 fn approve_cmd_with(
     dirs: &Dirs,
     id: &str,
-    yes: bool,
+    (yes, tty): (bool, bool),
     confirm: impl FnOnce(&str) -> bool,
 ) -> Res<()> {
     let p = pending::check(&state(dirs), id, now_ms())?;
@@ -475,10 +521,23 @@ fn approve_cmd_with(
         println!("nothing was registered: {id} still waits (clio reject {id} drops it)");
         return Ok(());
     }
-    // The person's yes: a permission window opens, as from a box.
-    let opened = person_said_yes(dirs, &[id.to_owned()], suspect_run(dirs, &p.run));
+    let suspect = suspect_run(dirs, &p.run);
     let p = approve(dirs, id)?;
     println!("approved {}: {}", p.id, sanitize::multiline(&outcome(&p)));
+    // The person's yes at a terminal, once it was approved: a permission window opens, as from a
+    // box.
+    let opened = tty
+        .then(|| person_said_yes(dirs, &[id.to_owned()], suspect))
+        .flatten();
+    if opened.is_none() && grant_hours(dirs) > 0 && grant::current(&state(dirs)).is_none() {
+        if !tty {
+            println!(
+                "not at a terminal: this approves only what is listed (no permission window opens)"
+            );
+        } else if !judge_on(dirs) {
+            println!("{JUDGE_OFF_YES}");
+        }
+    }
     if let Some(w) = opened {
         println!(
             "Clio acts without asking until {} ({} h); you get a summary when it ends. `clio grant off` closes it now.",
@@ -774,14 +833,14 @@ mod tests {
         );
         // `clio approve`: printed, then asked; a no registers nothing, a yes (or `--yes`) does.
         let mut asked = false;
-        approve_cmd_with(&d, &p.id, false, |q| {
+        approve_cmd_with(&d, &p.id, (false, true), |q| {
             asked = q.contains("exactly as shown");
             false
         })
         .unwrap();
         assert!(asked);
         assert!(!super::super::skills::live(&d).join("hi").exists());
-        approve_cmd_with(&d, &p.id, false, |_| true).unwrap();
+        approve_cmd_with(&d, &p.id, (false, true), |_| true).unwrap();
         let live = super::super::skills::live(&d).join("hi");
         assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
         assert_eq!(
@@ -1106,8 +1165,13 @@ mod tests {
     }
 
     fn with_hours(d: &Dirs, hours: u64) {
+        with_cfg(d, hours, true);
+    }
+
+    fn with_cfg(d: &Dirs, hours: u64, judge: bool) {
         let mut cfg = super::super::home::Config::default_with(vec!["pi".into()]);
         cfg.approvals.grant_hours = hours;
+        cfg.jev.enabled = judge;
         std::fs::create_dir_all(&d.config).unwrap();
         std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
     }
@@ -1121,6 +1185,15 @@ mod tests {
         let d = dirs_in(t.path());
         std::fs::create_dir_all(state(&d)).unwrap();
         assert_eq!(grant_hours(&d), 4, "no config: the default");
+        // No config: the judge is off, so no window.
+        assert!(person_said_yes(&d, &["a1".into()], false).is_none());
+        with_cfg(&d, 4, false);
+        assert!(person_said_yes(&d, &["a1".into()], false).is_none());
+        assert!(
+            grant_line(&d).contains("the judge is off"),
+            "{}",
+            grant_line(&d)
+        );
         with_hours(&d, 0);
         assert!(person_said_yes(&d, &["a1".into()], false).is_none());
         assert!(grant::current(&state(&d)).is_none());
@@ -1157,6 +1230,51 @@ mod tests {
         assert_eq!(grant_hours(&d), 4);
         grant_cmd(&d, true).unwrap();
         assert!(grant::current(&state(&d)).is_none());
+        // A window found open with the judge off closes at once.
+        with_hours(&d, 4);
+        person_said_yes(&d, &["d4".into()], false).unwrap();
+        with_cfg(&d, 4, false);
+        assert!(window_now(&d).is_none());
+        let closed = grant::read(&state(&d)).unwrap();
+        assert_eq!(closed.why.as_deref(), Some(grant::JUDGE_OFF));
+    }
+
+    // S-36: `clio approve` opens a window only at a terminal, with the judge on, and only once
+    // the approval ran: piped (or scheduled), with the judge off, or failed, it opens none.
+    #[test]
+    fn clio_approve_opens_a_window_only_at_a_terminal_once_it_ran() {
+        use clio_toolhost::skills::{SkillFile, compose, digest};
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let skill = |step: &str, good: bool| {
+            let md = compose("hi", "Says hello. Use when greeting.", step, "bash a.sh");
+            let files = vec![SkillFile {
+                path: "a.sh".into(),
+                content: "#!/bin/bash\necho hi\n".into(),
+            }];
+            let sha = if good {
+                digest(&md, &files)
+            } else {
+                "00".into()
+            };
+            let a = json!({"name": "hi", "description": "Says hello. Use when greeting.",
+                "skill_md": md, "files": files, "sha256": sha, "verdict": "could_not_check"});
+            pending::set_aside_skill(&state(&d), "r1", "s1", a, "its check could not be run here")
+                .unwrap()
+                .id
+        };
+        let st = state(&d);
+        with_cfg(&d, 4, false);
+        approve_cmd_with(&d, &skill("1. One.", true), (true, true), |_| true).unwrap();
+        assert!(grant::read(&st).is_none(), "the judge is off");
+        with_cfg(&d, 4, true);
+        approve_cmd_with(&d, &skill("1. Two.", true), (true, false), |_| true).unwrap();
+        assert!(grant::read(&st).is_none(), "not at a terminal");
+        assert!(approve_cmd_with(&d, &skill("1. Three.", false), (true, true), |_| true).is_err());
+        assert!(grant::read(&st).is_none(), "it did not run");
+        let id = skill("1. Four.", true);
+        approve_cmd_with(&d, &id, (true, true), |_| true).unwrap();
+        assert_eq!(grant::current(&st).unwrap().by, [id]);
     }
 
     // S-36: nothing but the person's yes opens a window: `grant::open` is called from one place

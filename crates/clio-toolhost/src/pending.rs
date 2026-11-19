@@ -683,9 +683,10 @@ impl ToolHost {
         req: &Request,
         class: Class,
         reason: Option<&str>,
+        cancel: &dyn Fn() -> bool,
     ) -> Response {
         let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
-        self.aside_at(at, req, req.args.clone(), class, reason)
+        self.aside_at(at, req, req.args.clone(), (class, reason), cancel)
     }
 
     /// In a review (it cannot ask the person) the action is refused outright, nothing is stored as
@@ -741,8 +742,8 @@ impl ToolHost {
         (state, run): (&Path, &str),
         req: &Request,
         args: Value,
-        class: Class,
-        reason: Option<&str>,
+        (class, reason): (Class, Option<&str>),
+        cancel: &dyn Fn() -> bool,
     ) -> Response {
         if self.review {
             return self.refuse_in_review(
@@ -786,7 +787,7 @@ impl ToolHost {
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
-                match self.granted(state, req, &p) {
+                match self.granted(state, req, &p, cancel) {
                     Ok(done) => return done,
                     Err(None) => (aside_text(&p), "host/aside"),
                     Err(Some(why)) => (
@@ -823,49 +824,44 @@ impl ToolHost {
     }
 
     /// A permission window is open (`grant`): what was just set aside (`p`, for call `req`) is
-    /// approved by it at once, through the same path as the person's yes, recorded in the
-    /// window's record before it runs, and its real result goes back as the call's own. Never a
-    /// secret, never in a `suspect` session, never in a review. `Err(None)`: no window, it waits;
-    /// `Err(Some(why))`: the window could not do it, and it waits.
+    /// approved by it at once when the window may answer it (`grant::may_answer`: never control,
+    /// a secret, a block change, a service or an MCP server), through the same path as the
+    /// person's yes, recorded in the window's record before it runs, and its real result goes
+    /// back as the call's own. Never in a `suspect` session, never in a review, never with the
+    /// judge off (an open window then closes). `Err(None)`: it waits; `Err(Some(why))`: the
+    /// window could not do it, and it waits.
     fn granted(
         &self,
         state: &Path,
         req: &Request,
         p: &Pending,
+        cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
-        if p.class == Class::Secret || self.review || self.is_suspect(&req.session) {
+        if !crate::grant::covers(p) || self.review || self.is_suspect(&req.session) {
             return Err(None);
         }
-        let port = self.memory.clone();
-        if p.class == Class::Memory && port.is_none() {
+        let w = crate::grant::current(state).ok_or(None)?;
+        if !self.memory.as_ref().is_some_and(|m| m.judge_on()) {
+            if let Err(e) = crate::grant::close(state, crate::grant::JUDGE_OFF) {
+                eprintln!("clio-toolhost: the permission window could not be closed: {e}");
+            }
+            return Err(None);
+        }
+        if !crate::grant::may_answer(&w, p) {
             return Err(None);
         }
         let w = crate::grant::begin(state, p, &p.what).ok_or(None)?;
         let now = now_ms();
         let left = crate::grant::left_text(w.ends_ms - now);
-        let (ok, content, data, external) = if p.class == Class::Memory {
-            let port = port.ok_or(None)?;
-            approve_block(state, &p.id, now, port.as_ref(), Some(&w.id)).map(|q| {
-                let text = match &q.state {
-                    State::Done { output_tail, .. } => output_tail.clone(),
-                    _ => String::new(),
-                };
-                (true, text, Value::Null, false)
-            })
-        } else {
-            self.approve_as(&p.id, now, Some(&w.id), Some(req))
-                .map(|(_, ran)| ran)
-        }
-        .map_err(|e| {
-            crate::grant::done(state, &w, &p.id, &format!("not done: {e}"));
-            Some(e)
-        })?;
-        let outcome = match data.get("exit_code").and_then(Value::as_i64) {
-            Some(c) => format!("done (exit {c})"),
-            None if ok => "done".to_owned(),
-            None => format!("failed: {content}"),
-        };
-        crate::grant::done(state, &w, &p.id, &outcome);
+        let (ok, content, data, external) = self
+            .approve_as(&p.id, now, Some(&w.id), Some((req, cancel)))
+            .map(|(_, ran)| ran)
+            .map_err(|e| {
+                crate::grant::done(state, &w, &p.id, crate::grant::NOT_RUN);
+                Some(e)
+            })?;
+        let code = data.get("exit_code").and_then(Value::as_i64);
+        crate::grant::done(state, &w, &p.id, &crate::grant::outcome(ok, code));
         if p.tool == "mcp_call" {
             return Ok(self.mcp_outside(req, ok, "grant/approved", &content, &p.what));
         }
@@ -908,14 +904,16 @@ impl ToolHost {
 
     /// The one path of every yes: the person's (`granted` is `None`), or a permission window's
     /// (`granted`: its id). `call`: the call it answers when the window approves it inline, while
-    /// that call holds the host, so the result is that call's own (judged and marked as any).
-    /// What ran, and its result (ok, text, data, outside text).
+    /// that call holds the host, so the result is that call's own (judged and marked as any), it
+    /// stops when that call is cancelled, and a command keeps its own time limit and runs in the
+    /// background when it asked to, as an unwindowed run would. What ran, and its result (ok,
+    /// text, data, outside text).
     pub(crate) fn approve_as(
         &self,
         id: &str,
         now_ms: i64,
         granted: Option<&str>,
-        call: Option<&Request>,
+        call: Option<(&Request, &dyn Fn() -> bool)>,
     ) -> Result<(Pending, Ran), String> {
         let h = self
             .host
@@ -988,26 +986,41 @@ impl ToolHost {
         // Claimed before it runs: a second approval, even from another process, finds it.
         claim(state, id).map_err(|_| format!("{id} already ran"))?;
         // Under a window, as the call it answers: its result is judged when the guard filters it.
-        let (rid, call_id) = call.map_or_else(
-            || (id.to_owned(), "approve".to_owned()),
-            |r| (r.id.clone(), r.call_id.clone()),
+        let (rid, call_id, args) = call.map_or_else(
+            || (id.to_owned(), "approve".to_owned(), run_args(&p)),
+            |(r, _)| (r.id.clone(), r.call_id.clone(), p.args.clone()),
         );
         let req = Request {
             id: rid,
             tool: p.tool.clone(),
-            args: run_args(&p),
+            args,
             session: p.session.clone(),
             call_id,
             tainted: false,
         };
-        let ran = self.host_run(
-            h,
-            &req,
-            format!("approve:{id}"),
-            rule,
-            real.as_deref(),
-            &|| false,
-        );
+        let background = req.args.get("background").and_then(Value::as_bool) == Some(true);
+        let ran = match call {
+            Some(_) if p.tool == "exec" && background => {
+                let r = self.job_start(
+                    h,
+                    &req,
+                    DecisionOut {
+                        outcome: "allow".into(),
+                        rule: rule.into(),
+                        reason: "approved under the person's permission window".into(),
+                    },
+                );
+                Ok((r.ok, r.content, r.data, r.external))
+            }
+            _ => self.host_run(
+                h,
+                &req,
+                format!("approve:{id}"),
+                rule,
+                real.as_deref(),
+                call.map_or(&|| false, |(_, c)| c),
+            ),
+        };
         // It did not run (its line before could not be logged): it still waits.
         let ran = ran.inspect_err(|_| {
             let _ = fs::remove_file(dir(state).join(format!("{id}.ran")));
@@ -1266,7 +1279,7 @@ mod tests {
             call_id: "c".into(),
             tainted: false,
         };
-        assert!(matches!(host.granted(&st, &req, &p), Err(None)));
+        assert!(matches!(host.granted(&st, &req, &p, &|| false), Err(None)));
         assert!(
             crate::grant::record(&st, &crate::grant::read(&st).unwrap().id)
                 .unwrap()

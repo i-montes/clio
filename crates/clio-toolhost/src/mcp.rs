@@ -39,6 +39,8 @@ use crate::{DecisionOut, Request, Response, SUSPECT_REASON, ToolHost, lock, sani
 
 /// A server's main file in its versions folder: what the person approved.
 pub const MANIFEST: &str = "mcp.json";
+/// Why a call of an `ask` tool waits: the one MCP call a permission window may answer.
+pub const ASK_TOOL: &str = "this tool of the server may change something";
 /// The only host npm reaches, for the facts and the install.
 pub const REGISTRY: &str = "registry.npmjs.org";
 pub const DEFAULT_LIMITS: Limits = Limits {
@@ -1359,7 +1361,7 @@ impl ToolHost {
             true,
             "mcp/propose",
             format!(
-                "set aside {}: the MCP server «{}» ({}@{}) waits for the person's approval. Nothing was downloaded. If they approve (or their open permission window does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end.",
+                "set aside {}: the MCP server «{}» ({}@{}) waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end.",
                 p.id, m.name, m.package, m.version
             ),
         )
@@ -1465,7 +1467,7 @@ impl ToolHost {
         } else if t.flagged {
             Some("the tool changed since the person confirmed it")
         } else if t.mode == Mode::Ask {
-            Some("this tool of the server may change something")
+            Some(ASK_TOOL)
         } else {
             None
         };
@@ -1478,7 +1480,8 @@ impl ToolHost {
                 "version": state.version,
                 "call": call_text(server, tool, &arguments),
             });
-            return self.aside(h, &r, Class::Send, Some(why));
+            // An MCP call has its own time limit and nothing to cancel it by.
+            return self.aside(h, &r, Class::Send, Some(why), &|| false);
         }
         let (ok, raw) = self.mcp_run(server, tool, &arguments);
         if let Err(e) = h.log(

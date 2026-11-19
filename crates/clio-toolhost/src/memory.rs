@@ -378,6 +378,11 @@ pub trait MemoryPort: Send + Sync {
     fn judge_text(&self, _text: &str, _source: &str) -> TextVerdict {
         TextVerdict::NoJudge
     }
+    /// The person turned a judge on for this service (Jev): without one no permission window
+    /// acts (`grant`), and an open one closes.
+    fn judge_on(&self) -> bool {
+        false
+    }
     fn search(&self, query: &str, limit: usize) -> Result<Found, String>;
     /// The same error for "does not exist", "is not active" and "is another scope's": which one
     /// it is must not leak.
@@ -1367,7 +1372,7 @@ impl ToolHost {
         if let Some(t) = text {
             args["text"] = t.into();
         }
-        self.aside_at(at, req, args, crate::ask::Class::Memory, None)
+        self.aside_at(at, req, args, (crate::ask::Class::Memory, None), &|| false)
     }
 
     fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {

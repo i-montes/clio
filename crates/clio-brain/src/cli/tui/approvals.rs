@@ -1,9 +1,11 @@
-//! The approvals in the chat. When a turn ends with items waiting and no permission window is
-//! open, ONE box lists every waiting item of this conversation, each as its own box shows it, and
-//! says what a yes does: it approves all of it and lets Clio act without asking for
-//! `approvals.grant_hours`, with a summary when they end. Under an open window what waits is
-//! approved by it (`Session::grant`), never a secret and never in a `suspect` session. When the
-//! window ends Clio starts one turn to sum up what she did under it.
+//! The approvals in the chat. When a turn ends with items waiting, ONE box lists every waiting
+//! item of this conversation the window cannot answer, each as its own box shows it, and says
+//! what a yes does: it approves all of it and lets Clio approve by herself, for
+//! `approvals.grant_hours`, what ends with the act (delete, spend, send, an `ask` MCP call, a
+//! skill), with a summary when they end. Under an open window what was set aside after it opened
+//! and it may answer is approved by it (`Session::grant`); control, a secret, a block change, a
+//! service or an MCP server always asks, as in a `suspect` session or with the judge off. When
+//! the window ends Clio starts one turn to sum up what she did under it.
 
 use super::app::{Action, App, Cmd, Confirm, Screen, chat_waits};
 use super::ask::{BlockAsk, Part};
@@ -23,12 +25,15 @@ pub struct Approvals {
     pub answered: bool,
     /// When the last check was asked for: an idle chat checks again after `RECHECK_MS`.
     pub last_ms: Option<u64>,
-    /// When the open permission window ends (wall clock, ms), as of the last check.
+    /// When the open permission window ends, on this chat's clock (`App::now_ms`), as of the
+    /// last check.
     pub grant_ends: Option<i64>,
     /// `approvals.grant_hours`, as of the last check (`None`: not read yet; 4 by default).
     pub hours: Option<u64>,
     /// The judge flagged this session: its boxes open no window.
     pub suspect: bool,
+    /// The judge is off (`jev.enabled`): no window opens.
+    pub judge_off: bool,
     /// A permission window ended and its record waits in the session: one turn sums it up.
     pub summary: bool,
 }
@@ -104,24 +109,39 @@ pub fn checked(app: &mut App, session: &str, waiting: usize) {
     }
 }
 
-/// The permission window as the runtime read it: when it ends, the hours a yes is worth, and
-/// whether this session is `suspect`.
-pub fn grant_state(app: &mut App, session: &str, ends: Option<i64>, hours: u64, suspect: bool) {
+/// The permission window as the runtime read it: when it ends (wall clock, ms: put on this
+/// chat's clock here, which counts from its start), the hours a yes is worth, whether this
+/// session is `suspect` and whether the judge is on.
+pub fn grant_state(
+    app: &mut App,
+    session: &str,
+    ends: Option<i64>,
+    hours: u64,
+    (suspect, judge): (bool, bool),
+) {
     if session != app.chat.session_id {
         return;
     }
+    let now = i64::try_from(app.now_ms).unwrap_or(i64::MAX);
     let a = &mut app.chat.approvals;
-    a.grant_ends = ends;
+    a.grant_ends = ends.map(|e| now.saturating_add(e.saturating_sub(crate::cli::now_ms())));
     a.hours = Some(hours);
     a.suspect = suspect;
+    a.judge_off = !judge;
 }
 
 /// What a yes in the box does, in plain words: its first row, and the key hint's words (`base`:
 /// what `y` does to the items, ` yes to all` or a lone item's own words).
-pub fn yes_says(hours: u64, suspect: bool, base: &str) -> (String, String) {
+pub fn yes_says(hours: u64, (suspect, judge_off): (bool, bool), base: &str) -> (String, String) {
     if suspect {
         return (
             "Yes approves only what is listed: this session read content that tried to give orders, so no permission window opens.".into(),
+            format!("{base} (no window opens)"),
+        );
+    }
+    if judge_off && hours > 0 {
+        return (
+            "The judge is off: this approves only what is listed.".into(),
             format!("{base} (no window opens)"),
         );
     }
@@ -132,11 +152,24 @@ pub fn yes_says(hours: u64, suspect: bool, base: &str) -> (String, String) {
         ),
         h => (
             format!(
-                "Yes approves all of this and lets Clio act without asking for the next {h} hour{}; you get a summary when they end.",
+                "Yes approves all of this and, for the next {h} hour{}, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end.",
                 if h == 1 { "" } else { "s" }
             ),
             format!("{base}, then {h} h without asking"),
         ),
+    }
+}
+
+/// An item labelled `class` («class» or «class · reason», `pending::label`) is one a window
+/// never answers (`grant::covers`, read back from the label).
+fn always_asks(class: &str) -> bool {
+    let inner = class.trim_start_matches('«').trim_end_matches('»');
+    let (name, reason) = inner
+        .split_once(" · ")
+        .map_or((inner, None), |(n, r)| (n, Some(r)));
+    match name {
+        "send" => reason.is_some_and(|r| r != clio_toolhost::mcp::ASK_TOOL),
+        n => ["control", "secret", "memory", "service", "mcp"].contains(&n),
     }
 }
 
@@ -154,7 +187,8 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         [_] => " yes, run it".to_owned(),
         _ => " yes to all".to_owned(),
     };
-    let (head, yes) = yes_says(app.chat.approvals.hours.unwrap_or(4), suspect, &base);
+    let hours = app.chat.approvals.hours.unwrap_or(4);
+    let (head, yes) = yes_says(hours, (suspect, app.chat.approvals.judge_off), &base);
     let mut rows = vec![(Part::Head, head)];
     let mut ids: Vec<String> = Vec::new();
     for (i, (id, what, block)) in items.into_iter().enumerate() {
@@ -167,7 +201,12 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         } else {
             format!("{id} · ")
         };
-        rows.push((Part::Warn, format!("{at}{class}")));
+        let note = if hours > 0 && always_asks(&class) {
+            " · this one always asks you"
+        } else {
+            ""
+        };
+        rows.push((Part::Warn, format!("{at}{class}{note}")));
         match block {
             Some(b) => rows.extend(b.parts().into_iter().filter(|(p, t)| {
                 // The suspect line is said once, at the end.
@@ -423,10 +462,11 @@ mod tests {
         assert!(cmds.contains(&Cmd::CheckApprovals {
             session: "sid".into()
         }));
+        // The runtime sends the end on the wall clock; the chat's clock counts from its start.
         let mut a = idle();
         let t0 = a.now_ms;
         a.chat.approvals.last_ms = Some(t0);
-        a.chat.approvals.grant_ends = i64::try_from(t0 + 60_000).ok();
+        let (a, _) = feed(a, vec![grant_ends(crate::cli::now_ms() + 60_000)]);
         let (a, cmds) = feed(a, vec![Input::Tick(t0 + 30_000)]);
         assert!(!cmds.iter().any(|c| matches!(c, Cmd::CheckApprovals { .. })));
         let (a, cmds) = feed(a, vec![Input::Tick(t0 + 61_000)]);
@@ -543,10 +583,10 @@ mod tests {
         let (a, seen, t) = read_to_the_end(a, 80, 16, t0 + 2_000);
         let seen = seen.split_whitespace().collect::<Vec<_>>().join(" ");
         for s in [
-            "Yes approves all of this and lets Clio act without asking for the next 4 hours; you get a summary when they end.",
+            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end.",
             "1 of 3 · a1b2 · «delete»",
             "rm -r /srv/old",
-            "2 of 3 · e7f8 · «mcp»",
+            "2 of 3 · e7f8 · «mcp» · this one always asks you",
             "3 of 3 · c1d2e3f4 · «send»",
             "the last row",
         ] {
@@ -598,45 +638,74 @@ mod tests {
         }
     }
 
-    // What a yes does, in the box's first row and the keys: a window of `grant_hours`, none at
-    // 0 (each item asked), none in a session the judge flagged.
+    // What a yes does, in the box's first row and the keys: a window of `grant_hours` over what
+    // ends with the act, none at 0 (each item asked), none in a session the judge flagged, none
+    // with the judge off. An item a window never answers says so in its row.
     #[test]
     fn what_a_yes_does_is_said_in_the_box() {
-        let (h, k) = super::yes_says(4, false, " yes to all");
+        let (h, k) = super::yes_says(4, (false, false), " yes to all");
         assert_eq!(
             h,
-            "Yes approves all of this and lets Clio act without asking for the next 4 hours; you get a summary when they end."
+            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end."
         );
         assert_eq!(k, " yes to all, then 4 h without asking");
-        let (h, k) = super::yes_says(0, false, " yes to all");
+        let (h, k) = super::yes_says(0, (false, false), " yes to all");
         assert!(h.contains("asks again for the next one"), "{h}");
         assert_eq!(k, " yes to all");
-        let (h, _) = super::yes_says(4, true, " yes to all");
+        let (h, _) = super::yes_says(4, (true, false), " yes to all");
         assert!(h.contains("no permission window opens"), "{h}");
+        let (h, k) = super::yes_says(4, (false, true), " yes to all");
+        assert_eq!(h, "The judge is off: this approves only what is listed.");
+        assert_eq!(k, " yes to all (no window opens)");
         let mut a = idle();
         a.chat.approvals.hours = Some(0);
         let (a, _) = feed(a, vec![deletes(&["a1"])]);
         let text = screen_text(&a, 100, 30);
         assert!(!text.contains("without asking"), "{text}");
+        // Control, a block change, a changed MCP tool: "always asks"; a delete, an ask call: not.
+        assert!(super::always_asks("«control»"));
+        assert!(super::always_asks("«memory»"));
+        assert!(super::always_asks(
+            "«send · the tool changed since the person confirmed it»"
+        ));
+        assert!(!super::always_asks("«delete»"));
+        assert!(!super::always_asks(&format!(
+            "«send · {}»",
+            clio_toolhost::mcp::ASK_TOOL
+        )));
+        let (a, _) = feed(
+            idle(),
+            vec![asks(vec![
+                ("a1", "«control» systemd-run --user x", None),
+                ("b2", "«delete» rm -r /srv/old", None),
+            ])],
+        );
+        let text = screen_text(&a, 120, 30);
+        assert!(
+            text.contains("«control» · this one always asks you"),
+            "{text}"
+        );
+        assert!(!text.contains("«delete» · this one"), "{text}");
     }
 
-    // The status line shows the open window and what waits.
+    /// The window as the runtime sends it: its end on the wall clock.
+    fn grant_ends(ends: i64) -> Input {
+        Input::Bg(Bg::Grant {
+            session: "sid".into(),
+            ends: Some(ends),
+            hours: 4,
+            suspect: false,
+            judge: true,
+        })
+    }
+
+    // The status line shows the open window and what waits: its end comes on the wall clock and
+    // is shown against it, whatever the chat's own clock (which counts from its start).
     #[test]
     fn the_status_line_shows_the_window() {
         let a = idle();
-        let ends = i64::try_from(a.now_ms + 3 * 3_600_000 + 12 * 60_000).unwrap();
-        let (a, _) = feed(
-            a,
-            vec![
-                Input::Bg(Bg::Grant {
-                    session: "sid".into(),
-                    ends: Some(ends),
-                    hours: 4,
-                    suspect: false,
-                }),
-                found(1),
-            ],
-        );
+        let ends = crate::cli::now_ms() + 3 * 3_600_000 + 12 * 60_000 + 30_000;
+        let (a, _) = feed(a, vec![grant_ends(ends), found(1)]);
         let text = screen_text(&a, 120, 20);
         assert!(
             text.contains("permission: 3 h 12 min left · 1 waiting for approval"),
@@ -658,7 +727,8 @@ mod tests {
             )))],
         );
         assert_eq!(approvals_turns(&cmds), 0);
-        assert_eq!(a.chat.approvals.waiting, 1);
+        // An act approved inline was never counted: the count comes with the next check.
+        assert_eq!(a.chat.approvals.waiting, 2);
         assert!(notes(&a)[0].starts_with("approved under your permission"));
         let (a, cmds) = feed(
             a,
@@ -784,6 +854,38 @@ mod tests {
         a.screen = Screen::Chat;
         let (_, cmds) = feed(a, vec![key(KeyCode::Down)]);
         assert_eq!(approvals_turns(&cmds), 1);
+    }
+
+    // An ended window's summary that arrives while the person types starts no turn, and their
+    // message goes alone (the session keeps the summary for Clio's own turn); once that turn
+    // ends the chat checks again, and the summary then gets its own turn.
+    #[test]
+    fn a_summary_never_rides_with_a_typed_message() {
+        let mut a = idle();
+        a.chat.set_input("and now?".into());
+        let summary = || {
+            Input::Bg(Bg::GrantSummary {
+                session: "sid".into(),
+            })
+        };
+        let (a, cmds) = feed(a, vec![summary()]);
+        assert_eq!(approvals_turns(&cmds), 0, "something is typed");
+        let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
+        assert!(cmds.contains(&Cmd::ChatSend {
+            text: "and now?".into()
+        }));
+        let (a, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 0);
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::CheckApprovals { .. })),
+            "{cmds:?}"
+        );
+        let (a, cmds) = feed(a, vec![summary()]);
+        assert_eq!(approvals_turns(&cmds), 1, "{cmds:?}");
+        assert_eq!(
+            notes(&a).last().map(String::as_str),
+            Some(super::GRANT_TURN)
+        );
     }
 
     /// A person's message as the session's file keeps it: the envelope, what they typed and,

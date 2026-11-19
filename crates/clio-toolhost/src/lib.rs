@@ -956,12 +956,12 @@ impl ToolHost {
                 _ => None,
             };
             if let Some(class) = class {
-                return self.aside(h, &req, class, None);
+                return self.aside(h, &req, class, None, cancel);
             }
             // A session that read text the judge flagged asks before it reaches out, whatever
             // the command: what it read may be what wants out.
             if reaches && self.is_suspect(&req.session) {
-                return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON));
+                return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON), cancel);
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
                 if self.review {

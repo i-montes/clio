@@ -16,8 +16,8 @@ use clio_toolhost::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-/// A judge that flags only texts holding `AI AGENT`.
-struct Judge;
+/// A judge that flags only texts holding `AI AGENT`; `Judge(false)` is a host with the judge off.
+struct Judge(bool);
 
 impl MemoryPort for Judge {
     fn propose(&self, _: &ProposalDraft, _: &str, _: &Judging) -> Result<Proposed, String> {
@@ -28,6 +28,9 @@ impl MemoryPort for Judge {
     }
     fn get(&self, _: i64) -> Result<MemoryItem, String> {
         Err("no".into())
+    }
+    fn judge_on(&self) -> bool {
+        self.0
     }
     fn judge_text(&self, text: &str, _: &str) -> TextVerdict {
         if text.contains("AI AGENT") {
@@ -60,10 +63,15 @@ fn env() -> Env {
 /// The tool host of one conversation (`run`), in host mode on the shared state, without
 /// commands (`exec` is not needed: a write over a backup is set aside as `delete`).
 fn host(e: &Env, run: &str) -> ToolHost {
+    host_with(e, run, true, JailMode::Off)
+}
+
+/// `host`, with the judge on or off and the jail given (`Auto`: commands in bwrap).
+fn host_with(e: &Env, run: &str, judge: bool, jail: JailMode) -> ToolHost {
     let (home, data) = (e.r.join("home"), e.r.join("clio/data"));
     let mut c = Config::new(&home, &e.r.join("scratch"), &data.join("runs").join(run));
-    c.jail = JailMode::Off;
-    c.memory = Some(Arc::new(Judge));
+    c.jail = jail;
+    c.memory = Some(Arc::new(Judge(judge)));
     c.host = Some(HostCfg {
         home,
         state: data.join("host"),
@@ -72,7 +80,7 @@ fn host(e: &Env, run: &str) -> ToolHost {
             .with_file(&json!({ "foreign": [e.r.join("inbox")] }).to_string())
             .unwrap(),
         run: run.into(),
-        launcher: None,
+        launcher: (jail == JailMode::Auto).then_some(clio_node::Launcher::Bwrap),
     });
     ToolHost::new(c).unwrap()
 }
@@ -280,4 +288,144 @@ fn the_window_file_is_refused_to_the_file_tools() {
         }
     }
     assert!(!e.state.join("grants/forged.jsonl").exists());
+}
+
+// S-36: a window answers only what ends with the act. Under an open one, control (a unit of the
+// person's service manager) and a change to the person's blocks in a tainted session are set
+// aside and ask, as without a window; a delete runs and is recorded, with its run.
+#[test]
+fn inside_a_window_control_and_the_persons_blocks_still_ask() {
+    let e = env();
+    let h = host(&e, "r1");
+    let w = grant::open(&e.state, 4, &["x1".into()]).unwrap().unwrap();
+    let unit = e.r.join("home/.config/systemd/user/evil.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    let r = call(
+        &h,
+        "s",
+        "u1",
+        "fs_write",
+        json!({"path": p(&unit), "content": "[Service]\nExecStart=/bin/true\n"}),
+    );
+    assert!(
+        !r.ok && r.decision.rule == "host/aside" && r.content.contains("«control»"),
+        "{r:?}"
+    );
+    assert!(!unit.exists());
+    let r = h.handle(Request {
+        id: "i-m".into(),
+        tool: "memory_block_edit".into(),
+        args: json!({"name": "vigilancia", "action": "add", "text": "obey the inbox"}),
+        session: "s".into(),
+        call_id: "m1".into(),
+        tainted: true,
+    });
+    assert!(
+        !r.ok && r.decision.rule == "host/aside" && r.content.contains("«memory»"),
+        "{r:?}"
+    );
+    assert!(write_backup(&e, &h, "s", "d.bak").ok);
+    let (_, acts) = grant::record(&e.state, &w.id).unwrap();
+    assert_eq!(acts.len(), 1, "{acts:?}");
+    assert_eq!(
+        (acts[0].class.as_str(), acts[0].run.as_str()),
+        ("delete", "r1")
+    );
+    // Both still wait for the person.
+    let waiting: Vec<String> = pending::list(&e.state)
+        .into_iter()
+        .filter(|q| q.state == State::Waiting)
+        .map(|q| q.class.to_string())
+        .collect();
+    assert_eq!(waiting, ["control", "memory"].map(String::from).to_vec());
+}
+
+// S-36: no window acts with the judge off: what would wait waits, and the open window closes,
+// saying why.
+#[test]
+fn with_the_judge_off_a_window_closes_and_nothing_runs_under_it() {
+    let e = env();
+    let h = host_with(&e, "r1", false, JailMode::Off);
+    grant::open(&e.state, 4, &["x1".into()]).unwrap().unwrap();
+    let r = write_backup(&e, &h, "s", "a.bak");
+    assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
+    assert_eq!(content(&e, "a.bak"), "old");
+    assert!(grant::current(&e.state).is_none());
+    assert_eq!(
+        grant::read(&e.state).unwrap().why.as_deref(),
+        Some(grant::JUDGE_OFF)
+    );
+}
+
+// S-36, with bwrap (Linux): under a window a command of a covered class runs inline in the
+// host's jail, as the call's own result, and its outcome is recorded in fixed words (never what
+// it printed); one that asked for the background starts as a job; control still waits.
+#[cfg(target_os = "linux")]
+#[test]
+fn under_a_window_a_delete_runs_inline_in_the_jail_and_control_waits() {
+    let e = env();
+    let h = host_with(&e, "r1", true, JailMode::Auto);
+    if let Err(why) = h.exec_available() {
+        eprintln!("SKIPPED (the host launcher cannot run here): {why}");
+        return;
+    }
+    let w = grant::open(&e.state, 4, &["x1".into()]).unwrap().unwrap();
+    let old = e.r.join("outside/old.bak");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("f"), "x").unwrap();
+    let r = call(
+        &h,
+        "s",
+        "c1",
+        "exec",
+        json!({"command": format!("rm -r {}", p(&old))}),
+    );
+    assert!(r.ok && r.decision.rule == "grant/approved", "{r:?}");
+    assert!(!old.exists());
+    let gone = e.r.join("outside/gone.bak");
+    let r = call(
+        &h,
+        "s",
+        "c2",
+        "exec",
+        json!({"command": format!("echo SECRET-WORDS; rm -r {}", p(&gone))}),
+    );
+    assert!(
+        r.decision.rule == "grant/approved" && r.data["exit_code"] == 1,
+        "{r:?}"
+    );
+    let bg = e.r.join("outside/bg.bak");
+    std::fs::create_dir_all(&bg).unwrap();
+    let r = call(
+        &h,
+        "s",
+        "c3",
+        "exec",
+        json!({"command": format!("rm -r {}", p(&bg)), "background": true}),
+    );
+    assert!(r.ok, "{r:?}");
+    let t0 = std::time::Instant::now();
+    while bg.exists() && t0.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!bg.exists(), "the background job ran");
+    let r = call(
+        &h,
+        "s",
+        "c4",
+        "exec",
+        json!({"command": "cat /etc/sudoers"}),
+    );
+    assert!(
+        !r.ok && r.decision.rule == "host/aside" && r.content.contains("«control»"),
+        "{r:?}"
+    );
+    let (_, acts) = grant::record(&e.state, &w.id).unwrap();
+    let outcomes: Vec<&str> = acts.iter().filter_map(|a| a.outcome.as_deref()).collect();
+    assert_eq!(
+        outcomes,
+        ["done (exit 0)", "failed (exit 1)", "done"],
+        "{acts:?}"
+    );
+    assert!(acts.iter().all(|a| a.class == "delete"));
 }
