@@ -415,6 +415,43 @@ fn clio_reopens_the_last_session_with_its_history() {
     w.assert_key_nowhere();
 }
 
+// The same, opened from the drawer (Ctrl-S, its row, Enter) by a `clio --new`.
+#[test]
+fn the_selector_lists_a_session_and_reopens_it_with_its_history() {
+    if can_run("drawer_reopen", true).is_none() {
+        return;
+    }
+    let w = World::new(
+        r#"[{"text":"first answer","usage":[100,5]},{"text":"second answer","usage":[200,7]}]"#,
+    );
+    let v = w.pty("drawer_reopen");
+    ok(
+        &v,
+        &[
+            "opened",
+            "answered",
+            "selector",
+            "row_listed",
+            "reopened",
+            "history_user",
+            "history_answer",
+            "answered_again",
+            "history_still_there",
+        ],
+    );
+    assert_eq!(
+        (v["code1"].as_i64(), v["code2"].as_i64()),
+        (Some(0), Some(0)),
+        "{v:#}"
+    );
+    assert_eq!(v["procs_after_first"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    let list =
+        clio_brain::pi::sessions::list_sessions(&w.home().join(".local/share/clio/pi/sessions"));
+    assert_eq!(list.sessions.len(), 1);
+    w.assert_key_nowhere();
+}
+
 #[test]
 fn killing_clio_with_sigkill_leaves_no_pi_and_no_toolhost() {
     if can_run("sigkill", true).is_none() {

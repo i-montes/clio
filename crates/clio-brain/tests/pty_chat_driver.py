@@ -269,6 +269,28 @@ elif scenario == "reopen":
     send(fd, CTRL_C)  # idle: Ctrl-C leaves
     out["code2"] = wait_exit(fd, pid)
     out["procs_after_quit"] = len(pi_procs())
+elif scenario == "drawer_reopen":
+    # The same session, opened from the drawer: `clio --new`, Ctrl-S, its row, Enter.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, "primera pregunta", "first answer")
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves cleanly
+    out["code1"] = wait_exit(fd, pid)
+    out["procs_after_first"] = len(pi_procs())
+    pid, fd = spawn()
+    out["selector"] = open_drawer(fd)
+    out["row_listed"] = wait_screen(fd, "primera pregunta", 20)
+    send(fd, b"j")  # first row is "new session"
+    send(fd, ENTER)
+    out["reopened"] = wait_screen(fd, "first answer", 60) and idle(fd, 60)
+    s = screen()
+    out["history_user"] = "primera pregunta" in s
+    out["history_answer"] = "first answer" in s
+    out["answered_again"] = ask(fd, "segunda pregunta", "second answer")
+    out["history_still_there"] = "first answer" in screen()
+    time.sleep(0.5)
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves
+    out["code2"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = len(pi_procs())
 elif scenario == "one_turn":
     # A new session, one turn (cfg "ask" / "answer"), and leave.
     out["opened"] = open_new_chat(fd)
