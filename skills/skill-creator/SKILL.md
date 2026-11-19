@@ -44,7 +44,9 @@ open its SKILL.md with `read` and follow it.
   of those; a check that needs them comes back "could not check", and the skill then waits for the
   person's approval instead of being registered by itself. When the skill does need the network,
   check locally what can be (the script's syntax, its handling of a saved answer) and say so.
-- Something that runs, never a description of a check.
+- Something that runs, never a description of a check. A check that succeeds whatever the skill
+  does (`true`, `exit 0`, an `echo`) is no check: skill_write refuses it, and the reviewer fails a
+  skill that does not do what it says.
 
 ## Never
 
@@ -59,8 +61,12 @@ open its SKILL.md with `read` and follow it.
 
 A reviewer runs the check in the background; the answer comes by itself: registered (usable from
 the next session), waiting for the person's approval, or failed with findings. A registered skill
-may come with the review's notes: write a new version only if a note is worth it. When it failed,
-fix it and call skill_write again; after three failed reviews in a row the draft is dropped.
+may come with the review's notes: write a new version only if a note is worth it. The notes come
+to you once an hour per skill; those of the version you wrote in answer go to the person only.
+When it failed, fix it and call skill_write again; after three failed reviews in a row the draft
+is dropped and that name is refused for an hour: tell the person what failed. A change to this
+skill (skill-creator), or a skill of a name the person removed, always waits for the person's
+approval.
 
 ## After using a skill
 
