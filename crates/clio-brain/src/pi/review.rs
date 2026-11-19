@@ -1,4 +1,4 @@
-//! A review: the second agent (`clio-reviewer@2`) that checks a piece of work. What it is asked,
+//! A review: the second agent (`clio-reviewer@3`) that checks a piece of work. What it is asked,
 //! and how its answer is read: strictly, from one fenced block, and anything else is
 //! `could_not_check` with the raw text attached (cleaned and capped), never obeyed.
 

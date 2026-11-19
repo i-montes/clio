@@ -7,7 +7,7 @@
 //!   (`<run>/reviews/<n>/`): its session file never shows in the drawer, its reads never mark
 //!   the conversation, and its commands and the chat's never wait for each other (the tool host
 //!   runs one call at a time);
-//! - the prompt `clio-reviewer@2` and a fixed list of tools (read, bash, find, ls), so its own
+//! - the prompt `clio-reviewer@3` and a fixed list of tools (read, bash, find, ls), so its own
 //!   prompt prefix caches; no memory, no person to ask (`clio toolhost --review`: what would wait
 //!   for the person is refused), no background commands;
 //! - a clean context: only the review request, never the conversation, the identity or memory;
