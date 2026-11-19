@@ -83,8 +83,12 @@ exist only in a chat on the person's own machine (host mode).
 A reviewer runs the check; a failed review comes back to you with its findings (three in a row
 and the draft is dropped). Then the person sees the whole service in an approval box and says yes
 or no. Once registered, `service_status` shows how its runs went. To change it, write a new
-version with the same name: it is reviewed and approved again. You cannot run, turn off or remove
-a service: the person does that with `/services`.
+version with the same name: it is reviewed and approved again. `service_manage` runs it now
+(`run`, only while it is on and unchanged since it was approved), turns it `off`, shows its `logs`,
+and turns it back `on`, back to the version before (`undo`) or away (`remove`, kept in
+`removed/`). `run` and `off` need no permission; `on`, `undo` and `remove` need the person's (one
+box, or their open permission window), and `on` of a service the person turned off always waits
+for them. Never ask the person to type a command for any of it.
 
 ## How to verify
 

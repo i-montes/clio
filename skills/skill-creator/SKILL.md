@@ -72,7 +72,10 @@ approval.
 
 Call skill_report with `worked` or `failed` and one line of what happened. When it failed, fix it
 with skill_write under the same name. Three failures in a row turn a skill off and the person is
-told.
+told. `skill_manage` turns a skill `off` (no permission needed) and back `on`, back to the version
+before (`undo`) or away (`remove`, kept in `removed/`): those three need the person's permission
+(one box, or their open permission window); `on` of a skill the person turned off, and removing
+one Clio ships, always wait for them.
 
 ## How to verify
 

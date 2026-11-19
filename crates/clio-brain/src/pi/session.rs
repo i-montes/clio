@@ -48,7 +48,7 @@ pub const GUARD_TOOLS: [&str; 24] = [
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools,
 /// the services' (S-69) and the MCP servers' (S-70).
-pub const HOST_GUARD_TOOLS: [&str; 7] = [
+pub const HOST_GUARD_TOOLS: [&str; 10] = [
     "job_output",
     "job_stop",
     "service_write",
@@ -56,19 +56,22 @@ pub const HOST_GUARD_TOOLS: [&str; 7] = [
     "mcp_propose",
     "mcp_tools",
     "mcp_call",
+    "service_manage",
+    "skill_manage",
+    "mcp_manage",
 ];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@26";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@26.md");
+pub const PROMPT_NAME: &str = "clio-agent@27";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@27.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@10";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@10.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@11";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@11.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -522,8 +525,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 26\n"));
-        assert!(HOST_PROMPT.starts_with("version: 10\n"));
+        assert!(PROMPT.starts_with("version: 27\n"));
+        assert!(HOST_PROMPT.starts_with("version: 11\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -534,6 +537,9 @@ mod tests {
             "mcp_propose",
             "mcp_tools",
             "mcp_call",
+            "service_manage",
+            "skill_manage",
+            "mcp_manage",
         ] {
             assert!(HOST_PROMPT.contains(&format!("`{t}`")) && !PROMPT.contains(&format!("`{t}`")));
         }
@@ -596,8 +602,8 @@ mod tests {
             .unwrap()
         };
         for (new, was, changed) in [
-            (PROMPT, old("clio-agent@25.md"), 3),
-            (HOST_PROMPT, old("clio-host@9.md"), 8),
+            (old("clio-agent@26.md"), old("clio-agent@25.md"), 3),
+            (old("clio-host@10.md"), old("clio-host@9.md"), 8),
         ] {
             let (n, w): (Vec<&str>, Vec<&str>) = (new.lines().collect(), was.lines().collect());
             assert_eq!(n.len(), w.len());
@@ -619,6 +625,52 @@ mod tests {
                 "/pending",
                 "/mcp confirm",
                 "stays off until",
+            ] {
+                assert!(!new.contains(bad), "{bad}");
+            }
+        }
+    }
+
+    // S-68, S-69, S-70: `clio-agent@27` and `clio-host@11` are `@26` and `@10` with only the
+    // sentences on managing skills, services and MCP servers changed: the model may turn what it
+    // created off, on, back or away (`*_manage`), with the person's permission where it is needed,
+    // and is never told the person alone does it.
+    #[test]
+    fn the_new_prompts_only_change_the_managing_sentences() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was, changed) in [
+            (PROMPT, old("clio-agent@26.md"), 2),
+            (HOST_PROMPT, old("clio-host@10.md"), 4),
+        ] {
+            let (n, w): (Vec<&str>, Vec<&str>) = (new.lines().collect(), was.lines().collect());
+            assert_eq!(n.len(), w.len());
+            let diff: Vec<(&str, &str)> = n
+                .iter()
+                .zip(&w)
+                .filter(|(a, b)| a != b)
+                .map(|(a, b)| (*a, *b))
+                .collect();
+            assert_eq!(diff.len(), changed, "{diff:#?}");
+            for (now, was) in &diff[1..] {
+                // The old sentence is still there, word for word, and only what is added says
+                // how a skill, a service or a server is turned off, on, back or away.
+                let kept = was.trim_end_matches('.');
+                let kept = kept.split(". Only the person").next().unwrap();
+                let kept = kept.split("; only the person").next().unwrap();
+                assert!(now.starts_with(kept), "{now}");
+                assert!(now.contains("off") && now.contains("on"), "{now}");
+            }
+            for bad in [
+                "Only the person turns a service",
+                "only the person turns a server off",
+                "clio approve",
+                "/pending",
             ] {
                 assert!(!new.contains(bad), "{bad}");
             }
