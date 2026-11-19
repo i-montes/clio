@@ -18,6 +18,12 @@ use crate::host::{Host, MAX_TIMEOUT_SECS, log_line, now_ms};
 use crate::{BlockEdit, DecisionOut, Judging, MemoryPort, Request, Response, ToolHost, lock};
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
+/// How many items of one session may wait for the person at once.
+pub const MAX_WAITING: usize = 20;
+/// What the model is told past it.
+const TOO_MANY: &str = "too many actions wait for the person: wait for their answers";
+/// An item this long past its time (answered or not) is removed when the store is read.
+const KEEP_MS: i64 = 7 * DAY_MS;
 /// What is kept of an approved action's output.
 const TAIL_BYTES: usize = 4000;
 /// How long the reason of a secret request may be.
@@ -391,6 +397,12 @@ pub fn shown(p: &Pending) -> &str {
         .unwrap_or("")
 }
 
+/// `p` was taken for an answer that never wrote what came of it (Clio ended while it ran): it may
+/// have run in part, so it is not waiting any more and is never offered again.
+pub fn interrupted(state: &Path, p: &Pending) -> bool {
+    p.state == State::Waiting && dir(state).join(format!("{}.ran", p.id)).exists()
+}
+
 /// Takes `id` for one answer: an approval and a rejection racing each other, even from two
 /// processes, cannot both have it.
 fn claim(state: &Path, id: &str) -> std::io::Result<()> {
@@ -462,14 +474,25 @@ fn load(state: &Path, id: &str) -> Result<Pending, String> {
     serde_json::from_str(&text).map_err(|e| format!("pending item {id} is damaged: {e}"))
 }
 
-/// Every pending action of this machine, oldest first.
+/// Every pending action of this machine, oldest first. One more than 7 days past its time is
+/// removed here (with its claim), best effort.
 pub fn list(state: &Path) -> Vec<Pending> {
+    let now = now_ms();
     let mut all: Vec<Pending> = fs::read_dir(dir(state))
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok())
+        .filter(|p: &Pending| {
+            // Past its time every item is over, answered or not.
+            if now.saturating_sub(p.expires_ms) > KEEP_MS {
+                let _ = fs::remove_file(dir(state).join(format!("{}.json", p.id)));
+                let _ = fs::remove_file(dir(state).join(format!("{}.ran", p.id)));
+                return false;
+            }
+            true
+        })
         .collect();
     all.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
     all
@@ -530,16 +553,20 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
 }
 
 /// Saves `p` (id and hash are filled here), or returns the one already waiting for the same
-/// action in the same session.
+/// action in the same session. A session with `MAX_WAITING` items waiting gets no more.
 pub(crate) fn set_aside(state: &Path, mut p: Pending) -> Result<Pending, String> {
     p.hash = hash_of(&p.tool, &p.args);
-    if let Some(old) = list(state).into_iter().find(|o| {
-        o.session == p.session
-            && o.hash == p.hash
-            && o.state == State::Waiting
-            && o.expires_ms > p.created_ms
-    }) {
-        return Ok(old);
+    let waiting: Vec<Pending> = list(state)
+        .into_iter()
+        .filter(|o| {
+            o.session == p.session && o.state == State::Waiting && o.expires_ms > p.created_ms
+        })
+        .collect();
+    if let Some(old) = waiting.iter().find(|o| o.hash == p.hash) {
+        return Ok(old.clone());
+    }
+    if waiting.len() >= MAX_WAITING {
+        return Err(TOO_MANY.into());
     }
     for n in 0u32.. {
         let seed = format!("{}|{}|{}|{n}", p.session, p.hash, p.created_ms);
@@ -807,8 +834,8 @@ impl ToolHost {
     }
 
     /// `request_secret`: checks the name, the destination and the vault now, and stores the
-    /// request for the person; the value is asked for when the turn ends, by the chat, and never
-    /// comes through here.
+    /// request for the person; the chat asks for the value (when it opens the boxes, or at once
+    /// with `/pending`), and it never comes through here.
     pub(crate) fn request_secret(
         &self,
         req: &Request,
@@ -898,7 +925,7 @@ impl ToolHost {
         };
         let content = match set_aside(&cfg.state, draft) {
             Ok(p) => format!(
-                "requested {}: the person will be asked when the turn ends; go on with what does not need it",
+                "requested {}: the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it",
                 p.id
             ),
             Err(e) => return refuse(format!("the request could not be stored ({e})")),
@@ -973,5 +1000,66 @@ mod tests {
             assert!(again.contains(&format!("\"class\": \"{new}\"")), "{again}");
         }
         let _ = fs::remove_dir_all(&state);
+    }
+
+    fn item(session: &str, n: usize, now: i64) -> Pending {
+        Pending {
+            id: String::new(),
+            class: Class::Delete,
+            tool: "exec".into(),
+            args: json!({"command": format!("rm -r /srv/old{n}")}),
+            hash: String::new(),
+            what: String::new(),
+            run: "r".into(),
+            session: session.into(),
+            created_ms: now,
+            expires_ms: now + DAY_MS,
+            state: State::Waiting,
+            reason: None,
+        }
+    }
+
+    // A session has at most 20 items waiting: the 21st is refused with a text for the model,
+    // the same action again still gets its id, and another session is not counted.
+    #[test]
+    fn at_most_twenty_items_of_a_session_wait() {
+        let t = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let ids: Vec<String> = (0..MAX_WAITING)
+            .map(|n| set_aside(t.path(), item("s", n, now)).unwrap().id)
+            .collect();
+        assert_eq!(
+            set_aside(t.path(), item("s", 99, now)).unwrap_err(),
+            "too many actions wait for the person: wait for their answers"
+        );
+        assert_eq!(set_aside(t.path(), item("s", 3, now)).unwrap().id, ids[3]);
+        assert!(set_aside(t.path(), item("other", 99, now)).is_ok());
+        // One answered makes room.
+        reject(t.path(), &ids[0]).unwrap();
+        assert!(set_aside(t.path(), item("s", 99, now)).is_ok());
+    }
+
+    // Reading the store removes what is more than a week past its time, answered or not, with
+    // its claim; what is younger stays.
+    #[test]
+    fn items_a_week_past_their_time_are_removed_when_the_store_is_read() {
+        let t = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let mut old = item("s", 1, now - 9 * DAY_MS);
+        old.id = "aa11".into();
+        old.state = State::Rejected;
+        save(t.path(), &old).unwrap();
+        fs::write(dir(t.path()).join("aa11.ran"), "").unwrap();
+        let mut stale = item("s", 2, now - 9 * DAY_MS);
+        stale.id = "bb22".into();
+        save(t.path(), &stale).unwrap();
+        let mut recent = item("s", 3, now - 3 * DAY_MS);
+        recent.id = "cc33".into();
+        recent.state = State::Rejected;
+        save(t.path(), &recent).unwrap();
+        let ids: Vec<String> = list(t.path()).into_iter().map(|p| p.id).collect();
+        assert_eq!(ids, ["cc33"]);
+        assert!(!dir(t.path()).join("aa11.ran").exists());
+        assert!(!dir(t.path()).join("bb22.json").exists());
     }
 }

@@ -189,14 +189,14 @@ fn a_stopped_or_locked_vault_and_a_name_it_has_are_refused_at_request_time() {
 }
 
 #[test]
-fn a_request_waits_for_the_person_once_and_counts_toward_the_days_questions() {
+fn a_request_waits_for_the_person_once_and_is_told_it_is_answered_later() {
     let e = env();
     serve(&e, true);
     let r = ask(&e, "s1", req("linear"));
     assert!(r.ok, "{}", r.content);
     assert!(
         r.content.ends_with(
-            ": the person will be asked when the turn ends; go on with what does not need it"
+            ": the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it"
         ),
         "{}",
         r.content

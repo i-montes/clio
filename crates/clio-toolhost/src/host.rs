@@ -20,7 +20,7 @@ use crate::{Approved, Request, ToolHost, ops};
 pub struct HostCfg {
     /// Relative paths are taken from here, and commands start here.
     pub home: PathBuf,
-    /// `Dirs.data/host`: the action log, the pending actions and the day's questions.
+    /// `Dirs.data/host`: the action log and the pending actions.
     pub state: PathBuf,
     /// Clio's own folders: the file tools refuse them and commands see them empty.
     pub control: Vec<PathBuf>,

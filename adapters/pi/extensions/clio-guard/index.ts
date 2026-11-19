@@ -620,12 +620,13 @@ export default function clioGuard(pi: ExtensionAPI) {
 	});
 
 	// A secret the task needs: the host checks it and stores the request; the person types the
-	// value into Clio when the turn ends, and it goes to the vault. It never passes through here.
+	// value into Clio when the chat asks (or at once with /pending), and it goes to the vault. It
+	// never passes through here.
 	register({
 		name: "request_secret",
 		label: "request_secret",
 		description:
-			"Ask the person to put a secret the task needs (an API token, a key) into Clio's vault, bound to the one place it may be sent. You never see the value: the person types it into Clio, not into this conversation. Answers at once with a request id; the person is asked when the turn ends and their answer comes with their next message.",
+			"Ask the person to put a secret the task needs (an API token, a key) into Clio's vault, bound to the one place it may be sent. You never see the value: the person types it into Clio, not into this conversation. Answers at once with a request id; the person is asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn.",
 		promptSnippet: "Ask the person to store a secret the task needs in the vault (you never see it).",
 		promptGuidelines: [
 			"request_secret: only when the task really needs a credential; never ask for a secret's value in the conversation or with ask_person. Go on with what does not need it; the answer (saved or declined) comes with the person's next message.",
