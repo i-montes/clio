@@ -184,6 +184,59 @@ pub(super) fn skill_ask(
     super::ask::BlockAsk::new(&p, suspect).unwrap()
 }
 
+/// A service set aside for the person (S-69), as the box gets it: its manifest composed from
+/// `m`, its files, the review's verdict and notes, and why it waits.
+pub(super) fn service_ask(
+    m: &clio_toolhost::services::Manifest,
+    files: &[(&str, &str)],
+    verdict: &str,
+    notes: &str,
+    suspect: bool,
+) -> super::ask::BlockAsk {
+    let files: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(p, c)| serde_json::json!({"path": p, "content": c}))
+        .collect();
+    let p = clio_toolhost::pending::Pending {
+        id: "s1a2b3c4".into(),
+        class: clio_toolhost::ask::Class::Service,
+        tool: "service_write".into(),
+        args: serde_json::json!({"name": m.name, "description": m.description,
+            "skill_md": clio_toolhost::services::compose(m), "files": files, "update": false,
+            "verdict": verdict, "notes": notes}),
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        ask: true,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: Some("a service always waits for your approval".into()),
+    };
+    super::ask::BlockAsk::new(&p, suspect).unwrap()
+}
+
+/// A service as `service_write` composes it: `disk-check`, every hour, no network.
+pub(super) fn service_manifest() -> clio_toolhost::services::Manifest {
+    clio_toolhost::services::Manifest {
+        name: "disk-check".into(),
+        description: "Checks the free space of / every hour and says when it is under 10%.".into(),
+        schedule: clio_toolhost::services::Schedule {
+            every: "1h".into(),
+            at: None,
+        },
+        command: "bash check.sh".into(),
+        verify: "bash check-run.sh . 'bash check.sh' | grep -q '^ok'".into(),
+        network: vec![],
+        secrets: vec![],
+        writes: vec![],
+        limits: clio_toolhost::services::DEFAULT_LIMITS,
+    }
+}
+
+pub(super) const SERVICE_SCRIPT: &str = "#!/bin/bash\nused=$(df --output=pcent / | tail -1 | tr -dc 0-9)\necho \"$used\" > \"$CLIO_STATE_DIR/last\"\nif [ \"$used\" -gt 90 ]; then echo \"/ is $used% full\"; exit 10; fi\necho \"/ is $used% full\"\n";
+
 pub(super) const SKILL_DESCRIPTION: &str =
     "Reports which folders take the disk. Use when the person asks what fills the disk.";
 
@@ -677,7 +730,161 @@ fn command_states() -> Vec<(&'static str, App)> {
     m.foot = Some("/skills off|on|undo|remove <name>".into());
     a.modal = Some(m);
     out.push(("/skills", a));
+    services_states(&mut out);
     out
+}
+
+/// Services (S-69): the Approval box (short; long and scrolled; with hosts, secrets and write
+/// paths), the note once registered, `/services`, and the notices at chat open.
+fn services_states(out: &mut Vec<(&'static str, App)>) {
+    let notes =
+        "verdict: passes\nran: bash check-run.sh . 'bash check.sh' (exit 0)\nfindings: none";
+    let m = service_manifest();
+    let mut a = conversation(true);
+    approve_service(
+        &mut a,
+        service_ask(&m, &[("check.sh", SERVICE_SCRIPT)], "passes", notes, false),
+        0,
+    );
+    out.push(("service waits for approval, short", a));
+    let long: String = (1..=40)
+        .map(|i| format!("echo \"step {i}: look at the folder of level {i}\"\n"))
+        .collect();
+    let mut a = conversation(true);
+    approve_service(
+        &mut a,
+        service_ask(
+            &m,
+            &[("check.sh", SERVICE_SCRIPT), ("steps.sh", &long)],
+            "could_not_check",
+            "verdict: could_not_check\nran: the check needs a disk over 90% full\nfindings: none",
+            false,
+        ),
+        14,
+    );
+    out.push(("service waits for approval, long and scrolled", a));
+    let mut m = service_manifest();
+    m.name = "uptime-report".into();
+    m.description =
+        "Every day at 07:30, posts yesterday's uptime of the sites to the status page.".into();
+    m.schedule = clio_toolhost::services::Schedule {
+        every: "1d".into(),
+        at: Some("07:30".into()),
+    };
+    m.command = "bash report.sh".into();
+    m.network = vec!["api.statuspage.io".into(), "example.com".into()];
+    m.secrets = vec![clio_toolhost::services::SecretUse {
+        name: "statuspage-key".into(),
+        env: "STATUSPAGE_KEY".into(),
+        host: "api.statuspage.io".into(),
+    }];
+    m.writes = vec!["/home/ivan/reports/uptime".into()];
+    m.limits = clio_toolhost::services::Limits {
+        cpu_percent: 25,
+        memory_mb: 256,
+        seconds: 120,
+    };
+    let mut a = conversation(true);
+    approve_service(
+        &mut a,
+        service_ask(
+            &m,
+            &[(
+                "report.sh",
+                "#!/bin/bash\ncurl -sf https://example.com/ > /dev/null && echo up\n",
+            )],
+            "passes",
+            "verdict: passes\nran: bash check-run.sh . 'bash report.sh' (exit 0)\nfindings:\n1. it does not say what happens when the site is down\n   evidence: report.sh line 2",
+            true,
+        ),
+        0,
+    );
+    out.push((
+        "service waits for approval, with hosts, secrets and write paths",
+        a,
+    ));
+    let (a, _) = super::app::update(
+        conversation(true),
+        super::app::Input::Bg(super::app::Bg::ChatAnswered(Ok(
+            "approved s1a2b3c4: the service «disk-check» is registered (version 1): it runs every 1h".into(),
+        ))),
+    );
+    out.push(("service registered", a));
+    // `/services` from a real folder: one fine, one paused, one waiting for the vault.
+    let t = tempfile::tempdir().unwrap();
+    let d = crate::cli::home::Dirs {
+        config: t.path().join("config"),
+        data: t.path().join("data"),
+        runs: t.path().join("data/runs"),
+        runtime: None,
+        home: t.path().join("home"),
+    };
+    let root = crate::cli::services::root(&d);
+    let now = crate::cli::now_ms();
+    for (name, every, enabled, off, runs) in [
+        (
+            "disk-check",
+            "1h",
+            true,
+            None,
+            serde_json::json!([{"start_ms": now - 1_200_000, "ms": 310, "version": 1, "outcome": "ok", "exit": 0, "tail": "/ is 61% full", "by": "timer"}]),
+        ),
+        (
+            "backup-notes",
+            "1d",
+            false,
+            Some("paused: three failed runs in a row"),
+            serde_json::json!([{"start_ms": now - 3_600_000, "ms": 2100, "version": 2, "outcome": "failed", "exit": 23, "tail": "rsync: connection unexpectedly closed", "by": "timer"}]),
+        ),
+        (
+            "uptime-report",
+            "15m",
+            true,
+            None,
+            serde_json::json!([{"start_ms": now - 60_000, "ms": 0, "version": 1, "outcome": "waiting", "why": "waiting for the vault (it is locked)", "by": "timer"}]),
+        ),
+    ] {
+        let mut m = service_manifest();
+        m.name = name.into();
+        m.schedule.every = every.into();
+        let v = root.join("versions").join(name).join("1");
+        std::fs::create_dir_all(&v).unwrap();
+        std::fs::write(v.join("service.json"), clio_toolhost::services::compose(&m)).unwrap();
+        std::fs::create_dir_all(root.join("records")).unwrap();
+        std::fs::write(root.join("records").join(format!("{name}.json")), serde_json::json!({"name": name, "description": m.description, "enabled": enabled, "off": off, "current": 1, "versions": [{"n": 1, "sha256": "x", "at_ms": now - 86_400_000, "by": "person", "verdict": "passes, approved"}]}).to_string()).unwrap();
+        std::fs::create_dir_all(root.join("runs")).unwrap();
+        std::fs::write(
+            root.join("runs").join(format!("{name}.json")),
+            runs.to_string(),
+        )
+        .unwrap();
+    }
+    std::fs::write(root.join("notices.json"), serde_json::json!([{"at_ms": now - 3_600_000, "name": "backup-notes", "text": "paused: three failed runs in a row; clio services logs backup-notes shows why", "seen": true}]).to_string()).unwrap();
+    let mut a = conversation(true);
+    a.modal = Some(crate::cli::services::chat_command(&d, "").unwrap());
+    out.push((
+        "/services: one fine, one paused, one waiting for the vault",
+        a,
+    ));
+    let mut a = pi(true);
+    for n in [
+        "service «backup-notes»: paused: three failed runs in a row; clio services logs backup-notes shows why",
+        "service «disk-check»: needs your attention: / is 93% full",
+    ] {
+        a.chat.items.push(Item::Note(n.into()));
+    }
+    out.push(("services' notices when a chat opens", a));
+}
+
+/// A service's approval box on screen, after the quiet second, scrolled `scroll` rows.
+fn approve_service(a: &mut App, b: super::ask::BlockAsk, scroll: usize) {
+    approve_block(a, b);
+    let c = a.confirm.as_mut().unwrap();
+    c.id = "s1a2b3c4".into();
+    c.workspace =
+        "«service · a service always waits for your approval» register the service «disk-check»"
+            .into();
+    c.block.as_mut().unwrap().scroll = scroll;
 }
 
 /// The screen as it looks: a wide character takes two columns, so the cell it covers is left out.

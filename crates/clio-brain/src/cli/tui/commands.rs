@@ -35,6 +35,7 @@ pub enum Run {
     Undo,
     Review,
     Skills,
+    Services,
     Copy,
     Memory,
     Doctor,
@@ -169,6 +170,14 @@ pub const COMMANDS: &[Command] = &[
         "Clio's skills: list them, turn one off or on, go back a version",
         false,
         Run::Skills,
+    ),
+    c(
+        "services",
+        &[],
+        "[show | on | off | undo | remove | run | logs <name> | enable | disable]",
+        "Clio's services, run on a schedule: list them, look at one, turn one off, run one now",
+        false,
+        Run::Services,
     ),
     c(
         "copy",
@@ -597,6 +606,18 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
                 vec![]
             }
             _ => vec![Cmd::Skills(args.to_owned())],
+        },
+        Run::Services => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["remove", name] => {
+                app.confirm = Some(Confirm::new(
+                    Action::RemoveService,
+                    (*name).to_owned(),
+                    0,
+                    String::new(),
+                ));
+                vec![]
+            }
+            _ => vec![Cmd::Services(args.to_owned())],
         },
         Run::Actions => vec![Cmd::LoadActions { run: id }],
         Run::Undo => {

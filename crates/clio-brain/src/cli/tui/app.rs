@@ -198,6 +198,8 @@ pub enum Cmd {
     },
     /// `/skills [off|on|undo|remove <name>]`: the person's (a removal was confirmed already).
     Skills(String),
+    /// `/services [...]`: the person's (a removal was confirmed already).
+    Services(String),
     /// `/review stop`.
     ReviewStop,
     /// The automatic turn that gives a review's findings to the model (as data), and the
@@ -377,6 +379,8 @@ pub enum Action {
     UndoSession,
     /// `/skills remove`: `Confirm::id` is the skill's name.
     RemoveSkill,
+    /// `/services remove`: `Confirm::id` is the service's name.
+    RemoveService,
 }
 
 /// A question that needs a `y`.
@@ -920,6 +924,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::DeleteSession => vec![Cmd::DeleteSession { reference: c.id }],
         Action::UndoSession => vec![Cmd::UndoSession { id: c.id }],
         Action::RemoveSkill => vec![Cmd::Skills(format!("remove {} --yes", c.id))],
+        Action::RemoveService => vec![Cmd::Services(format!("remove {} --yes", c.id))],
         Action::Approve => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -1905,6 +1910,10 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         Action::UndoSession => "Undo this session's file changes in".to_owned(),
         Action::RemoveSkill => format!(
             "Remove the skill «{}»? Pi stops loading it from the next session; its versions are kept.",
+            clean(&c.id)
+        ),
+        Action::RemoveService => format!(
+            "Remove the service «{}»? It stops running; its versions are kept.",
             clean(&c.id)
         ),
     };

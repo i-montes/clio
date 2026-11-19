@@ -1311,6 +1311,10 @@ impl Ctx {
                 move |d, _| super::skills::chat_command(d, &args),
                 |r| Bg::Modal(r.and_then(|x| x)),
             ),
+            Cmd::Services(args) => self.spawn(
+                move |d, _| super::services::chat_command(d, &args),
+                |r| Bg::Modal(r.and_then(|x| x)),
+            ),
             Cmd::ReviewStop => {
                 if let Ok(c) = self.review_cancel.lock() {
                     c.cancel();

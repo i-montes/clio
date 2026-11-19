@@ -244,12 +244,75 @@ pub struct SkillAsk {
     pub skill_md: String,
     /// Each other file: its path and its content, whole.
     pub files: Vec<(String, String)>,
+    /// A service (S-69): what the manifest grants, one row each (schedule, command, hosts,
+    /// secrets, writes, limits), the review's verdict and its notes; `None` for a skill.
+    pub service: Option<Vec<String>>,
+}
+
+/// A service's rows for its box, from the stored item: `None` if its manifest does not read.
+fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<Vec<String>> {
+    let m: clio_toolhost::services::Manifest = serde_json::from_str(manifest).ok()?;
+    let none = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_owned()
+        } else {
+            v.join(", ")
+        }
+    };
+    let mut rows = vec![
+        format!(
+            "schedule: every {}{}",
+            m.schedule.every,
+            m.schedule
+                .at
+                .as_ref()
+                .map_or_else(String::new, |a| format!(" at {a} (local time)"))
+        ),
+        format!("command: {}", m.command),
+        format!("hosts it may reach: {}", none(&m.network)),
+        format!(
+            "secrets: {}",
+            none(
+                &m.secrets
+                    .iter()
+                    .map(|s| format!("{} for {} only (as ${})", s.name, s.host, s.env))
+                    .collect::<Vec<_>>()
+            )
+        ),
+        format!(
+            "it may write: its state folder{}",
+            m.writes
+                .iter()
+                .map(|w| format!(", {w}"))
+                .collect::<String>()
+        ),
+        format!(
+            "limits: {}% CPU, {} MB, {} s",
+            m.limits.cpu_percent, m.limits.memory_mb, m.limits.seconds
+        ),
+        format!(
+            "review: {}",
+            match p.args["verdict"].as_str().unwrap_or("") {
+                "could_not_check" => "could not check",
+                v => v,
+            }
+        ),
+    ];
+    let notes = p.args["notes"].as_str().unwrap_or("").trim();
+    if !notes.is_empty() {
+        rows.push("review notes:".into());
+        rows.extend(notes.lines().map(str::to_owned));
+    }
+    Some(rows)
 }
 
 impl BlockAsk {
     pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
-        if let Some((name, description, md, files)) = clio_toolhost::pending::skill_of(p) {
+        let service = clio_toolhost::pending::service_of(p);
+        if let Some((name, description, md, files)) =
+            clio_toolhost::pending::skill_of(p).or(service.clone())
+        {
             return Some(Self {
                 name: clean(name),
                 action: "register".into(),
@@ -269,6 +332,15 @@ impl BlockAsk {
                         .iter()
                         .map(|(path, content)| (clean(path), sanitize::multiline(content)))
                         .collect(),
+                    service: match service {
+                        Some(_) => Some(
+                            service_rows(p, md)?
+                                .iter()
+                                .map(|r| sanitize::line(r).trim_end().to_owned())
+                                .collect(),
+                        ),
+                        None => None,
+                    },
                 }),
             });
         }
@@ -299,15 +371,20 @@ impl BlockAsk {
     /// A skill's rows: what it is, why it waits, every file line by line under `--- <path> ---`,
     /// the warning.
     fn skill_parts(&self, s: &SkillAsk) -> Vec<(Part, String)> {
+        let kind = if s.service.is_some() {
+            "service"
+        } else {
+            "skill"
+        };
         let mut out = vec![
             (
                 Part::Head,
                 format!(
                     "Clio wants to register {} «{}».",
                     if s.update {
-                        "a new version of the skill"
+                        format!("a new version of the {kind}")
                     } else {
-                        "the skill"
+                        format!("the {kind}")
                     },
                     self.name
                 ),
@@ -315,8 +392,17 @@ impl BlockAsk {
             (Part::Label, format!("what it is for: {}", s.description)),
             (Part::Warn, format!("why it waits for you: {}", s.reason)),
         ];
+        // A service: what it is granted, then the review, before its files.
+        for row in s.service.iter().flatten() {
+            out.push((Part::Label, row.clone()));
+        }
+        let main = if s.service.is_some() {
+            clio_toolhost::services::MANIFEST
+        } else {
+            "SKILL.md"
+        };
         // Every file whole, scripts too; an empty line still takes a row: shown as it is.
-        for (path, text) in std::iter::once(("SKILL.md", s.skill_md.as_str()))
+        for (path, text) in std::iter::once((main, s.skill_md.as_str()))
             .chain(s.files.iter().map(|(p, t)| (p.as_str(), t.as_str())))
         {
             out.push((Part::Label, format!("--- {path} ---")));

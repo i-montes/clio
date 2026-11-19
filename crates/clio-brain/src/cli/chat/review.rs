@@ -112,6 +112,9 @@ const MAX_SKILL_SUBJECT: usize = 160_000;
 /// (what is judged is what is registered, whether it opens the folder or not), and its check, run
 /// from `folder`, the staged copy.
 pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewRequest {
+    if clio_toolhost::services::is_service_draft(&d.id) {
+        return service_request(d, folder);
+    }
     let mut subject = format!(
         "A skill for Clio{}: instructions an agent will follow, and scripts it may run. A copy of it is in {} (it may be read-only: copy it under /tmp if its check must write). Every file of it, whole:\n\n--- SKILL.md ---\n{}\n",
         if d.update {
@@ -139,6 +142,51 @@ pub fn skill_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewR
     }
 }
 
+/// What a service draft's reviewer is asked (S-69): as a skill's, with its manifest as the main
+/// file and its `verify` as the check. Its approval is always the person's: the review only
+/// decides whether the person is asked at all.
+pub fn service_request(d: &clio_toolhost::skills::Draft, folder: &Path) -> ReviewRequest {
+    let mut subject = format!(
+        "A service for Clio{}: a program that will run by itself on a schedule, with no model, as the person, with the machine read-only except its state folder ($CLIO_STATE_DIR) and the paths in `writes`, and the network only to the hosts in `network`. A copy of it is in {} (it may be read-only: copy it under /tmp if its check must write). Every file of it, whole:\n\n--- {} ---\n{}\n",
+        if d.update {
+            " (a new version of one already registered)"
+        } else {
+            ""
+        },
+        folder.display(),
+        clio_toolhost::services::MANIFEST,
+        d.skill_md
+    );
+    for f in &d.files {
+        subject.push_str(&format!("--- {} ---\n{}\n", f.path, f.content));
+    }
+    subject.push_str(
+        "\nCheck too that its description says what it does, that running it twice in a row is safe, that it exits 0 when all is well, 10 when the person must look at something and anything else on a failure, that it keeps its state only in $CLIO_STATE_DIR, that every host it reaches is in `network` and every path it writes is in `writes`, that no secret is in a file (secrets come as the variables in `secrets`), and that it does nothing beyond what it says.",
+    );
+    ReviewRequest {
+        what: format!(
+            "the service «{}», before the person is asked to approve it",
+            d.name
+        ),
+        subject,
+        paths: vec![folder.display().to_string()],
+        check: format!(
+            "In {}, run the `verify` command of its {} as written; it must succeed without the network. A check that would succeed whatever the service does is no check: then design and run your own. The verdict is `fails` if the service does not do what it says.",
+            folder.display(),
+            clio_toolhost::services::MANIFEST
+        ),
+    }
+}
+
+/// A draft's main file: a service's manifest, or a skill's SKILL.md.
+fn main_of(d: &clio_toolhost::skills::Draft) -> &'static str {
+    if clio_toolhost::services::is_service_draft(&d.id) {
+        clio_toolhost::services::MANIFEST
+    } else {
+        "SKILL.md"
+    }
+}
+
 /// `<review>/stage/<name>/`: the skill's files for its reviewer, written here by the person's
 /// `clio`. Every level is made new (0700) and every file new, never through a link; nothing that
 /// already exists is reused. Any failure is an error (the review then could not check).
@@ -146,7 +194,7 @@ fn stage(dir: &Path, d: &clio_toolhost::skills::Draft) -> Result<PathBuf, String
     let stage = dir.join("stage");
     crate::cli::skills::new_dir(&stage)?;
     let folder = stage.join(&d.name);
-    crate::cli::skills::write_tree(&folder, &d.skill_md, &d.files)?;
+    crate::cli::skills::write_tree_named(&folder, main_of(d), &d.skill_md, &d.files)?;
     Ok(folder)
 }
 
@@ -167,7 +215,7 @@ fn settle(answer: Answer, folder: &Path, d: &clio_toolhost::skills::Draft) -> An
             .map_err(|e| format!("{}: {e}", p.display()))?;
         Ok(t)
     };
-    let staged = read("SKILL.md").and_then(|md| {
+    let staged = read(main_of(d)).and_then(|md| {
         let files = d
             .files
             .iter()

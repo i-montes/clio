@@ -927,3 +927,135 @@ fn a_skill_box_shows_the_whole_skill_and_is_approved_only_after_its_end() {
         );
     }
 }
+
+// S-69: a service's Approval box shows what it is for, its schedule, command, hosts, secrets
+// (name → host), write paths, limits, the review's verdict and notes, and every file whole; it
+// scrolls, never cut; a click, the wheel or a paste never answers it, a key before the quiet
+// second or before its end was shown does not arm it, and only then `y` approves it.
+#[test]
+fn a_service_box_shows_everything_it_grants_and_is_approved_only_after_its_end() {
+    use super::tests_gallery::{SERVICE_SCRIPT, service_ask, service_manifest};
+    let mut m = service_manifest();
+    m.network = vec!["api.statuspage.io".into()];
+    m.secrets = vec![clio_toolhost::services::SecretUse {
+        name: "statuspage-key".into(),
+        env: "STATUSPAGE_KEY".into(),
+        host: "api.statuspage.io".into(),
+    }];
+    m.writes = vec!["/home/ivan/reports".into()];
+    let long: String = (1..=40).map(|i| format!("echo step-{i}\n")).collect();
+    let b = service_ask(
+        &m,
+        &[("check.sh", SERVICE_SCRIPT), ("steps.sh", &long)],
+        "passes",
+        "verdict: passes\nran: bash check.sh (exit 0)\nfindings: none",
+        false,
+    );
+    let mut a = chat();
+    a.host = true;
+    let (mut a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAsks(vec![(
+            "s1a2".into(),
+            "«service» register".into(),
+            Some(b),
+        )]))],
+    );
+    let wheel = |kind| {
+        Input::Mouse(MouseEvent {
+            kind,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    // Straight away: a key, a click, the wheel and a paste answer nothing.
+    let (n, c) = feed(
+        a,
+        vec![
+            ch('y'),
+            key(KeyCode::Enter),
+            wheel(MouseEventKind::Down(MouseButton::Left)),
+            wheel(MouseEventKind::ScrollDown),
+            Input::Paste("y\n".into()),
+        ],
+    );
+    assert!(c.is_empty(), "{c:?}");
+    a = n;
+    let mut seen = String::new();
+    let mut t = 2_000;
+    for _ in 0..120 {
+        let screen = screen_text(&a, 80, 24);
+        seen.push_str(&box_rows(&screen).join("\n"));
+        seen.push('\n');
+        if a.confirm
+            .as_ref()
+            .unwrap()
+            .block
+            .as_ref()
+            .unwrap()
+            .seen_end
+            .get()
+        {
+            break;
+        }
+        let (n, c) = feed(
+            a,
+            vec![
+                Input::Tick(t),
+                ch('y'),
+                key(KeyCode::Enter),
+                Input::Paste("y".into()),
+                wheel(MouseEventKind::Down(MouseButton::Left)),
+                key(KeyCode::Down),
+            ],
+        );
+        assert!(c.is_empty(), "{c:?}");
+        a = n;
+        assert!(!a.confirm.as_ref().unwrap().armed);
+        t += 2_000;
+    }
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "Clio wants to register the service «disk-check».",
+        "what it is for: Checks the free space",
+        "why it waits for you: a service always waits for your approval",
+        "schedule: every 1h",
+        "command: bash check.sh",
+        "hosts it may reach: api.statuspage.io",
+        "secrets: statuspage-key for api.statuspage.io only (as",
+        "$STATUSPAGE_KEY)",
+        "it may write: its state folder, /home/ivan/reports",
+        "limits: 50% CPU, 512 MB, 300 s",
+        "review: passes",
+        "ran: bash check.sh (exit 0)",
+        "--- service.json ---",
+        "--- check.sh ---",
+        "--- steps.sh ---",
+        "echo step-40",
+        "yes, register it",
+    ] {
+        assert!(words.contains(want), "{want}\n{seen}");
+    }
+    // Its end was shown: a click or a paste still answer nothing; `y` then Enter approves.
+    let (a, c) = feed(
+        a,
+        vec![
+            Input::Tick(t + 2_000),
+            wheel(MouseEventKind::Down(MouseButton::Left)),
+            Input::Paste("y\n".into()),
+        ],
+    );
+    assert!(c.is_empty(), "{c:?}");
+    let (_, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 4_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswer {
+            id: "s1a2".into(),
+            yes: true
+        }]
+    );
+}

@@ -172,10 +172,19 @@ pub fn next_skill(app: &mut App) -> Vec<Cmd> {
         return vec![];
     };
     app.chat.review.running = Some(app.now_ms);
-    app.chat.items.push(Item::Note(format!(
-        "reviewing the skill «{}» before it is registered…",
-        super::app::clean(&name)
-    )));
+    app.chat.items.push(Item::Note(
+        if clio_toolhost::services::is_service_draft(&id) {
+            format!(
+                "reviewing the service «{}» before you are asked to approve it…",
+                super::app::clean(&name)
+            )
+        } else {
+            format!(
+                "reviewing the skill «{}» before it is registered…",
+                super::app::clean(&name)
+            )
+        },
+    ));
     vec![Cmd::SkillReview {
         session: app.chat.session_id.clone(),
         id,
@@ -229,8 +238,13 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
             )));
         }
         SkillOutcome::Waits { id, what, ask } => {
+            let service = (**ask)
+                .as_ref()
+                .and_then(|b| b.skill.as_ref())
+                .is_some_and(|s| s.service.is_some());
             app.chat.items.push(Item::Note(format!(
-                "a skill waits for your approval ({id}) · review: {verdict}"
+                "a {} waits for your approval ({id}) · review: {verdict}",
+                if service { "service" } else { "skill" }
             )));
             let mut c =
                 super::app::Confirm::new(super::app::Action::Approve, id.clone(), 0, what.clone());
@@ -244,16 +258,27 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
             attempt,
             dropped,
             to_model,
+        }
+        | SkillOutcome::ServiceRejected {
+            name,
+            attempt,
+            dropped,
+            to_model,
         } => {
+            let kind = if matches!(outcome, SkillOutcome::ServiceRejected { .. }) {
+                "service"
+            } else {
+                "skill"
+            };
             app.chat.review.findings = Some((to_model.clone(), rv.marked, REVIEW_ASK));
             app.chat.items.push(Item::Note(if *dropped {
                 format!(
-                    "skill «{}» not registered: review failed three times in a row; the draft was dropped",
+                    "{kind} «{}» not registered: review failed three times in a row; the draft was dropped",
                     clean(name)
                 )
             } else {
                 format!(
-                    "skill «{}» not registered: review failed (attempt {attempt} of 3); the findings go to Clio when the chat is idle",
+                    "{kind} «{}» not registered: review failed (attempt {attempt} of 3); the findings go to Clio when the chat is idle",
                     clean(name)
                 )
             }));

@@ -240,6 +240,13 @@ pub enum SkillOutcome {
         dropped: bool,
         to_model: String,
     },
+    /// A service draft's review failed (S-69): as `Rejected`, and the person is never asked.
+    ServiceRejected {
+        name: String,
+        attempt: u32,
+        dropped: bool,
+        to_model: String,
+    },
 }
 
 /// What a turn did that a review can check.

@@ -369,6 +369,8 @@ impl SessionSource for LocalSource {
             jev::taint_session(&toolhost.socket, &pi.session_id, false);
             notes.push(CHANGED_SINCE_CLOSE.to_owned());
         }
+        // A service paused or asking for attention since the last chat (S-69): a quiet note.
+        notes.extend(crate::cli::services::take_notices(d));
         let session_file =
             session_file.or_else(|| pi.state.session_file.clone().map(PathBuf::from));
         // What Pi offers this connector, kept for `/model` before a session's first message.
@@ -593,8 +595,8 @@ fn skill_next(a: &clio_brain::pi::review::Answer, marked: bool, suspect: bool) -
 /// name the person removed (and has not brought back).
 fn kept_for_person(root: &Path, name: &str) -> Option<String> {
     use crate::cli::skills;
-    if name == skills::BUNDLED {
-        Some("it changes the skill Clio ships with".to_owned())
+    if skills::is_shipped(name) {
+        Some("it changes a skill Clio ships with".to_owned())
     } else if skills::record(root, name).is_none() && skills::was_removed(root, name) {
         Some("you removed a skill of this name".to_owned())
     } else {
@@ -696,6 +698,9 @@ impl ChatSession {
         d: &clio_toolhost::skills::Draft,
         rv: &super::Reviewed,
     ) -> Result<super::SkillOutcome, String> {
+        if clio_toolhost::services::is_service_draft(&d.id) {
+            return self.after_service_review(h, d, rv);
+        }
         let a = &rv.answer;
         let name = d.name.clone();
         let (marked, suspect) = marks(d, self.mark_file(), rv.marked);
@@ -789,6 +794,82 @@ impl ChatSession {
         locked(&h.asked).insert(p.id.clone());
         locked(&h.notes).push(format!(
             "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({}); do not write it again meanwhile.",
+            p.id
+        ));
+        Ok(super::SkillOutcome::Waits {
+            what: format!("{} {}", pending::label(&p), pending::what(&p)),
+            ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
+            id: p.id,
+        })
+    }
+
+    /// What a service draft's review leads to (S-69): `fails` gives the findings back to the
+    /// model (the third in a row drops it) and the person never sees it; any other verdict sets
+    /// it aside for the person, always, with the verdict and the review's notes in the box.
+    /// Nothing registers a service but the person's approval.
+    fn after_service_review(
+        &self,
+        h: &HostSide,
+        d: &clio_toolhost::skills::Draft,
+        rv: &super::Reviewed,
+    ) -> Result<super::SkillOutcome, String> {
+        let a = &rv.answer;
+        let name = d.name.clone();
+        let (marked, suspect) = marks(d, self.mark_file(), rv.marked);
+        let failed = a.verdict == clio_brain::pi::review::Verdict::Fails;
+        let (attempt, dropped) = skill_count(&mut locked(&self.skill_fails), &name, failed);
+        if failed {
+            let next = if dropped {
+                let ban =
+                    clio_toolhost::skills::dropped_file(&self.run_dir.join("toolhost"), &name);
+                ban.parent()
+                    .map_or(Ok(()), crate::cli::mkdir_private)
+                    .and_then(|()| {
+                        crate::cli::write_private(&ban, crate::cli::now_ms().to_string().as_bytes())
+                    })?;
+                "It is dropped, and that name is refused for the next hour: tell the person what failed instead."
+            } else {
+                "Fix what the findings say and call service_write again with the whole service."
+            };
+            return Ok(super::SkillOutcome::ServiceRejected {
+                to_model: format!(
+                    "Your draft {} of the service «{name}» was not offered to the person: its review failed (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
+                    d.id,
+                    a.for_model()
+                ),
+                name,
+                attempt,
+                dropped,
+            });
+        }
+        let verdict = a.verdict.word();
+        let reason = if marked {
+            "a service always waits for your approval; and this session read content from outside"
+        } else {
+            "a service always waits for your approval"
+        };
+        let args = json!({
+            "name": d.name,
+            "description": d.description,
+            "skill_md": d.skill_md,
+            "files": d.files,
+            "sha256": d.sha256,
+            "draft": d.id,
+            "update": d.update,
+            "verdict": verdict,
+            "notes": a.for_model(),
+        });
+        let p = clio_toolhost::pending::set_aside_service(
+            &pending::state(&self.dirs),
+            &self.id,
+            &self.pi.session_id,
+            args,
+            reason,
+            pending::per_day(&self.dirs),
+        )?;
+        locked(&h.asked).insert(p.id.clone());
+        locked(&h.notes).push(format!(
+            "your service «{name}» passed to the person: it waits for their approval ({}); do not write it again meanwhile.",
             p.id
         ));
         Ok(super::SkillOutcome::Waits {
@@ -1000,7 +1081,13 @@ impl Session for ChatSession {
             done()?;
             return Err(format!("draft {id} changed after it was stored: dropped"));
         }
-        if let Err(e) = clio_toolhost::skills::check_stored(&d.name, &d.skill_md, &d.files) {
+        // A service's draft (its id says so) must be a service's, a skill's a skill's.
+        let stored = if clio_toolhost::services::is_service_draft(&d.id) {
+            clio_toolhost::services::check_stored(&d.name, &d.skill_md, &d.files).map(drop)
+        } else {
+            clio_toolhost::skills::check_stored(&d.name, &d.skill_md, &d.files)
+        };
+        if let Err(e) = stored {
             done()?;
             return Err(e);
         }
@@ -1072,6 +1159,10 @@ impl Session for ChatSession {
                     .or_else(|| {
                         clio_toolhost::pending::skill_of(p)
                             .map(|s| format!("the skill «{}» is not registered", s.0))
+                    })
+                    .or_else(|| {
+                        clio_toolhost::pending::service_of(p)
+                            .map(|s| format!("the service «{}» is not registered", s.0))
                     })
             });
         if let Some(refused) = block {
