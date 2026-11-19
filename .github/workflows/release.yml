@@ -6,6 +6,11 @@ name: release
 # there until a person approves it. Before approving, read what changed in the sensitive paths:
 #   git diff <last tag>..<this tag> -- crates/clio-gateway crates/clio-vault crates/clio-node apps/pwa
 # Never create that environment without a required reviewer: it would approve itself.
+#
+# Only after every gate and the review: `clio` and `clio-vault` are built for Linux x86_64 and
+# aarch64 and macOS arm64 and x86_64, smoke-tested where they run, attested, and published with
+# `VERSION`, `SHA256SUMS` and `install.sh` (what the one-line install and `clio update` read). A
+# manual run builds and tests but publishes nothing; only a `v*` tag publishes.
 
 on:
   push:
@@ -17,8 +22,22 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  TAG: ${{ github.ref_name }}
 
 jobs:
+  # A tag's version (without its `v`) must be the workspace's, which `clio --version` prints.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The tag is the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "clio-brain") | .version')
+          if [ "${TAG#v}" != "$v" ]; then
+            echo "::error::the tag is $TAG but Cargo.toml says version $v"
+            exit 1
+          fi
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -28,6 +47,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
       - run: scripts/rule-coverage.sh
+      - run: sh -n install.sh
   bench:
     runs-on: ubuntu-latest
     steps:
@@ -56,9 +76,161 @@ jobs:
     environment: release-review
     steps:
       - run: echo "A person approved this release after reading the changes to the gateway, the vault, the node signatures and the PWA."
-  release:
-    needs: [checks, bench, attacks, chaos, review]
-    runs-on: ubuntu-latest
+
+  build:
+    needs: [version, checks, bench, attacks, chaos, review]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            zigbuild: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            zigbuild: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            zigbuild: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            zigbuild: false
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: echo "Everything passed. Build and sign the artifacts here (S-43) once there is something to ship."
+      - run: rustup target add "${{ matrix.target }}"
+      # Linux binaries are linked against glibc 2.28 (the `.2.28` suffix), older than Ubuntu
+      # 22.04's 2.35 and Debian 12's 2.36. Not musl: clio-memory loads ONNX Runtime, a glibc
+      # library, at run time.
+      - if: matrix.zigbuild
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.1
+      - if: matrix.zigbuild
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-zigbuild
+      - name: Build (Linux, glibc 2.28)
+        if: matrix.zigbuild
+        run: cargo zigbuild --release --locked -p clio-brain --bin clio -p clio-vault --bin clio-vault --target "${{ matrix.target }}.2.28"
+      - name: Build (macOS)
+        if: "!matrix.zigbuild"
+        run: cargo build --release --locked -p clio-brain --bin clio -p clio-vault --bin clio-vault --target "${{ matrix.target }}"
+      - name: Name the binaries as their assets
+        run: |
+          mkdir dist
+          for b in clio clio-vault; do
+            cp "target/${{ matrix.target }}/release/$b" "dist/$b-${{ matrix.target }}"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clio-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each binary runs where it can: `--version` is the release's; Linux needs no glibc newer than
+  # 2.28 and starts in Ubuntu 22.04 and Debian 12; install.sh installs it from a release folder.
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Runs only where the runner can execute x86_64 code (Rosetta).
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: clio-${{ matrix.target }}
+          path: dist
+      - name: Can this runner execute the binaries?
+        id: can
+        run: |
+          if [ "${{ matrix.target }}" = x86_64-apple-darwin ] && ! arch -x86_64 true 2>/dev/null; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "${{ matrix.target }}: built, not run (this runner cannot execute x86_64 code)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: --version is the release's
+        if: steps.can.outputs.run == 'true'
+        run: |
+          chmod +x dist/*
+          want="clio $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "clio-brain") | .version')"
+          run() { if [ "${{ matrix.target }}" = x86_64-apple-darwin ]; then arch -x86_64 "$@"; else "$@"; fi; }
+          got=$(run "dist/clio-${{ matrix.target }}" --version)
+          echo "$got"
+          [ "$got" = "$want" ] || { echo "::error::expected '$want'"; exit 1; }
+      - name: Linux needs glibc 2.28 or older, and starts on Ubuntu 22.04 and Debian 12
+        if: runner.os == 'Linux'
+        run: |
+          for b in clio clio-vault; do
+            f="dist/$b-${{ matrix.target }}"
+            max=$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
+            echo "$b: highest glibc symbol ${max:-none}"
+            [ -n "$max" ] || { echo "::error::$b has no GLIBC_ symbols: is it a glibc binary?"; exit 1; }
+            top=$(printf '%s\nGLIBC_2.28\n' "$max" | sort -V | tail -1)
+            [ "$top" = GLIBC_2.28 ] || { echo "::error::$b needs $max, more than GLIBC_2.28"; exit 1; }
+          done
+          for image in ubuntu:22.04 debian:12; do
+            docker run --rm --network none -v "$PWD/dist:/dist:ro" "$image" "/dist/clio-${{ matrix.target }}" --version
+            docker run --rm --network none -v "$PWD/dist:/dist:ro" "$image" "/dist/clio-${{ matrix.target }}" setup --help
+            # With no arguments clio-vault answers with its own error: it loaded and ran.
+            out=$(docker run --rm --network none -v "$PWD/dist:/dist:ro" "$image" "/dist/clio-vault-${{ matrix.target }}" 2>&1 || true)
+            case "$out" in clio-vault:*) ;; *) echo "::error::clio-vault on $image: $out"; exit 1 ;; esac
+          done
+      - name: install.sh installs them from a release folder
+        if: steps.can.outputs.run == 'true' && matrix.target != 'x86_64-apple-darwin'
+        run: |
+          cd dist
+          cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "clio-brain") | .version' > VERSION
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum clio-* > SHA256SUMS; else shasum -a 256 clio-* > SHA256SUMS; fi
+          cd ..
+          CLIO_RELEASE_BASE="$PWD/dist" sh install.sh </dev/null
+          "$HOME/.local/bin/clio" --version
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, checks, bench, attacks, chaos, review, build, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: clio-*
+          path: dist
+          merge-multiple: true
+      # VERSION names the latest release for install.sh and `clio update`; install.sh is the one
+      # of this same commit.
+      - name: VERSION, install.sh and SHA256SUMS
+        working-directory: dist
+        run: |
+          printf '%s\n' "${TAG#v}" > VERSION
+          cp ../install.sh install.sh
+          sha256sum clio-* install.sh VERSION > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/clio-*
+      - name: Publish the release
+        working-directory: dist
+        run: gh release create "$TAG" clio-* install.sh VERSION SHA256SUMS --title "$TAG" --generate-notes --verify-tag
