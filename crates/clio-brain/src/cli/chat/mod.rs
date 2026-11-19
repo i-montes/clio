@@ -10,6 +10,7 @@
 //! - [`run`]: `clio run --harness pi`, a whole prompt without a terminal.
 
 pub mod local;
+pub mod review;
 pub mod run;
 
 use std::path::PathBuf;
@@ -181,6 +182,92 @@ pub trait Session: Send + Sync {
     fn abort_compaction(&self) {}
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
+    /// What the last turn changed (files written, commands run, as the action log records
+    /// them), or `None` when it changed nothing (a read-only turn).
+    fn last_work(&self) -> Option<TurnWork> {
+        None
+    }
+    /// The judge's closed question after a turn that changed something: does this work need an
+    /// independent review? `false` when the judge is off or silent.
+    fn needs_review(&self, _work: &TurnWork) -> bool {
+        false
+    }
+    /// A review by a second agent (`review::run`): its own Pi, tool host and run folder, the
+    /// marks and the day's budget of this session. Runs beside a turn; `cancel` stops it.
+    fn review(&self, _req: &ReviewRequest, _cancel: &Cancel) -> Result<Reviewed, String> {
+        Err("reviews are not available in this session".into())
+    }
+    /// A review's findings go with the next message, as data, with Clio's request to answer
+    /// them; `marked`: the reviewer ended marked (`Some(suspect)`), so they mark this session
+    /// the same way.
+    fn queue_findings(&self, _findings: &str, _marked: Option<bool>) {}
+}
+
+/// What a turn did that a review can check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnWork {
+    /// What the person asked (empty for a turn Clio started).
+    pub request: String,
+    pub commands: Vec<String>,
+    pub files: Vec<String>,
+    /// The model's final message.
+    pub answer: String,
+}
+
+/// What a review is asked: a description, the subject (text and paths) and a check (may be
+/// empty: the reviewer designs one).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewRequest {
+    pub what: String,
+    pub subject: String,
+    pub paths: Vec<String>,
+    pub check: String,
+}
+
+impl ReviewRequest {
+    /// `/review [what]` or the judge: the last turn's work, described by `what` or by the
+    /// person's request.
+    pub fn of_work(what: Option<&str>, work: Option<&TurnWork>) -> Self {
+        let Some(w) = work else {
+            return Self {
+                what: what.unwrap_or_default().to_owned(),
+                ..Self::default()
+            };
+        };
+        let mut subject = format!("What the person asked:\n{}\n\nWhat was done:\n", w.request);
+        for c in &w.commands {
+            subject.push_str(&format!("- ran: {c}\n"));
+        }
+        for f in &w.files {
+            subject.push_str(&format!("- wrote: {f}\n"));
+        }
+        subject.push_str(&format!("\nWhat the agent said at the end:\n{}", w.answer));
+        Self {
+            what: what.map_or_else(
+                || format!("the work done for this request: {}", w.request),
+                str::to_owned,
+            ),
+            subject,
+            paths: w.files.clone(),
+            check: String::new(),
+        }
+    }
+}
+
+/// A review's result: the answer, and how it ran.
+#[derive(Debug, Clone)]
+pub struct Reviewed {
+    pub answer: clio_brain::pi::review::Answer,
+    /// The model it ran on.
+    pub model: String,
+    /// Why it did not run on the reviewer's model (the connector does not offer it).
+    pub fallback: Option<String>,
+    pub secs: u64,
+    /// The reviewer ended marked (it read what is not the person's): `Some(suspect)`.
+    pub marked: Option<bool>,
+    /// The reviewer's whole answer, kept in the review's folder.
+    pub full: Option<String>,
+    pub usage: clio_brain::pi::rpc::Usage,
 }
 
 pub trait SessionSource: Send + Sync {

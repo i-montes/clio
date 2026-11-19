@@ -208,6 +208,62 @@ pub struct Config {
     pub memory: MemoryCfg,
     #[serde(default)]
     pub session: SessionCfg,
+    #[serde(default)]
+    pub review: ReviewCfg,
+}
+
+/// The reviewer: a second agent that checks a piece of work (`/review`, or when the judge says so).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCfg {
+    /// Its model. Unset: `claude-opus-5-5` with the `claude` connector, the session's otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default = "review_thinking")]
+    pub thinking: String,
+    #[serde(default = "review_seconds")]
+    pub max_seconds: u64,
+    #[serde(default = "review_steps")]
+    pub max_steps: u32,
+    /// After a turn that changed something, the judge decides whether it is reviewed.
+    #[serde(default = "yes")]
+    pub auto: bool,
+    #[serde(default = "review_threshold")]
+    pub threshold: f64,
+    #[serde(default = "review_per_hour")]
+    pub max_per_hour: u32,
+}
+
+/// The reviewer's model with the `claude` connector when `review.model` is not set.
+pub const REVIEW_MODEL_CLAUDE: &str = "claude-opus-5-5";
+
+fn review_thinking() -> String {
+    "medium".into()
+}
+fn review_seconds() -> u64 {
+    600
+}
+fn review_steps() -> u32 {
+    40
+}
+fn review_threshold() -> f64 {
+    0.8
+}
+fn review_per_hour() -> u32 {
+    3
+}
+
+impl Default for ReviewCfg {
+    fn default() -> Self {
+        Self {
+            model: None,
+            thinking: review_thinking(),
+            max_seconds: review_seconds(),
+            max_steps: review_steps(),
+            auto: true,
+            threshold: review_threshold(),
+            max_per_hour: review_per_hour(),
+        }
+    }
 }
 
 /// One continuous conversation (`docs/specs/2026-11-18-continuous-conversation-design.md`).
@@ -316,6 +372,7 @@ impl Config {
             jev: JevCfg::default(),
             memory: MemoryCfg::default(),
             session: SessionCfg::default(),
+            review: ReviewCfg::default(),
         }
     }
 
@@ -340,6 +397,14 @@ impl Config {
             cfg.model.provider = provider.into();
         }
         cfg.model.check(&p)?;
+        if !clio_brain::pi::launch::THINKING.contains(&cfg.review.thinking.as_str()) {
+            return Err(format!(
+                "{}: review.thinking {:?} is not a Pi level ({})",
+                p.display(),
+                cfg.review.thinking,
+                clio_brain::pi::launch::THINKING.join(", ")
+            ));
+        }
         Ok(cfg)
     }
 

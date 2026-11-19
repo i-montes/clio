@@ -90,18 +90,19 @@ pub fn run_assessed(
     guard: &mut RunGuard,
     on_event: &mut dyn FnMut(&Event),
 ) -> Result<RunSummary, PiError> {
-    run_assessed_with(client, assessor, pre, text, None, cancel, guard, on_event)
+    run_assessed_with(client, assessor, pre, text, &[], cancel, guard, on_event)
 }
 
-/// `run_assessed`, with `data` from outside (what an action the person approved printed) after
-/// the person's text, wrapped as a tool result: it is neither judged nor recalled on as theirs.
+/// `run_assessed`, with `data` from outside (what an action the person approved printed, a
+/// review's findings) after the person's text, each wrapped as its source: it is neither judged
+/// nor recalled on as theirs.
 #[allow(clippy::too_many_arguments)]
 pub fn run_assessed_with(
     client: &RpcClient,
     assessor: &Assessor,
     pre: &super::preprompt::PrePrompt,
     text: &str,
-    data: Option<&str>,
+    data: &[(clio_gateway::Source, &str)],
     cancel: &Cancel,
     guard: &mut RunGuard,
     on_event: &mut dyn FnMut(&Event),
@@ -111,8 +112,8 @@ pub fn run_assessed_with(
     // What goes in front of the message (the time, memories, tool suggestions) is decided now; the
     // level above was judged without any of it.
     let mut prepared = pre.prepare_within(text, &super::envelope::stamp_now());
-    if let Some(d) = data {
-        let d = clio_gateway::wrap_untrusted(clio_gateway::Source::ToolResult, d);
+    for (source, d) in data {
+        let d = clio_gateway::wrap_untrusted(*source, d);
         prepared.text = format!("{}\n\n{d}", prepared.text);
     }
     // A compaction that went through: the next message asks for the session's summary first.

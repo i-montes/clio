@@ -19,6 +19,9 @@
 // Host mode (`CLIO_GUARD_HOST=1`): the tools act on the person's real machine. Paths go to the
 // host absolute, the early refusals about the working folder are left to the host (which knows
 // Clio's own folders), and `bash` takes `network` (a command has no network unless it asks).
+//
+// Review mode (`CLIO_GUARD_REVIEW=1`): the second agent that checks a piece of work. Only the
+// reading tools and `bash` (`REVIEW_TOOL_NAMES`), fixed whatever the mode, and no background jobs.
 
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -53,11 +56,14 @@ const JUDGE = "clio-guard.judge";
 export const TOOL_NAMES = ["read", "write", "edit", "bash", "find", "ls", "memory_search", "memory_get", "memory_timeline", "memory_context", "memory_save", "memory_session_summary", "memory_update", "memory_consolidate", "memory_forget", "memory_revert", "memory_pin", "memory_block", "memory_block_edit", "ask_person", "request_secret", "todo_write"] as const;
 // Host mode only: the commands `bash` starts in the background (`background: true`).
 export const HOST_TOOL_NAMES = ["job_output", "job_stop"] as const;
+// Review mode: the only tools of a review, always these (its prompt prefix caches).
+export const REVIEW_TOOL_NAMES = ["read", "bash", "find", "ls"] as const;
 export const HOST_USE_WHEN: Record<(typeof HOST_TOOL_NAMES)[number], string> = {
 	job_output: "check what a command started in the background has printed so far, and whether it ended",
 	job_stop: "stop a command that runs in the background",
 };
-const ACTIVE: string[] = [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
+const REVIEW = process.env.CLIO_GUARD_REVIEW === "1";
+const ACTIVE: string[] = REVIEW ? [...REVIEW_TOOL_NAMES] : [...TOOL_NAMES, ...(process.env.CLIO_GUARD_HOST === "1" ? HOST_TOOL_NAMES : [])];
 const ALLOWED = new Set<string>(ACTIVE);
 /**
  * What each tool is for, as Jev is asked about it («you need to <use_when>», Jev spec): one entry per
@@ -323,13 +329,18 @@ export default function clioGuard(pi: ExtensionAPI) {
 	register({
 		...bash,
 		...(HOST
-			? { parameters: { ...bash.parameters, properties: { ...bash.parameters.properties, timeout: HOST_TIMEOUT, network: NETWORK, background: BACKGROUND } } }
+			? {
+					parameters: {
+						...bash.parameters,
+						properties: { ...bash.parameters.properties, timeout: HOST_TIMEOUT, network: NETWORK, ...(REVIEW ? {} : { background: BACKGROUND }) },
+					},
+				}
 			: {}),
-		promptGuidelines: rule(bash, `bash: ${HOST ? `${HOST_BASH_RULE} ${HOST_JOBS_RULE}` : BASH_RULE} ${DATA_RULE}`),
+		promptGuidelines: rule(bash, `bash: ${HOST ? (REVIEW ? HOST_BASH_RULE : `${HOST_BASH_RULE} ${HOST_JOBS_RULE}`) : BASH_RULE} ${DATA_RULE}`),
 		execute: async (id: string, params: any, signal: any, onUpdate: any, ctx: any) => {
 			// Pi's own bash does not know `network` or `background`: they go to the host, not to Pi.
 			const { network, background, ...own } = params ?? {};
-			if (HOST && background === true) {
+			if (HOST && !REVIEW && background === true) {
 				const args: Record<string, unknown> = { command: own.command, background: true };
 				if (network === true) args.network = true;
 				if (typeof own.timeout === "number" && own.timeout > 0) args.timeout = Math.ceil(own.timeout);
@@ -702,10 +713,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 		pi.appendEntry(TOOLS_ENTRY, {
 			active: pi.getActiveTools(),
 			all: pi.getAllTools().map((t) => ({ name: t.name, source: t.sourceInfo?.path ?? null })),
-			catalog: [
-				...TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),
-				...(HOST ? HOST_TOOL_NAMES.map((name) => ({ name, use_when: HOST_USE_WHEN[name] })) : []),
-			],
+			catalog: REVIEW
+				? REVIEW_TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] }))
+				: [
+						...TOOL_NAMES.map((name) => ({ name, use_when: USE_WHEN[name] })),
+						...(HOST ? HOST_TOOL_NAMES.map((name) => ({ name, use_when: HOST_USE_WHEN[name] })) : []),
+					],
 			prompt: prompt.version,
 		});
 	});

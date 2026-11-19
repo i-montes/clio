@@ -1,0 +1,539 @@
+//! The reviewer: a second Pi that checks a piece of work and answers with a verdict
+//! (`docs/specs/2026-11-18-clio-creates-design.md`, stage 1). [`run`] is the only way to start
+//! one. It starts like the session's own Pi (the same jail, connector and launcher rules, the
+//! guard), with:
+//!
+//! - its own Pi folders and session, its own `clio toolhost` and run folder
+//!   (`<run>/reviews/<n>/`): its session file never shows in the drawer, its reads never mark
+//!   the conversation, and its commands and the chat's never wait for each other (the tool host
+//!   runs one call at a time);
+//! - the prompt `clio-reviewer@1` and a fixed list of tools (read, bash, find, ls), so its own
+//!   prompt prefix caches; no memory, no person to ask (`clio toolhost --review`: what would wait
+//!   for the person is refused), no background commands;
+//! - a clean context: only the review request, never the conversation, the identity or memory;
+//! - the session's marks, the same day's budget, and the action log under its own run id
+//!   (`<run>.review-<n>`).
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use clio_brain::control::DayBudget;
+use clio_brain::pi::budget::RunGuard;
+use clio_brain::pi::install;
+use clio_brain::pi::launch::{Launch, SessionTarget, start};
+use clio_brain::pi::review::{self, Answer};
+use clio_brain::pi::rpc::{Cancel, Usage};
+use clio_brain::pi::session::{
+    HostOpts, REVIEW_GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, review_guard_env,
+};
+use clio_brain::pi::{PiPaths, text};
+use clio_core::SystemClock;
+use clio_jev::{Clean, Questions};
+use serde_json::{Value, json};
+
+use super::local::{provider_of, task_budget};
+use super::{ReviewRequest, Reviewed, TurnWork};
+use crate::cli::home::{Config, Dirs, REVIEW_MODEL_CLAUDE};
+use crate::cli::{jev, usage};
+
+/// The judge's closed question after a turn that changed something.
+pub const NEEDS_REVIEW: &str = "needs_review";
+pub const NEEDS_REVIEW_TEXT: &str = "The work listed in `done` was carried out on this machine to \
+     answer `person_request`. It needs an independent check by someone else: it changes code, \
+     configuration, a service or data, a mistake in it could go unnoticed, and it is not trivial \
+     to see at a glance that it is right.";
+
+/// Where the session that asks for a review stands.
+pub struct Parent<'a> {
+    pub dirs: &'a Dirs,
+    /// Its run id and folder.
+    pub run: &'a str,
+    pub run_dir: &'a Path,
+    /// The folder it works on: its copy, or the home in host mode.
+    pub work: &'a Path,
+    pub host: bool,
+    /// Its mark: `Some(suspect)` when it is marked.
+    pub marked: Option<bool>,
+    pub day: Arc<Mutex<DayBudget>>,
+    /// The session's model, used when the connector does not offer the reviewer's.
+    pub model: &'a str,
+}
+
+/// The reviewer's model: `review.model`, else Opus with the `claude` connector, else the
+/// session's; the session's when the connector does not offer it (and why).
+fn model_for(d: &Dirs, cfg: &Config, session: &str) -> (String, Option<String>) {
+    let want = cfg.review.model.clone().unwrap_or_else(|| {
+        if cfg.model.provider == "claude" {
+            REVIEW_MODEL_CLAUDE.to_owned()
+        } else {
+            session.to_owned()
+        }
+    });
+    let offered = usage::pi_models(d, &cfg.model.provider)
+        .unwrap_or_else(|| usage::catalog_models(d, &cfg.model.provider));
+    if want == session || offered.is_empty() || offered.contains(&want) {
+        (want, None)
+    } else {
+        (
+            session.to_owned(),
+            Some(format!(
+                "{} is not offered by this connector: the review ran on the session's model",
+                text::line(&want, 80)
+            )),
+        )
+    }
+}
+
+/// A new, empty folder for the review: `<run>/reviews/<n>`.
+fn new_folder(run_dir: &Path) -> Result<(u32, PathBuf), String> {
+    let base = run_dir.join("reviews");
+    crate::cli::mkdir_private(&base)?;
+    for n in 1..10_000 {
+        let dir = base.join(n.to_string());
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {
+                crate::cli::mkdir_private(&dir)?;
+                return Ok((n, dir));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err("too many reviews in this run".into())
+}
+
+/// Runs one review to its end (or its limit, or `cancel`). Never fails: what kept it from
+/// running is a `could_not_check` that says why.
+pub fn run(p: &Parent<'_>, req: &ReviewRequest, cancel: &Cancel) -> Reviewed {
+    let began = Instant::now();
+    let mut out = Reviewed {
+        answer: Answer::could_not_check("the review did not start", None),
+        model: p.model.to_owned(),
+        fallback: None,
+        secs: 0,
+        marked: None,
+        full: None,
+        usage: Usage::default(),
+    };
+    let dir = match started(p, req, cancel, &mut out) {
+        Ok(dir) => Some(dir),
+        Err((dir, e)) => {
+            out.answer = Answer::could_not_check(&format!("the review did not run: {e}"), None);
+            dir
+        }
+    };
+    out.secs = began.elapsed().as_secs();
+    if let Some(dir) = dir {
+        keep(&dir, req, &out);
+    }
+    out
+}
+
+/// What `run` does once it has a folder; on failure, the folder (if any) and why.
+fn started(
+    p: &Parent<'_>,
+    req: &ReviewRequest,
+    cancel: &Cancel,
+    out: &mut Reviewed,
+) -> Result<PathBuf, (Option<PathBuf>, String)> {
+    if cancel.is_cancelled() {
+        return Err((None, "it was stopped".into()));
+    }
+    let d = p.dirs;
+    let cfg = Config::load(d).map_err(|e| (None, e))?;
+    let (model, fallback) = model_for(d, &cfg, p.model);
+    out.model.clone_from(&model);
+    out.fallback = fallback;
+    let (n, dir) = new_folder(p.run_dir).map_err(|e| (None, e))?;
+    let fail = |e: String| (Some(dir.clone()), e);
+    let id = format!("{}.review-{n}", p.run);
+    let main = crate::cli::pi::paths(d);
+    let node = install::find_node(&std::env::var("PATH").unwrap_or_default())
+        .map_err(|e| fail(e.to_string()))?;
+    let install = install::locate(&main).map_err(|e| fail(e.to_string()))?;
+    let connector = clio_brain::connector::by_provider(&cfg.model.provider)
+        .ok_or_else(|| fail("no connector".into()))?;
+    let key = crate::cli::vault::model_key(d, connector).map_err(fail)?;
+    // Its own Pi folders: its session file is not the conversation's, nor its `models.json`.
+    let paths = PiPaths { root: dir.clone() };
+    let exe = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
+    let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
+    let service_env = jev::toolhost_env(d, &cfg.jev);
+    let toolhost = Toolhost::start(
+        &exe,
+        d.need_runtime().map_err(fail)?,
+        &paths,
+        &dir,
+        p.work,
+        &key,
+        ToolhostOpts {
+            memory: None,
+            extra_env: &service_env,
+            host: p.host.then(|| HostOpts {
+                home: &d.home,
+                state: &state,
+                control: &control,
+                rules: rules.as_deref(),
+                run: &id,
+            }),
+            secrets: None,
+            review: true,
+        },
+    )
+    .map_err(fail)?;
+    let mut rc = cfg.clone();
+    rc.model.model.clone_from(&model);
+    rc.model.thinking.clone_from(&cfg.review.thinking);
+    let launch = Launch {
+        guard: Some(ensure_guard(&install).map_err(fail)?),
+        guard_tools: REVIEW_GUARD_TOOLS.map(String::from).to_vec(),
+        extra_env: review_guard_env(&paths, &toolhost, p.host).map_err(fail)?,
+        provider: provider_of(d, &rc),
+        api_key: Some(key),
+        cwd: p.work.to_path_buf(),
+        name: None,
+        install,
+        node,
+        paths,
+        session: SessionTarget::New {
+            id: Some(id.clone()),
+        },
+        helper: exe,
+    };
+    let pi = start(&launch).map_err(|e| fail(e.to_string()))?;
+    pi.client.set_interactive(false);
+    // The session's marks: a reviewer of a marked session asks before what a marked one asks.
+    if let Some(suspect) = p.marked
+        && !jev::taint_session(&toolhost.socket, &pi.session_id, suspect)
+    {
+        return Err(fail(
+            "it could not be marked like the session that asked for it".into(),
+        ));
+    }
+    let mut budget = task_budget(&cfg.limits);
+    budget.max_steps = cfg.review.max_steps;
+    budget.max_ms = i64::try_from(cfg.review.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let mut guard = RunGuard::new(Arc::new(SystemClock), &id, budget, p.day.clone());
+    let ask = review::request(&req.what, &req.subject, &req.paths, &req.check);
+    let ran = pi
+        .client
+        .run_prompt_limited(&ask, cancel, &mut guard, &mut |_| {});
+    let (answer, raw) = match ran {
+        Err(e) => (
+            Answer::could_not_check(&format!("the review did not run: {e}"), None),
+            String::new(),
+        ),
+        Ok(s) => {
+            out.usage = s.usage;
+            let a = if cancel.is_cancelled() || s.aborted {
+                Answer::could_not_check("the review was stopped", Some(&s.text))
+            } else if let Some(stop) = s.stopped {
+                Answer::could_not_check(
+                    &format!("the review reached its limit: {}", stop.reason()),
+                    Some(&s.text),
+                )
+            } else if s.text.trim().is_empty() && !s.errors.is_empty() {
+                Answer::could_not_check(
+                    &format!("the reviewer's model failed: {}", s.errors.join("; ")),
+                    None,
+                )
+            } else {
+                review::parse(&s.text)
+            };
+            (a, s.text)
+        }
+    };
+    out.answer = answer;
+    drop(pi);
+    toolhost.stop();
+    // The reviewer's own mark, as its tool host left it.
+    out.marked = std::fs::read_to_string(dir.join("toolhost/tainted.json"))
+        .ok()
+        .map(|t| t.contains("\"suspect\""));
+    let full = dir.join("answer.txt");
+    if crate::cli::write_private(&full, text::data(&raw).as_bytes()).is_ok() {
+        out.full = Some(full.display().to_string());
+    }
+    Ok(dir)
+}
+
+/// `review.json` in the review's folder: what was asked and what came of it.
+fn keep(dir: &Path, req: &ReviewRequest, r: &Reviewed) {
+    let a = &r.answer;
+    let v = json!({
+        "what": req.what,
+        "paths": req.paths,
+        "check": req.check,
+        "verdict": a.verdict.word(),
+        "ran": a.ran,
+        "findings": a.findings.iter().map(|f| json!({"what": f.what, "evidence": f.evidence})).collect::<Vec<_>>(),
+        "dropped": a.dropped,
+        "raw": a.raw,
+        "model": r.model,
+        "fallback": r.fallback,
+        "secs": r.secs,
+        "marked": r.marked,
+        "usage": {"input": r.usage.input, "output": r.usage.output, "cache_read": r.usage.cache_read, "cache_write": r.usage.cache_write, "cost": r.usage.cost},
+    });
+    let _ = crate::cli::write_private(
+        &dir.join("review.json"),
+        serde_json::to_string_pretty(&v)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+}
+
+/// The judge's closed question about a turn's work; `false` when the judge is off, silent, or
+/// says no (under `review.threshold`).
+pub fn needs_review(d: &Dirs, work: &TurnWork) -> bool {
+    let Ok(cfg) = Config::load(d) else {
+        return false;
+    };
+    let Some(judge) = jev::client(d, &cfg.jev).filter(|_| cfg.review.auto) else {
+        return false;
+    };
+    let Ok(socket) = crate::cli::vault::gateway_socket(d) else {
+        return false;
+    };
+    let vault = clio_vault::VaultClient::new(&socket).with_timeout(Duration::from_secs(2));
+    let scrub = |t: &str| vault.scrub(t).map_err(|e| e.to_string());
+    let done: Vec<String> = work
+        .commands
+        .iter()
+        .map(|c| format!("ran: {}", text::line(c, 300)))
+        .chain(
+            work.files
+                .iter()
+                .map(|f| format!("wrote: {}", text::line(f, 300))),
+        )
+        .take(40)
+        .collect();
+    let state = json!({ "person_request": text::line(&work.request, 2000), "done": done });
+    let (Ok(state), Ok(qs)) = (
+        Clean::try_new(state, &scrub),
+        Questions::new().noul(NEEDS_REVIEW, NEEDS_REVIEW_TEXT),
+    ) else {
+        return false;
+    };
+    judge
+        .ask(&state, &qs)
+        .ok()
+        .and_then(|a| a.noul(NEEDS_REVIEW))
+        .is_some_and(|p| p >= cfg.review.threshold)
+}
+
+/// One turn as the session saw it: its tool calls, by id.
+#[derive(Debug, Clone, Default)]
+pub struct Turn {
+    pub request: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// (call id, Pi's tool, its arguments).
+    pub calls: Vec<(String, String, Value)>,
+    pub answer: String,
+}
+
+/// What `turn` changed, as the action log records it: in host mode the log of the person's
+/// machine (`<state>/actions.jsonl`: this run and session, done or stopped), in copy mode the
+/// session's effect log (`effects.jsonl`: the write and command calls of this turn that the tool
+/// host applied). `None`: nothing (a read-only turn).
+pub fn work_of(
+    turn: &Turn,
+    session: &str,
+    host: Option<(&Path, &str)>,
+    effects: &Path,
+) -> Option<TurnWork> {
+    let (mut commands, mut files) = (Vec::new(), Vec::new());
+    let lines = |p: &Path| {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect::<Vec<_>>()
+    };
+    match host {
+        Some((state, run)) => {
+            for l in lines(&state.join("actions.jsonl")) {
+                let at = l["at_ms"].as_i64().unwrap_or(0);
+                if l["run"] != run
+                    || l["session"] != session
+                    || at < turn.start_ms
+                    || at > turn.end_ms
+                    || !matches!(l["outcome"].as_str(), Some("done" | "stopped"))
+                {
+                    continue;
+                }
+                let what = text::line(l["what"].as_str().unwrap_or(""), 300);
+                match l["tool"].as_str() {
+                    Some("exec") => commands.push(what),
+                    Some("fs_write" | "fs_mkdir") => files.push(what),
+                    _ => {}
+                }
+            }
+        }
+        None => {
+            let applied: std::collections::HashSet<String> = lines(effects)
+                .iter()
+                .filter_map(|l| l["id"].as_str())
+                .filter_map(|id| id.strip_prefix(session)?.strip_prefix(':'))
+                .filter_map(|rest| rest.split(':').next().map(str::to_owned))
+                .collect();
+            for (id, tool, args) in &turn.calls {
+                if !applied.contains(id) {
+                    continue;
+                }
+                match tool.as_str() {
+                    "bash" => {
+                        commands.push(text::line(args["command"].as_str().unwrap_or(""), 300))
+                    }
+                    "write" | "edit" => {
+                        files.push(text::line(args["path"].as_str().unwrap_or(""), 300))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    files.dedup();
+    (!commands.is_empty() || !files.is_empty()).then(|| TurnWork {
+        request: turn.request.clone(),
+        commands,
+        files,
+        answer: text::block(&turn.answer, 4000),
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn turn() -> Turn {
+        Turn {
+            request: "fix the backup script".into(),
+            start_ms: 100,
+            end_ms: 200,
+            calls: vec![
+                ("c1".into(), "read".into(), json!({"path": "a.sh"})),
+                ("c2".into(), "write".into(), json!({"path": "a.sh"})),
+                ("c3".into(), "bash".into(), json!({"command": "sh a.sh"})),
+                ("c4".into(), "bash".into(), json!({"command": "never ran"})),
+            ],
+            answer: "done".into(),
+        }
+    }
+
+    #[test]
+    fn copy_mode_counts_only_the_writes_and_commands_the_tool_host_applied() {
+        let t = tempfile::tempdir().unwrap();
+        let effects = t.path().join("effects.jsonl");
+        std::fs::write(
+            &effects,
+            "{\"id\":\"s1:c1:0\",\"hash\":\"h\",\"result\":{}}\n{\"id\":\"s1:c2:1\",\"hash\":\"h\",\"result\":{}}\n{\"id\":\"s1:c3:2\",\"hash\":\"h\",\"result\":{\"exit_code\":0}}\n{\"id\":\"other:c4:3\",\"hash\":\"h\",\"result\":{}}\n",
+        )
+        .unwrap();
+        let w = work_of(&turn(), "s1", None, &effects).unwrap();
+        assert_eq!(w.files, vec!["a.sh"]);
+        assert_eq!(w.commands, vec!["sh a.sh"]);
+        // A turn that only read changed nothing.
+        let mut read_only = turn();
+        read_only.calls.truncate(1);
+        assert_eq!(work_of(&read_only, "s1", None, &effects), None);
+    }
+
+    #[test]
+    fn host_mode_reads_the_action_log_of_this_run_session_and_turn() {
+        let t = tempfile::tempdir().unwrap();
+        let line = |at: i64, run: &str, tool: &str, what: &str, outcome: &str| {
+            json!({"at_ms": at, "run": run, "session": "s1", "tool": tool, "what": what, "outcome": outcome}).to_string()
+        };
+        let log = [
+            line(150, "r1", "exec", "systemctl --user restart x", "run"),
+            line(151, "r1", "exec", "systemctl --user restart x", "done"),
+            line(152, "r1", "fs_write", "/home/p/a.conf", "done"),
+            line(153, "r1", "exec", "rm -rf /", "deny"),
+            line(154, "r1", "fs_write", "/home/p/b", "aside"),
+            line(155, "r1.review-1", "exec", "cat a", "done"),
+            line(250, "r1", "exec", "later", "done"),
+        ]
+        .join("\n");
+        std::fs::write(t.path().join("actions.jsonl"), log).unwrap();
+        let w = work_of(&turn(), "s1", Some((t.path(), "r1")), Path::new("/none")).unwrap();
+        assert_eq!(w.commands, vec!["systemctl --user restart x"]);
+        assert_eq!(w.files, vec!["/home/p/a.conf"]);
+        assert_eq!(w.request, "fix the backup script");
+    }
+
+    fn dirs_in(root: &Path, cfg: &Config) -> Dirs {
+        let data = root.join("data");
+        let d = Dirs {
+            config: root.join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: Some(root.join("run/clio")),
+            home: root.to_path_buf(),
+        };
+        std::fs::create_dir_all(&d.config).unwrap();
+        std::fs::create_dir_all(&d.data).unwrap();
+        std::fs::write(d.config_file(), serde_json::to_string(cfg).unwrap()).unwrap();
+        d
+    }
+
+    fn work() -> TurnWork {
+        TurnWork {
+            request: "fix it".into(),
+            commands: vec!["make test".into()],
+            files: vec!["src/a.rs".into()],
+            answer: "fixed".into(),
+        }
+    }
+
+    // The judge off (the default) or `review.auto` off: no question, no automatic review.
+    #[test]
+    fn without_the_judge_or_with_auto_off_no_automatic_review() {
+        let t = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default_with(vec![]);
+        assert!(!cfg.jev.enabled && cfg.review.auto);
+        assert!(!needs_review(&dirs_in(t.path(), &cfg), &work()));
+        cfg.jev.enabled = true;
+        cfg.review.auto = false;
+        assert!(!needs_review(&dirs_in(t.path(), &cfg), &work()));
+    }
+
+    #[test]
+    fn the_reviewer_runs_on_opus_with_claude_and_on_the_sessions_model_when_it_is_not_offered() {
+        let t = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default_with(vec![]);
+        cfg.model.provider = "claude".into();
+        cfg.model.model = "claude-sonnet-5-5".into();
+        let d = dirs_in(t.path(), &cfg);
+        usage::save_pi_models(
+            &d,
+            "claude",
+            &["claude-sonnet-5-5".into(), REVIEW_MODEL_CLAUDE.into()],
+        );
+        assert_eq!(
+            model_for(&d, &cfg, "claude-sonnet-5-5"),
+            (REVIEW_MODEL_CLAUDE.into(), None)
+        );
+        usage::save_pi_models(&d, "claude", &["claude-sonnet-5-5".into()]);
+        let (m, why) = model_for(&d, &cfg, "claude-sonnet-5-5");
+        assert_eq!(m, "claude-sonnet-5-5");
+        assert!(why.unwrap().contains("not offered"));
+        // Another connector: the session's model unless `review.model` says otherwise.
+        cfg.model.provider = "opencode-go".into();
+        assert_eq!(model_for(&d, &cfg, "beam-free"), ("beam-free".into(), None));
+    }
+
+    #[test]
+    fn the_review_request_of_a_turn_lists_what_was_done() {
+        let w = work();
+        let r = ReviewRequest::of_work(None, Some(&w));
+        assert!(r.what.contains("fix it"));
+        assert!(r.subject.contains("- ran: make test") && r.subject.contains("- wrote: src/a.rs"));
+        assert_eq!(r.paths, vec!["src/a.rs"]);
+        let r = ReviewRequest::of_work(Some("the parser"), Some(&w));
+        assert_eq!(r.what, "the parser");
+    }
+}

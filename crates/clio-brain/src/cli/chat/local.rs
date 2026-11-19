@@ -40,6 +40,7 @@ use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, Toolhost, ToolhostOpts, ensure_guard, guard_env,
 };
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
+use clio_gateway::Source;
 use serde_json::{Value, json};
 
 use super::{Opened, Refresh, Row, RowKind, Session, SessionSource, Target};
@@ -296,6 +297,7 @@ impl SessionSource for LocalSource {
                     id.as_str(),
                     person.as_path(),
                 )),
+                review: false,
             },
         )?;
         // 3. Pi
@@ -395,6 +397,12 @@ impl SessionSource for LocalSource {
             taint_file,
             summarized: AtomicBool::new(false),
             busy: Mutex::new(()),
+            id: id.clone(),
+            work: work.clone(),
+            host_mode: host,
+            model: cfg.model.model.clone(),
+            turn: Mutex::default(),
+            findings: Mutex::default(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -419,7 +427,7 @@ impl SessionSource for LocalSource {
     }
 }
 
-fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
+pub(super) fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
     let m = &cfg.model;
     // `Config::load` guarantees `m.provider` is a connector.
     let mut p = connector::by_provider(&m.provider)
@@ -441,7 +449,7 @@ fn provider_of(d: &Dirs, cfg: &Config) -> Provider {
 /// An open session: Pi, and the toolhost beside it. Field order is the order they are dropped:
 /// Pi first, then the toolhost.
 /// The caps of one prompt: the configured limits, and the anti-loop and retries of the builtin loop.
-fn task_budget(limits: &Limits) -> Budget {
+pub(super) fn task_budget(limits: &Limits) -> Budget {
     let mut b = AgentConfig::new("pi", "", Path::new("")).budget;
     b.max_steps = limits.max_steps;
     b.max_ms = i64::try_from(limits.max_seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
@@ -499,6 +507,15 @@ struct ChatSession {
     /// Held while a turn runs: the closing turn never runs beside one (both would read Pi's events).
     busy: Mutex<()>,
     host: Option<HostSide>,
+    /// The run, the folder it works on, its mode and model: what a review starts from.
+    id: String,
+    work: PathBuf,
+    host_mode: bool,
+    model: String,
+    /// The last turn, for what it changed (`last_work`).
+    turn: Mutex<super::review::Turn>,
+    /// A review's findings for the next message, and the reviewer's mark.
+    findings: Mutex<Option<(String, Option<bool>)>>,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -562,16 +579,90 @@ impl Session for ChatSession {
             .chain(notes)
             .collect::<Vec<_>>()
             .join("\n\n");
-        run_assessed_with(
+        let mut given = Vec::new();
+        if !data.is_empty() {
+            given.push((Source::ToolResult, data.as_str()));
+        }
+        // A review's findings: data from another agent, with Clio's request to answer them. A
+        // reviewer that read what is not the person's marks this session the same way.
+        let findings = locked(&self.findings).take();
+        if let Some((_, marked)) = &findings {
+            if let Some(suspect) = *marked {
+                jev::taint_session(&self.toolhost.socket, &self.pi.session_id, suspect);
+            }
+            self.pre.reviewed();
+        }
+        if let Some((f, _)) = &findings {
+            given.push((Source::SubagentSummary, f.as_str()));
+        }
+        let mut turn = super::review::Turn {
+            request: text.to_owned(),
+            start_ms: crate::cli::now_ms(),
+            ..Default::default()
+        };
+        let mut watch = |e: &Event| {
+            if let Event::ToolStart { id, name, args } = e {
+                turn.calls.push((id.clone(), name.clone(), args.clone()));
+            }
+            on_event(e);
+        };
+        let r = run_assessed_with(
             &self.pi.client,
             &self.assessor,
             &self.pre,
             text,
-            (!data.is_empty()).then_some(data.as_str()),
+            &given,
             cancel,
             &mut guard,
-            on_event,
+            &mut watch,
+        );
+        turn.end_ms = crate::cli::now_ms();
+        if let Ok(s) = &r {
+            turn.answer.clone_from(&s.text);
+        }
+        *locked(&self.turn) = turn;
+        r
+    }
+
+    fn last_work(&self) -> Option<super::TurnWork> {
+        let turn = locked(&self.turn).clone();
+        let state = self.dirs.data.join("host");
+        super::review::work_of(
+            &turn,
+            &self.pi.session_id,
+            self.host_mode
+                .then_some((state.as_path(), self.id.as_str())),
+            &self.run_dir.join("toolhost/effects.jsonl"),
         )
+    }
+
+    fn needs_review(&self, work: &super::TurnWork) -> bool {
+        super::review::needs_review(&self.dirs, work)
+    }
+
+    fn review(
+        &self,
+        req: &super::ReviewRequest,
+        cancel: &Cancel,
+    ) -> Result<super::Reviewed, String> {
+        let marked = std::fs::read_to_string(&self.taint_file)
+            .ok()
+            .map(|t| t.contains("\"suspect\""));
+        let parent = super::review::Parent {
+            dirs: &self.dirs,
+            run: &self.id,
+            run_dir: &self.run_dir,
+            work: &self.work,
+            host: self.host_mode,
+            marked,
+            day: self.day.clone(),
+            model: &self.model,
+        };
+        Ok(super::review::run(&parent, req, cancel))
+    }
+
+    fn queue_findings(&self, findings: &str, marked: Option<bool>) {
+        *locked(&self.findings) = Some((findings.to_owned(), marked));
     }
 
     fn new_pending(&self) -> Vec<Pending> {

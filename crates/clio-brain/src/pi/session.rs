@@ -46,6 +46,8 @@ pub const GUARD_TOOLS: [&str; 22] = [
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools.
 pub const HOST_GUARD_TOOLS: [&str; 2] = ["job_output", "job_stop"];
+/// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
+pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
 pub const PROMPT_NAME: &str = "clio-agent@22";
 pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@22.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
@@ -56,6 +58,9 @@ pub fn scrub_json(key: &str) -> String {
 
 pub const HOST_PROMPT_NAME: &str = "clio-host@6";
 pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@6.md");
+/// The prompt of a review (the second agent that checks a piece of work).
+pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@1";
+pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@1.md");
 /// The guard travels inside the binary so an installed `clio` needs no repository; a checkout
 /// that already has `extensions/clio-guard` next to Pi's `node_modules` uses its own.
 pub const GUARD_FILES: [(&str, &str); 4] = [
@@ -164,6 +169,38 @@ pub fn guard_env(
     Ok(env)
 }
 
+/// `guard_env` for a review: its own prompt and `CLIO_GUARD_REVIEW=1` (the reduced tool list);
+/// `host` as the session that asked for it. Nobody answers its questions (no `CLIO_GUARD_PERSON`).
+pub fn review_guard_env(
+    paths: &PiPaths,
+    toolhost: &Toolhost,
+    host: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut env = vec![
+        (
+            "CLIO_GUARD_PROMPT_FILE".into(),
+            write_named_prompt(paths, REVIEW_PROMPT_NAME, REVIEW_PROMPT)?
+                .display()
+                .to_string(),
+        ),
+        (
+            "CLIO_GUARD_PROMPT_VERSION".into(),
+            REVIEW_PROMPT_NAME.into(),
+        ),
+        (
+            "CLIO_TOOLHOST_SOCKET".into(),
+            toolhost.socket.display().to_string(),
+        ),
+        (REVIEW_ENV.into(), "1".into()),
+    ];
+    if host {
+        env.push((HOST_ENV.into(), "1".into()));
+    }
+    Ok(env)
+}
+
+/// Set in Pi's environment for a review.
+pub const REVIEW_ENV: &str = "CLIO_GUARD_REVIEW";
 /// Set in Pi's environment for a host-mode session.
 pub const HOST_ENV: &str = "CLIO_GUARD_HOST";
 /// Set in Pi's environment when a person answers the guard's dialogs.
@@ -181,6 +218,8 @@ pub struct ToolhostOpts<'a> {
     /// A person can be asked for a secret (`request_secret`): where requests wait (`Dirs.data/host`),
     /// the run, and the vault's person socket.
     pub secrets: Option<(&'a Path, &'a str, &'a Path)>,
+    /// A review: nothing is set aside for the person (`clio toolhost --review`).
+    pub review: bool,
 }
 
 /// The `--host-*` options of `clio toolhost`.
@@ -230,6 +269,7 @@ impl Toolhost {
             extra_env,
             host,
             secrets,
+            review,
         } = opts;
         // Units a `clio` killed before it could stop them do not run forever as the person.
         // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
@@ -296,6 +336,9 @@ impl Toolhost {
                 .arg(run)
                 .arg("--vault-person")
                 .arg(person);
+        }
+        if review {
+            cmd.arg("--review");
         }
         let mut child = cmd
             .arg("--socket-dir")
@@ -409,6 +452,23 @@ mod tests {
             assert!(host.contains(&format!("\"{t}\"")), "{t}");
         }
         assert_eq!(host.matches('"').count(), HOST_GUARD_TOOLS.len() * 2);
+        let review = index
+            .lines()
+            .find(|l| l.contains("export const REVIEW_TOOL_NAMES"))
+            .unwrap();
+        for t in REVIEW_GUARD_TOOLS {
+            assert!(review.contains(&format!("\"{t}\"")), "{t}");
+        }
+        assert_eq!(review.matches('"').count(), REVIEW_GUARD_TOOLS.len() * 2);
+    }
+
+    #[test]
+    fn the_review_prompt_is_the_one_the_guard_checks_and_names_its_tools() {
+        assert!(REVIEW_PROMPT.starts_with("version: 1\n"));
+        assert!(!REVIEW_PROMPT.contains("Jev"));
+        for t in REVIEW_GUARD_TOOLS {
+            assert!(REVIEW_PROMPT.contains(&format!("`{t}`")), "{t}");
+        }
     }
 
     #[test]
