@@ -797,6 +797,7 @@ pub fn no_unix_sockets() -> Option<Vec<u8>> {
 }
 
 /// `no_unix_sockets` in a memory file at its start, open WITHOUT close-on-exec (bwrap reads it).
+#[cfg(target_os = "linux")]
 fn seccomp_fd() -> Result<std::fs::File, String> {
     use std::io::{Seek, Write};
     let program = no_unix_sockets()
@@ -808,6 +809,13 @@ fn seccomp_fd() -> Result<std::fs::File, String> {
         .and_then(|()| f.rewind())
         .map_err(|e| format!("seccomp filter: {e}"))?;
     Ok(f)
+}
+
+/// A review's filter only exists on Linux (`memfd_create`, `bwrap --seccomp`): elsewhere there is
+/// no bwrap, and a review is refused, never run without its filter.
+#[cfg(not(target_os = "linux"))]
+fn seccomp_fd() -> Result<std::fs::File, String> {
+    Err("a review's seccomp filter only exists on Linux".into())
 }
 
 #[cfg(test)]
