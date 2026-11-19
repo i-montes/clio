@@ -59,16 +59,16 @@ pub const HOST_GUARD_TOOLS: [&str; 7] = [
 ];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@25";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@25.md");
+pub const PROMPT_NAME: &str = "clio-agent@26";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@26.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@9";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@9.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@10";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@10.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -522,8 +522,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 25\n"));
-        assert!(HOST_PROMPT.starts_with("version: 9\n"));
+        assert!(PROMPT.starts_with("version: 26\n"));
+        assert!(HOST_PROMPT.starts_with("version: 10\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -550,8 +550,8 @@ mod tests {
             .unwrap()
         };
         for (new, was) in [
-            (PROMPT, old("clio-agent@24.md")),
-            (HOST_PROMPT, old("clio-host@8.md")),
+            (old("clio-agent@25.md"), old("clio-agent@24.md")),
+            (old("clio-host@9.md"), old("clio-host@8.md")),
         ] {
             let start = new.find("\nMCP servers\n").expect("an MCP servers section");
             let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
@@ -580,6 +580,48 @@ mod tests {
             let without = format!("{}{}", &new[..start + 1], &new[end + 1..]);
             let first = |t: &str| t.split_once('\n').map(|(_, r)| r.to_owned()).unwrap();
             assert_eq!(first(&without), first(&was));
+        }
+    }
+
+    // S-36: the new prompts are the old ones with only the passages on approval changed (the
+    // permission window, the one box at the end of the turn, secrets only the person answers),
+    // and they never tell the model to have the person type a command to approve.
+    #[test]
+    fn the_new_prompts_only_change_the_approval_passages() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was, changed) in [
+            (PROMPT, old("clio-agent@25.md"), 3),
+            (HOST_PROMPT, old("clio-host@9.md"), 8),
+        ] {
+            let (n, w): (Vec<&str>, Vec<&str>) = (new.lines().collect(), was.lines().collect());
+            assert_eq!(n.len(), w.len());
+            let diff: Vec<(&str, &str)> = n
+                .iter()
+                .zip(&w)
+                .filter(|(a, b)| a != b)
+                .map(|(a, b)| (*a, *b))
+                .collect();
+            assert_eq!(diff.len(), changed, "{diff:#?}");
+            for (now, _) in &diff[1..] {
+                assert!(
+                    now.contains("approv") || now.contains("permission window"),
+                    "{now}"
+                );
+            }
+            for bad in [
+                "clio approve",
+                "/pending",
+                "/mcp confirm",
+                "stays off until",
+            ] {
+                assert!(!new.contains(bad), "{bad}");
+            }
         }
     }
 }
