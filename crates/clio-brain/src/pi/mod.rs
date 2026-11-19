@@ -25,6 +25,7 @@ pub mod level;
 pub mod net;
 pub mod preprompt;
 pub mod review;
+pub mod round;
 pub mod rpc;
 pub mod session;
 pub mod sessions;
