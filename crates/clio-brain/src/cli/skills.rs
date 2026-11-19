@@ -418,13 +418,9 @@ fn register_kind(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
     r.current = n;
     r.versions.push(version);
     r.failures = 0;
-    // An MCP server, new or at a new version, is off until the person confirms its tools.
-    if kind == Kind::Mcp {
-        r.enabled = false;
-        r.off = Some(WAITING_TOOLS.into());
-    } else if r.off.as_deref() != Some(OFF_BY_PERSON) {
-        // A new version, reviewed, turns back on a skill that failed; not one the person turned
-        // off.
+    // A new version (approved, an MCP server's included) turns back on one that failed or
+    // changed; not one the person turned off.
+    if r.off.as_deref() != Some(OFF_BY_PERSON) {
         r.enabled = true;
         r.off = None;
     }
