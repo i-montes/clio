@@ -109,11 +109,14 @@ pub fn restore_terminal() {
 /// What the TUI writes when it takes the terminal: the alternate screen, bracketed paste, the
 /// mouse if asked, and the keyboard's legacy mode, pushed on the screen it was on and on the
 /// alternate one (kitty keeps a stack for each): a "report all keys" mode another program left
-/// on would turn Shift+a into `a`. Terminals that do not know the protocol ignore it.
+/// on would turn Shift+a into `a`. Terminals that do not know the protocol ignore it. And xterm's
+/// "modifyOtherKeys" off (`CSI > 4 ; 0 m`, its default, so nothing is restored at exit): left on
+/// by another program, it sends Ctrl-C, Shift+a and `_` in a form crossterm drops.
 fn take(out: &mut impl std::io::Write, mouse: bool) -> std::io::Result<()> {
     let legacy = || PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::empty());
     queue!(
         out,
+        crossterm::style::Print("\x1b[>4;0m"),
         legacy(),
         EnterAlternateScreen,
         legacy(),

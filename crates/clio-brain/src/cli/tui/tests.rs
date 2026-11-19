@@ -2116,7 +2116,7 @@ fn ctrl_c_twice_always_quits_and_so_does_quit() {
 }
 
 // The terminal is put in the keyboard's legacy mode while Clio runs (on the screen it was on
-// and on the alternate one), and both are popped when it is given back.
+// and on the alternate one), and both are popped when it is given back; modifyOtherKeys is off.
 #[test]
 fn taking_the_terminal_asks_for_legacy_keys_and_giving_it_back_pops_them() {
     let (mut on, mut off) = (Vec::new(), Vec::new());
@@ -2127,6 +2127,9 @@ fn taking_the_terminal_asks_for_legacy_keys_and_giving_it_back_pops_them() {
         String::from_utf8(off).unwrap(),
     );
     let alt = on.find("\x1b[?1049h").unwrap();
+    // xterm's modifyOtherKeys off, once, and nothing about it at exit.
+    assert_eq!(on.matches("\x1b[>4;0m").count(), 1, "{on:?}");
+    assert!(!off.contains("\x1b[>4"), "{off:?}");
     assert_eq!(on.matches("\x1b[>0u").count(), 2, "{on:?}");
     assert!(on.find("\x1b[>0u").unwrap() < alt && on.rfind("\x1b[>0u").unwrap() > alt);
     assert!(!on.contains("\x1b[?1000h"), "no mouse unless asked: {on:?}");
