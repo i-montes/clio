@@ -84,6 +84,8 @@ const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
 const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
 const BLOCK_DESCRIPTION: &str = "Read one of the person's blocks whole, in order, each entry with its id: identidad (who Clio is and how she speaks), reglas (how she works and her limits), preferencias (who the person is), vigilancia (what she watches) (read-only)";
 const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
+/// The memory's judge declining a text as not worth keeping (the brain's port says exactly this).
+pub const NOT_WORTH_REMEMBERING: &str = "Clio did not save it: it does not look worth remembering";
 const HIDDEN_CHARS: &str =
     "the text has invisible or control characters: write it again with visible characters only";
 const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. In a session that read outside content it is set aside and written only if the person approves it";
@@ -1056,6 +1058,7 @@ impl ToolHost {
                 Some(cleaned).filter(|t| !t.is_empty())
             }
         };
+        let summary = kind == ProposalKind::Session;
         let draft = ProposalDraft {
             text,
             title,
@@ -1132,6 +1135,17 @@ impl ToolHost {
                     external: false,
                 }
             }
+            // The summary is Clio's own bookkeeping: declined as not worth keeping, there is
+            // nothing for the model to report, so it is no failure. An unsafe one stays an error.
+            Err(why) if summary && why == NOT_WORTH_REMEMBERING => Response {
+                id: req.id.clone(),
+                ok: true,
+                content: "nothing was saved and nothing needs saving: go on".into(),
+                data: json!({ "proposed": false, "result": "declined" }),
+                decision: out,
+                tainted: self.is_tainted(&req.session),
+                external: false,
+            },
             Err(why) => self.memory_failed(req, out, &why),
         }
     }

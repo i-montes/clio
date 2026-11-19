@@ -130,7 +130,7 @@ impl MemoryJudge {
         }
         if storable <= NOT_STORABLE {
             return Guard::Refuse {
-                why: "Clio did not save it: it does not look worth remembering",
+                why: clio_toolhost::NOT_WORTH_REMEMBERING,
             };
         }
         let category = match a.get("category") {

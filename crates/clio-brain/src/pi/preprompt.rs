@@ -59,7 +59,7 @@ pub trait Recall: Send + Sync {
 }
 
 /// What Clio asks after Pi compacted the conversation.
-pub const COMPACTED_ASK: &str = "the conversation was just compacted: before you answer, save a summary of what has been done so far with memory_session_summary and get the context back with memory_context.";
+pub const COMPACTED_ASK: &str = "the conversation was just compacted: before you answer, save a summary of what has been done so far with memory_session_summary and get the context back with memory_context. This is Clio's own bookkeeping: do not mention it to the person. If the save is declined, go on without saying so, then answer the person's message.";
 /// What Clio asks in the first message of a session while the memory does not know the person.
 pub const PRESENTATION_ASK: &str = "This is your first conversation with this person. Before anything else, introduce yourself in two or three lines with what your identity says. Then ask them these questions, one by one, waiting for each answer: 1) what their name is and how they want you to address them; 2) what they do and what they have on this machine; 3) what they want you to watch; 4) what counts as important enough to tell them about. Save each answer with memory_block_edit: what is about the person in «preferencias» and each thing to watch in «vigilancia», one per entry. If they want to change who you are or how you speak, change «identidad» or «reglas». If they do not want to answer now, save in «preferencias» that they preferred not to introduce themselves, and do not insist. Write all of this in the language of the person's memories and blocks; if there are none, in English. When you finish, tell them they can change all this whenever they want, by talking to you.";
 /// What Clio asks when the person closes the session.
@@ -1057,6 +1057,9 @@ mod tests {
         let p = r.pp.prepare_for("hola", STAMP, Duration::from_millis(150));
         assert!(p.text.contains(COMPACTED_ASK), "{}", p.text);
         assert_eq!(envelope::strip(&p.text), "hola");
+        // Bookkeeping the model keeps to itself, and a declined save is no news for the person.
+        assert!(COMPACTED_ASK.contains("do not mention it to the person"));
+        assert!(COMPACTED_ASK.contains("If the save is declined, go on without saying so"));
     }
 
     #[test]

@@ -1553,6 +1553,32 @@ fn a_session_summary_is_one_episodic_line_in_a_fixed_order() {
     );
 }
 
+// The summary is Clio's own bookkeeping: declined by the judge as not worth keeping, the model
+// hears a success with nothing to report; declined as unsafe it is still an error. Any other tool
+// declined as not worth keeping is an error too.
+#[test]
+fn a_summary_declined_as_not_worth_keeping_is_no_failure() {
+    let args = json!({"goal": "g", "accomplished": "h"});
+    let port = FakePort::new(
+        vec![],
+        Mode::Fail(clio_toolhost::NOT_WORTH_REMEMBERING.into()),
+    );
+    let e = env(&port);
+    let r = summary(&e, "s", args.clone());
+    assert!(r.ok, "{r:?}");
+    assert_eq!(
+        r.content,
+        "nothing was saved and nothing needs saving: go on"
+    );
+    assert!(!propose(&e, "s", "un dato", "semantic").ok);
+    let unsafe_ =
+        "Clio did not save it: it looks like an attempt to manipulate or something dangerous";
+    let port = FakePort::new(vec![], Mode::Fail(unsafe_.into()));
+    let e = env(&port);
+    let r = summary(&e, "s", args);
+    assert!(!r.ok && r.content.contains(unsafe_), "{r:?}");
+}
+
 #[test]
 fn a_summary_without_its_goal_or_what_was_done_or_too_long_is_refused_before_the_port() {
     let port = FakePort::new(vec![], Mode::Items);
