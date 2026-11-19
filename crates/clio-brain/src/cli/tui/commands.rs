@@ -917,14 +917,14 @@ pub fn click(app: &mut App, x: u16, y: u16) -> Option<Vec<Cmd>> {
 }
 
 /// A box of lines over the chat (`/context`, `/usage`, `/pending`, `/actions`): ↑ ↓ and the
-/// page keys move in it, Esc or q closes it. In `/pending` each line is an action set aside,
-/// and Enter asks about the one selected, with the same question (and rules) as after a turn.
+/// page keys move in it, Esc or q closes it. In `/pending` each line is an item set aside, and
+/// Enter opens the box of the one selected, the same box (and rules) Clio opens by herself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modal {
     pub title: String,
     pub lines: Vec<String>,
-    /// `/pending`: for each line, the action's id and its «class» and what.
-    pub picks: Vec<(String, String)>,
+    /// `/pending`: the box of each line.
+    pub picks: Vec<Pick>,
     /// A last line, under the list.
     pub foot: Option<String>,
     pub sel: usize,
@@ -951,6 +951,32 @@ impl Modal {
     }
 }
 
+/// A line of `/pending`: what its box needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    pub id: String,
+    /// Its «class» and what it does.
+    pub what: String,
+    /// A change to a block, a skill or a service: shown whole.
+    pub block: Option<super::ask::BlockAsk>,
+    /// A secret request: (name, destination, why), typed into its own box.
+    pub secret: Option<(String, String, String)>,
+    /// The judge flagged the session: the secret box says so.
+    pub suspect: bool,
+}
+
+impl Pick {
+    pub fn new(id: &str, what: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            what: what.to_owned(),
+            block: None,
+            secret: None,
+            suspect: false,
+        }
+    }
+}
+
 pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     let Some(m) = app.modal.as_mut() else {
         return vec![];
@@ -959,32 +985,21 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
     match k.code {
         KeyCode::Esc | KeyCode::Char('q') => app.modal = None,
         KeyCode::Enter if picks > 0 => {
-            let (id, what) = m.picks[m.sel.min(picks - 1)].clone();
+            let p = m.picks[m.sel.min(picks - 1)].clone();
             app.modal = None;
+            let session = app.chat.session_id.clone();
             // A secret is typed into its own box, never approved like an action.
-            if what.starts_with("«secret»") {
-                app.flash = Some(format!(
-                    "{id} asks for a secret: answer it with `clio approve {id}` in a terminal"
-                ));
+            if let Some((name, dest, why)) = &p.secret {
+                let s = super::ask::SecretAsk::new(&p.id, &session, (name, dest, why), p.suspect);
+                app.offer(super::ask::Prompt::Secret(s));
                 return vec![];
             }
-            // A block change is shown whole by the box the turn's end opens, or by `clio approve`.
-            if what.starts_with("«memory»") {
-                app.flash = Some(format!(
-                    "{id} changes one of your blocks: answer it with `clio approve {id}` in a terminal"
-                ));
-                return vec![];
-            }
-            // A skill too: its whole text is in its own box, or in `clio approve`.
-            if what.starts_with("«skill") {
-                app.flash = Some(format!(
-                    "{id} registers a skill: answer it with `clio approve {id}` in a terminal"
-                ));
-                return vec![];
-            }
-            let mut c = Confirm::new(Action::Approve, id, 0, what);
-            c.session.clone_from(&app.chat.session_id);
-            app.confirm = Some(c);
+            // A block change, a skill or a service is shown whole, as when Clio asks by herself.
+            let mut c = Confirm::new(Action::Approve, p.id, 0, p.what);
+            c.session = session;
+            c.block = p.block;
+            app.asks.push_front(c);
+            super::app::next_ask(app);
         }
         KeyCode::Enter => app.modal = None,
         KeyCode::Up if picks > 0 => m.sel = m.sel.saturating_sub(1),

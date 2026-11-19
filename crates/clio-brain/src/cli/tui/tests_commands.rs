@@ -513,7 +513,15 @@ fn what_the_model_writes_is_never_a_command() {
             }),
         ],
     );
-    assert_eq!(cmds, vec![Cmd::LoadSessions]);
+    assert_eq!(
+        cmds,
+        vec![
+            Cmd::LoadSessions,
+            Cmd::CheckApprovals {
+                session: "sid".into()
+            }
+        ]
+    );
     assert!(!a.quit && a.confirm.is_none() && a.chat.menu.is_none());
     // Nor what a reopened session's history holds.
     let mut a = app();

@@ -276,13 +276,15 @@ pub struct HostRules {
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
     sudo: Regex,
-    questions_per_day: u32,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostFile {
-    questions_per_day: Option<u32>,
+    /// The old daily cap of questions, still read so an older file loads: the chat's window
+    /// (`approvals.every_hours`) replaced it.
+    #[serde(default, rename = "questions_per_day")]
+    _questions_per_day: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     foreign: Vec<PathBuf>,
     #[serde(default)]
@@ -307,7 +309,6 @@ impl HostRules {
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
-            questions_per_day: 3,
         }
     }
 
@@ -362,14 +363,7 @@ impl HostRules {
                 .map_err(|e| format!("host.json: invalid pattern «{}»: {e}", a.pattern))?;
             self.rules.push((a.class, re));
         }
-        if let Some(n) = file.questions_per_day {
-            self.questions_per_day = n;
-        }
         Ok(self)
-    }
-
-    pub fn questions_per_day(&self) -> u32 {
-        self.questions_per_day
     }
 
     pub fn classify_command(&self, command: &str) -> Option<Class> {
@@ -1343,21 +1337,14 @@ mod tests {
 
     #[test]
     fn the_persons_file_only_adds() {
+        // `questions_per_day` (the old daily cap) is still read, and does nothing.
         let r = HostRules::factory()
             .with_file(r#"{"questions_per_day": 5, "foreign": ["/srv/inbox", "mailbox"], "ask": [{"class": "send", "pattern": "^rsync .*prod:"}]}"#)
             .unwrap();
-        assert_eq!(r.questions_per_day(), 5);
         assert!(r.is_foreign(Path::new("/srv/inbox/a")) && r.is_foreign(Path::new("/a/mailbox/b")));
         assert!(r.is_foreign(Path::new("/var/log/x")));
         assert_eq!(r.classify_command("sudo rsync -a x prod:/srv"), Some(Send));
         assert_eq!(r.classify_command("rm -rf ~/x"), Some(Delete));
-        assert_eq!(
-            HostRules::factory()
-                .with_file("{}")
-                .unwrap()
-                .questions_per_day(),
-            3
-        );
 
         for (json, says) in [
             (r#"{"remove": ["/var/log"]}"#, "unknown field"),

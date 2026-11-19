@@ -1192,17 +1192,11 @@ impl ToolHost {
         let waits = self
             .host
             .as_ref()
-            .map(|h| {
-                (
-                    h.cfg.state.as_path(),
-                    h.cfg.run.as_str(),
-                    h.cfg.rules.questions_per_day(),
-                )
-            })
+            .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()))
             .or_else(|| {
                 self.secrets
                     .as_ref()
-                    .map(|c| (c.state.as_path(), c.run.as_str(), c.per_day))
+                    .map(|c| (c.state.as_path(), c.run.as_str()))
             });
         if marked && waits.is_none() {
             return Response {
@@ -1331,7 +1325,7 @@ impl ToolHost {
         &self,
         req: &Request,
         out: DecisionOut,
-        at: (&Path, &str, u32),
+        at: (&Path, &str),
         port: &Arc<dyn MemoryPort>,
         name: String,
         edit: BlockEdit,

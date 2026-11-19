@@ -147,7 +147,6 @@ pub(super) fn block_ask(args: serde_json::Value, suspect: bool) -> super::ask::B
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: None,
     };
@@ -177,7 +176,6 @@ pub(super) fn skill_ask(
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some(reason.into()),
     };
@@ -210,7 +208,6 @@ pub(super) fn service_ask(
         session: "sid".into(),
         created_ms: 0,
         expires_ms: 1,
-        ask: true,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("a service always waits for your approval".into()),
     };
@@ -708,11 +705,8 @@ fn command_states() -> Vec<(&'static str, App)> {
         ],
     );
     m.picks = vec![
-        (
-            "a1b2".into(),
-            "«delete» sudo rm -r /var/lib/docker/volumes/old".into(),
-        ),
-        ("c3d4".into(), "«control» systemctl restart nginx".into()),
+        commands::Pick::new("a1b2", "«delete» sudo rm -r /var/lib/docker/volumes/old"),
+        commands::Pick::new("c3d4", "«control» systemctl restart nginx"),
     ];
     m.foot = Some("and 1 from other sessions: clio pending in a terminal".into());
     a.modal = Some(m);

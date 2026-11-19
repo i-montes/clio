@@ -212,6 +212,29 @@ pub struct Config {
     pub review: ReviewCfg,
     #[serde(default)]
     pub ui: UiCfg,
+    #[serde(default)]
+    pub approvals: ApprovalsCfg,
+}
+
+/// When Clio opens the approval boxes by herself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalsCfg {
+    /// At most once every this many hours (the rest of the time the items wait, quietly, in
+    /// `/pending`); 0 asks at once.
+    #[serde(default = "every_hours")]
+    pub every_hours: u64,
+}
+
+fn every_hours() -> u64 {
+    4
+}
+
+impl Default for ApprovalsCfg {
+    fn default() -> Self {
+        Self {
+            every_hours: every_hours(),
+        }
+    }
 }
 
 /// The chat's screen.
@@ -405,6 +428,7 @@ impl Config {
             session: SessionCfg::default(),
             review: ReviewCfg::default(),
             ui: UiCfg::default(),
+            approvals: ApprovalsCfg::default(),
         }
     }
 

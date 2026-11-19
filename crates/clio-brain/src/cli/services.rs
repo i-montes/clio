@@ -1269,7 +1269,6 @@ mod tests {
             "s",
             args,
             "a service always waits for your approval",
-            3,
         )
         .unwrap()
     }

@@ -7,6 +7,7 @@
 //! threads: it turns `Cmd`s into work on worker threads and their answers into `Input::Bg`.
 
 pub mod app;
+pub mod approvals;
 pub mod ask;
 pub mod chat;
 pub mod commands;
@@ -465,6 +466,45 @@ struct Ctx {
 
 /// The threads closing a session (and saving its summary).
 type Closing = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+
+/// The box of a waiting item, for `/pending`.
+fn pick(p: &clio_toolhost::pending::Pending, suspect: bool) -> commands::Pick {
+    let what = format!("{} {}", super::pending::label(p), super::pending::what(p));
+    let mut k = commands::Pick::new(&p.id, &what);
+    k.block = ask::BlockAsk::new(p, suspect);
+    k.secret = clio_toolhost::pending::secret_of(p)
+        .map(|(n, d, w)| (n.to_owned(), d.to_owned(), w.to_owned()));
+    k.suspect = suspect;
+    k
+}
+
+/// Clio asks about everything that waits, one box after another: the secrets in their own box,
+/// the rest as approvals (a block change, a skill or a service shown whole).
+fn offer(waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
+    let (secrets, aside): (Vec<_>, Vec<_>) = waiting
+        .iter()
+        .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
+    let secrets: Vec<_> = secrets
+        .into_iter()
+        .filter_map(|p| {
+            let (n, d, w) = clio_toolhost::pending::secret_of(p)?;
+            Some((p.id.clone(), (n.into(), d.into(), w.into())))
+        })
+        .collect();
+    if !secrets.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, suspect)));
+    }
+    let asks: Vec<_> = aside
+        .into_iter()
+        .map(|p| {
+            let k = pick(p, suspect);
+            (k.id, k.what, k.block)
+        })
+        .collect();
+    if !asks.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
+    }
+}
 
 /// The session listed under `file` in Pi's sessions folder (and that folder).
 fn session_by_file(
@@ -1158,37 +1198,8 @@ impl Ctx {
                         if let Some(w) = session.last_work() {
                             let _ = tx.send(Input::Bg(Bg::TurnWork(Box::new(w))));
                         }
-                        // Host mode: what the turn set aside is asked now, one question each;
-                        // and the secrets it asked for (within the day's questions), one box each.
-                        let (secrets, aside): (Vec<_>, Vec<_>) = session
-                            .new_pending()
-                            .into_iter()
-                            .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
-                        let secrets: Vec<(String, (String, String, String))> = secrets
-                            .iter()
-                            .filter(|p| p.ask)
-                            .filter_map(|p| {
-                                let (n, d, w) = clio_toolhost::pending::secret_of(p)?;
-                                Some((p.id.clone(), (n.into(), d.into(), w.into())))
-                            })
-                            .collect();
-                        if !secrets.is_empty() {
-                            let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, session.suspect())));
-                        }
-                        let asks: Vec<_> = aside
-                            .into_iter()
-                            .map(|p| {
-                                let what = super::pending::what(&p);
-                                (
-                                    p.id.clone(),
-                                    format!("{} {what}", super::pending::label(&p)),
-                                    ask::BlockAsk::new(&p, session.suspect()),
-                                )
-                            })
-                            .collect();
-                        if !asks.is_empty() {
-                            let _ = tx.send(Input::Bg(Bg::ChatAsks(asks)));
-                        }
+                        // What the turn set aside waits: Clio asks about it once the chat is
+                        // idle, if it is time (`Cmd::CheckApprovals`).
                         // Skills: the drafts the turn wrote are reviewed; the reports counted.
                         let (drafts, notes) = session.skill_news();
                         if !drafts.is_empty() || !notes.is_empty() {
@@ -1469,27 +1480,54 @@ impl Ctx {
                 move |d, _| set_cap(d, cap),
                 |r| Bg::CapSet(r.and_then(|x| x)),
             ),
-            Cmd::LoadPending { session } => self.spawn(
-                move |d, _| {
-                    let now = crate::cli::now_ms();
-                    let all = super::pending::waiting(d);
-                    let others = all.iter().filter(|p| p.session != session).count();
-                    let mine = all
-                        .into_iter()
-                        .filter(|p| !session.is_empty() && p.session == session)
-                        .map(|p| {
-                            let what = format!(
-                                "{} {}",
-                                super::pending::label(&p),
-                                super::pending::what(&p)
-                            );
-                            (p.id.clone(), super::pending::line(&p, now), what)
-                        })
-                        .collect();
-                    (mine, others)
-                },
-                Bg::Pending,
-            ),
+            Cmd::LoadPending { session } => {
+                let open = self.current_chat();
+                self.spawn(
+                    move |d, _| {
+                        let now = crate::cli::now_ms();
+                        let others = super::pending::waiting(d)
+                            .iter()
+                            .filter(|p| p.session != session)
+                            .count();
+                        let Some(s) = open.filter(|_| !session.is_empty()) else {
+                            return (vec![], others);
+                        };
+                        let suspect = s.suspect();
+                        let mine = s
+                            .waiting()
+                            .iter()
+                            .map(|p| (super::pending::line(p, now), pick(p, suspect)))
+                            .collect();
+                        (mine, others)
+                    },
+                    Bg::Pending,
+                );
+            }
+            Cmd::CheckApprovals { session } => {
+                let Some(s) = self.current_chat() else {
+                    return;
+                };
+                self.spawn(
+                    move |d, tx| {
+                        let waiting = s.waiting();
+                        let every = Config::load(d).map_or_else(
+                            |_| crate::cli::home::ApprovalsCfg::default().every_hours,
+                            |c| c.approvals.every_hours,
+                        );
+                        let opened = !waiting.is_empty()
+                            && super::pending::ask_now(d, every, crate::cli::now_ms());
+                        if opened {
+                            offer(&waiting, s.suspect(), tx);
+                        }
+                        Bg::Approvals {
+                            session,
+                            waiting: waiting.len(),
+                            opened,
+                        }
+                    },
+                    |r| r.unwrap_or_else(|e| Bg::Done(Err(e))),
+                );
+            }
             Cmd::LoadActions { run } => self.spawn(
                 move |d, _| {
                     let log = super::pending::action_log(d, Some(&run))?;

@@ -30,6 +30,24 @@ pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
         .collect()
 }
 
+/// Whether Clio may open the approval boxes by herself now: at least `every_hours` since she last
+/// did. The time is kept in the host folder (`asked.json`), so it survives a restart and every
+/// conversation shares it; when she may, now becomes that time. A clock that went back, a file
+/// that cannot be read: she may.
+pub fn ask_now(dirs: &Dirs, every_hours: u64, now: i64) -> bool {
+    let file = state(dirs).join("asked.json");
+    let last = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| t.trim().parse::<i64>().ok());
+    let window = i64::try_from(every_hours.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
+    let due = last.is_none_or(|l| now < l || now - l >= window);
+    if due {
+        let _ = mkdir_private(&state(dirs))
+            .and_then(|()| super::write_private(&file, now.to_string().as_bytes()));
+    }
+    due
+}
+
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
@@ -76,15 +94,6 @@ fn block_text(dirs: &Dirs, p: &Pending) -> Option<String> {
     Some(rows.join("\n"))
 }
 
-/// How many set-aside items a day are asked about: the person's `host.json`, or the factory's.
-pub fn per_day(dirs: &Dirs) -> u32 {
-    dirs.host_rules()
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .and_then(|t| HostRules::factory().with_file(&t).ok())
-        .unwrap_or_else(HostRules::factory)
-        .questions_per_day()
-}
-
 /// The person's answer to secret request `id`: the value (`Some`) goes to the vault, `None`
 /// declines it. What the model is told with the next message.
 pub fn answer_secret(dirs: &Dirs, id: &str, value: Option<&SecretValue>) -> Res<String> {
@@ -105,7 +114,6 @@ pub fn answer_secret(dirs: &Dirs, id: &str, value: Option<&SecretValue>) -> Res<
             format!("secret {name} saved, bound to {dest}")
         }
     };
-    let _ = pending::answered_at_terminal(&st, id);
     Ok(note)
 }
 
@@ -125,10 +133,10 @@ pub fn label(p: &Pending) -> String {
     }
 }
 
-/// One line for the person: id, class, what, since when, until when, and whether it was asked.
+/// One line for the person: id, class, what, since when and until when.
 pub fn line(p: &Pending, now: i64) -> String {
     format!(
-        "{}  {}  {}  · since {} UTC · {} {} UTC{}",
+        "{}  {}  {}  · since {} UTC · {} {} UTC",
         p.id,
         label(p),
         sanitize::line(&what(p)),
@@ -139,11 +147,6 @@ pub fn line(p: &Pending, now: i64) -> String {
             "expires"
         },
         stamp(p.expires_ms),
-        if p.ask {
-            ""
-        } else {
-            " · not asked (goes to the day's summary)"
-        }
     )
 }
 
@@ -241,7 +244,6 @@ pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
     } else {
         host_for(dirs, &p.run)?.approve(id, now_ms())?
     };
-    let _ = pending::answered_at_terminal(&state(dirs), id);
     Ok(done)
 }
 
@@ -286,7 +288,6 @@ fn register_skill(dirs: &Dirs, p: &Pending) -> Res<String> {
 
 pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
     let p = pending::reject(&state(dirs), id)?;
-    let _ = pending::answered_at_terminal(&state(dirs), id);
     Ok(p)
 }
 
@@ -555,7 +556,7 @@ mod tests {
         let p = |args: serde_json::Value| -> Pending {
             serde_json::from_value(json!({"id": "ab12", "class": "memory",
                 "tool": "memory_block_edit", "args": args, "hash": "", "what": "", "run": "r",
-                "session": "s", "created_ms": 0, "expires_ms": 1, "ask": true,
+                "session": "s", "created_ms": 0, "expires_ms": 1,
                 "state": "waiting"}))
             .unwrap()
         };
@@ -602,15 +603,8 @@ mod tests {
                 "files": files, "sha256": digest(md, &files), "verdict": "could_not_check"})
         };
         let aside = |a: Value| {
-            pending::set_aside_skill(
-                &state(&d),
-                "r1",
-                "s1",
-                a,
-                "its check could not be run here",
-                3,
-            )
-            .unwrap()
+            pending::set_aside_skill(&state(&d), "r1", "s1", a, "its check could not be run here")
+                .unwrap()
         };
         let p = aside(args(&md));
         assert!(what(&p).starts_with("register the skill «hi» (2 files)"));
@@ -669,6 +663,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
     }
 
+    // Clio opens the boxes by herself at most once a window, shared by every conversation and
+    // kept across restarts in her data folder; 0 asks at once; a clock that went back asks.
+    #[test]
+    fn clio_asks_at_most_once_a_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = dirs_in(tmp.path());
+        let h = 3_600_000;
+        assert!(ask_now(&d, 4, 10 * h), "never asked: due");
+        assert!(!ask_now(&d, 4, 10 * h + 1));
+        assert!(!ask_now(&d, 4, 14 * h - 1), "the window is not over");
+        assert!(ask_now(&d, 4, 14 * h), "it is");
+        assert!(!ask_now(&d, 4, 15 * h));
+        assert!(ask_now(&d, 0, 15 * h), "0: every time");
+        assert!(ask_now(&d, 4, 2 * h), "the clock went back");
+        assert!(state(&d).join("asked.json").exists());
+    }
+
     fn dirs_in(root: &Path) -> Dirs {
         let data = root.join("data");
         Dirs {
@@ -704,7 +715,6 @@ mod tests {
             state: state(&dirs),
             run: "r1".into(),
             person,
-            per_day: 3,
         });
         (dirs, ToolHost::new(cfg).unwrap())
     }
@@ -848,7 +858,6 @@ mod tests {
             state: state(&dirs),
             run: "r1".into(),
             person: dirs.home.join("no-vault.sock"),
-            per_day: 3,
         });
         let host = ToolHost::new(cfg).unwrap();
         let ask = |text: &str| {

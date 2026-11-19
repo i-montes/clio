@@ -1,10 +1,7 @@
 //! Host mode: what the list (`ask`) sets aside waits here for the person, in
 //! `state/pending/<id>.json`. Nothing set aside runs until the person approves it, and then it
-//! runs as it was saved (same hash), once, and never after it expired (24 hours).
-//!
-//! Questions: at most `questions_per_day` set-aside actions a local day are asked about
-//! (`ask: true`); the rest go to the day's summary. Ones the person answered at the terminal give
-//! their question back (`answered_at_terminal`).
+//! runs as it was saved (same hash), once, and never after it expired (24 hours). When the chat
+//! asks about them is the brain's (`approvals.every_hours`): every item may be asked.
 
 use std::fs;
 use std::io::Write;
@@ -42,8 +39,6 @@ pub struct Pending {
     pub session: String,
     pub created_ms: i64,
     pub expires_ms: i64,
-    /// False: past today's questions, it goes to the day's summary.
-    pub ask: bool,
     pub state: State,
     /// Why it waits when its class alone would not say it (a suspect session reaching out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,14 +61,12 @@ pub enum State {
 }
 
 /// `request_secret`: where its requests wait (`state`, as the actions set aside), the run they
-/// belong to, the vault's person socket (only `Status` and `List` are asked, at request time) and
-/// how many questions a day the person gets, shared with the actions.
+/// belong to and the vault's person socket (only `Status` and `List` are asked, at request time).
 #[derive(Debug, Clone)]
 pub struct SecretCfg {
     pub state: PathBuf,
     pub run: String,
     pub person: PathBuf,
-    pub per_day: u32,
 }
 
 /// What a secret request asks for: name, destination (`tool:domain`) and why.
@@ -215,16 +208,15 @@ fn made_of(p: &Pending, class: Class) -> Option<SkillOf<'_>> {
 
 /// The person's `clio` sets aside a reviewed skill draft (S-68): `args` holds the whole draft
 /// (name, description, `skill_md`, `files`, `sha256`, `draft`), `reason` why it waits. Same store
-/// and questions as the rest; the model has no way here.
+/// as the rest; the model has no way here.
 pub fn set_aside_skill(
     state: &Path,
     run: &str,
     session: &str,
     args: Value,
     reason: &str,
-    per_day: u32,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, per_day, Class::Skill)
+    set_aside_made(state, (run, session), args, reason, Class::Skill)
 }
 
 /// A reviewed service draft, as `set_aside_skill` (S-69): it always waits for the person.
@@ -234,9 +226,8 @@ pub fn set_aside_service(
     session: &str,
     args: Value,
     reason: &str,
-    per_day: u32,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, per_day, Class::Service)
+    set_aside_made(state, (run, session), args, reason, Class::Service)
 }
 
 fn set_aside_made(
@@ -244,7 +235,6 @@ fn set_aside_made(
     (run, session): (&str, &str),
     args: Value,
     reason: &str,
-    per_day: u32,
     class: Class,
 ) -> Result<Pending, String> {
     let (tool, rule) = if class == Class::Service {
@@ -265,11 +255,10 @@ fn set_aside_made(
         session: session.to_owned(),
         created_ms: now,
         expires_ms: now + DAY_MS,
-        ask: false,
         state: State::Waiting,
         reason: Some(reason.to_owned()),
     };
-    let p = set_aside(state, p, per_day)?;
+    let p = set_aside(state, p)?;
     if let Err(e) = log_line(
         state, run, session, &p.tool, &p.what, false, "aside", rule, None,
     ) {
@@ -369,13 +358,6 @@ pub fn answer_secret(
     p.state = State::Stored;
     save(state, &p)?;
     Ok(p)
-}
-
-/// Today's questions (local day).
-#[derive(Default, Serialize, Deserialize)]
-struct Questions {
-    day: String,
-    ids: Vec<String>,
 }
 
 /// The exact answer to the model.
@@ -547,28 +529,9 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
     Ok(p)
 }
 
-fn questions(state: &Path) -> Questions {
-    fs::read_to_string(state.join("questions.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_questions(state: &Path, q: &Questions) -> Result<(), String> {
-    let text = serde_json::to_string(q).map_err(|e| e.to_string())?;
-    write_private(&state.join("questions.json"), &text)
-}
-
-/// The person answered `id` at the terminal: it was not one of the day's questions.
-pub fn answered_at_terminal(state: &Path, id: &str) -> Result<(), String> {
-    let mut q = questions(state);
-    q.ids.retain(|x| x != id);
-    save_questions(state, &q)
-}
-
-/// Saves `p` (id, hash and `ask` are filled here), or returns the one already waiting for the
-/// same action in the same session.
-pub(crate) fn set_aside(state: &Path, mut p: Pending, per_day: u32) -> Result<Pending, String> {
+/// Saves `p` (id and hash are filled here), or returns the one already waiting for the same
+/// action in the same session.
+pub(crate) fn set_aside(state: &Path, mut p: Pending) -> Result<Pending, String> {
     p.hash = hash_of(&p.tool, &p.args);
     if let Some(old) = list(state).into_iter().find(|o| {
         o.session == p.session
@@ -585,21 +548,6 @@ pub(crate) fn set_aside(state: &Path, mut p: Pending, per_day: u32) -> Result<Pe
         if !file(state, &p.id)?.exists() {
             break;
         }
-    }
-    // Shortcut: the UTC day number when `date` cannot run, which splits the day elsewhere.
-    let today = local(p.created_ms, "%F")
-        .unwrap_or_else(|| format!("utc-{}", p.created_ms.div_euclid(DAY_MS)));
-    let mut q = questions(state);
-    if q.day != today {
-        q = Questions {
-            day: today,
-            ids: vec![],
-        };
-    }
-    p.ask = q.ids.len() < per_day as usize;
-    if p.ask {
-        q.ids.push(p.id.clone());
-        save_questions(state, &q)?;
     }
     save(state, &p)?;
     Ok(p)
@@ -657,11 +605,7 @@ impl ToolHost {
         class: Class,
         reason: Option<&str>,
     ) -> Response {
-        let at = (
-            h.cfg.state.as_path(),
-            h.cfg.run.as_str(),
-            h.cfg.rules.questions_per_day(),
-        );
+        let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
         self.aside_at(at, req, req.args.clone(), class, reason)
     }
 
@@ -711,11 +655,11 @@ impl ToolHost {
         }
     }
 
-    /// `aside` with where it waits given apart (`state`, `run`, the day's questions) and the
-    /// arguments it keeps: a block change waits in a chat that is not in host mode too.
+    /// `aside` with where it waits given apart (`state`, `run`) and the arguments it keeps: a
+    /// block change waits in a chat that is not in host mode too.
     pub(crate) fn aside_at(
         &self,
-        (state, run, per_day): (&Path, &str, u32),
+        (state, run): (&Path, &str),
         req: &Request,
         args: Value,
         class: Class,
@@ -743,12 +687,11 @@ impl ToolHost {
             session: req.session.clone(),
             created_ms: now,
             expires_ms: now + DAY_MS,
-            ask: false,
             state: State::Waiting,
             reason: reason.map(str::to_owned),
         };
         draft.what = self.clean(shown(&draft));
-        let (content, rule) = match set_aside(state, draft, per_day) {
+        let (content, rule) = match set_aside(state, draft) {
             Ok(p) => {
                 if let Err(e) = log_line(
                     state,
@@ -950,18 +893,13 @@ impl ToolHost {
             session: req.session.clone(),
             created_ms: now,
             expires_ms: now + DAY_MS,
-            ask: false,
             state: State::Waiting,
             reason: None,
         };
-        let content = match set_aside(&cfg.state, draft, cfg.per_day) {
-            Ok(p) if p.ask => format!(
+        let content = match set_aside(&cfg.state, draft) {
+            Ok(p) => format!(
                 "requested {}: the person will be asked when the turn ends; go on with what does not need it",
                 p.id
-            ),
-            Ok(p) => format!(
-                "requested {id}: today's questions to the person are used up, so the chat will not ask; the person can answer with `clio approve {id}`. Go on with what does not need it",
-                id = p.id
             ),
             Err(e) => return refuse(format!("the request could not be stored ({e})")),
         };
@@ -998,7 +936,6 @@ mod tests {
             session: "s".into(),
             created_ms: 0,
             expires_ms: 1,
-            ask: true,
             state: State::Waiting,
             reason: None,
         };

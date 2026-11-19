@@ -215,6 +215,8 @@ pub struct Chat {
     pub(super) parsed: Cell<usize>,
     /// The reviews of this session.
     pub review: super::review::Review,
+    /// What of this session waits for the person, and when Clio asks.
+    pub approvals: super::approvals::Approvals,
 }
 
 impl Default for Chat {
@@ -271,6 +273,7 @@ impl Chat {
             resume: false,
             parsed: Cell::new(0),
             review: super::review::Review::default(),
+            approvals: super::approvals::Approvals::default(),
         }
     }
 
@@ -1342,6 +1345,12 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(r, t.dim()));
     }
+    if let Some(w) = super::approvals::status(app) {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled(w, t.accent_line()));
+    }
     if c.jobs > 0 {
         if spans.len() > 1 {
             spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
@@ -2122,7 +2131,12 @@ mod tests {
         );
         assert!(app.chat.running && app.chat.items.is_empty());
         let (app, cmds) = opened(false);
-        assert!(cmds.is_empty() && !app.chat.running);
+        // Idle: only whether to ask about what waits is checked.
+        assert!(!app.chat.running);
+        assert!(
+            cmds.iter().all(|c| matches!(c, Cmd::CheckApprovals { .. })),
+            "{cmds:?}"
+        );
         // Reopened: the turn's message is only Clio's envelope.
         let mut c = Chat::opening(1, 0);
         let wrapped = clio_brain::pi::envelope::wrap("2026-11-03 18:42 -05:00", "");

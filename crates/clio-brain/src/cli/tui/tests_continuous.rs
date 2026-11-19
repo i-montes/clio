@@ -427,7 +427,7 @@ fn last_note(a: &App) -> String {
 #[test]
 fn a_context_over_the_cap_is_compacted_when_the_turn_ends() {
     let (a, cmds) = feed(turn_running(), vec![settled(Some(150_000))]);
-    assert_eq!(cmds, vec![Cmd::LoadSessions]);
+    assert_eq!(cmds, vec![Cmd::LoadSessions, check()]);
     assert!(!a.chat.compacting);
     let mut a = a;
     a.chat.running = true;
@@ -451,7 +451,9 @@ fn a_context_over_the_cap_is_compacted_when_the_turn_ends() {
             None,
         ))],
     );
-    assert!(cmds.is_empty() && !a.chat.compacting && !a.chat.auto_compact);
+    // Idle again: now whether to ask about what waits is checked.
+    assert_eq!(cmds, vec![check()]);
+    assert!(!a.chat.compacting && !a.chat.auto_compact);
     let n = last_note(&a);
     assert!(
         n.contains("still over the cap") && n.contains("/compact N"),
@@ -576,5 +578,12 @@ fn nothing_is_compacted_by_itself_while_something_waits() {
         assert!(!a.chat.compacting, "{what}");
     }
     let (_, cmds) = feed(turn_running(), vec![settled(None)]);
-    assert_eq!(cmds, vec![Cmd::LoadSessions]);
+    assert_eq!(cmds, vec![Cmd::LoadSessions, check()]);
+}
+
+/// The turn ended idle: whether to ask about what waits is checked.
+fn check() -> Cmd {
+    Cmd::CheckApprovals {
+        session: "sid".into(),
+    }
 }

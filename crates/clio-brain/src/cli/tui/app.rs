@@ -170,6 +170,11 @@ pub enum Cmd {
     LoadPending {
         session: String,
     },
+    /// What this session has waiting for the person: its boxes open if the window allows it
+    /// (`approvals.every_hours`), and `Bg::Approvals` says what was found.
+    CheckApprovals {
+        session: String,
+    },
     /// The action log of one run (a host session).
     LoadActions {
         run: String,
@@ -218,9 +223,9 @@ pub enum Cmd {
     Redraw,
 }
 
-/// This session's actions waiting, (id, line, «class» and what) each, and how many of other
-/// sessions wait.
-pub type Waiting = (Vec<(String, String, String)>, usize);
+/// This session's actions waiting, the line and the box of each, and how many of other sessions
+/// wait.
+pub type Waiting = (Vec<(String, super::commands::Pick)>, usize);
 
 /// What a worker thread reports back.
 pub enum Bg {
@@ -283,9 +288,14 @@ pub enum Bg {
     Compacted(Result<String, String>, Option<u64>, Option<Refresh>),
     /// The context cap `/compact N` saved.
     CapSet(Result<u64, String>),
-    /// This session's actions waiting: (id, line, «class» and what), and how many of other
-    /// sessions wait too.
+    /// This session's actions waiting, and how many of other sessions wait too.
     Pending(Result<Waiting, String>),
+    /// What `Cmd::CheckApprovals` found: how many wait, and whether their boxes were opened.
+    Approvals {
+        session: String,
+        waiting: usize,
+        opened: bool,
+    },
     /// Lines to show in a box with that title.
     Modal(Result<Modal, String>),
     /// What the turn about to settle changed (it changed something).
@@ -730,6 +740,7 @@ pub fn update(mut app: App, input: Input) -> (App, Vec<Cmd>) {
         cmds.extend(super::review::next_skill(&mut app));
         cmds.extend(super::review::after_turn(&mut app));
         cmds.extend(super::review::deliver(&mut app));
+        cmds.extend(super::approvals::check(&mut app));
     }
     (app, cmds)
 }
@@ -1262,6 +1273,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     app.chat
                         .items
                         .extend(info.notes.into_iter().map(super::chat::Item::Note));
+                    // What waits from before: asked about once the chat is idle, if it is time.
+                    app.chat.approvals.check = true;
                     // A new session's first message: the presentation, if any, is asked in
                     // front of it (`PrePrompt`), so Clio introduces herself and answers.
                     if let Some(text) = queued {
@@ -1358,6 +1371,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatAnswered(r) => {
             app.answering = app.answering.saturating_sub(1);
+            let a = &mut app.chat.approvals;
+            a.waiting = a.waiting.saturating_sub(1);
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),
@@ -1461,11 +1476,18 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
+        Bg::Approvals {
+            session,
+            waiting,
+            opened,
+        } => {
+            super::approvals::checked(app, &session, waiting, opened);
+            vec![]
+        }
         Bg::Pending(r) => {
             match r {
                 Ok((rows, others)) => {
-                    let mut lines: Vec<String> = rows.iter().map(|(_, l, _)| l.clone()).collect();
-                    let picks = rows.into_iter().map(|(id, _, what)| (id, what)).collect();
+                    let (mut lines, picks): (Vec<String>, _) = rows.into_iter().unzip();
                     if lines.is_empty() {
                         lines.push("nothing in this session waits for your approval".into());
                     }
@@ -1564,6 +1586,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             // The list beside the chat: a new session shows up, a title changes.
             if app.pi {
+                app.chat.approvals.check = true;
                 let mut cmds = vec![Cmd::LoadSessions];
                 // Before the compaction: it would make the chat look busy.
                 cmds.extend(super::review::turn_ended(app));

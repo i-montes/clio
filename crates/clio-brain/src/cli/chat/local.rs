@@ -789,7 +789,6 @@ impl ChatSession {
             &self.pi.session_id,
             args,
             &reason,
-            pending::per_day(&self.dirs),
         )?;
         locked(&h.asked).insert(p.id.clone());
         locked(&h.notes).push(format!(
@@ -797,7 +796,6 @@ impl ChatSession {
             p.id
         ));
         Ok(super::SkillOutcome::Waits {
-            what: format!("{} {}", pending::label(&p), pending::what(&p)),
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
         })
@@ -871,7 +869,6 @@ impl ChatSession {
             &self.pi.session_id,
             args,
             reason,
-            pending::per_day(&self.dirs),
         )?;
         locked(&h.asked).insert(p.id.clone());
         locked(&h.notes).push(format!(
@@ -879,7 +876,6 @@ impl ChatSession {
             p.id
         ));
         Ok(super::SkillOutcome::Waits {
-            what: format!("{} {}", pending::label(&p), pending::what(&p)),
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
         })
@@ -1133,6 +1129,20 @@ impl Session for ChatSession {
             .into_iter()
             .filter(|p| p.run == h.run && p.session == self.pi.session_id)
             .filter(|p| asked.insert(p.id.clone()))
+            .collect()
+    }
+
+    fn waiting(&self) -> Vec<Pending> {
+        let Some(h) = &self.host else {
+            return Vec::new();
+        };
+        let mut asked = locked(&h.asked);
+        pending::waiting(&h.dirs)
+            .into_iter()
+            .filter(|p| p.run == h.run && p.session == self.pi.session_id)
+            .inspect(|p| {
+                asked.insert(p.id.clone());
+            })
             .collect()
     }
 

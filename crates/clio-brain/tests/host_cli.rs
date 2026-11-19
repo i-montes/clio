@@ -115,9 +115,6 @@ fn pending_approve_actions_and_undo_on_a_host_session() {
     assert!(o.status.success(), "{}", out(&o));
     assert!(out(&o).contains(&format!("approved {id}")), "{}", out(&o));
     assert_eq!(read(&backup), "new");
-    // Answered at the terminal: it is not one of the day's questions any more.
-    let q = read(&w.data.join("host/questions.json"));
-    assert!(!q.contains(&id), "{q}");
     let o = w.clio(&["approve", &id]);
     assert!(
         !o.status.success() && out(&o).contains("already ran"),

@@ -291,7 +291,6 @@ fn nothing_the_model_calls_registers_runs_or_turns_on_a_service() {
         "s",
         json!({"name": "x", "description": "d", "skill_md": "{}", "files": [], "sha256": "y"}),
         "a service always waits for your approval",
-        3,
     )
     .unwrap();
     let err = e.host.approve(&p.id, p.created_ms + 1).unwrap_err();
