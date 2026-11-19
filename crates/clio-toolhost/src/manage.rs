@@ -5,11 +5,13 @@
 //! of the person's commands (`crates/clio-brain/src/cli/manage.rs`):
 //!
 //! - free, recorded in `<run>/manage.jsonl` and done when the turn ends: `off` (stopping is always
-//!   safe), and `run` of a service that is on (the runner checks its files against what was
-//!   approved and pauses it when they changed, as the timer does);
+//!   safe), and `run` of a service that is on and reaches no host and holds no secret (the runner
+//!   checks its files against what was approved and pauses it when they changed, as the timer
+//!   does); a `run` that reaches hosts or holds secrets could send or spend: set aside as `send`;
 //! - set aside for the person (hash-bound, the one approval box): `on`, `undo`, `remove`. A
 //!   permission window answers them (`grant::covers`), except `on` of what the person turned off
-//!   (`PERSON_OFF`) and `remove` of a skill Clio ships (`SHIPPED`): those always ask;
+//!   (`PERSON_OFF`), `remove` or `undo` of a skill Clio ships (`SHIPPED`) and `undo` of a service
+//!   (`SERVICE_UNDO`: its older version's grants are shown in the box): those always ask;
 //! - in a `suspect` session every action but `status` is set aside and always asks.
 //!
 //! At most `PER_HOUR` calls an hour per session. Registering something new or a new version, a
@@ -39,7 +41,9 @@ pub const PER_HOUR: usize = 20;
 /// Why an `on` always asks: the person turned it off.
 pub const PERSON_OFF: &str = "the person turned it off: only they turn it back on";
 /// Why a `remove` always asks: a skill Clio ships.
-pub const SHIPPED: &str = "a skill Clio ships: only the person removes it";
+pub const SHIPPED: &str = "a skill Clio ships: only the person removes it or takes it back";
+/// Why a service's `undo` always asks: the older version may reach other hosts and secrets.
+pub const SERVICE_UNDO: &str = "an older version of a service may reach other hosts, secrets and paths: only the person takes it back";
 /// A record's `off` when the person turned it off (`/skills off`, `/services off`, `/mcp off`).
 pub const OFF_BY_PERSON: &str = "turned off by the person";
 /// A record's `off` when Clio turned it off (`*_manage off`).
@@ -94,7 +98,7 @@ pub fn is_manage(p: &Pending) -> bool {
 
 /// A reason that makes an item ask the person whatever window is open.
 pub fn always_asks(reason: &str) -> bool {
-    [PERSON_OFF, SHIPPED, SUSPECT_REASON].contains(&reason)
+    [PERSON_OFF, SHIPPED, SERVICE_UNDO, SUSPECT_REASON].contains(&reason)
 }
 
 /// Where the free requests wait for the person's `clio`.
@@ -119,6 +123,19 @@ pub fn prev_version(root: &Path, name: &str, rec: &Value) -> Option<u64> {
                     .is_dir()
         })
         .max()
+}
+
+/// Service `name`'s manifest at `version`, as approved (`None`: it does not read).
+pub fn manifest_at(root: &Path, name: &str, version: u64) -> Option<(String, services::Manifest)> {
+    let text = fs::read_to_string(
+        root.join(skills::VERSIONS)
+            .join(name)
+            .join(version.to_string())
+            .join(services::MANIFEST),
+    )
+    .ok()?;
+    let m = serde_json::from_str(&text).ok()?;
+    Some((text, m))
 }
 
 /// What a set-aside item does, in plain words, from its arguments only (never the stored `what`):
@@ -152,6 +169,14 @@ pub fn what(p: &Pending) -> Option<(String, String)> {
             n("version")
         ),
         "off" => format!("turn the {word} «{name}» off"),
+        "run" if p.args["reaches"].is_string() => format!(
+            "run the service «{name}» now (it reaches {}{})",
+            s("reaches"),
+            match s("with").as_str() {
+                "" => String::new(),
+                w => format!(" with {w}"),
+            }
+        ),
         "run" => format!("run the service «{name}» now"),
         "logs" => format!("show Clio the log of the {word} «{name}»"),
         other => format!("{other} the {word} «{name}»"),
@@ -279,15 +304,37 @@ impl ToolHost {
         if let Some(t) = plain {
             return self.manage_answer(req, false, "manage/plain", t);
         }
-        if !suspect && (action == "off" || action == "run") {
+        let current = rec["current"].as_u64().unwrap_or(0);
+        // A run that reaches hosts or holds secrets could send or spend: it asks, as `send`.
+        let reach = (action == "run")
+            .then(|| match manifest_at(&root, name, current) {
+                Some((_, m)) if m.network.is_empty() && m.secrets.is_empty() => None,
+                Some((_, m)) => Some((
+                    m.network.join(", "),
+                    m.secrets
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )),
+                None => Some((
+                    "hosts it declared (its manifest does not read)".into(),
+                    String::new(),
+                )),
+            })
+            .flatten();
+        if !suspect && (action == "off" || (action == "run" && reach.is_none())) {
             return self.manage_request(req, h, &k, name, action, why);
         }
+        let shipped = k.class == Class::Skill && SHIPPED_SKILLS.contains(&name);
         let reason = if suspect {
             Some(SUSPECT_REASON)
         } else if action == "on" && off_why == OFF_BY_PERSON {
             Some(PERSON_OFF)
-        } else if action == "remove" && k.class == Class::Skill && SHIPPED_SKILLS.contains(&name) {
+        } else if matches!(action, "remove" | "undo") && shipped {
             Some(SHIPPED)
+        } else if action == "undo" && k.class == Class::Service {
+            Some(SERVICE_UNDO)
         } else {
             None
         };
@@ -295,8 +342,18 @@ impl ToolHost {
             "name": name,
             "action": action,
             "why": why,
-            "version": rec["current"].as_u64().unwrap_or(0),
+            "version": current,
         });
+        if let Some((hosts, secrets)) = &reach {
+            a["reaches"] = Value::from(hosts.as_str());
+            a["with"] = Value::from(secrets.as_str());
+        }
+        // The version a service goes back to, as approved: its grants are in the box.
+        if let (Some(to), "undo", Class::Service) = (prev, action, k.class)
+            && let Some((text, _)) = manifest_at(&root, name, to)
+        {
+            a["older"] = Value::from(text);
+        }
         if let (Some(to), "undo") = (prev, action) {
             a["to"] = Value::from(to);
         }
@@ -305,7 +362,12 @@ impl ToolHost {
         if action == "on" {
             a["off"] = Value::from(off_why);
         }
-        self.manage_aside(req, h, k.class, a, reason)
+        let class = if reach.is_some() {
+            Class::Send
+        } else {
+            k.class
+        };
+        self.manage_aside(req, h, class, a, reason)
     }
 
     /// `status` and `logs`, read from the registry. What a service or a server printed is outside
@@ -502,7 +564,7 @@ impl ToolHost {
             true,
             "manage/free",
             format!(
-                "Clio {does} when this turn ends and says so in the chat; you hear what came of it with the next message. It needs no approval: do not ask the person for one."
+                "Clio {does} when this turn ends and says so in the chat; you hear what came of it right after, in a turn Clio starts by herself (or with the person's next message). It needs no approval: do not ask the person for one."
             ),
         )
     }
@@ -551,7 +613,7 @@ impl ToolHost {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
                 let window = if reason.is_none() {
-                    " If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it with the next message."
+                    " If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after."
                 } else {
                     ""
                 };
