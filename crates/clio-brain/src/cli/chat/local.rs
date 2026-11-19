@@ -35,7 +35,7 @@ use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
 use clio_brain::pi::level::{self, Assessor, run_assessed_with};
-use clio_brain::pi::preprompt::{APPROVALS_ASK, GRANT_ASK, PrePrompt};
+use clio_brain::pi::preprompt::{APPROVALS_ASK, GRANT_ASK, MANAGE_ASK, PrePrompt};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
@@ -439,6 +439,7 @@ impl SessionSource for LocalSource {
                 asked: Mutex::default(),
                 approved: Mutex::default(),
                 notes: Mutex::default(),
+                acted: std::sync::atomic::AtomicBool::new(false),
                 told: Mutex::default(),
                 summary: Mutex::default(),
             }),
@@ -572,6 +573,9 @@ struct HostSide {
     /// What the person answered to the secrets the model asked for (never a value), for the
     /// model's next message.
     notes: Mutex<Vec<String>>,
+    /// `notes` holds outcomes of acts on what Clio created: a turn Clio starts by herself gives
+    /// them with `MANAGE_ASK`.
+    acted: std::sync::atomic::AtomicBool,
     /// The items a permission window approved that the chat already showed.
     told: Mutex<HashSet<String>>,
     /// An ended permission window (its id) and what it approved, for the turn that sums it up:
@@ -629,11 +633,17 @@ impl HostSide {
         grant::done(&st, &w, id, &outcome);
         let left = grant::left_text(w.ends_ms - crate::cli::now_ms());
         r.map(|n| {
-            let outcome = n
-                .strip_prefix(&format!("approved {id}: "))
-                .unwrap_or(&n)
-                .to_owned();
-            format!("approved under your permission ({left} left): {what}\n{outcome}")
+            // The outcome starts with the act itself (`pending::outcome`): said once.
+            let outcome = n.strip_prefix(&format!("approved {id}: ")).unwrap_or(&n);
+            let outcome = outcome
+                .strip_prefix(pending::what(&p).as_str())
+                .unwrap_or(outcome)
+                .trim_start();
+            if outcome.is_empty() {
+                format!("approved under your permission ({left} left): {what}")
+            } else {
+                format!("approved under your permission ({left} left): {what}\n{outcome}")
+            }
         })
     }
 
@@ -653,8 +663,13 @@ impl HostSide {
             "the window has ended".into()
         };
         let mut told = locked(&self.told);
+        // A free act's own note was in the chat already.
         acts.into_iter()
-            .filter(|a| a.session == session && told.insert(a.pending.clone()))
+            .filter(|a| {
+                a.session == session
+                    && !a.pending.starts_with(crate::cli::manage::FREE_ACT)
+                    && told.insert(a.pending.clone())
+            })
             .map(|a| {
                 format!(
                     "approved under your permission ({left}): «{}» {}",
@@ -662,6 +677,14 @@ impl HostSide {
                 )
             })
             .collect()
+    }
+
+    /// An outcome of an act on what Clio created: the model hears `model` with the next message
+    /// (or in the turn Clio starts by herself); the chat shows the returned note.
+    fn acted(&self, model: String, chat: String) -> String {
+        locked(&self.notes).push(model);
+        self.acted.store(true, Ordering::SeqCst);
+        chat
     }
 
     /// `Session::queue_summary`, for this conversation's run.
@@ -1023,6 +1046,16 @@ fn approvals_turn(text: &str, findings: bool, presenting: bool, data: &str) -> O
     (!data.is_empty()).then_some(true)
 }
 
+/// Clio's request in a turn the approvals started: only acts on what she created, done when a
+/// turn ended, go on with the person's request; with the person's answers, those come first.
+fn own_ask(acted: bool, answered: bool) -> &'static str {
+    if acted && !answered {
+        MANAGE_ASK
+    } else {
+        APPROVALS_ASK
+    }
+}
+
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1082,6 +1115,11 @@ impl Session for ChatSession {
                 )
             })
             .unwrap_or_default();
+        let acted = self
+            .host
+            .as_ref()
+            .is_some_and(|h| h.acted.swap(false, Ordering::SeqCst));
+        let approved_none = approved.is_empty();
         let told = summary.as_ref().map(|(id, _)| id.clone());
         let summary = summary.map(|(_, record)| record);
         if !approved.is_empty() || summary.is_some() {
@@ -1102,7 +1140,7 @@ impl Session for ChatSession {
             self.pre.reviewed(GRANT_ASK);
         }
         match approvals_turn(text, findings.is_some(), self.pre.presenting(), &data) {
-            Some(true) if summary.is_none() => self.pre.reviewed(APPROVALS_ASK),
+            Some(true) if summary.is_none() => self.pre.reviewed(own_ask(acted, !approved_none)),
             Some(_) => {}
             None => {
                 return Ok(RunSummary {
@@ -1204,26 +1242,38 @@ impl Session for ChatSession {
         *locked(&self.findings) = Some((findings.to_owned(), marked, ask));
     }
 
+    fn manage_news(&self) -> (Vec<String>, Vec<crate::cli::manage::Request>) {
+        let Some(h) = &self.host else {
+            return (vec![], vec![]);
+        };
+        let (said, runs) = crate::cli::manage::take_requests(
+            &h.dirs,
+            &self.run_dir.join("toolhost"),
+            (&h.run, &self.pi.session_id),
+            self.suspect(),
+        );
+        let notes = said
+            .into_iter()
+            .map(|(chat, model)| h.acted(model, chat))
+            .collect();
+        (notes, runs)
+    }
+
+    fn manage_run(&self, r: &crate::cli::manage::Request) -> String {
+        let Some(h) = &self.host else {
+            return String::new();
+        };
+        let (chat, model) =
+            crate::cli::manage::run_request(&h.dirs, (&h.run, &self.pi.session_id), r);
+        h.acted(model, chat)
+    }
+
     fn skill_news(&self) -> (Vec<(String, String)>, Vec<String>) {
         let th = self.run_dir.join("toolhost");
-        // What the model asked of what it created, free (`off`, `run`): done now, said in the
-        // chat, and told to the model with the next message.
-        let mut notes = Vec::new();
-        if let Some(h) = &self.host {
-            for (chat, model) in crate::cli::manage::take_requests(
-                &h.dirs,
-                &th,
-                (&h.run, &self.pi.session_id),
-                self.suspect(),
-            ) {
-                locked(&h.notes).push(model);
-                notes.push(chat);
-            }
-        }
         let Some(root) = &self.skills else {
-            return (vec![], notes);
+            return (vec![], vec![]);
         };
-        notes.extend(crate::cli::skills::apply_reports(root, &th));
+        let notes = crate::cli::skills::apply_reports(root, &th);
         let dir = clio_toolhost::skills::drafts_dir(&th);
         let taken = clio_toolhost::skills::taken_dir(&th);
         let mut handed = locked(&self.skill_handed);
@@ -1744,7 +1794,13 @@ impl ChatSession {
             clio_toolhost::pending::shown(&p),
         )
         .unwrap_or_else(|| (what.clone(), false));
-        locked(&h.approved).push(format!("{who} approved {id}: {shown}"));
+        let line = format!("{who} approved {id}: {shown}");
+        // Under a window nobody answered a box: an act on what Clio created goes on by itself.
+        if by.is_some() && clio_toolhost::manage::is_manage(&p) {
+            h.acted(line, String::new());
+        } else {
+            locked(&h.approved).push(line);
+        }
         Ok(if flagged {
             format!(
                 "approved {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
@@ -1919,6 +1975,7 @@ mod tests {
             asked: Mutex::default(),
             approved: Mutex::default(),
             notes: Mutex::default(),
+            acted: std::sync::atomic::AtomicBool::new(false),
             told: Mutex::default(),
             summary: Mutex::default(),
         }
@@ -1993,6 +2050,9 @@ mod tests {
             said.starts_with("approved under your permission ("),
             "{said}"
         );
+        // The act once, then what came of it.
+        assert_eq!(said.matches("rm -r /srv/new1.bak").count(), 1, "{said}");
+        assert!(said.contains("(exit 2)"), "{said}");
         let (_, acts) = grant::record(&st, &w.id).unwrap();
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].outcome.as_deref(), Some("failed (exit 2)"));
@@ -2071,6 +2131,10 @@ mod tests {
             Some(true)
         );
         assert_eq!(approvals_turn("", false, false, ""), None);
+        // S-69: only acts on what Clio created: she goes on with the person's request.
+        assert_eq!(own_ask(true, false), MANAGE_ASK);
+        assert_eq!(own_ask(true, true), APPROVALS_ASK);
+        assert_eq!(own_ask(false, true), APPROVALS_ASK);
         assert_eq!(approvals_turn("and now?", false, false, "x"), Some(false));
         assert_eq!(approvals_turn("", true, false, ""), Some(false));
         assert_eq!(approvals_turn("", false, true, ""), Some(false));

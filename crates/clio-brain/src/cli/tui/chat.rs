@@ -291,6 +291,7 @@ impl Chat {
         // Any turn gives the model what came of the approvals, and an ended window's record.
         self.approvals.answered = false;
         self.approvals.summary = false;
+        self.approvals.acted = false;
         self.running = true;
         self.aborting = false;
         self.turn_ms = now_ms;
@@ -946,6 +947,8 @@ pub fn send_text(app: &mut App, text: String) -> Vec<Cmd> {
     }
     c.scroll = 0;
     c.items.push(Item::User(text.clone()));
+    // The person spoke: Clio may go on by herself again (`approvals::MAX_AUTO_TURNS`).
+    c.approvals.auto_turns = 0;
     if c.running {
         return vec![Cmd::ChatSteer { text }];
     }

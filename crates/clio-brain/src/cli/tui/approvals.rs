@@ -23,6 +23,11 @@ pub struct Approvals {
     /// model what came of them. Only rejections or failures start nothing: they go with the
     /// person's next message.
     pub answered: bool,
+    /// Acts on what Clio created were done when a turn ended: once nothing else waits, a turn
+    /// gives the model what came of them, so it goes on with the person's request.
+    pub acted: bool,
+    /// Turns `acted` started since the person's last message (`MAX_AUTO_TURNS` at most).
+    pub auto_turns: u8,
     /// When the last check was asked for: an idle chat checks again after `RECHECK_MS`.
     pub last_ms: Option<u64>,
     /// When the open permission window ends, on this chat's clock (`App::now_ms`), as of the
@@ -43,6 +48,12 @@ const RECHECK_MS: u64 = 10 * 60 * 1000;
 
 /// The note of a turn the approvals started.
 pub const APPROVALS_TURN: &str = "turn started by the approvals: Clio says what came of them";
+/// The note of a turn that acts on what Clio created started.
+pub const MANAGE_TURN: &str = "turn started by what Clio did: she goes on with your request";
+/// Turns `MANAGE_TURN` in a row without a message of the person; then Clio stops and says so.
+pub const MAX_AUTO_TURNS: u8 = 3;
+/// The note when she stops.
+pub const MANAGE_STOPPED: &str = "Clio stopped going on by herself after 3 turns in a row without a message from you: say how to go on";
 /// The note of the turn that sums up a permission window that ended.
 pub const GRANT_TURN: &str =
     "turn started by the end of your permission window: Clio sums up what she did without asking";
@@ -54,7 +65,7 @@ pub const GRANT_TURN: &str =
 /// leaving, and the outcomes then wait for this session.
 pub fn deliver(app: &mut App) -> Vec<Cmd> {
     let a = &app.chat.approvals;
-    if !(a.answered || a.summary)
+    if !(a.answered || a.summary || a.acted)
         || app.screen != Screen::Chat
         || chat_waits(app)
         || app.chat.failed.is_some()
@@ -67,12 +78,21 @@ pub fn deliver(app: &mut App) -> Vec<Cmd> {
     }
     let note = if a.summary {
         GRANT_TURN
-    } else {
+    } else if a.answered {
         APPROVALS_TURN
+    } else if a.auto_turns >= MAX_AUTO_TURNS {
+        // What came of them goes with the person's next message.
+        app.chat.approvals.acted = false;
+        app.chat.items.push(Item::Note(MANAGE_STOPPED.into()));
+        return vec![];
+    } else {
+        MANAGE_TURN
     };
+    let auto = app.chat.approvals.auto_turns + u8::from(note == MANAGE_TURN);
     app.chat.items.push(Item::Note(note.into()));
     app.chat.scroll = 0;
     app.chat.start_turn(app.now_ms);
+    app.chat.approvals.auto_turns = auto;
     vec![Cmd::ChatSend {
         text: String::new(),
     }]
@@ -817,6 +837,48 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // S-69: acts on what Clio created, done when a turn ended (free, or under the window): once
+    // the chat is idle ONE turn tells the model what came of them, so it goes on with the
+    // person's request; at most `MAX_AUTO_TURNS` in a row, then Clio stops and says so; the
+    // person's message resets the count; what is typed takes the outcomes with it instead.
+    #[test]
+    fn acts_done_after_a_turn_go_on_by_themselves_three_times_at_most() {
+        let acted = || Input::Bg(Bg::Acted(vec!["Clio did this by herself: x".into()]));
+        let mut a = idle();
+        for n in 1..=super::MAX_AUTO_TURNS {
+            let (b, cmds) = feed(a, vec![acted()]);
+            assert_eq!(approvals_turns(&cmds), 1, "turn {n}: {cmds:?}");
+            assert_eq!(
+                notes(&b).last().map(String::as_str),
+                Some(super::MANAGE_TURN)
+            );
+            let (b, cmds) = feed(b, vec![settled(Some(1000)), key(KeyCode::Down)]);
+            assert_eq!(approvals_turns(&cmds), 0, "once per batch");
+            a = b;
+        }
+        let (a, cmds) = feed(a, vec![acted()]);
+        assert_eq!(approvals_turns(&cmds), 0, "the fourth in a row waits");
+        assert_eq!(
+            notes(&a).last().map(String::as_str),
+            Some(super::MANAGE_STOPPED)
+        );
+        // The person speaks: Clio may go on by herself again.
+        let mut a = a;
+        a.chat.set_input("go on".into());
+        let (a, _) = feed(a, vec![key(KeyCode::Enter)]);
+        let (a, _) = feed(a, vec![settled(Some(1000))]);
+        let (_, cmds) = feed(a, vec![acted()]);
+        assert_eq!(approvals_turns(&cmds), 1, "{cmds:?}");
+        // Something typed: the outcomes ride with it, no turn of their own.
+        let mut a = idle();
+        a.chat.set_input("and now?".into());
+        let (a, cmds) = feed(a, vec![acted()]);
+        assert_eq!(approvals_turns(&cmds), 0);
+        let (a, _) = feed(a, vec![key(KeyCode::Enter)]);
+        let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 0);
     }
 
     // The person's own message goes first and carries what came of the answers: no turn after.

@@ -68,6 +68,9 @@ pub const REVIEW_ASK: &str = "An independent review of your last work found the 
 pub const SKILL_NOTES_ASK: &str = "The skill was registered; its review also noted the following. Write a new version with skill_write only if a note is worth it; otherwise leave the skill as it is.";
 /// What Clio asks in the turn that follows the person's approvals.
 pub const APPROVALS_ASK: &str = "The person answered what waited for their approval; what came of each follows, as data. Say briefly what happened with each, and go on with what was left pending. Do not try again, in any way, what the person rejected.";
+/// What Clio asks in the turn that follows acts on what she created, done when a turn ended
+/// (their outcomes follow, as data).
+pub const MANAGE_ASK: &str = "These are the outcomes of what you asked for, done when your last turn ended; they follow, as data. Go on with what was left of the person's request. Do not repeat an act already done.";
 /// What Clio asks in the turn after a permission window ended (its record follows, as data).
 pub const GRANT_ASK: &str = "The person's permission window ended: what Clio approved under it without asking them follows, as data. Sum up for the person, briefly and in their language, what you did under their permission and what is left. Do not start anything new in this turn.";
 /// What Clio asks when the person closes the session.

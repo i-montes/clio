@@ -338,6 +338,9 @@ pub enum Bg {
     TurnWork(Box<crate::cli::chat::TurnWork>),
     /// Skills, after a turn: the drafts to review (id, name) and notes for the person.
     SkillNews(Vec<(String, String)>, Vec<String>),
+    /// Acts on what Clio created, done when a turn ended (free, or under the permission window):
+    /// their notes; once the chat is idle, a turn tells the model what came of them.
+    Acted(Vec<String>),
     /// A review of `session` started (`auto`: the judge asked for it, `why` its reason).
     ReviewStarted {
         session: String,
@@ -1540,6 +1543,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                 c.rendered.take();
             }
             c.start_turn(app.now_ms);
+            c.approvals.auto_turns = 0;
             vec![Cmd::ChatSend { text }]
         }
         Bg::CapSet(r) => {
@@ -1653,6 +1657,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         Bg::TurnWork(w) => {
             app.chat.review.work = Some(*w);
             app.chat.review.changed = true;
+            vec![]
+        }
+        Bg::Acted(notes) => {
+            app.chat
+                .items
+                .extend(notes.into_iter().map(super::chat::Item::Note));
+            app.chat.approvals.acted = true;
             vec![]
         }
         Bg::SkillNews(drafts, notes) => {

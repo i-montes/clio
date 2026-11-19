@@ -1210,7 +1210,33 @@ fn manage_states(out: &mut Vec<(&'static str, App)>) {
         "Clio asks to turn on a server you turned off",
         manage_box(&on),
     ));
-    let note = |n: &str| Input::Bg(Bg::SkillNews(vec![], vec![n.into()]));
+    let older = serde_json::json!({
+        "name": "uptime-report", "description": "Checks the sites.",
+        "schedule": {"every": "1h", "at": null}, "command": "bash run.sh", "verify": "bash run.sh",
+        "network": ["status.example.com"],
+        "secrets": [{"name": "STATUS_TOKEN", "env": "TOKEN", "host": "status.example.com"}],
+        "writes": [], "limits": {"cpu_percent": 50, "memory_mb": 512, "seconds": 300}
+    });
+    let undo = manage_item(
+        "service_manage",
+        serde_json::json!({"name": "uptime-report", "action": "undo", "why": "Version 3 sends too much", "version": 3, "to": 2, "older": older.to_string()}),
+        Some(clio_toolhost::manage::SERVICE_UNDO),
+    );
+    out.push((
+        "Clio asks to take a service back a version",
+        manage_box(&undo),
+    ));
+    let mut run = manage_item(
+        "service_manage",
+        serde_json::json!({"name": "uptime-report", "action": "run", "why": "The person asked for a check now", "version": 3, "reaches": "status.example.com", "with": "STATUS_TOKEN"}),
+        None,
+    );
+    run.class = clio_toolhost::ask::Class::Send;
+    out.push((
+        "Clio asks to run a service that reaches out",
+        manage_box(&run),
+    ));
+    let note = |n: &str| Input::Bg(Bg::Acted(vec![n.into()]));
     let (a, _) = super::tests::feed(
         conversation(true),
         vec![note(
@@ -1232,6 +1258,15 @@ fn manage_states(out: &mut Vec<(&'static str, App)>) {
         )))],
     );
     out.push(("a removal done under your permission window", a));
+    let mut c = conversation(true);
+    c.chat.approvals.auto_turns = super::approvals::MAX_AUTO_TURNS;
+    let (a, _) = super::tests::feed(
+        c,
+        vec![note(
+            "Clio did this by herself: turn the service «disk-check» off (Its disk is gone). «disk-check» is off",
+        )],
+    );
+    out.push(("Clio stops going on by herself", a));
 }
 
 fn approve_service(a: &mut App, b: super::ask::BlockAsk, scroll: usize) {
