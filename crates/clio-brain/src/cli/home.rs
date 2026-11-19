@@ -217,7 +217,7 @@ pub struct SessionCfg {
     #[serde(default = "yes")]
     pub continuous: bool,
     /// Between turns, a context over this many tokens is compacted (`/compact N` sets it).
-    #[serde(default = "context_cap")]
+    #[serde(default = "context_cap", deserialize_with = "cap_in_range")]
     pub context_cap_tokens: u64,
 }
 
@@ -225,6 +225,11 @@ pub const CONTEXT_CAP: u64 = 200_000;
 
 fn context_cap() -> u64 {
     CONTEXT_CAP
+}
+
+/// A cap edited by hand in `config.json` is held to what `/compact N` accepts (50k to 1M).
+fn cap_in_range<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    u64::deserialize(d).map(|n| n.clamp(50_000, 1_000_000))
 }
 
 impl Default for SessionCfg {
@@ -581,6 +586,21 @@ mod tests {
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    // A cap edited by hand is held to 50k–1M when read; a missing one is the default.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_context_cap_read_from_the_config_is_clamped() {
+        let cap = |v: &str| {
+            serde_json::from_str::<SessionCfg>(v)
+                .unwrap()
+                .context_cap_tokens
+        };
+        assert_eq!(cap(r#"{"context_cap_tokens": 1}"#), 50_000);
+        assert_eq!(cap(r#"{"context_cap_tokens": 99999999999}"#), 1_000_000);
+        assert_eq!(cap(r#"{"context_cap_tokens": 300000}"#), 300_000);
+        assert_eq!(cap("{}"), CONTEXT_CAP);
     }
 
     #[test]
