@@ -715,6 +715,7 @@ A `/` as the first letter of an empty message opens, over the box you type in, t
 | `/skills [off \| on \| undo \| remove <name>]` |  | Clio's skills: list them, turn one off or on, go back a version |
 | `/services [show \| on \| off \| undo \| remove \| run \| logs <name> \| enable \| disable]` |  | Clio's services, run on a schedule: list them, look at one, turn one off, run one now |
 | `/mcp [show \| on \| off \| confirm \| remove \| logs <name> \| allow \| ask <name> <tool>]` |  | MCP servers you approved: list them, look at their tools (confirm is optional), turn one on or off, choose which tools ask |
+| `/round` |  | Clio's rounds: when she last looked by herself, and what she told you |
 | `/copy` |  | copy the last answer (OSC 52) |
 | `/mouse [on \| off]` |  | let the chat take the mouse, or leave it to the terminal to select text |
 | `/memory` |  | open the memory |
@@ -764,6 +765,26 @@ clio undo <id>                 # in a host session: undoes the files it changed
 - **A budget per day**, not per task: `limits.day_cost_micro_usd` (3,000,000 by default) and `limits.day_steps` (1000) in `config.json`, counted across sessions in `~/.local/share/clio/host/day.json`. When it is spent, Clio says so and goes on the next day.
 - **`~/.config/clio/host.json`** (optional; it only adds, it removes nothing of the factory list): `{"foreign": ["/srv/mailbox", "attachments"], "ask": [{"class": "send", "pattern": "^rsync .*prod:"}]}`. A `questions_per_day` from before is read and ignored, as is an `approvals.every_hours`: `approvals.grant_hours` in `config.json` took their place. `foreign` are foreign folders (reading them marks the session; by default `/var/log`, `/var/mail`, `/var/spool`, `uploads`, `Downloads`, `Descargas`); `ask` adds patterns to one of the four classes (`delete`, `spend`, `send`, `control`). Files written with the old Spanish names (`borrar`, `gastar`, `enviar`) — this one and the pending items already saved — are still read.
 - **What it does not cover:** with `sudo`, a command can do anything, also read Clio's things; with the `systemd` console, even without `sudo`, a command can reach Clio's files through `/proc/<pid>/root`. Details in `docs/threat-model.md`.
+
+## The round: Clio looks by herself
+
+Without a round Clio acts only when you write. The round is Clio waking up by herself, looking at what you asked her to watch, and leaving a notice only when something needs you (S-71; design in `docs/specs/2026-11-19-the-round-design.md`).
+
+- **When.** The services timer (`clio services enable`; it runs `clio services run-due` every minute) also starts a round when one is due: every `round.every_hours` (8 by default) since the last one started, never inside `round.quiet` (`"23:00-07:00"` by default, local time; a round that falls there waits for their end). One at a time: a round still running makes the next one skip. After the machine was off it catches up once, never once per missed round. The timer starts it in a process of its own (a `systemd-run --user --scope`, or a separate process group where there is none) and never waits for it. `clio doctor` warns when rounds are on and the timer is not active.
+- **What it is.** One unattended session of the agent in host mode, with the normal host tools and its own prompt (`clio-round@1`). It has its own run folder (`clio actions --run <id>` shows what it did) and its own Pi session inside it, never your conversation: it is not in the sessions drawer; `clio round` and `/round` list rounds. Its first message is built by Clio only, as data that is wrapped and judged (the session is marked as having read outside text): your `vigilancia` block, the services and MCP servers that raised a notice or were paused since the last round, what waits for your approval and expires within 8 hours, and what earlier rounds told you. Your blocks reach it as they reach any session; nothing of your conversations does.
+- **Its answer** is one fenced `round` block: entries of `key:`, `state:` (`problem`, `resolved` or `info`) and `notice:`, or the single line `nothing`. Clio reads it strictly: anything else (prose, an order, a malformed or oversized block) is "could not report", kept for `clio round` as data and sent nowhere.
+- **No repeat.** Clio keeps, per key, what she last told you. A `problem` is told again only when its state changed, or after 24 hours as "still: …"; a `resolved` is told once (only of something told before) and the key is forgotten; an `info` once per distinct text.
+- **The notices** wait for you: the next time a chat opens they are shown once as quiet notes ("the round at 08:00: «disk-root» …"), and they ride once with your next message to that chat's model, as outside text (wrapped, and marking the session), so you can ask about them. A round with nothing to tell shows nothing.
+- **What it may do.** Read and measure. Nothing is answered for you: what needs your permission is set aside as always, and the approval box asks for it when a chat next opens, saying "set aside by the round at HH:MM" (an item from a round the judge flagged always asks). An open permission window covers the round like any session, and the window's record shows what it did. `ask_person` answers "decide yourself". It saves memories as the agent, under the normal budgets. It never changes your blocks, registers a service or installs a server without you, never opens or extends a window, never answers a box and never touches your conversation.
+- **Limits.** No round runs with the judge off (`jev.enabled`), the vault locked or the model's key missing: nothing runs, and one notice says why (once per reason). A judge flag ends the round at once, with a notice. Each round has its own budget, `round.max_steps` (40), `round.max_seconds` (600) and `round.max_cost_micro_usd` (500000), and shares the day's budget; a round cut by a limit says which in its outcome. Its model is the default one, or `round.model`.
+- **Settings** in `config.json`: `"round": {"every_hours": 8, "quiet": "23:00-07:00", "max_steps": 40, "max_seconds": 600, "max_cost_micro_usd": 500000, "model": null}`. `every_hours: 0` turns rounds off; `"quiet": ""` means no quiet hours; quiet hours that do not read as `HH:MM-HH:MM` fall back to the default.
+
+```sh
+clio round        # the last rounds: when, how long, by whom, the outcome, the notices
+clio round now    # one round now, in the foreground (ignores the interval and the quiet hours, not the lock or the limits)
+```
+
+`/round` shows the same list in the chat.
 
 ## Checking the machine
 

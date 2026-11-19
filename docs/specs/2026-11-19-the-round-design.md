@@ -1,7 +1,7 @@
 # The round (design, 2026-11-19)
 
 Status: decided by the owner's direction ("an autonomous but safe agent"; Telegram left out for
-now). Nothing here is built. It refines section 4 of `2026-11-17-clio-asistente-autonomo-design.md`.
+now). Built on `feat/round` (decisions below). It refines section 4 of `2026-11-17-clio-asistente-autonomo-design.md`.
 
 ## What it is for
 
@@ -69,3 +69,18 @@ now` runs one; `round.every_hours: 0` turns it off.
 - Telegram or any push channel: the notices wait for the next chat.
 - Rounds that act without permission outside a window.
 - Event triggers (a webhook, a file change): services cover frequent checks.
+
+## Decisions taken when building it
+
+- The round's session is its own run folder (`meta.instruction` "Clio's round") with its Pi session inside it (`runs/<id>/pi`): not in the sessions drawer; `clio round` and `/round` list rounds, `clio actions --run <id>` shows what one did.
+- Its state (last start, the "told" map, the last 50 rounds, why rounds are blocked) is `<data>/round/state.json`; its notices use the services' notices file format in `<data>/round/notices.json`; its lock is `<data>/round/round.lock`.
+- `run-due` starts a due round with `systemd-run --user --scope` (the services' detached start), or as a separate process group when there is none, and never waits; `clio round now` runs one in the foreground, ignoring the interval and the quiet hours but not the lock, the readiness checks or the limits.
+- The round is given the whole "told" map (key, state, notice), not only the previous round's notices, so it reuses keys.
+- Its data goes to the model through the findings path (`queue_findings`: wrapped as data, judged, the session marked); the ask comes from the brain in the envelope.
+- The block is `key:` / `state:` / `notice:` per entry (`- key:` first), or the single line `nothing`; keys are lowercase letters, digits and `-` (40 at most), at most 20 entries, a notice is capped at 600 characters, the answer at 16 KiB; anything else is "could not report".
+- No repeat: a problem is told when new or its state changed, again after 24 h as "still: …"; a `resolved` is told only of a key told before, then forgotten; an `info` once per text; a change of wording of the same problem is not told.
+- Notices are taken only when a chat opens (not by `clio run`), shown once, and ride once with the next message wrapped as a subagent summary, judged, marking the session.
+- A round's set-aside items carry "set aside by the round at HH:MM" as their reason and are offered in the next chat's one box; an item of a round the judge flagged is never answered by a window.
+- "Not ready" is one notice per distinct reason, until a round runs again.
+- A round does not serve MCP servers (it has the host tools only); its cost is priced at the default model's price even when `round.model` differs.
+- The doctor asks systemd whether the timer is active only when its unit files exist.
