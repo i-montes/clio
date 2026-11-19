@@ -182,7 +182,7 @@ pub fn osc52(text: &str) -> String {
 struct Guard;
 
 impl Guard {
-    /// `mouse`: the Pi harness takes clicks and the wheel (selecting text then needs Shift).
+    /// `mouse`: the chat takes clicks and the wheel (selecting text then needs Shift).
     fn enter(mouse: bool) -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         let e = |x: std::io::Error| format!("terminal: {x}");
         enable_raw_mode().map_err(e)?;
@@ -211,7 +211,10 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         signal_hook::flag::register_usize(sig, ended.clone(), sig as usize)
             .map_err(|e| format!("signals: {e}"))?;
     }
-    let (_guard, mut term) = Guard::enter(harness == Harness::Pi)?;
+    // The chat takes the mouse only when the person asked (`ui.mouse`): the terminal's own
+    // selection works otherwise.
+    let mouse = harness == Harness::Pi && Config::load(&dirs).is_ok_and(|c| c.ui.mouse);
+    let (_guard, mut term) = Guard::enter(mouse)?;
     let (tx, rx) = channel::<Input>();
     let dirs = Arc::new(dirs);
     let ctx = Ctx {
@@ -231,6 +234,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         .unwrap_or_default();
     let mut app = App::new(&cwd, theme::Theme::from_env());
     app.debug = debug;
+    app.mouse = mouse;
     let mut resume = vec![];
     if harness == Harness::Pi {
         app.use_pi();
@@ -1390,6 +1394,28 @@ impl Ctx {
                 move |d, _| set_connector(d, &name),
                 |r| Bg::Done(r.and_then(|x| x)),
             ),
+            Cmd::SetMouse(on) => {
+                let mut out = std::io::stdout();
+                let _ = if on {
+                    execute!(out, crossterm::event::EnableMouseCapture)
+                } else {
+                    execute!(out, crossterm::event::DisableMouseCapture)
+                };
+                self.spawn(
+                    move |d, _| {
+                        super::connect::edit_section(d, "ui", true, |m| {
+                            m.insert("mouse".into(), on.into());
+                        })
+                        .map(|()| {
+                            format!(
+                                "mouse {}: saved in config.json",
+                                if on { "on" } else { "off" }
+                            )
+                        })
+                    },
+                    |r| Bg::Done(r.and_then(|x| x)),
+                );
+            }
             Cmd::SetEffort(level) => {
                 let session = self.current_chat();
                 self.spawn(

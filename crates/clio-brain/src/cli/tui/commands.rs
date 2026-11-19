@@ -40,6 +40,7 @@ pub enum Run {
     Memory,
     Doctor,
     Help,
+    Mouse,
     Quit,
 }
 
@@ -197,6 +198,14 @@ pub const COMMANDS: &[Command] = &[
         Run::Doctor,
     ),
     c("help", &[], "", "keys and commands", false, Run::Help),
+    c(
+        "mouse",
+        &[],
+        "[on | off]",
+        "let the chat take the mouse, or leave it to the terminal to select text",
+        false,
+        Run::Mouse,
+    ),
     // Like Ctrl-C twice: always, stopping what runs as closing does.
     c("quit", &["exit"], "", "close Clio", false, Run::Quit),
 ];
@@ -641,6 +650,19 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             app.open_help();
             vec![]
         }
+        Run::Mouse => match args {
+            "on" | "off" => {
+                app.mouse = args == "on";
+                vec![Cmd::SetMouse(app.mouse)]
+            }
+            _ => {
+                app.flash = Some(format!(
+                    "the mouse is {}: /mouse on lets the chat take it, /mouse off leaves it to the terminal",
+                    if app.mouse { "on" } else { "off" }
+                ));
+                vec![]
+            }
+        },
         Run::Quit => {
             app.quit = true;
             vec![]

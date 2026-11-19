@@ -210,6 +210,16 @@ pub struct Config {
     pub session: SessionCfg,
     #[serde(default)]
     pub review: ReviewCfg,
+    #[serde(default)]
+    pub ui: UiCfg,
+}
+
+/// The chat's screen.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiCfg {
+    /// The chat takes the mouse (clicks, the wheel); off, the terminal selects and copies text.
+    #[serde(default)]
+    pub mouse: bool,
 }
 
 /// The reviewer: a second agent that checks a piece of work (`/review`, or when the judge says so).
@@ -394,6 +404,7 @@ impl Config {
             memory: MemoryCfg::default(),
             session: SessionCfg::default(),
             review: ReviewCfg::default(),
+            ui: UiCfg::default(),
         }
     }
 

@@ -493,15 +493,29 @@ fn chat_help(app: &App, w: u16) -> Vec<Line<'static>> {
             "/copy uses OSC 52: it only copies in terminals that allow it.",
         ],
     ));
-    sections.push((
-        "the mouse",
-        pairs(&[
-            ("click", "opens a session; outside the drawer, closes it"),
-            ("wheel", "scrolls what is under it"),
-            ("Shift and drag", "selects text"),
-        ]),
-        vec!["A click never answers a question: only the keys do."],
-    ));
+    sections.push(if app.mouse {
+        (
+            "the mouse (on)",
+            pairs(&[
+                ("click", "opens a session; outside the drawer, closes it"),
+                ("wheel", "scrolls what is under it"),
+                ("Shift and drag", "selects text"),
+            ]),
+            vec![
+                "A click never answers a question: only the keys do.",
+                "/mouse off leaves it to the terminal, to select and copy text.",
+            ],
+        )
+    } else {
+        (
+            "the mouse (off)",
+            vec![],
+            vec![
+                "The terminal selects and copies text; everything here works with the keys.",
+                "/mouse on lets the chat take clicks and the wheel (saved in config.json).",
+            ],
+        )
+    });
     let mut other = pairs(&[
         ("m", "the memory (in the sessions)"),
         ("D", "the doctor (in the sessions)"),

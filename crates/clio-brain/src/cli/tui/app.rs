@@ -159,6 +159,8 @@ pub enum Cmd {
     SetModel(String),
     SetConnector(String),
     SetEffort(String),
+    /// `/mouse on|off`: the terminal at once, `ui.mouse` in `config.json`.
+    SetMouse(bool),
     SessionName(String),
     /// Pi's compaction, with the person's instructions (may be empty).
     Compact(String),
@@ -464,6 +466,8 @@ pub struct App {
     pub last_key_ms: Option<u64>,
     /// The chat: the last key was a Ctrl-C that did not quit, so the next one quits.
     pub quit_armed: bool,
+    /// The chat takes the mouse (`ui.mouse`, `/mouse`); off, the terminal selects text.
+    pub mouse: bool,
     /// When the judge's reviews of the last hour started (`review.max_per_hour`).
     pub reviews_at: Vec<u64>,
     /// A short line of feedback at the bottom.
@@ -506,6 +510,7 @@ impl App {
             answering: 0,
             last_key_ms: None,
             quit_armed: false,
+            mouse: false,
             reviews_at: Vec::new(),
             flash: None,
             notice: None,

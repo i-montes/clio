@@ -1075,3 +1075,42 @@ fn usage_shows_the_cache_hit_rate_or_that_there_is_none() {
         "{s}"
     );
 }
+
+// The mouse is the terminal's unless the person gives it to the chat: `/mouse on|off` applies at
+// once (`Cmd::SetMouse`, which also saves `ui.mouse`), `/mouse` says how it is, and the help says
+// what each way does.
+#[test]
+fn mouse_on_and_off() {
+    assert!(!Config::default_with(vec![]).ui.mouse, "off by default");
+    let a = open();
+    assert!(!a.mouse);
+    let (a, cmds) = run(a, "/mouse on");
+    assert_eq!(cmds, vec![Cmd::SetMouse(true)]);
+    assert!(a.mouse);
+    let help = |mut a: App| {
+        a.open_help();
+        screen_text(&a, 100, 200)
+    };
+    let (a, cmds) = run(a, "/mouse");
+    assert!(cmds.is_empty());
+    assert!(
+        a.flash
+            .as_deref()
+            .is_some_and(|f| f.contains("the mouse is on"))
+    );
+    let (a, cmds) = run(a, "/mouse off");
+    assert_eq!(cmds, vec![Cmd::SetMouse(false)]);
+    assert!(!a.mouse);
+    let s = help(a);
+    assert!(
+        s.contains("the mouse (off)") && s.contains("/mouse on"),
+        "{s}"
+    );
+    let mut a = open();
+    a.mouse = true;
+    let s = help(a);
+    assert!(
+        s.contains("the mouse (on)") && s.contains("Shift and drag"),
+        "{s}"
+    );
+}
