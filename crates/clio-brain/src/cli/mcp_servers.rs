@@ -1930,8 +1930,13 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         let at = |p: &Path| seen[p.display().to_string()].as_str().unwrap().to_owned();
         assert!(at(&site).starts_with("no:"), "{seen}");
         assert_eq!(at(&open.join("a.txt")), "file:9", "{seen}");
-        assert_eq!(seen["/opt"], "dir:0", "{seen}");
-        assert_eq!(seen["/srv"], "dir:0", "{seen}");
+        // Nothing of the roots but the pieces Clio shows (Node lives under `/opt` on a CI runner).
+        let mut shown = e.port.windows().unwrap();
+        shown.extend([e.port.exe.clone(), e.d().data.clone(), open.clone()]);
+        for root in ["/opt", "/srv"] {
+            let n = super::super::services::tests::shown_in(root, &shown);
+            assert_eq!(seen[root], format!("dir:{n}"), "{seen}");
+        }
         assert!(fs::read_to_string(&site).is_ok(), "outside, it is readable");
     }
 

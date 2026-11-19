@@ -2076,6 +2076,17 @@ pub(crate) mod tests {
         Some((v, site.join("config.php"), open))
     }
 
+    /// How many entries a run sees in the hidden root `r`: one for each first folder under it of
+    /// a piece Clio shows (bwrap makes its mount point), and nothing else. A CI runner keeps its
+    /// toolchains under `/opt`, so a root is not simply empty.
+    pub(crate) fn shown_in(r: &str, shown: &[PathBuf]) -> usize {
+        shown
+            .iter()
+            .filter_map(|p| p.strip_prefix(r).ok()?.components().next())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
     // S-69, with bwrap: the machine's data outside the home is hidden too (`/var`, `/srv`, `/opt`,
     // `/mnt`, `/media`, `/root`, every home): a site's world-readable files under `/var` are not
     // readable from a run; a folder there it declared to read is, read-only.
@@ -2091,7 +2102,7 @@ pub(crate) mod tests {
         let q = |p: &Path| quote(&p.display().to_string());
         let script = format!(
             "cat {site} 2>/dev/null && echo LEAK site\n\
-             find /srv /opt /mnt /media /root -mindepth 1 2>/dev/null | grep -q . && echo LEAK roots\n\
+             for r in /srv /opt /mnt /media /root; do echo \"ROOT $r $(ls -A \"$r\" 2>/dev/null | wc -l)\"; done\n\
              cat {open}/a.txt\n\
              echo x > {open}/new 2>/dev/null && echo LEAK wrote-a-read-path\n\
              echo s > \"$CLIO_STATE_DIR/n\"\n",
@@ -2112,6 +2123,12 @@ pub(crate) mod tests {
         assert_eq!(x.outcome, "ok", "{x:?}");
         assert!(!x.tail.contains("LEAK"), "{}", x.tail);
         assert!(x.tail.contains("declared"), "{}", x.tail);
+        // Nothing of the roots but the pieces shown (the run's files live under `t`).
+        let shown = [t.path().to_path_buf(), open.clone()];
+        for root in ["/srv", "/opt", "/mnt", "/media", "/root"] {
+            let line = format!("ROOT {root} {}", shown_in(root, &shown));
+            assert!(x.tail.lines().any(|l| l == line), "{line}\n{}", x.tail);
+        }
         assert!(!open.join("new").exists());
         // Outside the jail the site's file is readable: the check above is a real one.
         assert!(fs::read_to_string(&site).is_ok());

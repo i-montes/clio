@@ -957,8 +957,9 @@ fn a_description_that_gives_orders_is_cleaned_and_judged() {
 }
 
 fn alive(pid: u32) -> bool {
-    // A process that was killed and waited for is gone from /proc (Linux).
-    !cfg!(target_os = "linux") || Path::new(&format!("/proc/{pid}")).exists()
+    // `kill(pid, 0)`: a process that was killed and waited for is gone (Linux and macOS).
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::test_kill_process(pid).is_ok()
 }
 
 fn set_record(e: &Env, name: &str, f: impl FnOnce(&mut Value)) {

@@ -1381,8 +1381,11 @@ mod tests {
         ] {
             assert!(read_refused(&bad, &home, &control).is_some(), "{bad}");
         }
-        // Under a hidden root outside the home: a read may name it; a write never.
-        let var = tempfile::TempDir::new_in("/var/tmp").ok();
+        // Under a hidden root outside the home: a read may name it; a write never. Linux only:
+        // services run only under bwrap, and macOS's `/var` is a link to `/private/var`.
+        let var = cfg!(target_os = "linux")
+            .then(|| tempfile::TempDir::new_in("/var/tmp").ok())
+            .flatten();
         if let Some(v) = &var {
             let p = v.path().display().to_string();
             assert_eq!(read_refused(&p, &home, &control), None);
