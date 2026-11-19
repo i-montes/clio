@@ -272,7 +272,7 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     Ok(())
 }
 
-/// The action log of `run` (all of it with `None`), the newest last.
+/// The action log of `run` and of its reviews (all of it with `None`), the newest last.
 pub fn action_log(dirs: &Dirs, run: Option<&str>) -> Res<Vec<Value>> {
     let file = state(dirs).join("actions.jsonl");
     let text = match std::fs::read_to_string(&file) {
@@ -283,8 +283,27 @@ pub fn action_log(dirs: &Dirs, run: Option<&str>) -> Res<Vec<Value>> {
     Ok(text
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| run.is_none_or(|r| v["run"] == r))
+        .filter(|v| run.is_none_or(|r| of_run(v, r)))
         .collect())
+}
+
+/// The entry is of `run` itself or of one of its reviews (`<run>.review-<n>`).
+fn of_run(v: &Value, run: &str) -> bool {
+    v["run"].as_str().is_some_and(|r| {
+        r == run
+            || r.strip_prefix(run)
+                .and_then(|x| x.strip_prefix(".review-"))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// `review N · ` before an entry of a review, so it is never taken for the session's own.
+fn review_mark(v: &Value) -> String {
+    v["run"]
+        .as_str()
+        .and_then(|r| r.rsplit_once(".review-"))
+        .map(|(_, n)| format!("review {} · ", sanitize::line(n)))
+        .unwrap_or_default()
 }
 
 /// One entry of the action log for the person: when, run (with `with_run`), tool, outcome, what,
@@ -300,10 +319,11 @@ pub fn action_line(v: &Value, with_run: bool) -> String {
         String::new()
     };
     format!(
-        "{} UTC{run}  {:<8} {:<5} {}{code}{}",
+        "{} UTC{run}  {:<8} {:<5} {}{}{code}{}",
         stamp(v["at_ms"].as_i64().unwrap_or(0)),
         s(&v["tool"]),
         s(&v["outcome"]),
+        review_mark(v),
         s(&v["what"]),
         if v["network"] == true {
             " · network"
@@ -339,7 +359,8 @@ pub fn action_cells(v: &Value, offset: i64) -> [String; 4] {
         s(&v["tool"]),
         s(&v["outcome"]),
         format!(
-            "{}{code}{}",
+            "{}{}{code}{}",
+            review_mark(v),
             s(&v["what"]),
             if v["network"] == true {
                 " · network"
@@ -385,6 +406,40 @@ mod tests {
     use super::*;
 
     const VALUE: &str = "lin_api_Zq8vX2mN4pR7tY1wK9sB3dF6";
+
+    // `/actions` and `clio actions --run` show a run's reviews with it, each row marked as the
+    // review's; another run that only starts the same is not shown.
+    #[test]
+    fn the_action_log_of_a_run_has_its_reviews_marked_as_theirs() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let d = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(state(&d)).unwrap();
+        let row = |run: &str, what: &str| {
+            json!({"at_ms": 0, "run": run, "tool": "exec", "what": what, "outcome": "done"})
+                .to_string()
+        };
+        let log = [
+            row("r1", "make"),
+            row("r1.review-2", "cat a"),
+            row("r10", "other"),
+            row("r1.review-x", "odd"),
+            row("r2.review-1", "theirs"),
+        ]
+        .join("\n");
+        std::fs::write(state(&d).join("actions.jsonl"), log).unwrap();
+        let got = action_log(&d, Some("r1")).unwrap();
+        let whats: Vec<String> = got.iter().map(|v| action_cells(v, 0)[3].clone()).collect();
+        assert_eq!(whats, ["make", "review 2 · cat a"]);
+        assert!(action_line(&got[1], false).contains("review 2 · cat a"));
+        assert_eq!(action_log(&d, None).unwrap().len(), 5);
+    }
 
     // `clio pending` shows the entry a replace or a remove would change, before `clio approve`.
     #[test]
