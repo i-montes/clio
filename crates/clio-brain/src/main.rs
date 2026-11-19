@@ -25,7 +25,9 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio undo <id> [--force]                    returns the original to how it was before apply;
                                               in a host session, undoes the files it changed
   clio pending [--json]                       what waits for your approval (host mode)
-  clio approve <id> | clio reject <id>        runs it exactly as it was set aside, or drops it
+  clio approve <id> [--yes] | clio reject <id>
+                                              runs it exactly as it was set aside, or drops it (a skill
+                                              is printed whole and asked about first; --yes skips that)
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
   clio runs [--all] [--json] | clio show <id> [--json]
@@ -231,7 +233,10 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             args.rest()?;
             pending::show(&dirs, json)?;
         }
-        "approve" => pending::approve_cmd(&dirs, &pending_arg(args)?)?,
+        "approve" => {
+            let yes = args.flag("--yes");
+            pending::approve_cmd(&dirs, &pending_arg(args)?, yes)?;
+        }
         "reject" => pending::reject_cmd(&dirs, &pending_arg(args)?)?,
         "actions" => {
             let (json, run) = (args.flag("--json"), args.value("--run")?);

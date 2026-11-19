@@ -234,15 +234,16 @@ pub struct BlockAsk {
     pub skill: Option<SkillAsk>,
 }
 
-/// A skill set aside for the person: what it is for, why it waits, its SKILL.md whole and each
-/// other file's name and size, all from the stored item.
+/// A skill set aside for the person: what it is for, why it waits, and every file of it whole
+/// (SKILL.md and the rest: scripts too), all from the stored item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillAsk {
     pub description: String,
     pub reason: String,
     pub update: bool,
     pub skill_md: String,
-    pub files: Vec<(String, usize)>,
+    /// Each other file: its path and its content, whole.
+    pub files: Vec<(String, String)>,
 }
 
 impl BlockAsk {
@@ -266,7 +267,7 @@ impl BlockAsk {
                     skill_md: sanitize::multiline(md),
                     files: files
                         .iter()
-                        .map(|(path, content)| (clean(path), content.len()))
+                        .map(|(path, content)| (clean(path), sanitize::multiline(content)))
                         .collect(),
                 }),
             });
@@ -295,7 +296,8 @@ impl BlockAsk {
         }
     }
 
-    /// A skill's rows: what it is, why it waits, SKILL.md line by line, its files, the warning.
+    /// A skill's rows: what it is, why it waits, every file line by line under `--- <path> ---`,
+    /// the warning.
     fn skill_parts(&self, s: &SkillAsk) -> Vec<(Part, String)> {
         let mut out = vec![
             (
@@ -312,25 +314,22 @@ impl BlockAsk {
             ),
             (Part::Label, format!("what it is for: {}", s.description)),
             (Part::Warn, format!("why it waits for you: {}", s.reason)),
-            (Part::Label, "SKILL.md, whole:".into()),
         ];
-        // An empty line still takes a row: the text is shown as it is.
-        out.extend(s.skill_md.lines().map(|l| {
-            (
-                Part::Text,
-                if l.is_empty() {
-                    " ".into()
-                } else {
-                    l.to_owned()
-                },
-            )
-        }));
-        out.push((Part::Label, "its other files:".into()));
-        if s.files.is_empty() {
-            out.push((Part::Text, "none".into()));
-        }
-        for (path, size) in &s.files {
-            out.push((Part::Text, format!("{path} ({size} bytes)")));
+        // Every file whole, scripts too; an empty line still takes a row: shown as it is.
+        for (path, text) in std::iter::once(("SKILL.md", s.skill_md.as_str()))
+            .chain(s.files.iter().map(|(p, t)| (p.as_str(), t.as_str())))
+        {
+            out.push((Part::Label, format!("--- {path} ---")));
+            out.extend(text.lines().map(|l| {
+                (
+                    Part::Text,
+                    if l.is_empty() {
+                        " ".into()
+                    } else {
+                        l.to_owned()
+                    },
+                )
+            }));
         }
         if self.suspect {
             out.push((Part::Warn, SUSPECT_LINE.into()));

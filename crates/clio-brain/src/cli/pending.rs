@@ -283,7 +283,18 @@ pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
 }
 
 /// `clio approve ID`. A secret request asks for the value here, with no echo.
-pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
+/// `clio approve ID [--yes]`: a skill is printed whole, then registered only after the person says
+/// yes to what they read (`--yes` skips the question).
+pub fn approve_cmd(dirs: &Dirs, id: &str, yes: bool) -> Res<()> {
+    approve_cmd_with(dirs, id, yes, super::apply::confirm)
+}
+
+fn approve_cmd_with(
+    dirs: &Dirs,
+    id: &str,
+    yes: bool,
+    confirm: impl FnOnce(&str) -> bool,
+) -> Res<()> {
     let p = pending::check(&state(dirs), id, now_ms())?;
     if let Some((name, dest, why)) = pending::secret_of(&p) {
         println!(
@@ -302,6 +313,13 @@ pub fn approve_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     }
     if let Some(text) = block_text(dirs, &p) {
         println!("{id}:\n{text}\n");
+    }
+    if pending::skill_of(&p).is_some()
+        && !yes
+        && !confirm("register this skill exactly as shown above?")
+    {
+        println!("nothing was registered: {id} still waits (clio reject {id} drops it)");
+        return Ok(());
     }
     let p = approve(dirs, id)?;
     println!("approved {}: {}", p.id, sanitize::multiline(&outcome(&p)));
@@ -577,8 +595,21 @@ mod tests {
         for l in md.lines().filter(|l| !l.is_empty()) {
             assert!(shown.contains(l), "{l}\n{shown}");
         }
-        assert!(shown.contains("a.sh (20 bytes)"), "{shown}");
-        approve(&d, &p.id).unwrap();
+        // Every file whole, scripts too (S-36).
+        assert!(
+            shown.contains("--- a.sh ---\n  #!/bin/bash\n  echo hi"),
+            "{shown}"
+        );
+        // `clio approve`: printed, then asked; a no registers nothing, a yes (or `--yes`) does.
+        let mut asked = false;
+        approve_cmd_with(&d, &p.id, false, |q| {
+            asked = q.contains("exactly as shown");
+            false
+        })
+        .unwrap();
+        assert!(asked);
+        assert!(!super::super::skills::live(&d).join("hi").exists());
+        approve_cmd_with(&d, &p.id, false, |_| true).unwrap();
         let live = super::super::skills::live(&d).join("hi");
         assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
         assert_eq!(
