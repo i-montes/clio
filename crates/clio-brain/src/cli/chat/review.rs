@@ -1111,7 +1111,9 @@ mod tests {
             run: "r1",
             run_dir: &run_dir,
             work: t.path(),
-            host: true,
+            // Copy mode: staging does not depend on the launcher, and a host-mode review is
+            // refused earlier where bwrap cannot run (macOS).
+            host: false,
             marked: None,
             day: Arc::new(Mutex::new(DayBudget::new(u64::MAX))),
             model: &model,
