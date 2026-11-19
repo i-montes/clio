@@ -980,7 +980,15 @@ export default function clioGuard(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("before_agent_start", (event) => {
+	pi.on("before_agent_start", async (event) => {
+		// A session reopened with its marks restored by the brain has none in its file: the host
+		// knows them before the first message, so the notice goes with it (an empty filter reads
+		// nothing and answers with the mark). With no answer, it comes with the first tool call.
+		if (!state.tainted) {
+			try {
+				await host("filter", { items: [] }, "taint-check", undefined, 5_000);
+			} catch {}
+		}
 		const o = event.systemPromptOptions;
 		const tools = o.selectedTools.filter((n) => o.toolSnippets[n]).map((n) => `- ${n}: ${o.toolSnippets[n]}`);
 		const rules = [...o.selectedTools.flatMap((n) => o.toolGuidelines[n] ?? []), ...o.promptGuidelines].map((r) => `- ${r}`);
