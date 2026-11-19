@@ -138,6 +138,17 @@ pub enum Cmd {
         id: String,
         yes: bool,
     },
+    /// The person's answer to ONE box that listed several items: each is answered in turn, in
+    /// the order shown.
+    ChatAnswers {
+        ids: Vec<String>,
+        yes: bool,
+    },
+    /// `/grant` (`""`: show the permission window) or `/grant off` (close it now).
+    Grant {
+        arg: String,
+        session: String,
+    },
     /// The person's answer to one of Pi's dialogs (a question of `ask_person`); `None` skips it.
     ChatUi {
         id: String,
@@ -170,8 +181,9 @@ pub enum Cmd {
     LoadPending {
         session: String,
     },
-    /// What this session has waiting for the person: its boxes open if the window allows it
-    /// (`approvals.every_hours`), and `Bg::Approvals` says what was found.
+    /// What this session has waiting for the person, at the end of a turn: under an open
+    /// permission window it is approved by it, else ONE box lists it; an ended window's summary
+    /// is queued. `Bg::Approvals` says what was found.
     CheckApprovals {
         session: String,
     },
@@ -294,16 +306,32 @@ pub enum Bg {
     CapSet(Result<u64, String>),
     /// This session's actions waiting, and how many of other sessions wait too.
     Pending(Result<Waiting, String>),
-    /// What `Cmd::CheckApprovals` found: how many wait, and whether their boxes were opened.
+    /// What `Cmd::CheckApprovals` found: how many wait.
     Approvals {
         session: String,
         waiting: usize,
-        opened: bool,
+    },
+    /// The permission window as read now: when it ends, the hours a yes is worth, and whether
+    /// the session is `suspect` (its boxes open no window).
+    Grant {
+        session: String,
+        ends: Option<i64>,
+        hours: u64,
+        suspect: bool,
+    },
+    /// What the permission window approved: a quiet note (or why it could not).
+    Granted(Result<String, String>),
+    /// What the person is told of the permission window (opened by their yes, `/grant`): a
+    /// quiet note, and what waits is looked at again (a window closed now is summed up).
+    GrantSaid(Result<String, String>),
+    /// A permission window ended: its record waits in the session for the turn that sums it up.
+    GrantSummary {
+        session: String,
     },
     /// Lines to show in a box with that title.
     Modal(Result<Modal, String>),
     /// A question that needs a `y`, built from what was read (`/mcp confirm`).
-    Confirm(Result<Confirm, String>),
+    Confirm(Result<Box<Confirm>, String>),
     /// What the turn about to settle changed (it changed something).
     TurnWork(Box<crate::cli::chat::TurnWork>),
     /// Skills, after a turn: the drafts to review (id, name) and notes for the person.
@@ -423,6 +451,8 @@ pub struct Confirm {
     pub session: String,
     /// When it came on screen (its quiet second starts then, not when it was queued).
     pub shown_ms: u64,
+    /// An approval box that lists several items: the ids after `id`, answered with it.
+    pub more: Vec<String>,
     /// A change to one of the person's blocks: drawn whole, scrolled with the arrows.
     pub block: Option<super::ask::BlockAsk>,
 }
@@ -451,6 +481,7 @@ impl Confirm {
             armed: false,
             session: String::new(),
             shown_ms: 0,
+            more: Vec::new(),
             block: None,
         }
     }
@@ -690,8 +721,9 @@ impl App {
     pub fn asking(&self, id: &str) -> bool {
         let secret =
             |p: &super::ask::Prompt| matches!(p, super::ask::Prompt::Secret(s) if s.id == id);
-        self.confirm.as_ref().is_some_and(|c| c.id == id)
-            || self.asks.iter().any(|c| c.id == id)
+        let mine = |c: &Confirm| c.id == id || c.more.iter().any(|m| m == id);
+        self.confirm.as_ref().is_some_and(mine)
+            || self.asks.iter().any(mine)
             || self.prompt.as_ref().is_some_and(secret)
             || self.prompts.iter().any(secret)
     }
@@ -1000,9 +1032,15 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::RemoveMcp => vec![Cmd::Mcp(format!("remove {} --yes", c.id))],
         // With the digest of the list shown: refused if it changed meanwhile.
         Action::ConfirmMcp => vec![Cmd::Mcp(format!("confirm {} {} --yes", c.id, c.workspace))],
-        Action::Approve => {
+        Action::Approve if c.more.is_empty() => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
+        }
+        Action::Approve => {
+            let mut ids = vec![c.id];
+            ids.extend(c.more);
+            app.answering += ids.len();
+            vec![Cmd::ChatAnswers { ids, yes }]
         }
     }
 }
@@ -1383,14 +1421,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             vec![]
         }
         // They come before the turn settles, so from the session open now.
+        // ONE box for everything that waits and is not in a box yet.
         Bg::ChatAsks(asks) => {
-            for (id, what, block) in asks {
-                if app.asking(&id) {
-                    continue;
-                }
-                let mut c = Confirm::new(Action::Approve, id, 0, what);
-                c.session.clone_from(&app.chat.session_id);
-                c.block = block;
+            let new: Vec<_> = asks
+                .into_iter()
+                .filter(|(id, ..)| !app.asking(id))
+                .collect();
+            if let Some(c) = super::approvals::one_box(app, new) {
                 app.asks.push_back(c);
             }
             next_ask(app);
@@ -1518,12 +1555,43 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
-        Bg::Approvals {
+        Bg::Approvals { session, waiting } => {
+            super::approvals::checked(app, &session, waiting);
+            vec![]
+        }
+        Bg::Grant {
             session,
-            waiting,
-            opened,
+            ends,
+            hours,
+            suspect,
         } => {
-            super::approvals::checked(app, &session, waiting, opened);
+            super::approvals::grant_state(app, &session, ends, hours, suspect);
+            vec![]
+        }
+        // Not an answer of the person's: no turn of its own; it rides with the next message.
+        Bg::Granted(r) => {
+            if r.is_ok() {
+                let a = &mut app.chat.approvals;
+                a.waiting = a.waiting.saturating_sub(1);
+            }
+            app.chat.items.push(match r {
+                Ok(m) => super::chat::Item::Note(m),
+                Err(e) => super::chat::Item::Error(e),
+            });
+            vec![]
+        }
+        Bg::GrantSaid(r) => {
+            app.chat.approvals.check = true;
+            app.chat.items.push(match r {
+                Ok(m) => super::chat::Item::Note(m),
+                Err(e) => super::chat::Item::Error(e),
+            });
+            vec![]
+        }
+        Bg::GrantSummary { session } => {
+            if session == app.chat.session_id {
+                app.chat.approvals.summary = true;
+            }
             vec![]
         }
         Bg::Pending(r) => {
@@ -1562,7 +1630,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             match r {
                 Ok(mut c) => {
                     c.session.clone_from(&app.chat.session_id);
-                    app.asks.push_back(c);
+                    app.asks.push_back(*c);
                     next_ask(app);
                 }
                 Err(e) => app.notice = Some(e),
@@ -2113,10 +2181,12 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
     let t = app.theme;
     let w = dialog_inner(area);
     let mut body: Vec<Line<'static>> = if c.action == Action::Approve {
-        vec![
-            Line::from(Span::styled(format!("Clio set aside {}.", c.id), t.bold())),
-            Line::from(""),
-        ]
+        let what = if c.more.is_empty() {
+            format!("Clio set aside {}.", c.id)
+        } else {
+            format!("Clio set aside {} items.", c.more.len() + 1)
+        };
+        vec![Line::from(Span::styled(what, t.bold())), Line::from("")]
     } else {
         vec![]
     };
@@ -2150,12 +2220,14 @@ fn block_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm, b: &super::as
     let d = format!("   {}   ", t.dot());
     let hint = Line::from(vec![
         Span::styled(if c.armed { "Enter" } else { "y then Enter" }, t.key()),
-        Span::styled(b.yes(), t.dim()),
+        Span::styled(b.yes().to_owned(), t.dim()),
         Span::styled(d, t.dim()),
         Span::styled(if c.armed { "other key" } else { "n or Esc" }, t.key()),
         Span::styled(
             if c.armed {
                 " goes back"
+            } else if c.action == Action::Approve && !c.more.is_empty() {
+                " no to all"
             } else if c.action == Action::Approve {
                 " no, reject it"
             } else {

@@ -816,7 +816,8 @@ fn a_long_block_change_scrolls_whole_and_is_approved_only_after_its_end() {
 }
 
 // The questions of a turn queue and none replaces another: a secret first (Pi waits for nothing,
-// but it is asked as before), then the actions set aside and the block change, in their order.
+// but it is asked as before), then ONE box for the actions set aside and the block change, in
+// their order.
 #[test]
 fn a_block_change_queues_with_the_commands_and_the_secrets() {
     use super::tests_gallery::block_ask;
@@ -848,29 +849,23 @@ fn a_block_change_queues_with_the_commands_and_the_secrets() {
         ],
     );
     assert!(matches!(a.prompt, Some(Prompt::Secret(_))));
-    assert_eq!(a.asks.len(), 3);
+    assert_eq!(a.asks.len(), 1, "the three in one box");
     let (a, cmds) = feed(a, vec![Input::Tick(2_000), key(KeyCode::Esc)]);
     assert!(matches!(&cmds[..], [Cmd::ChatSecret { id, value: None, .. }] if id == "s1"));
-    let mut answered = Vec::new();
-    let mut a = a;
-    let mut t = 4_000;
-    for _ in 0..3 {
-        let c = a.confirm.as_ref().unwrap();
-        assert_eq!(c.block.is_some(), c.id == "c3d4", "{}", c.id);
-        let _ = screen_text(&a, 100, 30);
-        let (n, cmds) = feed(a, vec![Input::Tick(t), ch('n')]);
-        a = n;
-        answered.extend(cmds);
-        t += 2_000;
-    }
-    let ids: Vec<&str> = answered
-        .iter()
-        .map(|c| match c {
-            Cmd::ChatAnswer { id, yes: false } => id.as_str(),
-            other => panic!("{other:?}"),
-        })
-        .collect();
-    assert_eq!(ids, ["a1", "c3d4", "b2"]);
+    let c = a.confirm.as_ref().unwrap();
+    assert_eq!(
+        (c.id.as_str(), c.more.as_slice()),
+        ("a1", &["c3d4".to_owned(), "b2".to_owned()][..])
+    );
+    let _ = screen_text(&a, 100, 30);
+    let (a, cmds) = feed(a, vec![Input::Tick(4_000), ch('n')]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswers {
+            ids: vec!["a1".into(), "c3d4".into(), "b2".into()],
+            yes: false
+        }]
+    );
     assert!(a.confirm.is_none() && a.asks.is_empty());
 }
 
@@ -1202,7 +1197,7 @@ fn an_mcp_server_box_shows_what_it_grants_and_is_approved_only_after_its_end() {
         "This is someone else's code: it will hold these credentials and can send them to the hosts above.",
         "Its tools are not known yet",
         "--- mcp.json ---",
-        "yes, download it and list its tools",
+        "yes, install it and turn it on",
     ] {
         assert!(words.contains(want), "{want}\n{seen}");
     }
@@ -1274,6 +1269,7 @@ pub(super) fn mcp_call_ask(arguments: &serde_json::Value) -> super::ask::BlockAs
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("this tool of the server may change something".into()),
+        granted: None,
     };
     super::ask::BlockAsk::new(&p, false).unwrap()
 }
@@ -1375,7 +1371,7 @@ fn mcp_confirm_lists_every_tool_waits_in_line_and_keeps_the_timing_rule() {
     let mut open = super::app::Confirm::new(Action::Approve, "x1".into(), 0, "«send» x".into());
     open.session = "sid".into();
     a.confirm = Some(open);
-    let (a, _) = feed(a, vec![Input::Bg(Bg::Confirm(Ok(c)))]);
+    let (a, _) = feed(a, vec![Input::Bg(Bg::Confirm(Ok(Box::new(c))))]);
     assert_eq!(a.confirm.as_ref().unwrap().id, "x1");
     let (a, cmds) = feed(a, vec![Input::Tick(2_000), ch('n')]);
     assert_eq!(

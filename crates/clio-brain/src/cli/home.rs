@@ -217,23 +217,24 @@ pub struct Config {
     pub approvals: ApprovalsCfg,
 }
 
-/// When Clio opens the approval boxes by herself.
+/// The permission window: how long a yes of the person lets Clio act without asking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalsCfg {
-    /// At most once every this many hours (the rest of the time the items wait, quietly, in
-    /// `/pending`); 0 asks at once.
-    #[serde(default = "every_hours")]
-    pub every_hours: u64,
+    /// A yes in an approval box (or `clio approve`) lets Clio act without asking for this many
+    /// hours (secrets and a session the judge flagged excepted); 0: no window, every item asks.
+    /// An `every_hours` of an earlier version is read and ignored.
+    #[serde(default = "grant_hours")]
+    pub grant_hours: u64,
 }
 
-fn every_hours() -> u64 {
+fn grant_hours() -> u64 {
     4
 }
 
 impl Default for ApprovalsCfg {
     fn default() -> Self {
         Self {
-            every_hours: every_hours(),
+            grant_hours: grant_hours(),
         }
     }
 }

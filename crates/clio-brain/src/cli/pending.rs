@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use clio_brain::pi::launch::valid_id;
 use clio_toolhost::ask::HostRules;
+use clio_toolhost::grant;
 use clio_toolhost::pending::{self, Pending, State};
 use clio_toolhost::{Config, HostCfg, JailMode, ToolHost};
 use clio_vault::{Scrubber, SecretValue};
@@ -53,22 +54,35 @@ pub fn interrupted_line(p: &Pending) -> String {
     )
 }
 
-/// Whether Clio may open the approval boxes by herself now: at least `every_hours` since she last
-/// did. The time is kept in the host folder (`asked.json`), so it survives a restart and every
-/// conversation shares it; when she may, now becomes that time. A clock that went back, a file
-/// that cannot be read: she may.
-pub fn ask_now(dirs: &Dirs, every_hours: u64, now: i64) -> bool {
-    let file = state(dirs).join("asked.json");
-    let last = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|t| t.trim().parse::<i64>().ok());
-    let window = i64::try_from(every_hours.saturating_mul(3_600_000)).unwrap_or(i64::MAX);
-    let due = last.is_none_or(|l| now < l || now - l >= window);
-    if due {
-        let _ = mkdir_private(&state(dirs))
-            .and_then(|()| super::write_private(&file, now.to_string().as_bytes()));
+/// How long a yes is worth (`approvals.grant_hours`; 0: no window).
+pub fn grant_hours(dirs: &Dirs) -> u64 {
+    super::home::Config::load(dirs).map_or_else(
+        |_| super::home::ApprovalsCfg::default().grant_hours,
+        |c| c.approvals.grant_hours,
+    )
+}
+
+/// Whether the judge flagged the session of run `run` (its tool host left the mark in the run
+/// folder).
+pub fn suspect_run(dirs: &Dirs, run: &str) -> bool {
+    valid_id(run)
+        && std::fs::read_to_string(dirs.runs.join(run).join("toolhost/tainted.json"))
+            .is_ok_and(|t| t.contains("\"suspect\""))
+}
+
+/// The person said yes to `ids` in an approval box or with `clio approve`: a permission window of
+/// `approvals.grant_hours` opens (none when it is 0, when one is open already, or when the
+/// session the yes belongs to is `suspect`: a yes there approves only what it lists). The only
+/// two callers are the chat's answer to a box (`Cmd::ChatAnswer`) and `approve_cmd`: nothing the
+/// model, a tool, a review, a notice or a summary turn reaches opens a window.
+pub fn person_said_yes(dirs: &Dirs, ids: &[String], suspect: bool) -> Option<grant::Window> {
+    if suspect {
+        return None;
     }
-    due
+    grant::open(&state(dirs), grant_hours(dirs), ids)
+        .inspect_err(|e| eprintln!("clio: the permission window did not open: {e}"))
+        .ok()
+        .flatten()
 }
 
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
@@ -109,8 +123,7 @@ pub fn what(p: &Pending) -> String {
 /// A block change as the approval box shows it, row by row, cleaned: what `clio approve` prints.
 /// The session is `suspect` when its tool host left that mark in the run folder.
 fn block_text(dirs: &Dirs, p: &Pending) -> Option<String> {
-    let suspect = std::fs::read_to_string(dirs.runs.join(&p.run).join("toolhost/tainted.json"))
-        .is_ok_and(|t| t.contains("\"suspect\""));
+    let suspect = suspect_run(dirs, &p.run);
     let b = super::tui::ask::BlockAsk::new(p, suspect)?;
     let rows: Vec<String> = b
         .parts()
@@ -200,7 +213,77 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
         println!("{}", interrupted_line(p));
     }
     if !list.is_empty() {
-        println!("\nclio approve <id> runs it · clio reject <id> drops it");
+        println!(
+            "\nclio approve <id> runs it (and lets Clio act without asking for {} h) · clio reject <id> drops it",
+            grant_hours(dirs)
+        );
+    }
+    Ok(())
+}
+
+/// The permission window in one line: open and how long is left, or that none is.
+pub fn grant_line(dirs: &Dirs) -> String {
+    match grant::current(&state(dirs)) {
+        Some(w) => format!(
+            "a permission window is open: {} left (until {}); Clio acts without asking, and `off` closes it",
+            grant::left_text(w.ends_ms - now_ms()),
+            pending::local(w.ends_ms, "%H:%M").unwrap_or_default()
+        ),
+        None => match grant_hours(dirs) {
+            0 => "no permission window: every item asks (approvals.grant_hours is 0)".into(),
+            h => format!(
+                "no permission window is open: the next yes lets Clio act without asking for {h} h"
+            ),
+        },
+    }
+}
+
+/// Window `w` in one line: when it opened, which answer opened it, when and why it ended.
+pub fn window_head(w: &grant::Window) -> String {
+    let at = |ms: i64| pending::local(ms, "%Y-%m-%d %H:%M").unwrap_or_else(|| ms.to_string());
+    let end = match (&w.closed_ms, &w.why) {
+        (Some(c), Some(why)) if *c < w.ends_ms => format!("closed {}: {why}", at(*c)),
+        _ if w.ends_ms > now_ms() => format!("ends {}", at(w.ends_ms)),
+        _ => format!("ended {}", at(w.ends_ms)),
+    };
+    format!(
+        "window opened {} by your yes to {} · {end}",
+        at(w.opened_ms),
+        w.by.join(", ")
+    )
+}
+
+/// What window `w` approved, as data for the turn that sums it up.
+pub fn summary_record(w: &grant::Window, acts: &[grant::Act]) -> String {
+    let mut out = vec![
+        window_head(w),
+        "what Clio approved under it, without asking:".into(),
+    ];
+    out.extend(grant::act_lines(acts).iter().map(|l| sanitize::line(l)));
+    out.join("\n")
+}
+
+/// `clio grant [off]`: the window now and the last five, each with what it approved; `off`
+/// closes the open one.
+pub fn grant_cmd(dirs: &Dirs, off: bool) -> Res<()> {
+    let st = state(dirs);
+    if off {
+        let said = match grant::close(&st, grant::BY_PERSON)? {
+            Some(_) => "the permission window is closed: Clio asks again for everything",
+            None => "no permission window is open",
+        };
+        println!("{said}");
+        return Ok(());
+    }
+    println!("{}", grant_line(dirs));
+    for (w, acts) in grant::windows(&st).into_iter().take(5) {
+        println!("\n{}", sanitize::line(&window_head(&w)));
+        if acts.is_empty() {
+            println!("  nothing was approved under it");
+        }
+        for l in grant::act_lines(&acts) {
+            println!("  {}", sanitize::line(&l));
+        }
     }
     Ok(())
 }
@@ -262,33 +345,39 @@ pub fn outcome(p: &Pending) -> String {
     }
 }
 
-/// Runs `id` as it was set aside. The person answered: it does not count as one of the day's
-/// questions.
+/// Runs `id` as it was set aside: the person's yes.
 pub fn approve(dirs: &Dirs, id: &str) -> Res<Pending> {
+    approve_as(dirs, id, None)
+}
+
+/// The one path of every yes: the person's (`granted` is `None`), or the permission window's
+/// (`granted`: its id, recorded on the item). The same checks, hash and log lines either way.
+pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> {
     // Before the toolhost is built (folders, the launcher's self-test): one that does not wait
     // stops here.
     let p = pending::check(&state(dirs), id, now_ms())?;
+    let at = (now_ms(), granted);
     let done = if pending::mcp_of(&p).is_some() {
-        // Downloaded, checked, probed and registered off only here, by the person's own `clio`
+        // Downloaded, checked, probed and registered only here, by the person's own `clio`
         // (S-70): never from the jail, never on the model's say-so.
-        pending::approve_mcp(&state(dirs), id, now_ms(), |p| {
+        pending::approve_mcp(&state(dirs), id, at, |p| {
             super::mcp_servers::Port::new(dirs.clone(), None)?.install(p)
         })?
     } else if pending::skill_of(&p).is_some() {
         // Registered here, by the person's own `clio`: never from the jail (S-68).
-        pending::approve_skill(&state(dirs), id, now_ms(), |p| register_skill(dirs, p))?
+        pending::approve_skill(&state(dirs), id, at, |p| register_skill(dirs, p))?
     } else if pending::service_of(&p).is_some() {
         // Only here, by the person's own `clio` (S-69): never from the jail, never by a review.
-        pending::approve_service(&state(dirs), id, now_ms(), |p| {
+        pending::approve_service(&state(dirs), id, at, |p| {
             super::services::register_approved(dirs, p)
         })?
     } else if pending::block_of(&p).is_some() {
         // The same port a clean session's tool host writes the person's blocks with.
         let models = clio_brain::memory_link::MemoryLink::model_dirs(&dirs.home);
         let port = clio_brain::memory_port::LinkPort::new(&dirs.data, &models);
-        pending::approve_block(&state(dirs), id, now_ms(), &port)?
+        pending::approve_block(&state(dirs), id, now_ms(), &port, granted)?
     } else {
-        host_for(dirs, &p.run)?.approve(id, now_ms())?
+        host_for(dirs, &p.run)?.approve_by(id, now_ms(), granted)?
     };
     Ok(done)
 }
@@ -371,9 +460,7 @@ fn approve_cmd_with(
         println!("{id}:\n{text}\n");
     }
     let question = if pending::mcp_of(&p).is_some() {
-        Some(
-            "download this package, list its tools (no network, no secrets) and keep it off until you confirm them?",
-        )
+        Some("download this package, list its tools (no network, no secrets) and turn it on?")
     } else if pending::service_of(&p).is_some() {
         Some("register this service exactly as shown above? it then runs on its schedule")
     } else {
@@ -388,8 +475,17 @@ fn approve_cmd_with(
         println!("nothing was registered: {id} still waits (clio reject {id} drops it)");
         return Ok(());
     }
+    // The person's yes: a permission window opens, as from a box.
+    let opened = person_said_yes(dirs, &[id.to_owned()], suspect_run(dirs, &p.run));
     let p = approve(dirs, id)?;
     println!("approved {}: {}", p.id, sanitize::multiline(&outcome(&p)));
+    if let Some(w) = opened {
+        println!(
+            "Clio acts without asking until {} ({} h); you get a summary when it ends. `clio grant off` closes it now.",
+            pending::local(w.ends_ms, "%H:%M").unwrap_or_default(),
+            (w.ends_ms - w.opened_ms) / 3_600_000
+        );
+    }
     Ok(())
 }
 
@@ -722,23 +818,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(live.join("SKILL.md")).unwrap(), md);
     }
 
-    // Clio opens the boxes by herself at most once a window, shared by every conversation and
-    // kept across restarts in her data folder; 0 asks at once; a clock that went back asks.
-    #[test]
-    fn clio_asks_at_most_once_a_window() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = dirs_in(tmp.path());
-        let h = 3_600_000;
-        assert!(ask_now(&d, 4, 10 * h), "never asked: due");
-        assert!(!ask_now(&d, 4, 10 * h + 1));
-        assert!(!ask_now(&d, 4, 14 * h - 1), "the window is not over");
-        assert!(ask_now(&d, 4, 14 * h), "it is");
-        assert!(!ask_now(&d, 4, 15 * h));
-        assert!(ask_now(&d, 0, 15 * h), "0: every time");
-        assert!(ask_now(&d, 4, 2 * h), "the clock went back");
-        assert!(state(&d).join("asked.json").exists());
-    }
-
     // An item claimed for an answer that never wrote what came of it (Clio ended while it ran)
     // is not waiting: it is never offered again, and it is listed as interrupted.
     #[test]
@@ -1017,5 +1096,137 @@ mod tests {
         assert!(approve(&dirs, &other).is_err());
         let link = MemoryLink::open_write(&dirs.data, &EmbedModel::none()).unwrap();
         assert_eq!(link.block_rows("vigilancia").unwrap().len(), 1);
+        drop(link);
+
+        // S-36: under a permission window the same path writes it, the item saying who approved.
+        let third = ask("a third entry");
+        let done = approve_as(&dirs, &third, Some("w9")).unwrap();
+        assert_eq!(done.granted.as_deref(), Some("w9"));
+        assert!(outcome(&done).contains("saved in «vigilancia» as m"));
+    }
+
+    fn with_hours(d: &Dirs, hours: u64) {
+        let mut cfg = super::super::home::Config::default_with(vec!["pi".into()]);
+        cfg.approvals.grant_hours = hours;
+        std::fs::create_dir_all(&d.config).unwrap();
+        std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+    }
+
+    // S-36: only the person's yes opens a window, of `approvals.grant_hours` (4 by default); a
+    // yes while one is open does not extend it; 0 means per-item asking; a yes in a suspect
+    // session approves only what it lists. Unknown `every_hours` in an old config is ignored.
+    #[test]
+    fn only_the_persons_yes_opens_a_window_and_it_never_grows() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(state(&d)).unwrap();
+        assert_eq!(grant_hours(&d), 4, "no config: the default");
+        with_hours(&d, 0);
+        assert!(person_said_yes(&d, &["a1".into()], false).is_none());
+        assert!(grant::current(&state(&d)).is_none());
+        assert!(grant_line(&d).contains("every item asks"));
+        with_hours(&d, 4);
+        assert!(
+            person_said_yes(&d, &["a1".into()], true).is_none(),
+            "suspect"
+        );
+        assert!(grant::current(&state(&d)).is_none());
+        let w = person_said_yes(&d, &["a1".into(), "b2".into()], false).unwrap();
+        assert_eq!(w.ends_ms - w.opened_ms, 4 * 3_600_000);
+        assert_eq!(w.by, ["a1", "b2"]);
+        assert!(
+            person_said_yes(&d, &["c3".into()], false).is_none(),
+            "never extended"
+        );
+        assert_eq!(grant::current(&state(&d)).unwrap().ends_ms, w.ends_ms);
+        assert!(grant_line(&d).contains("a permission window is open"));
+        // 0600: only the person reads or writes it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(grant::file(&state(&d)))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let mut v: Value =
+            serde_json::from_str(&std::fs::read_to_string(d.config_file()).unwrap()).unwrap();
+        v["approvals"]["every_hours"] = json!(2);
+        std::fs::write(d.config_file(), v.to_string()).unwrap();
+        assert_eq!(grant_hours(&d), 4);
+        grant_cmd(&d, true).unwrap();
+        assert!(grant::current(&state(&d)).is_none());
+    }
+
+    // S-36: nothing but the person's yes opens a window: `grant::open` is called from one place
+    // (`person_said_yes`), and that from two: the chat's answer to a box and `clio approve`.
+    #[test]
+    fn a_window_is_opened_from_the_persons_yes_only() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut opens = Vec::new();
+        let mut yes = Vec::new();
+        let mut todo = vec![src.clone()];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                let rel = p.strip_prefix(&src).unwrap().display().to_string();
+                // Only the code, not its tests.
+                if rel.contains("tests") {
+                    continue;
+                }
+                let code = text.split("\nmod tests {").next().unwrap_or("");
+                for (i, _) in code.match_indices("grant::open(") {
+                    opens.push((rel.clone(), i));
+                }
+                for l in code.lines().filter(|l| l.contains("person_said_yes(")) {
+                    yes.push((rel.clone(), l.trim().to_owned()));
+                }
+            }
+        }
+        let files: Vec<&str> = opens.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(files, ["cli/pending.rs"], "{opens:?}");
+        let mut callers: Vec<&str> = yes
+            .iter()
+            .filter(|(_, l)| !l.starts_with("pub fn person_said_yes("))
+            .map(|(f, _)| f.as_str())
+            .collect();
+        callers.sort_unstable();
+        assert_eq!(callers, ["cli/pending.rs", "cli/tui/mod.rs"], "{yes:?}");
+    }
+
+    // S-36: a window that ended is summed up once: its record lists every act; claimed once; the
+    // summary opens nothing. A window with no acts ends silently.
+    #[test]
+    fn an_ended_window_is_summed_up_once_and_opens_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let st = state(&d);
+        std::fs::create_dir_all(st.join("grants")).unwrap();
+        let now = now_ms();
+        let w = json!({"id": "w1", "opened_ms": now - 5 * 3_600_000, "ends_ms": now - 3_600_000, "by": ["a1"]});
+        let lines = [
+            json!({"window": w}).to_string(),
+            json!({"at": now - 4 * 3_600_000, "pending": "b2", "class": "delete", "what": "rm -r /srv/old", "session": "s"}).to_string(),
+            json!({"at": now - 4 * 3_600_000, "pending": "b2", "outcome": "done (exit 0)"}).to_string(),
+            json!({"at": now - 3 * 3_600_000, "pending": "c3", "class": "memory", "what": "add in «vigilancia»", "session": "t"}).to_string(),
+        ];
+        std::fs::write(st.join("grants/w1.jsonl"), lines.join("\n") + "\n").unwrap();
+        std::fs::write(grant::file(&st), w.to_string()).unwrap();
+        let (due, acts) = grant::summary_due(&st).unwrap();
+        assert_eq!((due.id.as_str(), acts.len()), ("w1", 2));
+        let rec = summary_record(&due, &acts);
+        for want in ["rm -r /srv/old", "done (exit 0)", "add in «vigilancia»"] {
+            assert!(rec.contains(want), "{want}: {rec}");
+        }
+        assert!(grant::claim_summary(&st, "w1"));
+        assert!(!grant::claim_summary(&st, "w1"), "once");
+        assert!(grant::summary_due(&st).is_none());
+        assert!(grant::current(&st).is_none(), "a summary opens nothing");
     }
 }

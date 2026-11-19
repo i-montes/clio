@@ -1,15 +1,18 @@
-//! When Clio opens the approval boxes by herself: at most once every `approvals.every_hours`,
-//! checked when a chat opens, whenever it becomes idle and every 10 minutes while it stays idle,
-//! never in the middle of a turn; at most `BATCH` boxes at a time. The rest of the time what
-//! waits stays in `/pending`, the chat says so in one quiet line and the status line counts it.
+//! The approvals in the chat. When a turn ends with items waiting and no permission window is
+//! open, ONE box lists every waiting item of this conversation, each as its own box shows it, and
+//! says what a yes does: it approves all of it and lets Clio act without asking for
+//! `approvals.grant_hours`, with a summary when they end. Under an open window what waits is
+//! approved by it (`Session::grant`), never a secret and never in a `suspect` session. When the
+//! window ends Clio starts one turn to sum up what she did under it.
 
-use super::app::{App, Cmd, Screen, chat_waits};
+use super::app::{Action, App, Cmd, Confirm, Screen, chat_waits};
+use super::ask::{BlockAsk, Part};
 use super::chat::Item;
 
 /// The chat's approvals (one session's).
 #[derive(Debug, Default)]
 pub struct Approvals {
-    /// The window is checked once the chat is idle: it opened, a turn ended, a draft waits.
+    /// What waits is looked at once the chat is idle: it opened, a turn ended, a draft waits.
     pub check: bool,
     /// What waits for the person in this session, as of the last check, less what was answered
     /// since: the status line.
@@ -20,22 +23,33 @@ pub struct Approvals {
     pub answered: bool,
     /// When the last check was asked for: an idle chat checks again after `RECHECK_MS`.
     pub last_ms: Option<u64>,
+    /// When the open permission window ends (wall clock, ms), as of the last check.
+    pub grant_ends: Option<i64>,
+    /// `approvals.grant_hours`, as of the last check (`None`: not read yet; 4 by default).
+    pub hours: Option<u64>,
+    /// The judge flagged this session: its boxes open no window.
+    pub suspect: bool,
+    /// A permission window ended and its record waits in the session: one turn sums it up.
+    pub summary: bool,
 }
 
-/// How many boxes Clio opens by herself at a time; the rest wait in `/pending`.
-pub const BATCH: usize = 10;
 /// An idle chat looks again this often, so nothing expires unasked because the chat sat open.
 const RECHECK_MS: u64 = 10 * 60 * 1000;
 
 /// The note of a turn the approvals started.
 pub const APPROVALS_TURN: &str = "turn started by the approvals: Clio says what came of them";
+/// The note of the turn that sums up a permission window that ended.
+pub const GRANT_TURN: &str =
+    "turn started by the end of your permission window: Clio sums up what she did without asking";
 
-/// The person answered what waited and the chat is idle: one turn, with no words of the person,
-/// gives the model what came of each answer (the runtime adds Clio's request). Nothing typed,
-/// no menu, box or notice in the way, as for the review's turn, and the keys in the chat: one
-/// who went to the sessions may be leaving, and the outcomes then wait for this session.
+/// The person answered what waited (or a permission window ended) and the chat is idle: one
+/// turn, with no words of the person, gives the model what came of each answer, or the window's
+/// record (the runtime adds Clio's request). Nothing typed, no menu, box or notice in the way,
+/// as for the review's turn, and the keys in the chat: one who went to the sessions may be
+/// leaving, and the outcomes then wait for this session.
 pub fn deliver(app: &mut App) -> Vec<Cmd> {
-    if !app.chat.approvals.answered
+    let a = &app.chat.approvals;
+    if !(a.answered || a.summary)
         || app.screen != Screen::Chat
         || chat_waits(app)
         || app.chat.failed.is_some()
@@ -46,7 +60,12 @@ pub fn deliver(app: &mut App) -> Vec<Cmd> {
     {
         return vec![];
     }
-    app.chat.items.push(Item::Note(APPROVALS_TURN.into()));
+    let note = if a.summary {
+        GRANT_TURN
+    } else {
+        APPROVALS_TURN
+    };
+    app.chat.items.push(Item::Note(note.into()));
     app.chat.scroll = 0;
     app.chat.start_turn(app.now_ms);
     vec![Cmd::ChatSend {
@@ -54,46 +73,143 @@ pub fn deliver(app: &mut App) -> Vec<Cmd> {
     }]
 }
 
-/// The chat is idle and something asked for a check: the runtime looks at what waits and at the
-/// window (`Cmd::CheckApprovals`), and opens the boxes when it may.
+/// The chat is idle and something asked for a check (or the open window's end came): the
+/// runtime looks at what waits and at the window (`Cmd::CheckApprovals`).
 pub fn check(app: &mut App) -> Vec<Cmd> {
     let a = &app.chat.approvals;
     let due = a
         .last_ms
         .is_some_and(|t| app.now_ms.saturating_sub(t) >= RECHECK_MS);
-    if !(a.check || due) || chat_waits(app) {
+    let ended = a
+        .grant_ends
+        .is_some_and(|e| i64::try_from(app.now_ms).is_ok_and(|n| n >= e));
+    if !(a.check || due || ended) || chat_waits(app) {
         return vec![];
     }
-    app.chat.approvals.check = false;
-    app.chat.approvals.last_ms = Some(app.now_ms);
+    let a = &mut app.chat.approvals;
+    a.check = false;
+    a.last_ms = Some(app.now_ms);
+    if ended {
+        a.grant_ends = None;
+    }
     vec![Cmd::CheckApprovals {
         session: app.chat.session_id.clone(),
     }]
 }
 
-/// What the check found: `waiting` items in all, the boxes `opened` or not. Not opened, a count
-/// that grew is said once, quietly; opened, what did not fit in the batch is said.
-pub fn checked(app: &mut App, session: &str, waiting: usize, opened: bool) {
-    if session != app.chat.session_id {
-        return;
-    }
-    let before = std::mem::replace(&mut app.chat.approvals.waiting, waiting);
-    if opened && waiting > BATCH {
-        let more = waiting - BATCH;
-        let (_, verb) = plural(more);
-        app.chat.items.push(Item::Note(format!(
-            "{more} more {verb} for your approval · /pending to answer them"
-        )));
-    } else if !opened && waiting > before {
-        let (s, verb) = plural(waiting);
-        app.chat.items.push(Item::Note(format!(
-            "{waiting} item{s} {verb} for your approval · /pending to answer now"
-        )));
+/// What the check found: `waiting` items in all.
+pub fn checked(app: &mut App, session: &str, waiting: usize) {
+    if session == app.chat.session_id {
+        app.chat.approvals.waiting = waiting;
     }
 }
 
-fn plural(n: usize) -> (&'static str, &'static str) {
-    if n == 1 { ("", "waits") } else { ("s", "wait") }
+/// The permission window as the runtime read it: when it ends, the hours a yes is worth, and
+/// whether this session is `suspect`.
+pub fn grant_state(app: &mut App, session: &str, ends: Option<i64>, hours: u64, suspect: bool) {
+    if session != app.chat.session_id {
+        return;
+    }
+    let a = &mut app.chat.approvals;
+    a.grant_ends = ends;
+    a.hours = Some(hours);
+    a.suspect = suspect;
+}
+
+/// What a yes in the box does, in plain words: its first row, and the key hint's words (`base`:
+/// what `y` does to the items, ` yes to all` or a lone item's own words).
+pub fn yes_says(hours: u64, suspect: bool, base: &str) -> (String, String) {
+    if suspect {
+        return (
+            "Yes approves only what is listed: this session read content that tried to give orders, so no permission window opens.".into(),
+            format!("{base} (no window opens)"),
+        );
+    }
+    match hours {
+        0 => (
+            "Yes approves all of this; Clio asks again for the next one.".into(),
+            base.to_owned(),
+        ),
+        h => (
+            format!(
+                "Yes approves all of this and lets Clio act without asking for the next {h} hour{}; you get a summary when they end.",
+                if h == 1 { "" } else { "s" }
+            ),
+            format!("{base}, then {h} h without asking"),
+        ),
+    }
+}
+
+/// ONE box for what waits (`items`: id, «class» and what, and its own box when it has one):
+/// what a yes does on top, then each item whole, as its own box shows it, scrolled, never cut.
+/// Answered once for all of them.
+pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Option<Confirm> {
+    let suspect = app.chat.approvals.suspect
+        || items
+            .iter()
+            .any(|(_, _, b)| b.as_ref().is_some_and(|b| b.suspect));
+    let n = items.len();
+    let base = match &items[..] {
+        [(_, _, Some(b))] => b.yes().to_owned(),
+        [_] => " yes, run it".to_owned(),
+        _ => " yes to all".to_owned(),
+    };
+    let (head, yes) = yes_says(app.chat.approvals.hours.unwrap_or(4), suspect, &base);
+    let mut rows = vec![(Part::Head, head)];
+    let mut ids: Vec<String> = Vec::new();
+    for (i, (id, what, block)) in items.into_iter().enumerate() {
+        let (class, rest) = match what.split_once('»') {
+            Some((c, r)) if c.starts_with('«') => (format!("{c}»"), r.trim().to_owned()),
+            _ => (String::new(), what.clone()),
+        };
+        let at = if n > 1 {
+            format!("{} of {n} · {id} · ", i + 1)
+        } else {
+            format!("{id} · ")
+        };
+        rows.push((Part::Warn, format!("{at}{class}")));
+        match block {
+            Some(b) => rows.extend(b.parts().into_iter().filter(|(p, t)| {
+                // The suspect line is said once, at the end.
+                !(*p == Part::Warn && t == super::ask::SUSPECT_LINE)
+            })),
+            None => rows.push((Part::Text, rest)),
+        }
+        ids.push(id);
+    }
+    let first = ids.first()?.clone();
+    let mut b = BlockAsk::rows("approval", rows, &yes);
+    b.suspect = suspect;
+    let mut c = Confirm::new(Action::Approve, first, 0, what_of(&ids));
+    c.more = ids.split_off(1);
+    c.session.clone_from(&app.chat.session_id);
+    c.block = Some(b);
+    Some(c)
+}
+
+fn what_of(ids: &[String]) -> String {
+    match ids {
+        [one] => format!("item {one}"),
+        _ => format!("{} items", ids.len()),
+    }
+}
+
+/// `3 waiting for approval` and the open window (`permission: 3 h 12 min left`) for the status
+/// line.
+pub fn status(app: &App) -> Option<String> {
+    let a = &app.chat.approvals;
+    let now = i64::try_from(app.now_ms).unwrap_or(i64::MAX);
+    let window = a.grant_ends.filter(|e| *e > now).map(|e| {
+        format!(
+            "permission: {} left",
+            clio_toolhost::grant::left_text(e - now)
+        )
+    });
+    let waiting = (a.waiting > 0).then(|| format!("{} waiting for approval", a.waiting));
+    match (window, waiting) {
+        (Some(w), Some(n)) => Some(format!("{w} · {n}")),
+        (w, n) => w.or(n),
+    }
 }
 
 /// A message read back from the session's file, split: what the person typed, and what came of
@@ -111,7 +227,11 @@ pub fn outcomes(stored: &str) -> (&str, Vec<String>) {
     let mut out: Vec<String> = Vec::new();
     for part in data.split("\n\n") {
         match out.last_mut() {
-            Some(last) if !(part.starts_with("the person ") || part.starts_with("secret ")) => {
+            Some(last)
+                if !(part.starts_with("the person ")
+                    || part.starts_with("the permission window ")
+                    || part.starts_with("secret ")) =>
+            {
                 last.push_str("\n\n");
                 last.push_str(part);
             }
@@ -123,12 +243,6 @@ pub fn outcomes(stored: &str) -> (&str, Vec<String>) {
         _ => o,
     };
     (typed, out.into_iter().map(live).collect())
-}
-
-/// `3 waiting for approval` for the status line, while anything waits.
-pub fn status(app: &App) -> Option<String> {
-    let n = app.chat.approvals.waiting;
-    (n > 0).then(|| format!("{n} waiting for approval"))
 }
 
 #[cfg(test)]
@@ -147,11 +261,10 @@ mod tests {
     use super::super::tests_gallery::{mcp_ask, screen_text, skill_ask, skill_md};
     use super::super::tests_review::idle;
 
-    fn found(waiting: usize, opened: bool) -> Input {
+    fn found(waiting: usize) -> Input {
         Input::Bg(Bg::Approvals {
             session: "sid".into(),
             waiting,
-            opened,
         })
     }
 
@@ -166,38 +279,36 @@ mod tests {
             .collect()
     }
 
-    // Not yet time to ask: one quiet line when the count grows, the count in the status line,
-    // and nothing said again while it does not grow. Asked: no line, the boxes say it.
-    #[test]
-    fn what_waits_outside_the_window_is_said_once_and_counted() {
-        let line = "2 items wait for your approval · /pending to answer now";
-        let (a, _) = feed(idle(), vec![found(2, false)]);
-        assert_eq!(notes(&a), [line]);
-        assert!(screen_text(&a, 100, 20).contains("2 waiting for approval"));
-        let (a, _) = feed(a, vec![found(2, false), found(1, false)]);
-        assert_eq!(notes(&a), [line], "said once; fewer is not news");
-        assert!(screen_text(&a, 100, 20).contains("1 waiting for approval"));
-        let (a, _) = feed(a, vec![found(0, false)]);
-        assert!(!screen_text(&a, 100, 20).contains("waiting for approval"));
-        let (a, _) = feed(idle(), vec![found(3, true)]);
-        assert!(notes(&a).is_empty());
-        // Another session's answer changes nothing here.
-        let (mut a, _) = feed(idle(), vec![]);
-        a.chat.session_id = "other".into();
-        let (a, _) = feed(a, vec![found(2, false)]);
-        assert!(notes(&a).is_empty());
+    fn asks(items: Vec<(&str, &str, Option<super::BlockAsk>)>) -> Input {
+        Input::Bg(Bg::ChatAsks(
+            items
+                .into_iter()
+                .map(|(i, w, b)| (i.to_owned(), w.to_owned(), b))
+                .collect(),
+        ))
     }
 
-    // Opened by Clio, at most 10 boxes; the chat says how many more wait in `/pending`.
+    fn deletes(ids: &[&str]) -> Input {
+        asks(
+            ids.iter()
+                .map(|i| (*i, "«delete» rm -r /srv/old", None))
+                .collect(),
+        )
+    }
+
+    // What waits is counted in the status line, with no line in the chat: the box says it.
     #[test]
-    fn a_batch_opens_at_most_ten_and_says_how_many_more_wait() {
-        let (a, _) = feed(idle(), vec![found(13, true)]);
-        assert_eq!(
-            notes(&a),
-            ["3 more wait for your approval · /pending to answer them"]
-        );
-        let (a, _) = feed(idle(), vec![found(10, true)]);
+    fn what_waits_is_counted_in_the_status_line() {
+        let (a, _) = feed(idle(), vec![found(2)]);
         assert!(notes(&a).is_empty());
+        assert!(screen_text(&a, 100, 20).contains("2 waiting for approval"));
+        let (a, _) = feed(a, vec![found(0)]);
+        assert!(!screen_text(&a, 100, 20).contains("waiting for approval"));
+        // Another session's count changes nothing here.
+        let (mut a, _) = feed(idle(), vec![]);
+        a.chat.session_id = "other".into();
+        let (a, _) = feed(a, vec![found(2)]);
+        assert_eq!(a.chat.approvals.waiting, 0);
     }
 
     // `/pending` sets the count of the status line from what it just read.
@@ -217,29 +328,43 @@ mod tests {
         assert!(m.lines[1].contains("interrupted: it may have run in part"));
     }
 
-    // A box already on screen or in line is not opened again, from a check or from `/pending`.
+    // A box already on screen or in line is not opened again, from a check or from `/pending`:
+    // what a later check finds goes in a box of its own, and `/pending` brings an item's box to
+    // the front instead of a second one.
     #[test]
     fn an_item_is_never_in_two_boxes() {
-        let asks = |ids: &[&str]| {
-            Input::Bg(Bg::ChatAsks(
-                ids.iter()
-                    .map(|i| ((*i).to_owned(), format!("«delete» {i}"), None))
-                    .collect(),
-            ))
-        };
-        let (a, _) = feed(idle(), vec![asks(&["a1", "b2"]), asks(&["a1", "b2", "c3"])]);
-        assert_eq!(a.confirm.as_ref().unwrap().id, "a1");
+        let (a, _) = feed(
+            idle(),
+            vec![deletes(&["a1", "b2"]), deletes(&["a1", "b2", "c3"])],
+        );
+        let c = a.confirm.as_ref().unwrap();
+        assert_eq!(
+            (c.id.as_str(), c.more.as_slice()),
+            ("a1", &["b2".to_owned()][..])
+        );
         let queued: Vec<&str> = a.asks.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(queued, ["b2", "c3"]);
+        assert_eq!(queued, ["c3"]);
+        let pending = |mut a: App, id: &str| {
+            let mut m = Modal::text("Pending", vec![id.into()]);
+            m.picks = vec![Pick::new(id, &format!("«delete» {id}"))];
+            a.modal = Some(m);
+            feed(a, vec![key(KeyCode::Enter)]).0
+        };
+        let a = pending(a, "b2");
+        assert_eq!(
+            a.confirm.as_ref().unwrap().id,
+            "a1",
+            "b2 is on screen already"
+        );
+        assert_eq!(a.asks.len(), 1);
         let mut a = a;
         a.confirm = None;
-        let mut m = Modal::text("Pending", vec!["c3".into()]);
-        m.picks = vec![Pick::new("c3", "«delete» c3")];
-        a.modal = Some(m);
-        let (a, _) = feed(a, vec![key(KeyCode::Enter)]);
+        a.asks.push_front(a.asks[0].clone());
+        a.asks[0].id = "x9".into();
+        let a = pending(a, "c3");
         assert_eq!(a.confirm.as_ref().unwrap().id, "c3");
         let queued: Vec<&str> = a.asks.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(queued, ["b2"]);
+        assert_eq!(queued, ["x9"]);
         let (a, _) = feed(a, vec![secrets_of(&["k1"]), secrets_of(&["k1"])]);
         let n = a.prompts.len() + usize::from(a.prompt.is_some());
         assert_eq!(n, 1);
@@ -284,7 +409,8 @@ mod tests {
         assert_eq!(checks(&cmds), 1);
     }
 
-    // The window is checked when the chat is idle, never in the middle of a turn.
+    // What waits is checked when the chat is idle, never in the middle of a turn; the end of an
+    // open window asks for a check by itself (the summary, and what waits again).
     #[test]
     fn the_window_is_checked_only_when_idle() {
         let mut a = idle();
@@ -297,10 +423,24 @@ mod tests {
         assert!(cmds.contains(&Cmd::CheckApprovals {
             session: "sid".into()
         }));
+        let mut a = idle();
+        let t0 = a.now_ms;
+        a.chat.approvals.last_ms = Some(t0);
+        a.chat.approvals.grant_ends = i64::try_from(t0 + 60_000).ok();
+        let (a, cmds) = feed(a, vec![Input::Tick(t0 + 30_000)]);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CheckApprovals { .. })));
+        let (a, cmds) = feed(a, vec![Input::Tick(t0 + 61_000)]);
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Cmd::CheckApprovals { .. }))
+                .count(),
+            1
+        );
+        assert!(a.chat.approvals.grant_ends.is_none());
     }
 
     // `/pending` answers every class: Enter on a secret opens its own box, on a skill the whole
-    // skill, on an action its plain box.
+    // skill, on an action the box Clio opens by herself, with what a yes does.
     #[test]
     fn pending_opens_the_right_box_for_every_class() {
         let modal = |p: Pick| {
@@ -328,11 +468,14 @@ mod tests {
         let a = modal(p);
         let c = a.confirm.as_ref().unwrap();
         assert_eq!((c.action, c.id.as_str()), (Action::Approve, "e5f6"));
-        assert!(c.block.as_ref().unwrap().skill.is_some());
+        assert!(screen_text(&a, 100, 60).contains("--- SKILL.md ---"));
 
         let a = modal(Pick::new("a1b2", "«delete» rm -r /srv/old"));
         let c = a.confirm.as_ref().unwrap();
-        assert_eq!((c.id.as_str(), c.block.is_none()), ("a1b2", true));
+        assert_eq!((c.id.as_str(), c.more.is_empty()), ("a1b2", true));
+        let text = screen_text(&a, 100, 30);
+        assert!(text.contains("rm -r /srv/old"), "{text}");
+        assert!(text.contains("next 4 hours"), "{text}");
 
         // S-70: an MCP server's proposal opens its whole box, facts and grants.
         let mut p = Pick::new("e7f8", "«mcp» install the MCP server «github»");
@@ -340,16 +483,6 @@ mod tests {
         let a = modal(p);
         let c = a.confirm.as_ref().unwrap();
         assert_eq!((c.action, c.id.as_str()), (Action::Approve, "e7f8"));
-        assert!(
-            c.block
-                .as_ref()
-                .unwrap()
-                .skill
-                .as_ref()
-                .unwrap()
-                .mcp
-                .is_some()
-        );
 
         // An MCP tool's call opens the box of its whole arguments, and the seen-the-end rule
         // holds from `/pending` too: `y` does not arm until the end was on screen.
@@ -364,7 +497,6 @@ mod tests {
         let a = modal(p);
         let c = a.confirm.as_ref().unwrap();
         assert_eq!((c.action, c.id.as_str()), (Action::Approve, "c1d2e3f4"));
-        assert!(c.block.as_ref().unwrap().plain.is_some());
         let t0 = a.now_ms;
         let (a, seen, t) = read_to_the_end(a, 70, 16, t0 + 2_000);
         assert!(seen.contains("\"k39\": \"value 39\""), "{seen}");
@@ -381,71 +513,175 @@ mod tests {
         );
     }
 
-    // S-70: an MCP server's proposal and an MCP tool's call ride a batch like any item: in
-    // line, never twice, each answered only once its end was shown, and ONE turn after.
+    fn three() -> Input {
+        asks(vec![
+            ("a1b2", "«delete» rm -r /srv/old", None),
+            (
+                "e7f8",
+                "«mcp» install the MCP server «github»",
+                Some(mcp_ask()),
+            ),
+            (
+                "c1d2e3f4",
+                "«send» MCP server «github»",
+                Some(mcp_call_ask(&serde_json::json!({"title": "the last row"}))),
+            ),
+        ])
+    }
+
+    // S-36 S-70: three items of different kinds wait: ONE box lists each whole, as its own box
+    // shows it, under what a yes does; `y` arms only once the end was on screen and the quiet
+    // second passed; `y` then Enter answers all of them yes, once; then ONE turn.
     #[test]
-    fn mcp_items_ride_a_batch_like_the_others() {
-        let batch = || {
-            Input::Bg(Bg::ChatAsks(vec![
-                ("a1b2".into(), "«delete» rm -r /srv/old".into(), None),
-                (
-                    "e7f8".into(),
-                    "«mcp» install the MCP server «github»".into(),
-                    Some(mcp_ask()),
-                ),
-                (
-                    "c1d2e3f4".into(),
-                    "«send» MCP server «github»".into(),
-                    Some(mcp_call_ask(&serde_json::json!({"title": "x"}))),
-                ),
-            ]))
-        };
-        let (a, _) = feed(idle(), vec![batch(), batch()]);
+    fn one_box_holds_every_waiting_item_and_is_answered_once() {
+        let (a, _) = feed(idle(), vec![three(), three()]);
+        assert!(a.asks.is_empty(), "never twice");
+        let c = a.confirm.as_ref().unwrap();
+        assert_eq!(c.id, "a1b2");
+        assert_eq!(c.more, ["e7f8", "c1d2e3f4"]);
         let t0 = a.now_ms;
-        assert_eq!(a.confirm.as_ref().unwrap().id, "a1b2");
-        let queued: Vec<&str> = a.asks.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(queued, ["e7f8", "c1d2e3f4"]);
+        let (a, seen, t) = read_to_the_end(a, 80, 16, t0 + 2_000);
+        let seen = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+        for s in [
+            "Yes approves all of this and lets Clio act without asking for the next 4 hours; you get a summary when they end.",
+            "1 of 3 · a1b2 · «delete»",
+            "rm -r /srv/old",
+            "2 of 3 · e7f8 · «mcp»",
+            "3 of 3 · c1d2e3f4 · «send»",
+            "the last row",
+        ] {
+            assert!(seen.contains(s), "{s}: {seen}");
+        }
+        let (a, cmds) = feed(a, vec![ch('y')]);
+        assert!(
+            cmds.is_empty() && !a.confirm.as_ref().unwrap().armed,
+            "quiet second"
+        );
         let (mut a, cmds) = feed(
             a,
-            vec![Input::Tick(t0 + 10_000), ch('y'), key(KeyCode::Enter)],
+            vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
         );
         assert_eq!(
             cmds,
-            vec![Cmd::ChatAnswer {
-                id: "a1b2".into(),
+            vec![Cmd::ChatAnswers {
+                ids: vec!["a1b2".into(), "e7f8".into(), "c1d2e3f4".into()],
                 yes: true
             }]
         );
-        let mut t = t0 + 20_000;
-        for id in ["e7f8", "c1d2e3f4"] {
-            assert_eq!(a.confirm.as_ref().unwrap().id, id);
-            let (n, _, at) = read_to_the_end(a, 80, 16, t);
-            let (n, cmds) = feed(
-                n,
-                vec![Input::Tick(at + 2_000), ch('y'), key(KeyCode::Enter)],
-            );
-            assert_eq!(
-                cmds,
-                vec![Cmd::ChatAnswer {
-                    id: id.into(),
-                    yes: true
-                }]
-            );
-            a = n;
-            t = at + 10_000;
-        }
+        assert_eq!(a.answering, 3);
+        assert!(a.confirm.is_none());
         a.answering = 3;
         let (_, cmds) = feed(
             a,
             vec![
                 answered(Ok("approved a1b2: done")),
                 answered(Ok(
-                    "approved e7f8: the MCP server «github» was installed, off",
+                    "approved e7f8: the MCP server «github» was installed and is on",
                 )),
                 answered(Ok("approved c1d2e3f4: the MCP tool answered")),
             ],
         );
         assert_eq!(approvals_turns(&cmds), 1, "{cmds:?}");
+
+        // `n` (and Esc) is no to all, after the quiet second: no need to read to the end for a no.
+        for k in [ch('n'), key(KeyCode::Esc)] {
+            let (a, _) = feed(idle(), vec![three()]);
+            let t = a.now_ms + 2_000;
+            let (_, cmds) = feed(a, vec![Input::Tick(t), k]);
+            assert_eq!(
+                cmds,
+                vec![Cmd::ChatAnswers {
+                    ids: vec!["a1b2".into(), "e7f8".into(), "c1d2e3f4".into()],
+                    yes: false
+                }]
+            );
+        }
+    }
+
+    // What a yes does, in the box's first row and the keys: a window of `grant_hours`, none at
+    // 0 (each item asked), none in a session the judge flagged.
+    #[test]
+    fn what_a_yes_does_is_said_in_the_box() {
+        let (h, k) = super::yes_says(4, false, " yes to all");
+        assert_eq!(
+            h,
+            "Yes approves all of this and lets Clio act without asking for the next 4 hours; you get a summary when they end."
+        );
+        assert_eq!(k, " yes to all, then 4 h without asking");
+        let (h, k) = super::yes_says(0, false, " yes to all");
+        assert!(h.contains("asks again for the next one"), "{h}");
+        assert_eq!(k, " yes to all");
+        let (h, _) = super::yes_says(4, true, " yes to all");
+        assert!(h.contains("no permission window opens"), "{h}");
+        let mut a = idle();
+        a.chat.approvals.hours = Some(0);
+        let (a, _) = feed(a, vec![deletes(&["a1"])]);
+        let text = screen_text(&a, 100, 30);
+        assert!(!text.contains("without asking"), "{text}");
+    }
+
+    // The status line shows the open window and what waits.
+    #[test]
+    fn the_status_line_shows_the_window() {
+        let a = idle();
+        let ends = i64::try_from(a.now_ms + 3 * 3_600_000 + 12 * 60_000).unwrap();
+        let (a, _) = feed(
+            a,
+            vec![
+                Input::Bg(Bg::Grant {
+                    session: "sid".into(),
+                    ends: Some(ends),
+                    hours: 4,
+                    suspect: false,
+                }),
+                found(1),
+            ],
+        );
+        let text = screen_text(&a, 120, 20);
+        assert!(
+            text.contains("permission: 3 h 12 min left · 1 waiting for approval"),
+            "{text}"
+        );
+    }
+
+    // What the window approved says so and starts no turn: it rides with the next message.
+    // The end of a window starts ONE turn that sums it up, with its own note, and only once.
+    #[test]
+    fn the_window_says_what_it_did_and_its_end_starts_one_summary_turn() {
+        let mut a = idle();
+        a.chat.approvals.waiting = 2;
+        let (a, cmds) = feed(
+            a,
+            vec![Input::Bg(Bg::Granted(Ok(
+                "approved under your permission (3 h 12 min left): «delete» rm -r /srv/old\ndone"
+                    .into(),
+            )))],
+        );
+        assert_eq!(approvals_turns(&cmds), 0);
+        assert_eq!(a.chat.approvals.waiting, 1);
+        assert!(notes(&a)[0].starts_with("approved under your permission"));
+        let (a, cmds) = feed(
+            a,
+            vec![Input::Bg(Bg::GrantSummary {
+                session: "sid".into(),
+            })],
+        );
+        assert_eq!(approvals_turns(&cmds), 1, "{cmds:?}");
+        assert_eq!(
+            notes(&a).last().map(String::as_str),
+            Some(super::GRANT_TURN)
+        );
+        let (a, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+        assert_eq!(approvals_turns(&cmds), 0, "once");
+        assert!(!a.chat.approvals.summary);
+        // Another session's summary waits for it.
+        let (_, cmds) = feed(
+            idle(),
+            vec![Input::Bg(Bg::GrantSummary {
+                session: "other".into(),
+            })],
+        );
+        assert_eq!(approvals_turns(&cmds), 0);
     }
 
     /// An answer back: the person said yes when the note says approved (or a failure).

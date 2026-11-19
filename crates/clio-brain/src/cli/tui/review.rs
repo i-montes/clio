@@ -246,7 +246,7 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
                 "a {} waits for your approval ({id}) · review: {verdict}",
                 if service { "service" } else { "skill" }
             )));
-            // Its box opens with the rest, when Clio asks (`approvals.every_hours`).
+            // Its box opens at once, with the rest, or an open permission window approves it.
             app.chat.approvals.check = true;
         }
         SkillOutcome::Rejected {

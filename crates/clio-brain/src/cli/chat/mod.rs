@@ -165,6 +165,20 @@ pub trait Session: Send + Sync {
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
         Err(format!("{id} is not of this session"))
     }
+    /// Under an open permission window: approves item `id` of this session as the window, through
+    /// the same path as the person's yes, recorded in the window's record before it runs. Never a
+    /// secret, never in a `suspect` session. What the chat says.
+    fn grant(&self, id: &str) -> Result<String, String> {
+        Err(format!("{id} is not of this session"))
+    }
+    /// What the permission window approved in this session that the chat has not said yet, one
+    /// quiet note each.
+    fn granted_news(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// The record of a permission window that ended: it goes with the next turn, as data, with
+    /// Clio's request to sum it up for the person.
+    fn queue_summary(&self, _record: String) {}
     /// The person's answer to a secret the model asked for (`request_secret`): the value goes to
     /// the vault, `None` declines it. What the model is told with the next message.
     fn answer_secret(

@@ -122,14 +122,14 @@ pub(super) fn conversation(host: bool) -> App {
 }
 
 fn approve(a: &mut App, quiet: bool) {
-    let mut c = Confirm::new(
-        Action::Approve,
-        "a1b2".into(),
-        0,
-        "«delete» rm -r /var/lib/docker/volumes/old (deletes 3 folders)".into(),
+    a.confirm = super::approvals::one_box(
+        a,
+        vec![(
+            "a1b2".into(),
+            "«delete» rm -r /var/lib/docker/volumes/old (deletes 3 folders)".into(),
+            None,
+        )],
     );
-    c.session = "sid".into();
-    a.confirm = Some(c);
     a.now_ms = 300_000;
     a.last_key_ms = Some(if quiet { 0 } else { 299_800 });
 }
@@ -149,6 +149,7 @@ pub(super) fn block_ask(args: serde_json::Value, suspect: bool) -> super::ask::B
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: None,
+        granted: None,
     };
     super::ask::BlockAsk::new(&p, suspect).unwrap()
 }
@@ -178,6 +179,7 @@ pub(super) fn skill_ask(
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some(reason.into()),
+        granted: None,
     };
     super::ask::BlockAsk::new(&p, suspect).unwrap()
 }
@@ -210,6 +212,7 @@ pub(super) fn service_ask(
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("a service always waits for your approval".into()),
+        granted: None,
     };
     super::ask::BlockAsk::new(&p, suspect).unwrap()
 }
@@ -398,16 +401,73 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     out.push(("review fails, its findings", fails()));
     let (a, _) = super::tests::feed(fails(), vec![super::tests_continuous::settled(Some(1000))]);
     out.push(("the turn started by the review", a));
-    // Not yet time to ask: one quiet line, the count in the status line.
+    // Three items of different kinds in ONE box, scrolled to the second.
+    let mut a = conversation(true);
+    a.confirm = super::approvals::one_box(
+        &a,
+        vec![
+            (
+                "a1b2".into(),
+                "«delete» rm -r /var/lib/docker/volumes/old (deletes 3 folders)".into(),
+                None,
+            ),
+            (
+                "e7f8".into(),
+                "«mcp» install the MCP server «github»".into(),
+                Some(mcp_ask()),
+            ),
+            (
+                "c3d4e5f6".into(),
+                "«memory» add in your block «vigilancia»".into(),
+                Some(block_ask(
+                    serde_json::json!({"name": "vigilancia", "action": "add", "text": "Watch the disk of /: tell me when it passes 90 %."}),
+                    false,
+                )),
+            ),
+        ],
+    );
+    a.confirm.as_mut().unwrap().block.as_mut().unwrap().scroll = 4;
+    a.now_ms = 300_000;
+    a.last_key_ms = Some(0);
+    out.push(("one box, three items of different kinds, scrolled", a));
+    // A window open: the status line says how long is left and what waits.
+    let mut a = conversation(true);
+    let ends = i64::try_from(a.now_ms).unwrap() + 3 * 3_600_000 + 12 * 60_000;
+    let (a, _) = super::tests::feed(
+        {
+            a.chat.approvals.waiting = 0;
+            a
+        },
+        vec![
+            Input::Bg(Bg::Grant {
+                session: "sid".into(),
+                ends: Some(ends),
+                hours: 4,
+                suspect: false,
+            }),
+            Input::Bg(Bg::Approvals {
+                session: "sid".into(),
+                waiting: 1,
+            }),
+        ],
+    );
+    out.push(("status line, a permission window open", a));
+    // What the window approved, said in the chat.
     let (a, _) = super::tests::feed(
         conversation(true),
-        vec![Input::Bg(Bg::Approvals {
+        vec![Input::Bg(Bg::Granted(Ok(
+            "approved under your permission (3 h 12 min left): «delete» rm -r /var/lib/docker/volumes/old (deletes 3 folders)\ndone (exit 0)".into(),
+        )))],
+    );
+    out.push(("approved under your permission", a));
+    // The window ended: one turn sums it up.
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![Input::Bg(Bg::GrantSummary {
             session: "sid".into(),
-            waiting: 2,
-            opened: false,
         })],
     );
-    out.push(("actions wait for approval, not asked yet", a));
+    out.push(("the turn started by the end of a window", a));
     // The person answered both boxes: one turn gives the model what came of them.
     let mut a = conversation(true);
     a.answering = 2;
@@ -791,6 +851,7 @@ pub(super) fn mcp_ask() -> super::ask::BlockAsk {
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("the person asked for GitHub's tools".into()),
+        granted: None,
     };
     super::ask::BlockAsk::new(&p, false).unwrap()
 }

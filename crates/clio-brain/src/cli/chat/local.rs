@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clio_core::SystemClock;
+use clio_toolhost::grant;
 use clio_toolhost::pending::Pending;
 use clio_vault::SecretValue;
 
@@ -34,7 +35,7 @@ use clio_brain::pi::budget::RunGuard;
 use clio_brain::pi::install;
 use clio_brain::pi::launch::{Launch, PiProcess, Provider, SessionTarget, start, valid_id};
 use clio_brain::pi::level::{self, Assessor, run_assessed_with};
-use clio_brain::pi::preprompt::{APPROVALS_ASK, PrePrompt};
+use clio_brain::pi::preprompt::{APPROVALS_ASK, GRANT_ASK, PrePrompt};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
     GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
@@ -437,6 +438,8 @@ impl SessionSource for LocalSource {
                 asked: Mutex::default(),
                 approved: Mutex::default(),
                 notes: Mutex::default(),
+                told: Mutex::default(),
+                summary: Mutex::default(),
             }),
         };
         let refresh = s.refresh().ok();
@@ -565,6 +568,10 @@ struct HostSide {
     /// What the person answered to the secrets the model asked for (never a value), for the
     /// model's next message.
     notes: Mutex<Vec<String>>,
+    /// The items a permission window approved that the chat already showed.
+    told: Mutex<HashSet<String>>,
+    /// What an ended permission window approved, for the turn that sums it up.
+    summary: Mutex<Option<String>>,
 }
 
 /// A draft id as the tool host makes them: 8 hex characters.
@@ -942,13 +949,14 @@ impl Session for ChatSession {
             self.budget,
             self.day.clone(),
         );
-        let (approved, notes) = self
+        let (approved, notes, summary) = self
             .host
             .as_ref()
             .map(|h| {
                 (
                     std::mem::take(&mut *locked(&h.approved)),
                     std::mem::take(&mut *locked(&h.notes)),
+                    locked(&h.summary).take(),
                 )
             })
             .unwrap_or_default();
@@ -957,14 +965,20 @@ impl Session for ChatSession {
             // the session is marked here, as its own toolhost would.
             jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
         }
-        let data = approved
-            .into_iter()
+        let data = summary
+            .iter()
+            .cloned()
+            .chain(approved)
             .chain(notes)
             .collect::<Vec<_>>()
             .join("\n\n");
+        // An ended permission window's record goes with Clio's request to sum it up.
+        if summary.is_some() {
+            self.pre.reviewed(GRANT_ASK);
+        }
         match approvals_turn(text, findings.is_some(), self.pre.presenting(), &data) {
-            Some(true) => self.pre.reviewed(APPROVALS_ASK),
-            Some(false) => {}
+            Some(true) if summary.is_none() => self.pre.reviewed(APPROVALS_ASK),
+            Some(_) => {}
             None => {
                 return Ok(RunSummary {
                     handled: true,
@@ -1178,100 +1192,83 @@ impl Session for ChatSession {
     }
 
     fn answer(&self, id: &str, yes: bool) -> Result<String, String> {
-        // One already put to the person, or one of this session still waiting (`/pending`).
+        self.answer_as(id, yes, None)
+    }
+
+    fn grant(&self, id: &str) -> Result<String, String> {
         let h = self
             .host
             .as_ref()
-            .filter(|h| {
-                locked(&h.asked).contains(id)
-                    || pending::waiting(&h.dirs)
-                        .iter()
-                        .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
-            })
             .ok_or_else(|| format!("{id} is not of this session"))?;
-        if pending::waiting(&h.dirs)
-            .iter()
-            .any(|p| p.id == id && clio_toolhost::pending::secret_of(p).is_some())
-        {
-            return Err(format!("{id} asks for a secret: answer it in its own box"));
-        }
-        // A block change or a skill: the model hears what came of it with the next message, as
-        // of a secret.
-        let block = pending::waiting(&h.dirs)
-            .iter()
-            .find(|p| p.id == id)
-            .and_then(|p| {
-                clio_toolhost::pending::block_of(p)
-                    .map(|b| format!("nothing was written to «{}»", b.name))
-                    .or_else(|| {
-                        clio_toolhost::pending::skill_of(p)
-                            .map(|s| format!("the skill «{}» is not registered", s.0))
-                    })
-                    .or_else(|| {
-                        clio_toolhost::pending::service_of(p)
-                            .map(|s| format!("the service «{}» is not registered", s.0))
-                    })
-                    .or_else(|| {
-                        clio_toolhost::pending::mcp_of(p)
-                            .map(|s| format!("the MCP server «{}» is not installed", s.0))
-                    })
-            });
-        if let Some(refused) = block {
-            let note = if yes {
-                match pending::approve(&h.dirs, id) {
-                    Ok(p) => match &p.state {
-                        clio_toolhost::pending::State::Done { output_tail, .. } => {
-                            format!("approved {id}: {output_tail}")
-                        }
-                        _ => format!("approved {id}"),
-                    },
-                    Err(e) => {
-                        locked(&h.notes).push(format!(
-                            "the person approved {id}, but nothing was written: {e}"
-                        ));
-                        return Err(format!("{id}: {e}"));
-                    }
-                }
-            } else {
-                pending::reject(&h.dirs, id)?;
-                format!("rejected {id}: {refused}")
-            };
-            locked(&h.notes).push(format!("the person {note}"));
-            return Ok(note);
-        }
-        if !yes {
-            pending::reject(&h.dirs, id)?;
-            let note = format!("rejected {id}: it is not run");
-            locked(&h.notes).push(format!("the person {note}"));
-            return Ok(note);
-        }
-        // Said yes, but it could not be done: an outcome too, told as such.
-        let p = pending::approve(&h.dirs, id).inspect_err(|e| {
-            locked(&h.notes).push(format!(
-                "the person approved {id}, but it could not be done: {e}"
+        // A session the judge flagged never acts under a window: it asks.
+        if self.suspect() {
+            return Err(format!(
+                "{id}: this session read content that tried to give orders, so it waits for you"
             ));
-        })?;
-        // An MCP server's answer is outside text: the session is marked before the model reads it.
-        if p.tool == "mcp_call" {
-            jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
         }
-        let what = pending::outcome(&p);
-        // What it printed is outside text: the judge reads it before the model does.
-        let (shown, flagged) = jev::judged_for_model(
-            &self.toolhost.socket,
-            &self.pi.session_id,
-            &what,
-            clio_toolhost::pending::shown(&p),
-        )
-        .unwrap_or_else(|| (what.clone(), false));
-        locked(&h.approved).push(format!("the person approved {id}: {shown}"));
-        Ok(if flagged {
-            format!(
-                "approved {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
-            )
-        } else {
-            format!("approved {id}: {what}")
+        let p = pending::waiting(&h.dirs)
+            .into_iter()
+            .find(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
+            .ok_or_else(|| format!("{id} is not of this session"))?;
+        if clio_toolhost::pending::secret_of(&p).is_some() {
+            return Err(format!("{id} asks for a secret: only you answer it"));
+        }
+        let st = pending::state(&h.dirs);
+        let what = format!("{} {}", pending::label(&p), pending::what(&p));
+        // Recorded before anything runs; a window that closed meanwhile leaves it waiting.
+        let w = grant::begin(&st, &p, &pending::what(&p))
+            .ok_or_else(|| format!("{id}: the permission window is closed, so it waits for you"))?;
+        locked(&h.told).insert(id.to_owned());
+        let r = self.answer_as(id, true, Some(&w));
+        grant::done(
+            &st,
+            &w,
+            id,
+            &r.clone().unwrap_or_else(|e| format!("not done: {e}")),
+        );
+        let left = grant::left_text(w.ends_ms - crate::cli::now_ms());
+        r.map(|n| {
+            let outcome = n
+                .strip_prefix(&format!("approved {id}: "))
+                .unwrap_or(&n)
+                .to_owned();
+            format!("approved under your permission ({left} left): {what}\n{outcome}")
         })
+    }
+
+    fn granted_news(&self) -> Vec<String> {
+        let Some(h) = &self.host else {
+            return Vec::new();
+        };
+        let st = pending::state(&h.dirs);
+        let Some(w) = grant::read(&st) else {
+            return Vec::new();
+        };
+        let Some((_, acts)) = grant::record(&st, &w.id) else {
+            return Vec::new();
+        };
+        let now = crate::cli::now_ms();
+        let left = if w.open_at(now, grant::mono_ms()) {
+            format!("{} left", grant::left_text(w.ends_ms - now))
+        } else {
+            "the window has ended".into()
+        };
+        let mut told = locked(&h.told);
+        acts.into_iter()
+            .filter(|a| a.session == self.pi.session_id && told.insert(a.pending.clone()))
+            .map(|a| {
+                format!(
+                    "approved under your permission ({left}): «{}» {}",
+                    a.class, a.what
+                )
+            })
+            .collect()
+    }
+
+    fn queue_summary(&self, record: String) {
+        if let Some(h) = &self.host {
+            *locked(&h.summary) = Some(record);
+        }
     }
 
     fn answer_secret(&self, id: &str, value: Option<&SecretValue>) -> Result<String, String> {
@@ -1546,6 +1543,117 @@ fn withheld(entries: &[Value]) -> Vec<super::Withheld> {
 
 fn is_taint(e: &Value) -> bool {
     e["customType"] == "clio-guard.taint" && e["data"]["tainted"] == true
+}
+
+impl ChatSession {
+    /// The one path of every yes in the chat: the person's (`granted` is `None`), or the open
+    /// permission window's. Says what happened; the model hears it with the next message.
+    fn answer_as(
+        &self,
+        id: &str,
+        yes: bool,
+        granted: Option<&grant::Window>,
+    ) -> Result<String, String> {
+        let by = granted.map(|w| w.id.as_str());
+        let who = if by.is_some() {
+            "the permission window"
+        } else {
+            "the person"
+        };
+        // One already put to the person, or one of this session still waiting (`/pending`).
+        let h = self
+            .host
+            .as_ref()
+            .filter(|h| {
+                locked(&h.asked).contains(id)
+                    || pending::waiting(&h.dirs)
+                        .iter()
+                        .any(|p| p.id == id && p.run == h.run && p.session == self.pi.session_id)
+            })
+            .ok_or_else(|| format!("{id} is not of this session"))?;
+        if pending::waiting(&h.dirs)
+            .iter()
+            .any(|p| p.id == id && clio_toolhost::pending::secret_of(p).is_some())
+        {
+            return Err(format!("{id} asks for a secret: answer it in its own box"));
+        }
+        // A block change or a skill: the model hears what came of it with the next message, as
+        // of a secret.
+        let block = pending::waiting(&h.dirs)
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| {
+                clio_toolhost::pending::block_of(p)
+                    .map(|b| format!("nothing was written to «{}»", b.name))
+                    .or_else(|| {
+                        clio_toolhost::pending::skill_of(p)
+                            .map(|s| format!("the skill «{}» is not registered", s.0))
+                    })
+                    .or_else(|| {
+                        clio_toolhost::pending::service_of(p)
+                            .map(|s| format!("the service «{}» is not registered", s.0))
+                    })
+                    .or_else(|| {
+                        clio_toolhost::pending::mcp_of(p)
+                            .map(|s| format!("the MCP server «{}» is not installed", s.0))
+                    })
+            });
+        if let Some(refused) = block {
+            let note = if yes {
+                match pending::approve_as(&h.dirs, id, by) {
+                    Ok(p) => match &p.state {
+                        clio_toolhost::pending::State::Done { output_tail, .. } => {
+                            format!("approved {id}: {output_tail}")
+                        }
+                        _ => format!("approved {id}"),
+                    },
+                    Err(e) => {
+                        locked(&h.notes)
+                            .push(format!("{who} approved {id}, but nothing was written: {e}"));
+                        return Err(format!("{id}: {e}"));
+                    }
+                }
+            } else {
+                pending::reject(&h.dirs, id)?;
+                format!("rejected {id}: {refused}")
+            };
+            locked(&h.notes).push(format!("{who} {note}"));
+            return Ok(note);
+        }
+        if !yes {
+            pending::reject(&h.dirs, id)?;
+            let note = format!("rejected {id}: it is not run");
+            locked(&h.notes).push(format!("the person {note}"));
+            return Ok(note);
+        }
+        // Said yes, but it could not be done: an outcome too, told as such.
+        let p = pending::approve_as(&h.dirs, id, by).inspect_err(|e| {
+            locked(&h.notes).push(format!(
+                "{who} approved {id}, but it could not be done: {e}"
+            ));
+        })?;
+        // An MCP server's answer is outside text: the session is marked before the model reads it.
+        if p.tool == "mcp_call" {
+            jev::taint_session(&self.toolhost.socket, &self.pi.session_id, false);
+        }
+        let what = pending::outcome(&p);
+        // What it printed is outside text: the judge reads it before the model does.
+        let (shown, flagged) = jev::judged_for_model(
+            &self.toolhost.socket,
+            &self.pi.session_id,
+            &what,
+            clio_toolhost::pending::shown(&p),
+        )
+        .unwrap_or_else(|| (what.clone(), false));
+        locked(&h.approved).push(format!("{who} approved {id}: {shown}"));
+        Ok(if flagged {
+            format!(
+                "approved {id}: {what}\n(Clio's judge flagged this output: the agent was not shown it)"
+            )
+        } else {
+            format!("approved {id}: {what}")
+        })
+    }
 }
 
 #[cfg(test)]
