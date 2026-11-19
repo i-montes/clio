@@ -122,7 +122,7 @@ impl EgressProxy {
         let sock = dir.join("proxy.sock");
         if sock.as_os_str().len() > MAX_SOCKET_PATH {
             return Err(format!(
-                "the proxy socket path ({}) is too long for a Unix socket",
+                "the proxy socket path ({}) is too long for a Unix socket: use a shorter XDG_RUNTIME_DIR",
                 sock.display()
             ));
         }

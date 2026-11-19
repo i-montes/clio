@@ -1342,8 +1342,8 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
 "#;
 
     fn tmp() -> TempDir {
-        let exe = std::env::current_exe().unwrap();
-        TempDir::new_in(exe.parent().unwrap().parent().unwrap().parent().unwrap()).unwrap()
+        // A checkout's own path can be too long for the proxy's socket: `/var/tmp` is short.
+        TempDir::new_in("/var/tmp").unwrap()
     }
 
     fn node() -> Option<PathBuf> {

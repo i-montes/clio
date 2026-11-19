@@ -1327,8 +1327,8 @@ pub(crate) mod tests {
     /// Not under `/tmp`: a run's `/tmp` is its own, and what it must see (the fake forwarder) has
     /// to be outside it. Short enough for the proxy's socket path.
     pub(crate) fn tmp() -> TempDir {
-        let exe = std::env::current_exe().unwrap();
-        TempDir::new_in(exe.parent().unwrap().parent().unwrap().parent().unwrap()).unwrap()
+        // A checkout's own path can be too long for the proxy's socket: `/var/tmp` is short.
+        TempDir::new_in("/var/tmp").unwrap()
     }
 
     /// `Runner::run`, for a run that must happen: a test thread's child forked meanwhile holds
