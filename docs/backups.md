@@ -24,7 +24,7 @@ Only the **last 2** (`restic forget --keep-last 2 --prune` after each copy). Cha
 - `~/.config/clio/config.json`.
 - `~/.local/share/clio/runs/` without the working copies (`sandbox/` and `scratch/`): the records, diffs, effect logs and, for host sessions, the tool host's files (file backups for `clio undo`, what the judge withheld, background job output) stay.
 
-The model key lives in the vault (`vault.bin`, which is already in the copy, encrypted). Not backed up: the restic passphrase, what can be reinstalled (`pi/`), and the host-mode files outside `runs/` (`~/.local/share/clio/host/`: the action log, what is pending and the day's budget; `~/.config/clio/host.json`).
+The model key lives in the vault (`vault.bin`, which is already in the copy, encrypted). Not backed up: the restic passphrase, what can be reinstalled (`pi/`), the trash of deleted conversations (`~/.local/share/clio/trash/sessions/`, kept 30 days, 0700; `clio sessions restore` brings one back), and the host-mode files outside `runs/` (`~/.local/share/clio/host/`: the action log, what is pending and the day's budget; `~/.config/clio/host.json`).
 
 ## Setting it up (once)
 
