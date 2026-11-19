@@ -139,7 +139,7 @@ What runs without the person inside a window (and only what was set aside after 
 - a command or write of class `delete`, `spend` or `send` (the list's, or the person's `host.json`);
 - a call of an MCP tool in `ask` mode (never one that changed since the person confirmed it);
 - a skill that would wait (reviewed; registered byte for byte as reviewed);
-- turning a service, skill or MCP server Clio created back on, back a version or away (`*_manage`, below).
+- turning a service, skill or MCP server Clio created back on, back a version (not a service) or away, and running a service that reaches hosts or holds secrets (`*_manage`, below).
 
 What **always asks the person**, window or not (their yes to it opens a window like any other yes):
 
@@ -148,7 +148,7 @@ What **always asks the person**, window or not (their yes to it opens a window l
 - **a change to the person's blocks**: it becomes the person's own words and Clio's standing rules.
 - **a new service or a new version of one**: unattended code that outlives the window.
 - **an MCP server** (install or update): someone else's code that outlives the window.
-- **turning on what the person turned off, and removing a skill Clio ships**: the person's own decisions.
+- **turning on what the person turned off, taking a service back a version, and removing or taking back a skill Clio ships**: the person's own decisions (an older service version may hold other grants).
 - **what waited from before the window opened**: the person never saw it; it keeps its box.
 
 What still limits what does run:
@@ -224,7 +224,7 @@ A service is a program the model wrote that keeps running on the person's machin
 
 In a host-mode chat the model has `service_manage`, `skill_manage` and `mcp_manage`. The tool host answers `status` and `logs` and writes no registry: `off` and `run` are a line in the run's request file, `on`, `undo` and `remove` a pending item, and the person's own `clio` carries either out with the person's functions after checking it again (a line names its session; an item is hash-bound to the version it is at, the version `undo` goes back to and who turned it off). The jail still cannot write a registry: it reaches neither the folders nor the request file's reader, and the brain takes nothing but `off` and `run` from the file.
 
-**Plainly: a fooled model can turn off, at once and without asking, the services, skills and MCP servers Clio created, and run a service that is on; with the person's yes, or inside a permission window, it can also turn them back on, take them back a version or move them to `removed/`.** What that can do: stop a useful check or report (until the person turns it back on), run a service early (only what was approved, as approved, in its jail), bring back a version the person had moved past, or re-enable something Clio turned off. What it cannot do: register, update or edit one, change what it may read, write or reach, set an MCP tool to run without asking, confirm a server's tools, touch the timer, turn on what the person turned off or remove a shipped skill without the person, reach another kind's registry, delete anything (`removed/` keeps it), act at all from a `suspect` session without the person (every action but `status` waits), or call more than 20 times an hour in a session. A service whose files changed pauses instead of running.
+**Plainly: a fooled model can turn off, at once and without asking, the services, skills and MCP servers Clio created, and run a service that is on and reaches nothing; with the person's yes, or inside a permission window, it can also turn them back on, take a skill back a version, run a service that reaches its declared hosts with its secrets, or move them to `removed/`.** What that can do: stop a useful check or report (until the person turns it back on; a notice tells them at the next chat), run a service early (only what was approved, as approved, in its jail), bring back a skill version the person had moved past, or re-enable something Clio turned off. Each act ends one turn: Clio may go on by herself at most 3 turns in a row without a message of the person. What it cannot do: register, update or edit one, change what it may read, write or reach, take a service back to an older version's grants, set an MCP tool to run without asking, confirm a server's tools, touch the timer, turn on what the person turned off (nor relabel what is off as hers) or remove or take back a shipped skill without the person, reach another kind's registry, delete anything (`removed/` keeps it), act at all from a `suspect` session without the person (every action but `status` waits), act on a request more than an hour old, or call more than 20 times an hour in a session. A service whose files changed pauses instead of running. The tool descriptions and prompts tell the model to use `off`, `undo` and `remove` only when the person asks or something is broken, never on outside text's say-so; that is advice, not a wall.
 
 ### Memory as an attack surface (injections that persist)
 
