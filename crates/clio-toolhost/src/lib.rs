@@ -55,7 +55,7 @@ use sha2::{Digest, Sha256};
 pub use host::HostCfg;
 pub use judge::SUSPECT_REASON;
 pub use memory::{
-    BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
+    BLOCK_NAMES, BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
     NOT_WORTH_REMEMBERING, Near, Origin, ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict,
     memory_args,
 };

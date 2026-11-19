@@ -48,7 +48,7 @@ pub const RECALL_BUDGET: usize = 400;
 const BLOCKS: [(&str, usize); 3] = [("identidad", 150), ("reglas", 200), ("preferencias", 150)];
 /// The person's blocks: the three made when the memory is opened for writing, and `vigilancia`
 /// (what Clio watches), made on its first write.
-pub const BLOCK_NAMES: [&str; 4] = ["identidad", "reglas", "preferencias", "vigilancia"];
+pub use clio_toolhost::BLOCK_NAMES;
 /// Longest entry of a block, in characters.
 pub const BLOCK_ENTRY_CHARS: usize = 1200;
 /// What a block sent to the model may hold in all, in characters: it is always sent whole.

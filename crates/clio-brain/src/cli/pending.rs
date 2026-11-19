@@ -576,8 +576,8 @@ mod tests {
 
     // S-05, S-36, S-60: a marked chat session's change to a block waits; `clio approve` (and the
     // chat's box, which calls the same `approve`) writes it through the port a clean session uses:
-    // the exact text, with the person's origin, once. What it prints is cleaned of what could
-    // redraw a terminal; a rejected one writes nothing.
+    // the exact text, with the person's origin, once. A text with what could redraw a terminal is
+    // refused before it waits; a rejected one writes nothing.
     #[test]
     fn an_approved_block_change_is_written_as_the_persons_and_shown_clean() {
         use clio_brain::memory_link::{EmbedModel, MemoryLink};
@@ -608,8 +608,17 @@ mod tests {
                 .unwrap_or_else(|| panic!("{text}"))
                 .to_owned()
         };
-        let text = "the disk of / \u{1b}[2J\u{1b}[31mover 90 %";
-        let id = ask(text);
+        // Text the box would have to clean is refused, not cleaned behind the person's back.
+        let line = json!({"id":"i","tool":"memory_block_edit","args":{"name":"vigilancia","action":"add","text":"the disk of / \u{1b}[2J\u{1b}[31mover 90 %"},"session":"s1","call_id":"c","tainted":true}).to_string();
+        let r: Value = serde_json::from_str(&host.handle_line(&line)).unwrap();
+        assert!(
+            r["content"]
+                .as_str()
+                .unwrap()
+                .contains("invisible or control characters"),
+            "{r}"
+        );
+        let id = ask("the disk of / over 90 %");
         let p = pending::check(&state(&dirs), &id, now_ms()).unwrap();
         assert_eq!(label(&p), "«memory»");
         let shown = block_text(&dirs, &p).unwrap();
@@ -621,7 +630,6 @@ mod tests {
                 "block: vigilancia",
                 "action: add an entry",
                 "text:",
-                // The tool host already cleaned it before it was stored.
                 "  the disk of / over 90 %",
             ]
         );

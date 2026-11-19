@@ -84,6 +84,8 @@ const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
 const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
 const BLOCK_DESCRIPTION: &str = "Read one of the person's blocks whole, in order, each entry with its id: identidad (who Clio is and how she speaks), reglas (how she works and her limits), preferencias (who the person is), vigilancia (what she watches) (read-only)";
 const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
+/// The person's blocks: the only names `memory_block_edit` can change.
+pub const BLOCK_NAMES: [&str; 4] = ["identidad", "reglas", "preferencias", "vigilancia"];
 /// The memory's judge declining a text as not worth keeping (the brain's port says exactly this).
 pub const NOT_WORTH_REMEMBERING: &str = "Clio did not save it: it does not look worth remembering";
 const HIDDEN_CHARS: &str =
@@ -1340,12 +1342,17 @@ impl ToolHost {
             BlockEdit::Remove(n) => ("remove", Some(*n), None),
         };
         let mut args = json!({ "name": name, "action": action });
-        if id.is_none() {
-            // An add to a block that does not exist is the model's mistake: nothing waits for it.
-            let block = name.clone();
-            if let Err(why) = self.ask_port(port, move |p| p.block(&block)) {
-                return self.memory_failed(req, out, &why);
-            }
+        // A block that does not exist is the model's mistake: nothing waits for it.
+        if !BLOCK_NAMES.contains(&name.as_str()) {
+            return self.memory_failed(
+                req,
+                out,
+                &format!(
+                    "there is no block «{}»: {}",
+                    self.tidy(&name, 40),
+                    BLOCK_NAMES.join(", ")
+                ),
+            );
         }
         if let Some(n) = id {
             let block = name.clone();
