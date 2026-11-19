@@ -71,6 +71,10 @@ pub struct HostJob {
     /// no new privileges (no `sudo`) and, with `Bwrap`, no Unix socket of its own (a seccomp
     /// filter refuses `socket(AF_UNIX, ...)`): a socket anywhere it can see cannot be connected to.
     pub read_only: bool,
+    /// With `read_only`, a round's command (nobody watches it, S-71): `/run` stays visible and
+    /// Unix sockets can be made, so `systemctl status` and the like read through them; the rest
+    /// of `read_only` holds (read-only root, its own `/tmp`, no new privileges).
+    pub sockets: bool,
 }
 
 /// A service's run (stage 3, S-69): `job` (its command, its files' folder as `cwd`, masks, the
@@ -369,7 +373,7 @@ impl HostJail {
         };
         let mut asked = job.masks.clone();
         // A review's command: `/run` (the person's D-Bus, sockets of what starts programs) too.
-        if job.read_only {
+        if job.read_only && !job.sockets {
             asked.push(PathBuf::from("/run"));
         }
         let mut masks = canon(&asked, "mask")?;
@@ -684,7 +688,7 @@ impl HostJail {
         // A review's command under bwrap: its seccomp filter, on a descriptor bwrap inherits. Kept
         // open until it has started; another thread's child may inherit it too (a few bytes of
         // filter, nothing else).
-        let _filter = match (&self.tools, job.read_only) {
+        let _filter = match (&self.tools, job.read_only && !job.sockets) {
             (Tools::Bwrap(_), true) => {
                 let f = seccomp_fd()?;
                 args.splice(
@@ -767,6 +771,7 @@ impl HostJail {
                 masks: vec![mask.clone()],
                 shows: vec![],
                 read_only: false,
+                sockets: false,
             })?;
             let why = match (out.exit_code, network) {
                 (Some(21), false) | (Some(20), true) => continue,

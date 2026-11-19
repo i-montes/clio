@@ -855,7 +855,11 @@ impl ToolHost {
         p: &Pending,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
-        if !crate::grant::covers(p) || self.review || self.is_suspect(&req.session) {
+        if !crate::grant::covers(p)
+            || self.review
+            || self.unattended
+            || self.is_suspect(&req.session)
+        {
             return Err(None);
         }
         let w = crate::grant::current(state).ok_or(None)?;

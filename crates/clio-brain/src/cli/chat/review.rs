@@ -371,6 +371,7 @@ fn started(
             }),
             secrets: None,
             review: true,
+            unattended: false,
             skills: None,
             show,
             mcp: None,

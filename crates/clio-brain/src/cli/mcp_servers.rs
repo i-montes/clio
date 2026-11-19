@@ -1379,6 +1379,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
             masks: vec![],
             shows: vec![],
             read_only: false,
+            sockets: false,
         };
         match h.run(&j) {
             Ok(o) if o.success() => Some((h, node)),

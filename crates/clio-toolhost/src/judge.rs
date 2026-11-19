@@ -33,6 +33,8 @@ const MAX_WAITING: usize = 256;
 const MAX_SOURCE_CHARS: usize = 200;
 /// The reason a networked command of a suspect session waits for the person.
 pub const SUSPECT_REASON: &str = "the session read text the judge flagged";
+/// The mark a round's session gets when its judge did not answer (`tainted.json`, S-71).
+pub const UNJUDGED: &str = "unjudged";
 
 /// Where a call read outside text from, for the judge and the notice.
 #[derive(Debug, Clone)]
@@ -197,13 +199,31 @@ impl ToolHost {
         wrapped: &[usize],
         w: &ToJudge,
     ) -> Value {
-        if wrapped.is_empty() || self.memory.is_none() {
+        if wrapped.is_empty() || (self.memory.is_none() && !self.unattended) {
             return Value::Null;
         }
         let text: Vec<&str> = wrapped.iter().filter_map(|&i| out[i].as_str()).collect();
         let text = text.join("\n");
         let verdict = self.verdict_of(&text, &w.source);
         match verdict {
+            // A round (nobody watches it) reads only judged text: a judge that is missing or
+            // silent withholds it, and the mark ends the round (S-71).
+            TextVerdict::NoJudge | TextVerdict::NoAnswer if self.unattended => {
+                for (n, &i) in wrapped.iter().enumerate() {
+                    out[i] = Value::String(if n == 0 {
+                        format!(
+                            "[withheld by Clio] {} bytes of outside text from {} `{}` were not shown to you: Clio's judge did not answer, and a round reads only judged text. Stop and answer with your block.",
+                            text.len(),
+                            w.tool,
+                            w.source
+                        )
+                    } else {
+                        String::new()
+                    });
+                }
+                self.mark(&req.session, UNJUDGED);
+                json!({ "judge": "unanswered", "withheld": { "tool": w.tool, "source": w.source, "bytes": text.len() } })
+            }
             TextVerdict::NoJudge | TextVerdict::Clean => Value::Null,
             TextVerdict::NoAnswer => {
                 let first = {

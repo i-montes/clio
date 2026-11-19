@@ -261,6 +261,8 @@ pub struct ToolhostOpts<'a> {
     pub secrets: Option<(&'a Path, &'a str, &'a Path)>,
     /// A review: nothing is set aside for the person (`clio toolhost --review`).
     pub review: bool,
+    /// A round (`clio toolhost --unattended`, S-71): it only reads, and no window covers it.
+    pub unattended: bool,
     /// Clio's skills folder (`clio toolhost --skills`): `skill_write`, `skill_report`, and a
     /// registered skill read as Clio's own text. Only a chat.
     pub skills: Option<&'a Path>,
@@ -328,6 +330,7 @@ impl Toolhost {
             host,
             secrets,
             review,
+            unattended,
             skills,
             show,
             mcp,
@@ -400,6 +403,9 @@ impl Toolhost {
         }
         if review {
             cmd.arg("--review");
+        }
+        if unattended {
+            cmd.arg("--unattended");
         }
         if let Some(s) = skills {
             cmd.arg("--skills").arg(s);

@@ -58,7 +58,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use host::HostCfg;
-pub use judge::SUSPECT_REASON;
+pub use judge::{SUSPECT_REASON, UNJUDGED};
 pub use memory::{
     BLOCK_NAMES, BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
     NOT_WORTH_REMEMBERING, Near, Origin, ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict,
@@ -159,6 +159,34 @@ pub const REVIEW_CANNOT_ASK: &str = "a review cannot ask the person: what needs 
 pub const REVIEW_NO_NETWORK: &str = "a review has no network and no sudo: what needs them cannot be checked here, so report it as could_not_check";
 /// The only requests a review's tool host serves: the reading tools, `exec`, and the internal
 /// operations of the guard and of Clio (S-67). Everything else is refused, whoever sent it.
+/// What a round (`--unattended`) is told when it tries to change something (S-71).
+pub const ROUND_ONLY_READS: &str = "a round only reads: propose it in your notice";
+/// Why what a round would send out waits for the person.
+const ROUND_REACHES: &str = "a round reaches nothing outside by itself";
+/// Why a round's change to a unit waits for the person.
+const ROUND_UNITS: &str = "a round changes no service";
+/// The tools a round never uses: each changes something, or needs the person.
+const ROUND_REFUSED: [&str; 8] = [
+    "fs_write",
+    "fs_mkdir",
+    "skill_write",
+    "skill_report",
+    "service_write",
+    "mcp_propose",
+    "memory_block_edit",
+    "request_secret",
+];
+
+/// Whether a round's call (`tool`, `args`) changes something: a refused tool, a manage act but
+/// `status` and `logs`, a background command.
+fn round_refuses(tool: &str, args: &Map<String, Value>) -> bool {
+    let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").trim();
+    ROUND_REFUSED.contains(&tool)
+        || (matches!(tool, "service_manage" | "skill_manage" | "mcp_manage")
+            && !matches!(s("action"), "status" | "logs"))
+        || (tool == "exec" && args.get("background").and_then(Value::as_bool) == Some(true))
+}
+
 const REVIEW_OPS: [&str; 10] = [
     "fs_read", "fs_stat", "fs_list", "fs_glob", "exec", "filter", "judge", "jobs", "taint",
     "closing",
@@ -195,6 +223,11 @@ pub struct Config {
     /// A review (`--review`): nobody can be asked, so what would wait for the person is refused
     /// outright and nothing is stored as pending; no background commands either.
     pub review: bool,
+    /// A round (`--unattended`, S-71): nobody watches and nobody answers. It only reads: its
+    /// commands run read-only with no new privileges, what changes something is refused
+    /// (`ROUND_ONLY_READS`), what reaches out waits for the person, no permission window covers
+    /// it, and a judge that does not answer withholds the text and ends it.
+    pub unattended: bool,
     /// Clio's skills folder (`<data>/skills`, S-68): `skill_write` and `skill_report` work, and
     /// a registered, enabled skill is read as Clio's own text. Only a chat gets it.
     pub skills: Option<PathBuf>,
@@ -224,6 +257,7 @@ impl Config {
             secrets: None,
             clock: Arc::new(SystemClock),
             review: false,
+            unattended: false,
             skills: None,
             shows: Vec::new(),
             mcp: None,
@@ -271,6 +305,7 @@ pub struct ToolHost {
     secrets: Option<pending::SecretCfg>,
     clock: Arc<dyn Clock>,
     review: bool,
+    unattended: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
     /// The service is stopping: a running command is stopped, and nothing new runs.
@@ -469,6 +504,7 @@ impl ToolHost {
             secrets: cfg.secrets,
             clock: cfg.clock,
             review: cfg.review,
+            unattended: cfg.unattended,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),
@@ -707,6 +743,13 @@ impl ToolHost {
                 .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()));
             let why = "a review only reads and runs commands: this is not one of its tools";
             return self.refuse_in_review(at, &req, &req.args, "review/tool", why);
+        }
+        if self.unattended && round_refuses(&req.tool, &map) {
+            let at = self
+                .host
+                .as_ref()
+                .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()));
+            return self.refuse_in_review(at, &req, &req.args, "round/read-only", ROUND_ONLY_READS);
         }
         let closing = || {
             lock(&self.sessions)
@@ -967,6 +1010,19 @@ impl ToolHost {
             // the command: what it read may be what wants out.
             if reaches && self.is_suspect(&req.session) {
                 return self.aside(h, &req, ask::Class::Send, Some(SUSPECT_REASON), cancel);
+            }
+            // A round (nobody watches it) never reaches out by itself, nor changes a unit through
+            // the service manager its sockets reach: it waits for the person.
+            if reaches && self.unattended {
+                return self.aside(h, &req, ask::Class::Send, Some(ROUND_REACHES), cancel);
+            }
+            if self.unattended
+                && req.tool == "exec"
+                && h.cfg
+                    .rules
+                    .changes_units(map.get("command").and_then(Value::as_str).unwrap_or(""))
+            {
+                return self.aside(h, &req, ask::Class::Control, Some(ROUND_UNITS), cancel);
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
                 if self.review {

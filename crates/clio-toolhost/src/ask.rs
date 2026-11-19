@@ -101,7 +101,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -451,6 +451,37 @@ impl HostRules {
             REACH_OUT.contains(&w[0].as_str())
                 || (w[0] == "ip" && w.windows(2).any(|p| p == ["netns", "exec"]))
         })
+    }
+
+    /// A command that changes a unit through the service manager: `systemctl` or `service` with a
+    /// verb that does more than read. A round (S-71) sees `/run`, so its sockets reach the manager.
+    pub fn changes_units(&self, command: &str) -> bool {
+        const READS: [&str; 14] = [
+            "status",
+            "show",
+            "cat",
+            "help",
+            "list-units",
+            "list-unit-files",
+            "list-timers",
+            "list-sockets",
+            "list-dependencies",
+            "list-jobs",
+            "is-active",
+            "is-enabled",
+            "is-failed",
+            "is-system-running",
+        ];
+        simple_commands(command)
+            .iter()
+            .any(|w| match w[0].as_str() {
+                "systemctl" => w[1..]
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .is_some_and(|v| !READS.contains(&v.as_str())),
+                "service" => w.get(2).is_some_and(|v| v != "status"),
+                _ => false,
+            })
     }
 
     /// The command names `sudo` anywhere, quoted or nested included: root reaches past every
@@ -1237,6 +1268,9 @@ mod tests {
             "clio services on backup",
             "clio mcp on time",
             "clio mcp confirm time",
+            // S-71: a round is started by the timer or the person, never by the model.
+            "clio round now",
+            "clio round run-timer",
             "systemctl --user enable --now clio-services.timer",
             "systemctl --user start clio-services.service",
             "ln -s ~/.config/systemd/user/clio-services.timer ~/.config/systemd/user/timers.target.wants/",
@@ -1244,6 +1278,32 @@ mod tests {
             assert_eq!(r.classify_command(c), Some(Control), "{c}");
         }
         assert_eq!(r.classify_command("systemctl status nginx"), None);
+    }
+
+    // S-71: a round sees the service manager's sockets: what changes a unit is told apart from
+    // what reads.
+    #[test]
+    fn what_changes_a_unit_is_told_apart_from_what_reads() {
+        let r = HostRules::factory();
+        for c in [
+            "systemctl --user restart backup",
+            "systemctl stop nginx",
+            "systemctl -H other status x",
+            "echo x && systemctl --user enable foo",
+            "service nginx reload",
+        ] {
+            assert!(r.changes_units(c), "{c}");
+        }
+        for c in [
+            "systemctl status nginx",
+            "systemctl --user list-timers --all",
+            "systemctl is-active nginx",
+            "systemctl",
+            "service nginx status",
+            "journalctl -u nginx -n 50",
+        ] {
+            assert!(!r.changes_units(c), "{c}");
+        }
     }
 
     // A scheduler runs a job later, outside the launcher and any permission window: control.
