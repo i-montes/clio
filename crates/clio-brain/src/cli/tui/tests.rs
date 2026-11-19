@@ -1505,26 +1505,30 @@ fn short_id_never_panics_on_a_non_ascii_name() {
     assert_eq!(short_id("20261031-181646-5a67"), "1031-1816-5a67");
 }
 
-// Host mode: at the end of a turn, each action the session set aside is one question; `s` and then
-// Enter runs it, `n` or Esc rejects it, and the next one comes. The question opens while the
-// person may be typing: it hears no key until a second passed without one, and a lone Enter or an
-// `s` followed by another key decides nothing.
+// Host mode: at the end of a turn, what the session set aside is ONE question for all of it;
+// `s` (or `y`) and then Enter approves all of it, `n` or Esc rejects all of it. The question opens
+// while the person may be typing: it hears no key until a second passed without one, and a lone
+// Enter or an `s` followed by another key decides nothing.
 #[test]
-fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
-    let asks = vec![
-        ("a1".to_owned(), "«delete» rm -r datos".to_owned(), None),
-        ("b2".to_owned(), "«send» git push".to_owned(), None),
-    ];
-    let (a, cmds) = feed(app(), vec![Input::Bg(Bg::ChatAsks(asks))]);
+fn what_a_turn_set_aside_is_asked_in_one_box_and_only_s_then_enter_runs_it() {
+    let asks = || {
+        Input::Bg(Bg::ChatAsks(vec![
+            ("a1".to_owned(), "«delete» rm -r datos".to_owned(), None),
+            ("b2".to_owned(), "«send» git push".to_owned(), None),
+        ]))
+    };
+    let (a, cmds) = feed(app(), vec![asks()]);
     assert!(cmds.is_empty());
     let c = a.confirm.as_ref().unwrap();
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "a1"));
+    assert_eq!(c.more, ["b2"]);
     let screen = screen_text(&a, 90, 30);
     assert!(
-        screen.contains("Run it?")
+        screen.contains("Clio set aside 2 items.")
             && screen.contains("y then Enter")
             && screen.contains("n or Esc")
-            && screen.contains("rm -r datos"),
+            && screen.contains("rm -r datos")
+            && screen.contains("git push"),
         "{screen}"
     );
     // Its own title, and the class on a line of its own above the command.
@@ -1533,7 +1537,10 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         "{screen}"
     );
     let class = screen.lines().find(|l| l.contains("«delete»")).unwrap();
-    assert!(!class.contains("rm -r"), "{screen}");
+    assert!(
+        class.contains("1 of 2 · a1") && !class.contains("rm -r"),
+        "{screen}"
+    );
     // Typing on: nothing is answered, and an `s` followed by another key is undone.
     let mut typing = Vec::new();
     for (i, k) in [
@@ -1554,6 +1561,7 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     assert!(cmds.is_empty(), "{cmds:?}");
     assert_eq!(a.confirm.as_ref().unwrap().id, "a1");
     assert!(!a.confirm.as_ref().unwrap().armed);
+    screen_text(&a, 90, 30);
     let (a, cmds) = feed(
         a,
         vec![
@@ -1565,18 +1573,9 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     );
     assert_eq!(
         cmds,
-        vec![Cmd::ChatAnswer {
-            id: "a1".into(),
+        vec![Cmd::ChatAnswers {
+            ids: vec!["a1".into(), "b2".into()],
             yes: true
-        }]
-    );
-    assert_eq!(a.confirm.as_ref().unwrap().id, "b2");
-    let (a, cmds) = feed(a, vec![Input::Tick(4_000), key(KeyCode::Esc)]);
-    assert_eq!(
-        cmds,
-        vec![Cmd::ChatAnswer {
-            id: "b2".into(),
-            yes: false
         }]
     );
     assert!(a.confirm.is_none());
@@ -1593,6 +1592,16 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
         Some(super::chat::Item::Note(m)) if m.contains("approved a1")
     ));
     assert_eq!(a.answering, 1);
+    let (a, _) = feed(app(), vec![asks()]);
+    let (a, cmds) = feed(a, vec![Input::Tick(4_000), key(KeyCode::Esc)]);
+    assert_eq!(
+        cmds,
+        vec![Cmd::ChatAnswers {
+            ids: vec!["a1".into(), "b2".into()],
+            yes: false
+        }]
+    );
+    assert!(a.confirm.is_none());
 }
 
 /// The Pi screen in host mode with a session open (`sid`) and two more listed.
@@ -1756,6 +1765,7 @@ fn a_question_that_opens_in_a_pause_waits_its_own_quiet_second() {
     assert_eq!((c.id.as_str(), c.shown_ms), ("b2", 5_000));
     let (a, _) = feed(a, vec![Input::Tick(5_600), ch('s')]);
     assert!(!a.confirm.as_ref().unwrap().armed);
+    screen_text(&a, 100, 30);
     let (_, cmds) = feed(a, vec![Input::Tick(6_700), ch('s'), key(KeyCode::Enter)]);
     assert_eq!(
         cmds,

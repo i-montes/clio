@@ -736,7 +736,6 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
     );
     let c = a.confirm.as_ref().unwrap();
     assert_eq!((c.action, c.id.as_str()), (Action::Approve, "e5f6"));
-    assert!(c.block.as_ref().unwrap().skill.is_some());
     let s = screen_text(&a, 100, 30);
     assert!(
         s.contains("Clio wants to register the skill «disk-report»."),

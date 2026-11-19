@@ -507,8 +507,18 @@ fn pick(p: &clio_toolhost::pending::Pending, suspect: bool) -> commands::Pick {
     k
 }
 
-/// Clio asks about everything that waits, one box after another: the secrets in their own box,
-/// the rest as approvals (a block change, a skill or a service shown whole).
+/// The permission window as it is now, for the status line and what the box says a yes does.
+fn send_grant(d: &Dirs, session: &str, s: &dyn Session, tx: &Sender<Input>) {
+    let _ = tx.send(Input::Bg(Bg::Grant {
+        session: session.to_owned(),
+        ends: clio_toolhost::grant::current(&super::pending::state(d)).map(|w| w.ends_ms),
+        hours: super::pending::grant_hours(d),
+        suspect: s.suspect(),
+    }));
+}
+
+/// Clio asks about everything that waits: the secrets each in their own box, the rest in ONE
+/// box (a block change, a skill, a service, an MCP server or a call shown whole).
 fn offer(waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
     let (secrets, aside): (Vec<_>, Vec<_>) = waiting
         .iter()
@@ -1027,6 +1037,53 @@ impl Ctx {
         }
     }
 
+    /// The person's answer to one box (`ids`, in the order shown), one after another in one
+    /// worker. A yes opens the permission window first (`pending::person_said_yes`: the only
+    /// place in the chat that opens one), unless the session is `suspect`.
+    fn answer(&self, ids: Vec<String>, yes: bool) {
+        let Some(session) = self.current_chat() else {
+            for _ in &ids {
+                self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
+            }
+            return;
+        };
+        self.answered.store(true, Ordering::SeqCst);
+        let quick = Quick::start(&self.quick);
+        self.spawn(
+            move |d, tx| {
+                // A command may run for an hour: quitting stops it instead of waiting.
+                let mut quick = Some(quick);
+                if super::pending::waiting(d)
+                    .iter()
+                    .any(|p| ids.contains(&p.id) && p.tool == "exec")
+                {
+                    quick = None;
+                }
+                if yes
+                    && let Some(w) = super::pending::person_said_yes(d, &ids, session.suspect())
+                {
+                    let _ = tx.send(Input::Bg(Bg::GrantSaid(Ok(format!(
+                        "permission window open: Clio acts without asking until {} ({}); you get a summary when it ends · /grant off closes it",
+                        clio_toolhost::pending::local(w.ends_ms, "%H:%M").unwrap_or_default(),
+                        clio_toolhost::grant::left_text(w.ends_ms - w.opened_ms)
+                    )))));
+                }
+                let mut last = None;
+                for (i, id) in ids.iter().enumerate() {
+                    let r = session.answer(id, yes);
+                    if i + 1 < ids.len() {
+                        let _ = tx.send(Input::Bg(Bg::ChatAnswered(r, yes)));
+                    } else {
+                        last = Some(r);
+                    }
+                }
+                drop(quick);
+                last.unwrap_or_else(|| Err("nothing to answer".into()))
+            },
+            move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
+        );
+    }
+
     fn exec(&self, cmd: Cmd) {
         match cmd {
             Cmd::LoadHome => self.spawn(
@@ -1219,6 +1276,12 @@ impl Ctx {
                     move |_, tx| {
                         let mut forward = |e: &clio_brain::pi::rpc::Event| {
                             let _ = tx.send(Input::Bg(Bg::ChatEvent(e.clone())));
+                            // What a permission window approved in that call: a quiet note.
+                            if matches!(e, clio_brain::pi::rpc::Event::ToolEnd { .. }) {
+                                for n in session.granted_news() {
+                                    let _ = tx.send(Input::Bg(Bg::Granted(Ok(n))));
+                                }
+                            }
                         };
                         let result = session
                             .run_prompt(&text, &cancel, &mut forward)
@@ -1256,28 +1319,27 @@ impl Ctx {
                     );
                 }
             }
-            Cmd::ChatAnswer { id, yes } => {
-                let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
-                    return;
-                };
-                self.answered.store(true, Ordering::SeqCst);
-                let quick = Quick::start(&self.quick);
+            Cmd::ChatAnswer { id, yes } => self.answer(vec![id], yes),
+            Cmd::ChatAnswers { ids, yes } => self.answer(ids, yes),
+            Cmd::Grant { arg, session: id } => {
+                let session = self.current_chat();
                 self.spawn(
-                    move |d, _| {
-                        // A command may run for an hour: quitting stops it instead of waiting.
-                        let mut quick = Some(quick);
-                        if super::pending::waiting(d)
-                            .iter()
-                            .any(|p| p.id == id && p.tool == "exec")
-                        {
-                            quick = None;
+                    move |d, tx| {
+                        let st = super::pending::state(d);
+                        let text = if arg == "off" {
+                            match clio_toolhost::grant::close(&st, clio_toolhost::grant::BY_PERSON)? {
+                                Some(_) => "the permission window is closed: Clio asks again for everything".to_owned(),
+                                None => "no permission window is open".to_owned(),
+                            }
+                        } else {
+                            super::pending::grant_line(d)
+                        };
+                        if let Some(s) = &session {
+                            send_grant(d, &id, s.as_ref(), tx);
                         }
-                        let r = session.answer(&id, yes);
-                        drop(quick);
-                        r
+                        Ok::<_, String>(text)
                     },
-                    move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
+                    |r| Bg::GrantSaid(r.and_then(|x| x)),
                 );
             }
             Cmd::ChatSecret { id, name, value } => {
@@ -1403,7 +1465,7 @@ impl Ctx {
             ),
             Cmd::McpConfirm(name) => self.spawn(
                 move |d, _| super::mcp_servers::confirm_ask(d, &name),
-                |r| Bg::Confirm(r.and_then(|x| x)),
+                |r| Bg::Confirm(r.and_then(|x| x).map(Box::new)),
             ),
             Cmd::ReviewStop => {
                 if let Ok(c) = self.review_cancel.lock() {
@@ -1536,7 +1598,10 @@ impl Ctx {
             Cmd::LoadPending { session } => {
                 let open = self.current_chat();
                 self.spawn(
-                    move |d, _| {
+                    move |d, tx| {
+                        if let Some(s) = &open {
+                            send_grant(d, &session, s.as_ref(), tx);
+                        }
                         let now = crate::cli::now_ms();
                         let others = super::pending::waiting(d)
                             .iter()
@@ -1567,21 +1632,32 @@ impl Ctx {
                 };
                 self.spawn(
                     move |d, tx| {
-                        let waiting = s.waiting();
-                        let every = Config::load(d).map_or_else(
-                            |_| crate::cli::home::ApprovalsCfg::default().every_hours,
-                            |c| c.approvals.every_hours,
-                        );
-                        let opened = !waiting.is_empty()
-                            && super::pending::ask_now(d, every, crate::cli::now_ms());
-                        if opened {
-                            let batch = waiting.len().min(approvals::BATCH);
-                            offer(&waiting[..batch], s.suspect(), tx);
+                        let st = super::pending::state(d);
+                        // An ended window's summary, once, by whichever conversation claims it.
+                        if let Some((w, acts)) = clio_toolhost::grant::summary_due(&st)
+                            && clio_toolhost::grant::claim_summary(&st, &w.id)
+                        {
+                            s.queue_summary(super::pending::summary_record(&w, &acts));
+                            let _ = tx.send(Input::Bg(Bg::GrantSummary {
+                                session: session.clone(),
+                            }));
                         }
+                        // Under an open window what waits is approved by it (never a secret, never
+                        // in a suspect session): the same path as the person's yes.
+                        let suspect = s.suspect();
+                        if !suspect && clio_toolhost::grant::current(&st).is_some() {
+                            for p in s.waiting() {
+                                if clio_toolhost::pending::secret_of(&p).is_none() {
+                                    let _ = tx.send(Input::Bg(Bg::Granted(s.grant(&p.id))));
+                                }
+                            }
+                        }
+                        send_grant(d, &session, s.as_ref(), tx);
+                        let waiting = s.waiting();
+                        offer(&waiting, suspect, tx);
                         Bg::Approvals {
                             session,
                             waiting: waiting.len(),
-                            opened,
                         }
                     },
                     |r| r.unwrap_or_else(|e| Bg::Done(Err(e))),

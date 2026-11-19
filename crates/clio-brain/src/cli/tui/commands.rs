@@ -31,6 +31,7 @@ pub enum Run {
     Context,
     Usage,
     Pending,
+    Grant,
     Actions,
     Undo,
     Review,
@@ -140,6 +141,14 @@ pub const COMMANDS: &[Command] = &[
         "what waits for your approval",
         false,
         Run::Pending,
+    ),
+    c(
+        "grant",
+        &[],
+        "[off]",
+        "the permission window: how long is left; off closes it now",
+        false,
+        Run::Grant,
     ),
     c(
         "actions",
@@ -607,6 +616,16 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             vec![]
         }
         Run::Pending => vec![Cmd::LoadPending { session: id }],
+        Run::Grant => match args {
+            "" | "off" => vec![Cmd::Grant {
+                arg: args.to_owned(),
+                session: id,
+            }],
+            _ => {
+                app.flash = Some("/grant shows the permission window; /grant off closes it".into());
+                vec![]
+            }
+        },
         Run::Review => super::review::command(app, args),
         Run::Skills => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["remove", name] => {
@@ -1010,8 +1029,21 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         KeyCode::Enter if picks > 0 => {
             let p = m.picks[m.sel.min(picks - 1)].clone();
             app.modal = None;
-            // Already in line: it moves to the front, it is not asked twice.
-            app.asks.retain(|c| c.id != p.id);
+            // Already in a box: that box comes to the front, it is not asked twice.
+            let mine = |c: &super::app::Confirm| c.id == p.id || c.more.contains(&p.id);
+            if app.confirm.as_ref().is_some_and(mine) {
+                return vec![];
+            }
+            if let Some(c) = app
+                .asks
+                .iter()
+                .position(mine)
+                .and_then(|i| app.asks.remove(i))
+            {
+                app.asks.push_front(c);
+                super::app::next_ask(app);
+                return vec![];
+            }
             app.prompts
                 .retain(|q| !matches!(q, super::ask::Prompt::Secret(s) if s.id == p.id));
             let session = app.chat.session_id.clone();
@@ -1021,11 +1053,11 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
                 app.offer(super::ask::Prompt::Secret(s));
                 return vec![];
             }
-            // A block change, a skill or a service is shown whole, as when Clio asks by herself.
-            let mut c = Confirm::new(Action::Approve, p.id, 0, p.what);
-            c.session = session;
-            c.block = p.block;
-            app.asks.push_front(c);
+            // Its box as when Clio asks by herself, with what a yes does: it opens a window too.
+            app.chat.approvals.suspect |= p.suspect;
+            if let Some(c) = super::approvals::one_box(app, vec![(p.id, p.what, p.block)]) {
+                app.asks.push_front(c);
+            }
             super::app::next_ask(app);
         }
         KeyCode::Enter => app.modal = None,

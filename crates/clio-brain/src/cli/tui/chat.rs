@@ -288,8 +288,9 @@ impl Chat {
 
     /// A turn starts now.
     pub fn start_turn(&mut self, now_ms: u64) {
-        // Any turn gives the model what came of the approvals.
+        // Any turn gives the model what came of the approvals, and an ended window's record.
         self.approvals.answered = false;
+        self.approvals.summary = false;
         self.running = true;
         self.aborting = false;
         self.turn_ms = now_ms;

@@ -27,7 +27,10 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
   clio pending [--json]                       what waits for your approval (host mode)
   clio approve <id> [--yes] | clio reject <id>
                                               runs it exactly as it was set aside, or drops it (a skill
-                                              is printed whole and asked about first; --yes skips that)
+                                              is printed whole and asked about first; --yes skips that);
+                                              a yes also lets Clio act without asking for approvals.grant_hours
+  clio grant [off]                            the permission window: how long is left and what it approved;
+                                              off closes it now
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
   clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
@@ -129,6 +132,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "pending"
             | "approve"
             | "reject"
+            | "grant"
             | "actions"
             | "skills"
             | "services"
@@ -261,6 +265,15 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             pending::approve_cmd(&dirs, &pending_arg(args)?, yes)?;
         }
         "reject" => pending::reject_cmd(&dirs, &pending_arg(args)?)?,
+        "grant" => {
+            let rest = args.rest()?;
+            let off = match rest.as_slice() {
+                [] => false,
+                [o] if o == "off" => true,
+                _ => return Err("usage: clio grant [off]".into()),
+            };
+            pending::grant_cmd(&dirs, off)?;
+        }
         "actions" => {
             let (json, run) = (args.flag("--json"), args.value("--run")?);
             args.rest()?;

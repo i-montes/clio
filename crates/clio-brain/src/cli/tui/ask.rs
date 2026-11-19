@@ -234,7 +234,7 @@ pub struct BlockAsk {
     pub skill: Option<SkillAsk>,
     /// Rows already made, and what `y` does (an MCP call set aside, an MCP server's tools to
     /// confirm): drawn whole the same way.
-    pub plain: Option<(Vec<(Part, String)>, &'static str)>,
+    pub plain: Option<(Vec<(Part, String)>, String)>,
 }
 
 /// A skill set aside for the person: what it is for, why it waits, and every file of it whole
@@ -401,7 +401,7 @@ impl BlockAsk {
     }
 
     /// A box of `rows` made elsewhere, `yes` under it.
-    pub fn rows(name: &str, rows: Vec<(Part, String)>, yes: &'static str) -> Self {
+    pub fn rows(name: &str, rows: Vec<(Part, String)>, yes: &str) -> Self {
         Self {
             name: sanitize::line(name),
             action: String::new(),
@@ -413,7 +413,7 @@ impl BlockAsk {
             max: std::cell::Cell::new(0),
             seen_end: std::cell::Cell::new(false),
             skill: None,
-            plain: Some((rows, yes)),
+            plain: Some((rows, yes.to_owned())),
         }
     }
 
@@ -465,11 +465,11 @@ impl BlockAsk {
     }
 
     /// What `y` does, for the keys under the box.
-    pub fn yes(&self) -> &'static str {
+    pub fn yes(&self) -> &str {
         if let Some((_, yes)) = &self.plain {
             yes
         } else if self.skill.as_ref().is_some_and(|s| s.mcp.is_some()) {
-            " yes, download it and list its tools"
+            " yes, install it and turn it on"
         } else if self.skill.is_some() {
             " yes, register it"
         } else {
