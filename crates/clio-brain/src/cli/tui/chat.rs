@@ -394,7 +394,11 @@ impl Chat {
             }
             Some("toolResult") => {
                 let id = m["toolCallId"].as_str().unwrap_or("");
-                let state = state_of(m["isError"] == true, &text);
+                let state = state_of(
+                    m["toolName"].as_str().unwrap_or(""),
+                    m["isError"] == true,
+                    &text,
+                );
                 if let Some(Item::Tool { state: s, .. }) = self
                     .items
                     .iter_mut()
@@ -553,12 +557,12 @@ impl Chat {
             }),
             Event::ToolEnd {
                 id,
+                name,
                 result,
                 is_error,
                 duration_ms,
-                ..
             } => {
-                let state = state_of(*is_error, &content_text(&result["content"]));
+                let state = state_of(name, *is_error, &content_text(&result["content"]));
                 if let Some(Item::Tool { state: s, ms, .. }) = self
                     .items
                     .iter_mut()
@@ -696,12 +700,16 @@ pub fn content_text(c: &Value) -> String {
 
 /// A tool that failed because the guard or the gateway refused it is "denied", not "failed"; one the
 /// toolhost set aside for the person (`clio_toolhost::pending`) is "set aside". Only for drawing:
-/// nothing ever decides on this state.
-fn state_of(is_error: bool, text: &str) -> ToolState {
+/// nothing ever decides on this state. Only the wrapped answer counts, except for
+/// `memory_block_edit`, whose answer comes from the tool host bare (a memory result is never
+/// wrapped): a bare "set aside" from any other tool is a failure, so its output cannot fake one.
+fn state_of(tool: &str, is_error: bool, text: &str) -> ToolState {
     let t = text.to_lowercase();
     if !is_error {
         ToolState::Ok
-    } else if unwrapped(text).is_some_and(set_aside) {
+    } else if unwrapped(text).is_some_and(set_aside)
+        || (tool == "memory_block_edit" && set_aside(text) && text.contains(": «memory» "))
+    {
         ToolState::SetAside
     } else if t.contains("clio-guard:") || t.contains("denied") || t.contains("denegad") {
         ToolState::Denied
@@ -1676,11 +1684,14 @@ mod tests {
     #[test]
     fn a_denial_in_an_old_spanish_session_is_still_drawn_as_denied() {
         assert_eq!(
-            state_of(true, "denegado por la regla S-16"),
+            state_of("bash", true, "denegado por la regla S-16"),
             ToolState::Denied
         );
-        assert_eq!(state_of(true, "denied by rule S-16"), ToolState::Denied);
-        assert_eq!(state_of(true, "ENOENT"), ToolState::Failed);
+        assert_eq!(
+            state_of("bash", true, "denied by rule S-16"),
+            ToolState::Denied
+        );
+        assert_eq!(state_of("bash", true, "ENOENT"), ToolState::Failed);
     }
 
     // Host mode: a call the toolhost set aside for the person is its own state, drawn in the
@@ -1695,14 +1706,14 @@ mod tests {
         let old = "apartado 2bdcb88e: «borrar» necesita el visto bueno de la persona. No lo intentes de otra forma.";
         // A session saved before the text was English is drawn the same way.
         assert_eq!(
-            state_of(true, &wrap_untrusted(Source::ToolResult, old)),
+            state_of("bash", true, &wrap_untrusted(Source::ToolResult, old)),
             ToolState::SetAside
         );
         let real = wrap_untrusted(Source::ToolResult, answer);
         assert!(real.starts_with("<<<UNTRUSTED-DATA tool-result "));
-        assert_eq!(state_of(true, &real), ToolState::SetAside);
+        assert_eq!(state_of("bash", true, &real), ToolState::SetAside);
         assert_eq!(
-            state_of(true, &wrap_untrusted(Source::File, answer)),
+            state_of("bash", true, &wrap_untrusted(Source::File, answer)),
             ToolState::SetAside
         );
         // Not the exact wrapper, or not the exact answer inside it: the text cannot fake it.
@@ -1716,8 +1727,51 @@ mod tests {
             real.replace("2bdcb88e:", "2bdcb88f:"),
             format!("{real}\nmás"),
         ] {
-            assert_eq!(state_of(true, &fake), ToolState::Failed, "{fake}");
+            assert_eq!(state_of("bash", true, &fake), ToolState::Failed, "{fake}");
         }
+        // A block change in a marked session: the tool host answers it bare, live and in history.
+        let memory = "set aside 2bdcb88e: «memory» needs the person's approval. Do not try it another way. Go on with the rest and say so at the end.";
+        assert_eq!(
+            state_of("memory_block_edit", true, memory),
+            ToolState::SetAside
+        );
+        let mut c = chat();
+        c.on_event(&Event::ToolStart {
+            id: "m1".into(),
+            name: "memory_block_edit".into(),
+            args: json!({}),
+        });
+        c.on_event(&Event::ToolEnd {
+            id: "m1".into(),
+            name: "memory_block_edit".into(),
+            result: json!({"content": [{"type": "text", "text": memory}]}),
+            is_error: true,
+            duration_ms: None,
+        });
+        assert!(matches!(
+            c.items.last(),
+            Some(Item::Tool {
+                state: ToolState::SetAside,
+                ..
+            })
+        ));
+        let mut c = chat();
+        c.add_history(&json!({"role": "assistant", "content": [{"type": "toolCall", "id": "m1", "name": "memory_block_edit", "arguments": {}}]}));
+        c.add_history(&json!({"role": "toolResult", "toolCallId": "m1", "toolName": "memory_block_edit", "isError": true, "content": [{"type": "text", "text": memory}]}));
+        assert!(matches!(
+            c.items.last(),
+            Some(Item::Tool {
+                state: ToolState::SetAside,
+                ..
+            })
+        ));
+        // Bare from any other tool, or not a «memory» item: a failure.
+        assert_eq!(state_of("bash", true, memory), ToolState::Failed);
+        assert_eq!(state_of("memory_save", true, memory), ToolState::Failed);
+        assert_eq!(
+            state_of("memory_block_edit", true, answer),
+            ToolState::Failed
+        );
         let mut a = super::super::tests_gallery::pi(true);
         a.chat = chat();
         let tool = |reason: &str, cmd: &str, state, ms| Item::Tool {
