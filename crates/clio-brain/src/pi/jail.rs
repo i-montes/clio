@@ -322,12 +322,22 @@ impl PiJail {
         a
     }
 
-    /// Files placed where the jail must not show them: Clio's data folder, the folder that holds
-    /// the vault's sockets (the one above the toolhost's) and the person's home.
+    /// Files placed where the jail must not show them: every folder above Pi's own (Clio's data
+    /// folder; for a review, its run folder too), the folder that holds the vault's sockets (the
+    /// one above the toolhost's) and the person's home. One that cannot be written is skipped,
+    /// and so is one inside the copy Pi is meant to see.
     fn decoys(&self, l: &Launch) -> Vec<PathBuf> {
         let name = format!(".pi-jail-decoy-{}", std::process::id());
         let mut dirs: Vec<PathBuf> = Vec::new();
-        dirs.extend(l.paths.root.parent().map(Path::to_path_buf));
+        let seen = |a: &Path| !host_mode(l) && a.starts_with(&l.cwd);
+        dirs.extend(
+            l.paths
+                .root
+                .ancestors()
+                .skip(1)
+                .filter(|a| a.parent().is_some() && !seen(a))
+                .map(Path::to_path_buf),
+        );
         for (k, v) in &l.extra_env {
             if k == "CLIO_TOOLHOST_SOCKET" {
                 dirs.extend(
@@ -685,6 +695,38 @@ mod tests {
             .output()
             .unwrap_or_else(|e| panic!("sh: {e}"));
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    // A review's Pi lives under the run folder: the self-test plants its decoys in the run
+    // folder and Clio's data folder too, so it still proves Pi sees neither.
+    #[test]
+    fn the_decoys_cover_every_folder_above_pis_own() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let mut l = launch_for("opencode", &data.join("runs/r1/sandbox"), &data);
+        let review = data.join("runs/r1/reviews/1");
+        l.paths = PiPaths {
+            root: review.clone(),
+        };
+        let j = PiJail {
+            bwrap: "/usr/bin/bwrap".into(),
+            proxy: EgressProxy::start(t.path(), "api.anthropic.com:443").unwrap(),
+        };
+        let name = format!(".pi-jail-decoy-{}", std::process::id());
+        let d = j.decoys(&l);
+        for dir in [
+            data.join("runs/r1/reviews"),
+            data.join("runs/r1"),
+            data.join("runs"),
+            data.clone(),
+        ] {
+            assert!(d.contains(&dir.join(&name)), "{}: {d:?}", dir.display());
+        }
+        assert!(!d.contains(&review.join(&name)), "{d:?}");
+        assert!(
+            !d.iter().any(|p| p.parent() == Some(Path::new("/"))),
+            "{d:?}"
+        );
     }
 
     // Host mode: Pi's working folder is the person's home, and in the jail it is an empty,
