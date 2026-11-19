@@ -341,6 +341,7 @@ impl SessionSource for LocalSource {
                     person.as_path(),
                 )),
                 review: false,
+                unattended: self.round,
                 skills: skills.as_deref(),
                 show: None,
                 // MCP servers (S-70): a host-mode chat, with a person to approve and confirm.
@@ -479,6 +480,7 @@ impl SessionSource for LocalSource {
             skill_notes: Mutex::default(),
             skill_handed: Mutex::default(),
             round_news: Mutex::new(round_news),
+            round: self.round,
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -610,6 +612,8 @@ struct ChatSession {
     skill_handed: Mutex<HashSet<String>>,
     /// The rounds' notices shown when this chat opened: they go with the person's next message.
     round_news: Mutex<Vec<String>>,
+    /// A round's session (`LocalSource::round`).
+    round: bool,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -642,12 +646,11 @@ impl HostSide {
             || (self.rounds && crate::cli::round::is_round(&self.dirs, &p.run))
     }
 
-    /// What waits for this session, a round's named as such.
+    /// What waits for this session.
     fn waiting(&self, session: &str) -> Vec<Pending> {
         pending::waiting(&self.dirs)
             .into_iter()
             .filter(|p| self.mine(p, session))
-            .map(|p| crate::cli::round::with_origin(&self.dirs, p))
             .collect()
     }
 
@@ -665,12 +668,15 @@ impl HostSide {
             .into_iter()
             .find(|p| p.id == id && self.mine(p, session))
             .ok_or_else(|| format!("{id} is not of this session"))?;
-        // A session the judge flagged (or the round that set it aside) never acts under a
-        // window: it asks.
+        // A session the judge flagged never acts under a window: it asks.
         if suspect || pending::suspect_run(&self.dirs, &p.run) {
             return Err(format!(
                 "{id}: this session read content that tried to give orders, so it waits for you"
             ));
+        }
+        // Nor does a round, which nobody watched (S-71): only the person's yes in the box.
+        if crate::cli::round::is_round(&self.dirs, &p.run) {
+            return Err(format!("{id}: a round's item always asks you"));
         }
         // The judge off closes the window; what it may not answer, or what waited from before it
         // opened, keeps its box.
@@ -1149,6 +1155,12 @@ impl Session for ChatSession {
         // reviewer that read what is not the person's marks this session the same way, and the
         // judge reads them first; a mark that cannot be made means they are not given.
         let findings = match locked(&self.findings).take() {
+            // A round's own data: judged, or the round does not start (S-71).
+            Some((f, _, ask)) if self.round => Some((
+                jev::judged_strictly(&self.toolhost.socket, &self.pi.session_id, &f)
+                    .map_err(PiError::Io)?,
+                ask,
+            )),
             Some((f, marked, ask)) => Some((
                 jev::findings_for_model(&self.toolhost.socket, &self.pi.session_id, &f, marked)
                     .map_err(PiError::Io)?,
@@ -2076,10 +2088,11 @@ mod tests {
         serde_json::from_value(v).unwrap()
     }
 
-    // What a round set aside waits for the person and is asked in the next chat, named as the
-    // round's; never in another round, and never answered by a window when that round was flagged.
+    // S-71: what a round set aside waits for the person and is asked in the next chat; never in
+    // another round, and never answered by a window, open or not, flagged or not: only the
+    // person's yes in the box.
     #[test]
-    fn a_rounds_items_are_asked_in_the_next_chat_and_a_flagged_rounds_always_ask() {
+    fn a_rounds_items_are_asked_in_the_next_chat_and_no_window_answers_them() {
         let t = tempfile::tempdir().unwrap();
         let h = host_side(t.path());
         let st = pending::state(&h.dirs);
@@ -2096,28 +2109,34 @@ mod tests {
         let asked = h.waiting("s1");
         assert_eq!(asked.len(), 1, "{asked:?}");
         assert_eq!(asked[0].id, "rnd1");
-        assert!(
-            asked[0]
-                .reason
-                .as_deref()
-                .is_some_and(|r| r.starts_with("set aside by the round at ")),
-            "{asked:?}"
-        );
+        // Its origin is shown, never stored in what the window rules read.
+        assert!(asked[0].reason.is_none(), "{asked:?}");
         let in_a_round = HostSide {
             rounds: false,
             ..host_side(t.path())
         };
         assert!(in_a_round.waiting("s1").is_empty());
-        // The round was flagged: its item always asks the person, window or not.
-        let mark = h.dirs.runs.join(&round).join("toolhost");
-        std::fs::create_dir_all(&mark).unwrap();
-        std::fs::write(mark.join("tainted.json"), "{\"suspect\": true}").unwrap();
         let err = h
             .grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0))
             .unwrap_err();
-        assert!(err.contains("waits for you"), "{err}");
-        std::fs::remove_file(mark.join("tainted.json")).unwrap();
-        assert!(h.grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0)).is_ok());
+        assert!(err.contains("always asks you"), "{err}");
+        // Flagged too.
+        let mark = h.dirs.runs.join(&round).join("toolhost");
+        std::fs::create_dir_all(&mark).unwrap();
+        std::fs::write(mark.join("tainted.json"), "{\"suspect\": true}").unwrap();
+        assert!(
+            h.grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0))
+                .is_err()
+        );
+        let (_, acts) = grant::record(&st, &w.id).unwrap();
+        assert!(acts.is_empty(), "{acts:?}");
+        assert!(matches!(
+            pending::waiting(&h.dirs)
+                .iter()
+                .find(|p| p.id == "rnd1")
+                .map(|p| &p.state),
+            Some(clio_toolhost::pending::State::Waiting)
+        ));
     }
 
     /// The person's path of a yes, faked: the item ran with exit `code` and printed words the

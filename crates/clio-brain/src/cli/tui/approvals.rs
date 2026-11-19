@@ -182,13 +182,15 @@ pub fn yes_says(hours: u64, (suspect, judge_off): (bool, bool), base: &str) -> (
 
 /// An item labelled `class` («class» or «class · reason», `pending::label`) is one a window
 /// never answers (`grant::covers`, read back from the label). A request about what Clio created
-/// (`manage`, its box says so) always asks only when it carries a reason.
+/// (`manage`, its box says so) always asks only when it carries a reason; what a round set aside
+/// (named so, `round::with_origin`) always asks (S-71).
 fn always_asks(class: &str, manage: bool) -> bool {
     let inner = class.trim_start_matches('«').trim_end_matches('»');
     let (name, reason) = inner
         .split_once(" · ")
         .map_or((inner, None), |(n, r)| (n, Some(r)));
     match name {
+        _ if reason.is_some_and(|r| r.starts_with(crate::cli::round::ORIGIN)) => true,
         _ if manage => reason.is_some(),
         "send" => reason.is_some_and(|r| r != clio_toolhost::mcp::ASK_TOOL),
         n => ["control", "secret", "memory", "service", "mcp"].contains(&n),
@@ -1105,5 +1107,19 @@ mod tests {
         ] {
             assert!(text.contains(s), "{s}: {text}");
         }
+    }
+
+    // S-71: what a round set aside always asks the person, whatever its class.
+    #[test]
+    fn a_rounds_item_always_asks() {
+        assert!(super::always_asks(
+            "«delete · set aside by the round at 08:00»",
+            false
+        ));
+        assert!(super::always_asks(
+            "«send · set aside by the round at 08:00; x»",
+            false
+        ));
+        assert!(!super::always_asks("«delete»", false));
     }
 }

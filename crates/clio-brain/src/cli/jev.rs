@@ -322,6 +322,20 @@ pub fn findings_for_model(
         .map_or_else(|| findings.to_owned(), |(shown, _)| shown))
 }
 
+/// A round's own data on its way to its model (S-71): the session marked, then judged; anything
+/// but a clean verdict (a flag, a judge that did not answer, a host that did not) means it is not
+/// given, and the round does not start.
+pub fn judged_strictly(socket: &Path, session: &str, data: &str) -> Result<String, String> {
+    if !taint_session(socket, session, false) {
+        return Err("its data could not be marked as outside text".into());
+    }
+    match judged_for_model(socket, session, data, "round") {
+        Some((shown, false)) => Ok(shown),
+        Some((_, true)) => Err("its data was withheld by the judge".into()),
+        None => Err(crate::cli::round::JUDGE_SILENT.into()),
+    }
+}
+
 /// Host mode: how many commands of `session` run in the background (0 when the host says none,
 /// or does not answer).
 pub fn jobs_running(socket: &Path, session: &str) -> usize {

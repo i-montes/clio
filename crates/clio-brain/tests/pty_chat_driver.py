@@ -340,7 +340,6 @@ elif scenario == "approve":
     out["opened"] = open_new_chat(fd)
     out["answered"] = ask(fd, cfg["ask"], cfg["answer"])
     out["box"] = wait_screen(fd, "y then Enter", 30)
-    out["box_screen"] = screen()
     time.sleep(1.5)  # the box hears its first key after a quiet second
     send(fd, b"y")
     out["armed"] = wait_screen(fd, "other key", 10)

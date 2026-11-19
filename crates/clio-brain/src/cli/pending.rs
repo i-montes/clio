@@ -247,7 +247,7 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
     }
     let now = now_ms();
     for p in &list {
-        println!("{}", line(p, now));
+        println!("{}", line(&super::round::with_origin(dirs, p.clone()), now));
     }
     for p in &cut {
         println!("{}", interrupted_line(p));

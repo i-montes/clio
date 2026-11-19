@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use clio_brain::pi::round::{
-    Entry, Given, MAX_ANSWER, MAX_ENTRIES, Report, STILL_MS, State, due, in_quiet, parse,
-    quiet_hours, to_tell,
+    Entry, Given, INFO_KEPT_MS, MAX_ANSWER, MAX_ENTRIES, MAX_TOLD, Report, STILL_MS, State, due,
+    in_quiet, parse, prune, quiet_hours, to_tell,
 };
 
 const H: i64 = 3_600_000;
@@ -16,7 +16,7 @@ const MIDNIGHT: i64 = 1_763_510_400_000;
 
 // S-71: a round is due every `round.every_hours` from the last start, never in the quiet hours
 // (a window that crosses midnight included; one that falls there waits for their end), once after
-// a downtime however long, and never with `0`.
+// a downtime however long, never with `0`, and a clock set back does not stop them.
 #[test]
 fn a_round_is_due_by_the_interval_outside_the_quiet_hours() {
     let q = quiet_hours("23:00-07:00");
@@ -58,6 +58,8 @@ fn a_round_is_due_by_the_interval_outside_the_quiet_hours() {
     assert!(due(8, q, Some(last), back, 0));
     assert!(!due(8, q, Some(back), back + 60_000, 0));
     assert!(!due(8, q, Some(back), back + 8 * H - 60_000, 0));
+    // The clock was set back: a last start ahead of now does not stop rounds.
+    assert!(due(8, q, Some(at(12, 0) + 30 * H), at(12, 0), 0));
     // `0`: never.
     assert!(!due(0, None, None, at(12, 0), 0));
     assert!(!due(0, None, Some(0), at(12, 0) + 100 * H, 0));
@@ -172,7 +174,8 @@ fn entry(key: &str, state: State, notice: &str) -> Entry {
 
 // S-71: a thing is not told twice: the same problem gives one notice, a change of state gives
 // one, a `resolved` is told once and the key forgotten, an `info` once per text, and a problem
-// still there after 24 h is told again as "still".
+// still there after 24 h (or told "in the future", before the clock was set back) is told again
+// as "still".
 #[test]
 fn the_same_thing_is_not_told_twice() {
     let mut told: BTreeMap<String, Given> = BTreeMap::new();
@@ -231,4 +234,35 @@ fn the_same_thing_is_not_told_twice() {
         to_tell(&mut told, std::slice::from_ref(&other), t0 + 6 * STILL_MS).len(),
         1
     );
+    // The clock set back: a problem told "later than now" is told again as still.
+    let mut told: BTreeMap<String, Given> = BTreeMap::new();
+    to_tell(&mut told, std::slice::from_ref(&disk), t0 + 10 * H);
+    assert_eq!(
+        to_tell(&mut told, std::slice::from_ref(&disk), t0),
+        [(
+            "disk-root".to_owned(),
+            "still: The disk is at 86 %.".to_owned()
+        )]
+    );
+}
+
+// S-71: what was told is bounded: an `info` is forgotten after 7 days, and only the newest
+// `MAX_TOLD` things are kept, whatever a round answers.
+#[test]
+fn what_was_told_is_bounded() {
+    let t0 = 1_800_000_000_000;
+    let mut told: BTreeMap<String, Given> = BTreeMap::new();
+    to_tell(&mut told, &[entry("note", State::Info, "x")], t0);
+    to_tell(&mut told, &[entry("disk", State::Problem, "y")], t0);
+    prune(&mut told, t0 + INFO_KEPT_MS + 1);
+    assert_eq!(told.keys().collect::<Vec<_>>(), ["disk"]);
+    for i in 0..(MAX_TOLD as i64 + 30) {
+        to_tell(
+            &mut told,
+            &[entry(&format!("k{i}"), State::Problem, "z")],
+            t0 + i,
+        );
+    }
+    assert_eq!(told.len(), MAX_TOLD);
+    assert!(told.contains_key(&format!("k{}", MAX_TOLD + 29)) && !told.contains_key("disk"));
 }

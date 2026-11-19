@@ -759,6 +759,7 @@ impl Runner<'_> {
                 masks,
                 shows,
                 read_only: false,
+                sockets: false,
             },
             writable,
             cpu_percent: s.cpu_percent,
@@ -806,9 +807,16 @@ fn due_now(root: &Path, name: &str, now: i64) -> Res<bool> {
 /// scope of its own and does not wait for it: `Ok` once it is in its scope (out of the timer's
 /// unit, which may then end without stopping it) or already ended well. `Err`: no scope (it ran
 /// nothing).
-pub(crate) fn start_detached(systemd_run: &Path, exe: &Path, args: &[&str]) -> Res<()> {
+pub(crate) fn start_detached(
+    systemd_run: &Path,
+    props: &[String],
+    exe: &Path,
+    args: &[&str],
+) -> Res<()> {
     let mut child = std::process::Command::new(systemd_run)
-        .args(["--user", "--scope", "--quiet", "--collect", "--"])
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .args(props.iter().flat_map(|p| ["-p", p.as_str()]))
+        .arg("--")
         .arg(exe)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -855,7 +863,7 @@ pub fn run_due(runner: &Runner<'_>, now: i64) -> Vec<String> {
             }
         }
         if let Some(sr) = runner.jail.scope() {
-            match start_detached(sr, &runner.exe, &["services", "run-timer", &r.name]) {
+            match start_detached(sr, &[], &runner.exe, &["services", "run-timer", &r.name]) {
                 Ok(()) => {
                     out.push(format!("{}: started in a scope of its own", r.name));
                     continue;
@@ -1407,6 +1415,7 @@ pub(crate) mod tests {
             masks: vec![],
             shows: vec![],
             read_only: false,
+            sockets: false,
         };
         match h.run(&j) {
             Ok(o) if o.success() => Some(h),

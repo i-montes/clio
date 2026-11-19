@@ -4,18 +4,21 @@
 //! - **When**: `clio services run-due` (the services timer, every minute) asks `run_due`: every
 //!   `round.every_hours`, never in `round.quiet`, one at a time (`<data>/round/round.lock`), one
 //!   catch-up after downtime (due is measured from the last start). It starts `clio round
-//!   run-timer` in a transient user scope of its own, as a service is started, and does not wait.
+//!   run-timer` in a transient user scope of its own (stopped from outside past its time), as a
+//!   service is started, and does not wait; where no scope can be made, no round runs.
 //! - **What**: one unattended session of the agent in host mode (`LocalSource::round`): its own run
 //!   folder and Pi session (never in the sessions drawer), the prompt `clio-round@1`, the host
-//!   tools, nobody to ask. Its only message is built here: Clio's request (`ROUND_ASK`) and, as
-//!   data the judge reads first, what to look at (`request`).
+//!   tools in a tool host that only reads (`--unattended`: commands read-only, no `sudo`, what
+//!   changes something refused, what reaches out set aside, no permission window), nobody to ask.
+//!   Its only message is built here: Clio's request (`ROUND_ASK`) and, as data the judge must
+//!   clear first, what to look at (`request`).
 //! - **Its answer** is read strictly (`pi::round::parse`); what is told is filtered so a thing is
 //!   not told twice (`pi::round::to_tell`). The notices are kept in `<data>/round/notices.json`
 //!   and shown once when a chat opens, then given to that chat's model with the person's next
 //!   message, as outside text.
 //! - **Limits**: no round without the judge on, the vault open and the model's key (one notice
-//!   says why, once); a judge flag ends it at once; its own caps (`round.*`) and the day's budget.
-//!   It never answers a box or opens a window: nothing here can (`a_round_answers_nothing`).
+//!   says why, once); a judge flag or a judge that does not answer ends it at once; its own caps
+//!   (`round.*`) and the day's budget. It never answers a box, and no window covers it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,8 +46,14 @@ pub use clio_brain::pi::round::quiet_hours;
 pub const INSTRUCTION: &str = "Clio's round";
 /// Rounds kept in the record.
 const KEPT: usize = 50;
-/// Approvals that expire within this long are given to the round.
-const EXPIRING_MS: i64 = 8 * 3_600_000;
+/// How the box and `clio pending` name what a round set aside.
+pub const ORIGIN: &str = "set aside by the round at";
+/// Why a round ended when its judge did not answer.
+pub const JUDGE_SILENT: &str = "the judge did not answer";
+/// Clio's own notices (a failure, a cut) are cut at this many characters.
+const OWN_MAX: usize = 300;
+/// Why no round runs where no scope of its own can be made.
+const NO_SCOPE: &str = "systemd-run is not here, so a round cannot run in a scope of its own, stopped from outside past its time";
 
 pub fn root(d: &Dirs) -> PathBuf {
     d.data.join("round")
@@ -175,8 +184,12 @@ pub fn run_due(d: &Dirs, now: i64) -> Vec<String> {
         Ok(e) => e,
         Err(e) => return vec![format!("round: {e}")],
     };
-    run_due_with(d, now, &|cfg| ready(d, cfg), &|| {
-        start(clio_node::host::systemd_run().as_deref(), &exe)
+    run_due_with(d, now, &|cfg| ready(d, cfg), &|cfg| {
+        start(
+            clio_node::host::systemd_run().as_deref(),
+            cfg.round.max_seconds,
+            &exe,
+        )
     })
 }
 
@@ -184,7 +197,7 @@ fn run_due_with(
     d: &Dirs,
     now: i64,
     ready: &dyn Fn(&Config) -> Res<()>,
-    start: &dyn Fn() -> Res<()>,
+    start: &dyn Fn(&Config) -> Res<()>,
 ) -> Vec<String> {
     let Ok(cfg) = Config::load(d) else {
         return vec![];
@@ -202,29 +215,22 @@ fn run_due_with(
         blocked(&root, &why, now);
         return vec![format!("round: not run: {why}")];
     }
-    vec![match start() {
-        Ok(()) => "round: started in a process of its own".into(),
-        Err(e) => format!("round: {e}"),
-    }]
+    match start(&cfg) {
+        Ok(()) => vec!["round: started in a process of its own".into()],
+        Err(why) => {
+            blocked(&root, &why, now);
+            vec![format!("round: not run: {why}")]
+        }
+    }
 }
 
-/// Starts `clio round run-timer` and does not wait: in a transient user scope of its own when
-/// `systemd-run` is there (out of the timer's unit, which may then end without stopping it), else
-/// as a process of its own.
-fn start(systemd_run: Option<&Path>, exe: &Path) -> Res<()> {
-    use std::os::unix::process::CommandExt;
-    if let Some(sr) = systemd_run {
-        return services::start_detached(sr, exe, &["round", "run-timer"]);
-    }
-    std::process::Command::new(exe)
-        .args(["round", "run-timer"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map(drop)
-        .map_err(|e| format!("{}: {e}", exe.display()))
+/// Starts `clio round run-timer` in a transient user scope of its own (out of the timer's unit,
+/// which may then end without stopping it), stopped from outside 5 minutes past
+/// `round.max_seconds`, and does not wait. No `systemd-run`: no round.
+fn start(systemd_run: Option<&Path>, max_seconds: u64, exe: &Path) -> Res<()> {
+    let sr = systemd_run.ok_or(NO_SCOPE)?;
+    let stop = format!("RuntimeMaxSec={}", max_seconds.saturating_add(300));
+    services::start_detached(sr, &[stop], exe, &["round", "run-timer"])
 }
 
 // ---- what it is given ------------------------------------------------------------------------
@@ -280,20 +286,16 @@ fn attention(d: &Dirs, since: i64) -> Vec<String> {
     out
 }
 
-/// What waits for the person and expires within `EXPIRING_MS`.
-fn expiring(d: &Dirs, now: i64) -> Vec<String> {
-    super::pending::waiting(d)
-        .iter()
-        .filter(|p| p.expires_ms - now <= EXPIRING_MS)
-        .map(|p| super::pending::line(p, now))
-        .collect()
-}
-
 /// The data of the round's message: only what Clio's own records hold, never a conversation.
+/// `st` is the state before this round started: "since your last round" is since its start.
 fn request(d: &Dirs, st: &St, now: i64) -> String {
-    let since = st.last_start_ms.unwrap_or(now - 24 * 3_600_000);
-    let told: Vec<String> = st
-        .told
+    let since = st
+        .last_start_ms
+        .filter(|l| *l <= now)
+        .unwrap_or(now - 24 * 3_600_000);
+    let mut told = st.told.clone();
+    r::prune(&mut told, now);
+    let told: Vec<String> = told
         .iter()
         .map(|(k, g)| {
             format!(
@@ -326,10 +328,6 @@ fn request(d: &Dirs, st: &St, now: i64) -> String {
         section(
             "Services and MCP servers that raised a notice or are paused since your last round:",
             attention(d, since),
-        ),
-        section(
-            "What waits for the person's approval and expires within 8 hours:",
-            expiring(d, now),
         ),
         section(
             "What earlier rounds told the person, still open (key: state — notice; reuse these keys):",
@@ -418,7 +416,8 @@ pub fn is_round(d: &Dirs, run: &str) -> bool {
             .is_ok_and(|m| m.host && m.instruction == INSTRUCTION)
 }
 
-/// `p`, named as set aside by a round when it was (the box and `/pending` say so).
+/// `p` as the person sees it, named as set aside by a round when it was (the box and `clio
+/// pending` say so). Display only: never stored, never given to what decides (a window).
 pub fn with_origin(d: &Dirs, mut p: Pending) -> Pending {
     let Ok(m) = super::runs::read_json::<super::runs::Meta>(&d.runs.join(&p.run).join("meta.json"))
     else {
@@ -427,7 +426,7 @@ pub fn with_origin(d: &Dirs, mut p: Pending) -> Pending {
     if !is_round(d, &p.run) {
         return p;
     }
-    let origin = format!("set aside by the round at {}", hhmm(m.created_ms));
+    let origin = format!("{ORIGIN} {}", hhmm(m.created_ms));
     p.reason = Some(match p.reason.take() {
         Some(r) => format!("{origin}; {r}"),
         None => origin,
@@ -437,13 +436,14 @@ pub fn with_origin(d: &Dirs, mut p: Pending) -> Pending {
 
 /// What came of a session's run: the outcome and the notices for the person (Clio's own words,
 /// or the round's entries that are told), the raw answer when it could not report.
+/// `unjudged`: its judge did not answer.
 fn settle(
     st: &mut St,
     ran: Result<clio_brain::pi::rpc::RunSummary, String>,
-    flagged: bool,
+    (flagged, unjudged): (bool, bool),
     now: i64,
 ) -> (String, Vec<(String, String)>, Option<String>) {
-    let own = |t: String| vec![(String::new(), t)];
+    let own = |t: String| vec![(String::new(), r::cap(&t, OWN_MAX))];
     if flagged {
         return (
             "ended: the judge flagged an injection in what it read".into(),
@@ -451,8 +451,20 @@ fn settle(
             None,
         );
     }
+    if unjudged || matches!(&ran, Err(e) if e.ends_with(JUDGE_SILENT)) {
+        return (
+            format!("ended: {JUDGE_SILENT}"),
+            own(format!(
+                "it was ended: {JUDGE_SILENT}, and a round reads only judged text"
+            )),
+            None,
+        );
+    }
     let s = match ran {
-        Err(e) => return (format!("failed: {e}"), own(format!("it failed: {e}")), None),
+        Err(e) => {
+            let e = r::cap(&e, OWN_MAX);
+            return (format!("failed: {e}"), own(format!("it failed: {e}")), None);
+        }
         Ok(s) => s,
     };
     if let Some(stop) = s.stopped {
@@ -467,7 +479,7 @@ fn settle(
         return ("stopped".into(), own("it was stopped".into()), None);
     }
     if s.text.trim().is_empty() && !s.errors.is_empty() {
-        let e = s.errors.join("; ");
+        let e = r::cap(&s.errors.join("; "), OWN_MAX);
         return (
             format!("failed: its model failed: {e}"),
             own(format!("it failed: its model failed: {e}")),
@@ -494,24 +506,47 @@ fn settle(
     }
 }
 
-/// A judge flag ends the round at once: after each tool and message, the mark its tool host
-/// leaves in its run folder is looked at, and a `suspect` one cancels the run.
+/// The marks a round's tool host left in its run folder: flagged (`suspect`), and its judge did
+/// not answer (`unjudged`).
+fn marks(d: &Dirs, run: &str) -> (bool, bool) {
+    let t =
+        std::fs::read_to_string(d.runs.join(run).join("toolhost/tainted.json")).unwrap_or_default();
+    (
+        super::pending::suspect_run(d, run),
+        t.contains(&format!("\"{}\"", clio_toolhost::UNJUDGED)),
+    )
+}
+
+/// A judge flag, or a judge that did not answer, ends the round at once: after each tool and
+/// message, the marks its tool host leaves in its run folder are looked at, and either cancels
+/// the run (`ended`).
 fn ender<'a>(
     d: &'a Dirs,
     run: &'a str,
-    flagged: &'a AtomicBool,
+    ended: &'a AtomicBool,
     cancel: &'a Cancel,
 ) -> impl FnMut(&Event) + 'a {
     move |e| {
         if matches!(
             e,
             Event::ToolEnd { .. } | Event::TurnEnd | Event::MessageEnd(_)
-        ) && super::pending::suspect_run(d, run)
+        ) && marks(d, run) != (false, false)
         {
-            flagged.store(true, Ordering::SeqCst);
+            ended.store(true, Ordering::SeqCst);
             cancel.cancel();
         }
     }
+}
+
+/// A round starts at `now`: what it is given (since the last round's start, read before this
+/// one's is written), and its start recorded.
+fn begin(root: &Path, d: &Dirs, now: i64) -> Res<String> {
+    let data = request(d, &read_state(root), now);
+    with_state(root, |st| {
+        st.last_start_ms = Some(now);
+        st.blocked = None;
+    })?;
+    Ok(data)
 }
 
 /// Runs one round now. `by`: `timer` (only if still due once its lock is taken, and quiet when it
@@ -537,13 +572,9 @@ pub fn run(d: &Dirs, by: &str, now: i64) -> Res<Option<Rec>> {
         }
         return Err(format!("no round: {why}"));
     }
-    with_state(&root, |st| {
-        st.last_start_ms = Some(now);
-        st.blocked = None;
-    })?;
+    let data = begin(&root, d, now)?;
     let began = std::time::Instant::now();
-    let data = request(d, &read_state(&root), now);
-    let flagged = Arc::new(AtomicBool::new(false));
+    let ended = Arc::new(AtomicBool::new(false));
     let mut run_id = None;
     let mut aside = 0;
     let src = super::chat::local::LocalSource::new(Arc::new(d.clone())).round();
@@ -556,7 +587,7 @@ pub fn run(d: &Dirs, by: &str, now: i64) -> Res<Option<Rec>> {
             let s = &o.session;
             s.queue_findings(&data, Some(false), ROUND_ASK);
             let cancel = Cancel::new();
-            let mut watch = ender(d, &o.id, &flagged, &cancel);
+            let mut watch = ender(d, &o.id, &ended, &cancel);
             let r = s
                 .run_prompt("", &cancel, &mut watch)
                 .map_err(|e| e.to_string());
@@ -565,11 +596,8 @@ pub fn run(d: &Dirs, by: &str, now: i64) -> Res<Option<Rec>> {
             r
         })
         .unwrap_or_else(|e| Err(format!("it did not start: {e}")));
-    let flagged = flagged.load(Ordering::SeqCst)
-        || run_id
-            .as_deref()
-            .is_some_and(|id| super::pending::suspect_run(d, id));
-    let (outcome, mut told, raw) = with_state(&root, |st| settle(st, ran, flagged, now))?;
+    let marked = run_id.as_deref().map_or((false, false), |id| marks(d, id));
+    let (outcome, mut told, raw) = with_state(&root, |st| settle(st, ran, marked, now))?;
     if aside > 0 {
         told.push((
             String::new(),
