@@ -434,6 +434,10 @@ impl MemoryPort for LinkPort {
         Ok(item(&link, &row, 0))
     }
 
+    fn judge_on(&self) -> bool {
+        self.judge.is_some()
+    }
+
     fn judge_text(&self, text: &str, source: &str) -> TextVerdict {
         match self.judge.as_ref().map(|j| j.injection(text, source)) {
             None => TextVerdict::NoJudge,

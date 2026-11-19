@@ -39,6 +39,9 @@ impl MemoryPort for Judge {
     fn get(&self, _: i64) -> Result<MemoryItem, String> {
         Err("no".into())
     }
+    fn judge_on(&self) -> bool {
+        true
+    }
     fn judge_text(&self, text: &str, _: &str) -> TextVerdict {
         self.asked.lock().unwrap().push(text.to_owned());
         if text.contains(FLAG) {
@@ -742,6 +745,59 @@ fn an_ask_tool_waits_and_runs_only_as_it_was_shown() {
         }
         s => panic!("{s:?}"),
     }
+}
+
+// S-36, S-70: under the person's permission window an `ask` tool's call runs at once, as the
+// call's own result (outside text, judged), recorded in the window's record with a fixed outcome;
+// a tool that changed since the person confirmed it still waits, and so does a proposal.
+#[test]
+fn under_a_window_an_ask_call_runs_inline_and_a_changed_tool_still_waits() {
+    let Some(e) = env() else { return };
+    install(&e, "time", true, true, 60);
+    let state = e.data.join("host");
+    let w = clio_toolhost::grant::open(&state, 4, &["x1".into()])
+        .unwrap()
+        .unwrap();
+    let r = call(
+        &e,
+        "s",
+        "c1",
+        "mcp_call",
+        json!({"server": "time", "tool": "write_note", "arguments": {"text": "buy milk"}}),
+    );
+    assert!(r.ok && r.content.contains("wrote buy milk"), "{r:?}");
+    assert!(r.external, "outside text");
+    let (_, acts) = clio_toolhost::grant::record(&state, &w.id).unwrap();
+    assert_eq!(acts.len(), 1);
+    assert_eq!(acts[0].outcome.as_deref(), Some("done"));
+    assert!(waiting(&e).is_empty());
+    // Changed since the person confirmed it: it waits for them, window or not.
+    install(&e, "changed", true, true, 60);
+    let r = call(
+        &e,
+        "s",
+        "c2",
+        "mcp_call",
+        json!({"server": "changed", "tool": "echo", "arguments": {"text": "x"}}),
+    );
+    assert!(!r.ok, "{r:?}");
+    let r = call(
+        &e,
+        "s",
+        "c3",
+        "mcp_call",
+        json!({"server": "changed", "tool": "echo", "arguments": {"text": "x"}}),
+    );
+    assert!(!r.ok && r.decision.outcome == "ask", "{r:?}");
+    // A proposal is someone else's code: it always waits for the person.
+    let r = call(&e, "s", "p", "mcp_propose", propose_args());
+    assert!(r.ok, "{r:?}");
+    let classes: Vec<Class> = waiting(&e).iter().map(|p| p.class).collect();
+    assert_eq!(classes, [Class::Send, Class::Mcp]);
+    assert_eq!(
+        clio_toolhost::grant::record(&state, &w.id).unwrap().1.len(),
+        1
+    );
 }
 
 // S-70: in a `suspect` session every call is set aside, free tools too, and no server is proposed.

@@ -6,10 +6,17 @@
 //! jail reaches can write it: it is under Clio's data, refused to the file tools and hidden from
 //! commands.
 //!
+//! A window answers only acts whose effect ends with the act (`covers`): commands of class
+//! `delete`, `spend` and `send`, an `ask` MCP tool call, a skill that would wait. It never answers
+//! `control` (Clio's own commands and folders, the service manager, D-Bus, units, sudoers, keys,
+//! schedulers: from there a fooled model could rewrite this file or schedule a yes), a secret, a
+//! change to the person's blocks, a service or an MCP server: those always ask the person. No
+//! window opens, and an open one closes, while the judge is off.
+//!
 //! What a window approves is recorded before it runs (`begin`) and its outcome after (`done`), in
 //! `<state>/grants/<id>.jsonl`, whose first line is the window itself. A missing or damaged file
-//! is no window; a clock set back does not make one last longer (the time since boot is checked
-//! too, when it can be read).
+//! is no window; a window never outlives the boot it opened in, and never lasts longer than its
+//! length by the wall clock or by the time since boot.
 
 use std::fs;
 use std::io::Write;
@@ -19,6 +26,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::ask::Class;
 use crate::host::{now_ms, private_dir};
 use crate::pending::Pending;
 
@@ -26,6 +34,10 @@ use crate::pending::Pending;
 pub const FLAGGED: &str = "the judge flagged an injection in a conversation";
 /// Why a window closed when the person closed it.
 pub const BY_PERSON: &str = "closed by you";
+/// Why a window closed when an act found the judge off.
+pub const JUDGE_OFF: &str = "the judge is off";
+/// The outcome recorded for an act that could not run (never its error's words: outside text).
+pub const NOT_RUN: &str = "failed: it could not run";
 
 /// How long a summary is still owed for a window that ended: older ones are only listed.
 const OWED_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -38,6 +50,9 @@ pub struct Window {
     /// The time since boot when it opened (`mono_ms`): a wall clock set back cannot stretch it.
     #[serde(default)]
     pub mono_ms: Option<i64>,
+    /// The boot it opened in (`boot_id`): another boot ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<String>,
     /// The approvals whose yes opened it.
     pub by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,15 +62,25 @@ pub struct Window {
 }
 
 impl Window {
-    /// Open at wall time `now` with the time since boot `mono`: after it opened, before its end,
-    /// not closed, and, on the same boot, not longer than its length since it opened (a time
-    /// since boot smaller than at the opening is another boot: the wall clock alone decides).
-    pub fn open_at(&self, now: i64, mono: Option<i64>) -> bool {
+    /// Open at wall time `now`, time since boot `mono`, on boot `boot`: after it opened, before
+    /// its end, not closed, on the boot it opened in (another boot id, or less time since boot
+    /// than at the opening, ends it), and not longer than its length since boot either.
+    pub fn open_at(&self, now: i64, mono: Option<i64>, boot: Option<&str>) -> bool {
         if self.closed_ms.is_some() || now < self.opened_ms || now >= self.ends_ms {
             return false;
         }
+        if let (Some(a), Some(b)) = (self.boot.as_deref(), boot)
+            && a != b
+        {
+            return false;
+        }
         let len = self.ends_ms - self.opened_ms;
-        !matches!((self.mono_ms, mono), (Some(a), Some(b)) if b >= a && b - a >= len)
+        !matches!((self.mono_ms, mono), (Some(a), Some(b)) if b < a || b - a >= len)
+    }
+
+    /// Open now, by every clock this machine has.
+    pub fn open_now(&self) -> bool {
+        self.open_at(now_ms(), mono_ms(), boot_id().as_deref())
     }
 
     /// When it ended, or ends.
@@ -73,6 +98,43 @@ pub fn mono_ms() -> Option<i64> {
     let id = rustix::time::ClockId::Monotonic;
     let t = rustix::time::clock_gettime(id);
     Some(t.tv_sec.checked_mul(1000)? + (t.tv_nsec / 1_000_000))
+}
+
+/// This boot's id (Linux); `None` where the system does not say.
+pub fn boot_id() -> Option<String> {
+    let id = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(id.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// May a window answer `p` by itself: only an act whose effect ends with the act (a command of
+/// class delete, spend or send, an `ask` MCP tool call, a skill that would wait). Never control,
+/// a secret, a change to the person's blocks, a service, an MCP server, a tool that changed since
+/// the person confirmed it, or a suspect session's reach out: those always ask the person.
+pub fn covers(p: &Pending) -> bool {
+    match p.class {
+        Class::Delete | Class::Spend | Class::Skill => true,
+        Class::Send => p
+            .reason
+            .as_deref()
+            .is_none_or(|r| r == crate::mcp::ASK_TOOL),
+        Class::Control | Class::Secret | Class::Memory | Class::Service | Class::Mcp => false,
+    }
+}
+
+/// `covers`, of an item set aside while window `w` was open: what waited from before it keeps
+/// its box (the person never saw it). The one test both the tool host and the chat apply.
+pub fn may_answer(w: &Window, p: &Pending) -> bool {
+    covers(p) && p.created_ms >= w.opened_ms
+}
+
+/// What came of an act, in fixed words: never its output, which may be outside text.
+pub fn outcome(ok: bool, exit: Option<i64>) -> String {
+    match exit {
+        Some(0) => "done (exit 0)".into(),
+        Some(c) => format!("failed (exit {c})"),
+        None if ok => "done".into(),
+        None => "failed: the tool reported an error".into(),
+    }
 }
 
 pub fn file(state: &Path) -> PathBuf {
@@ -94,7 +156,7 @@ pub fn read(state: &Path) -> Option<Window> {
 
 /// The window open now, if any.
 pub fn current(state: &Path) -> Option<Window> {
-    read(state).filter(|w| w.open_at(now_ms(), mono_ms()))
+    read(state).filter(Window::open_now)
 }
 
 fn write(state: &Path, w: &Window) -> Result<(), String> {
@@ -142,6 +204,7 @@ pub fn open(state: &Path, hours: u64, by: &[String]) -> Result<Option<Window>, S
         opened_ms: now,
         ends_ms: now.saturating_add(len),
         mono_ms: mono_ms(),
+        boot: boot_id(),
         by: by.to_vec(),
         closed_ms: None,
         why: None,
@@ -178,12 +241,13 @@ pub fn begin(state: &Path, p: &Pending, what: &str) -> Option<Window> {
         "class": p.class.to_string(),
         "what": what,
         "session": p.session,
+        "run": p.run,
     });
     append(state, &w.id, &line).ok()?;
     Some(w)
 }
 
-/// What came of an act `begin` recorded.
+/// What came of an act `begin` recorded: `outcome`'s words or `NOT_RUN`.
 pub fn done(state: &Path, w: &Window, id: &str, outcome: &str) {
     let line = json!({ "at": now_ms(), "pending": id, "outcome": first_line(outcome, 300) });
     if let Err(e) = append(state, &w.id, &line) {
@@ -209,6 +273,8 @@ pub struct Act {
     pub class: String,
     pub what: String,
     pub session: String,
+    /// The conversation's run folder.
+    pub run: String,
     pub outcome: Option<String>,
 }
 
@@ -240,6 +306,7 @@ pub fn record(state: &Path, id: &str) -> Option<(Window, Vec<Act>)> {
                 class: s(&v, "class"),
                 what: s(&v, "what"),
                 session: s(&v, "session"),
+                run: s(&v, "run"),
                 outcome: None,
             });
         }
@@ -266,11 +333,10 @@ pub fn windows(state: &Path) -> Vec<(Window, Vec<Act>)> {
 /// given yet: the oldest first. Read only: `claim_summary` takes it.
 pub fn summary_due(state: &Path) -> Option<(Window, Vec<Act>)> {
     let now = now_ms();
-    let mono = mono_ms();
     windows(state).into_iter().rev().find(|(w, acts)| {
         // The record's own copy may lag the file (a close): the file says whether it is open.
-        let closed_since = read(state).is_some_and(|c| c.id == w.id && !c.open_at(now, mono));
-        (closed_since || !w.open_at(now, mono))
+        let closed_since = read(state).is_some_and(|c| c.id == w.id && !c.open_now());
+        (closed_since || !w.open_now())
             && !acts.is_empty()
             && now.saturating_sub(w.end()) < OWED_MS
             && !dir(state).join(format!("{}.told", w.id)).exists()
@@ -278,7 +344,7 @@ pub fn summary_due(state: &Path) -> Option<(Window, Vec<Act>)> {
 }
 
 /// The summary of window `id` is given now, once: the first to claim it (any conversation, any
-/// process) gives it.
+/// process) gives it, just before it sends it; `release_summary` when the send failed.
 pub fn claim_summary(state: &Path, id: &str) -> bool {
     private_dir(&dir(state)).is_ok()
         && fs::OpenOptions::new()
@@ -287,6 +353,11 @@ pub fn claim_summary(state: &Path, id: &str) -> bool {
             .mode(0o600)
             .open(dir(state).join(format!("{id}.told")))
             .is_ok()
+}
+
+/// The summary of window `id` could not be given after all: it is owed again.
+pub fn release_summary(state: &Path, id: &str) {
+    let _ = fs::remove_file(dir(state).join(format!("{id}.told")));
 }
 
 /// `3 h 12 min`, `25 min`, `less than a minute`.
@@ -330,6 +401,7 @@ mod tests {
             opened_ms: opened,
             ends_ms: ends,
             mono_ms: mono,
+            boot: Some("b1".into()),
             by: vec!["a1".into()],
             closed_ms: None,
             why: None,
@@ -339,25 +411,70 @@ mod tests {
     const H: i64 = 3_600_000;
 
     // A clock set back never stretches a window: the time since boot ends it when its length has
-    // passed, whatever the wall clock says; one set back before the opening closes it.
+    // passed, whatever the wall clock says; one set back before the opening closes it. A window
+    // never outlives the boot it opened in, even with the clock set back and a reboot.
     #[test]
     fn a_clock_set_back_does_not_extend_a_window() {
+        let b = Some("b1");
         let x = w(10 * H, 14 * H, Some(1_000));
-        assert!(x.open_at(12 * H, Some(1_000 + 2 * H)));
+        assert!(x.open_at(12 * H, Some(1_000 + 2 * H), b));
         // Five real hours later the wall clock says 13:00: closed all the same.
-        assert!(!x.open_at(13 * H, Some(1_000 + 5 * H)));
+        assert!(!x.open_at(13 * H, Some(1_000 + 5 * H), b));
         // Before it opened: closed.
-        assert!(!x.open_at(9 * H, Some(1_000 + H)));
+        assert!(!x.open_at(9 * H, Some(1_000 + H), b));
         // At its end, and after: closed.
-        assert!(!x.open_at(14 * H, Some(1_000 + 4 * H)));
-        // Another boot (less time since boot than at the opening): the wall clock decides.
-        assert!(x.open_at(11 * H, Some(5)));
-        assert!(!x.open_at(15 * H, Some(5)));
+        assert!(!x.open_at(14 * H, Some(1_000 + 4 * H), b));
+        // Another boot: closed, whatever the wall clock says, by the boot id or, where there is
+        // none, by less time since boot than at the opening.
+        assert!(!x.open_at(11 * H, Some(5), b));
+        assert!(!x.open_at(11 * H, Some(1_000 + H), Some("b2")));
+        let mut y = x.clone();
+        y.boot = None;
+        assert!(!y.open_at(11 * H, Some(5), None));
+        assert!(y.open_at(11 * H, Some(1_000 + H), None));
         // No time since boot known: the wall clock alone.
-        assert!(w(0, H, None).open_at(H / 2, Some(7)));
+        assert!(w(0, H, None).open_at(H / 2, Some(7), b));
         let mut c = w(0, H, None);
         c.closed_ms = Some(1);
-        assert!(!c.open_at(H / 2, None));
+        assert!(!c.open_at(H / 2, None, b));
+    }
+
+    // Only what ends with the act: delete, spend, send (an `ask` MCP call too), a skill; never
+    // control, a secret, a block change, a service, an MCP server, a changed tool or a suspect
+    // session's reach out; and, inside a window, only what was set aside after it opened.
+    #[test]
+    fn a_window_answers_only_what_ends_with_the_act() {
+        let mut p = crate::pending::tests_item("s");
+        for (class, yes) in [
+            (Class::Delete, true),
+            (Class::Spend, true),
+            (Class::Send, true),
+            (Class::Skill, true),
+            (Class::Control, false),
+            (Class::Secret, false),
+            (Class::Memory, false),
+            (Class::Service, false),
+            (Class::Mcp, false),
+        ] {
+            p.class = class;
+            assert_eq!(covers(&p), yes, "{class}");
+        }
+        p.class = Class::Send;
+        p.reason = Some(crate::mcp::ASK_TOOL.into());
+        assert!(covers(&p));
+        p.reason = Some("the tool changed since the person confirmed it".into());
+        assert!(!covers(&p));
+        p.reason = Some(crate::SUSPECT_REASON.into());
+        assert!(!covers(&p));
+        p.reason = None;
+        let x = w(p.created_ms, p.created_ms + H, None);
+        assert!(may_answer(&x, &p));
+        let x = w(p.created_ms + 1, p.created_ms + H, None);
+        assert!(!may_answer(&x, &p), "set aside before the window opened");
+        assert_eq!(outcome(true, Some(0)), "done (exit 0)");
+        assert_eq!(outcome(true, Some(2)), "failed (exit 2)");
+        assert_eq!(outcome(true, None), "done");
+        assert_eq!(outcome(false, None), "failed: the tool reported an error");
     }
 
     // A missing or damaged file is no window; `hours` 0 opens none; an open window is not
@@ -387,6 +504,7 @@ mod tests {
         p.id = "c3".into();
         let w = begin(st, &p, "rm -r /srv/old").unwrap();
         done(st, &w, "c3", "done (exit 0)\nmore lines");
+        assert_eq!(record(st, &opened.id).unwrap().1[0].run, "r");
         assert!(summary_due(st).is_none(), "still open");
         let closed = close(st, "closed by you").unwrap().unwrap();
         assert_eq!(closed.why.as_deref(), Some("closed by you"));
@@ -405,6 +523,10 @@ mod tests {
         assert!(claim_summary(st, &due.id));
         assert!(!claim_summary(st, &due.id), "once");
         assert!(summary_due(st).is_none());
+        // The send failed: it is owed again.
+        release_summary(st, &due.id);
+        assert_eq!(summary_due(st).unwrap().0.id, opened.id);
+        assert!(claim_summary(st, &due.id));
         assert_eq!(left_text(3 * H + 12 * 60_000), "3 h 12 min");
         assert_eq!(left_text(25 * 60_000), "25 min");
     }

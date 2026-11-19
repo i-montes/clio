@@ -263,6 +263,12 @@ pub fn taint_session(socket: &Path, session: &str, suspect: bool) -> bool {
     taint_with(socket, session, &args)
 }
 
+/// A reviewer of `session` ended `suspect`: the session is marked so now, and the permission
+/// window closes for every conversation.
+pub fn flag_session(socket: &Path, session: &str) -> bool {
+    taint_with(socket, session, &json!({"suspect": true, "flagged": true}))
+}
+
 /// `taint_session` with its arguments: `flagged` says the judge flagged it just now, which also
 /// closes the permission window for every conversation.
 fn taint_with(socket: &Path, session: &str, args: &Value) -> bool {
@@ -305,14 +311,10 @@ pub fn findings_for_model(
     findings: &str,
     marked: Option<bool>,
 ) -> Result<String, String> {
-    // A reviewer the judge flagged is a fresh flag: it closes the permission window too.
-    let args = match marked {
-        Some(true) => Some(json!({"suspect": true, "flagged": true})),
-        Some(false) => Some(json!({})),
-        None => None,
-    };
-    if let Some(args) = args
-        && !taint_with(socket, session, &args)
+    // A reviewer that ended `suspect` already flagged the session when it ended
+    // (`flag_session`, which closed the permission window): here the mark is only made sure of.
+    if let Some(suspect) = marked
+        && !taint_session(socket, session, suspect)
     {
         return Err("the review's findings were not given to Clio: this conversation could not be marked like the reviewer, which read outside text (they are on screen above)".into());
     }

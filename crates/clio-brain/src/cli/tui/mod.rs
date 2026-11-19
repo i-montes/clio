@@ -511,9 +511,10 @@ fn pick(p: &clio_toolhost::pending::Pending, suspect: bool) -> commands::Pick {
 fn send_grant(d: &Dirs, session: &str, s: &dyn Session, tx: &Sender<Input>) {
     let _ = tx.send(Input::Bg(Bg::Grant {
         session: session.to_owned(),
-        ends: clio_toolhost::grant::current(&super::pending::state(d)).map(|w| w.ends_ms),
+        ends: super::pending::window_now(d).map(|w| w.ends_ms),
         hours: super::pending::grant_hours(d),
         suspect: s.suspect(),
+        judge: super::pending::judge_on(d),
     }));
 }
 
@@ -1038,8 +1039,9 @@ impl Ctx {
     }
 
     /// The person's answer to one box (`ids`, in the order shown), one after another in one
-    /// worker. A yes opens the permission window first (`pending::person_said_yes`: the only
-    /// place in the chat that opens one), unless the session is `suspect`.
+    /// worker. A yes opens the permission window once the first of them was approved
+    /// (`pending::person_said_yes`: the only place in the chat that opens one), unless the
+    /// session is `suspect` or the judge is off; none approved, none opens.
     fn answer(&self, ids: Vec<String>, yes: bool) {
         let Some(session) = self.current_chat() else {
             for _ in &ids {
@@ -1059,18 +1061,23 @@ impl Ctx {
                 {
                     quick = None;
                 }
-                if yes
-                    && let Some(w) = super::pending::person_said_yes(d, &ids, session.suspect())
-                {
-                    let _ = tx.send(Input::Bg(Bg::GrantSaid(Ok(format!(
-                        "permission window open: Clio acts without asking until {} ({}); you get a summary when it ends · /grant off closes it",
-                        clio_toolhost::pending::local(w.ends_ms, "%H:%M").unwrap_or_default(),
-                        clio_toolhost::grant::left_text(w.ends_ms - w.opened_ms)
-                    )))));
-                }
+                let mut opened = !yes;
                 let mut last = None;
                 for (i, id) in ids.iter().enumerate() {
                     let r = session.answer(id, yes);
+                    if !opened && r.is_ok() {
+                        opened = true;
+                        if let Some(w) =
+                            super::pending::person_said_yes(d, &ids, session.suspect())
+                        {
+                            let _ = tx.send(Input::Bg(Bg::GrantSaid(Ok(format!(
+                                "permission window open: until {} ({}) Clio approves by herself what deletes, spends or sends, `ask` MCP calls and skills; control, secrets, your blocks, services and MCP servers still ask you. You get a summary when it ends · /grant off closes it",
+                                clio_toolhost::pending::local(w.ends_ms, "%H:%M")
+                                    .unwrap_or_default(),
+                                clio_toolhost::grant::left_text(w.ends_ms - w.opened_ms)
+                            )))));
+                        }
+                    }
                     if i + 1 < ids.len() {
                         let _ = tx.send(Input::Bg(Bg::ChatAnswered(r, yes)));
                     } else {
@@ -1633,21 +1640,22 @@ impl Ctx {
                 self.spawn(
                     move |d, tx| {
                         let st = super::pending::state(d);
-                        // An ended window's summary, once, by whichever conversation claims it.
+                        // An ended window's summary, queued for the next turn Clio starts by
+                        // herself, by a conversation that may tell it (it is claimed when sent).
                         if let Some((w, acts)) = clio_toolhost::grant::summary_due(&st)
-                            && clio_toolhost::grant::claim_summary(&st, &w.id)
+                            && s.queue_summary(&w, &acts)
                         {
-                            s.queue_summary(super::pending::summary_record(&w, &acts));
                             let _ = tx.send(Input::Bg(Bg::GrantSummary {
                                 session: session.clone(),
                             }));
                         }
-                        // Under an open window what waits is approved by it (never a secret, never
-                        // in a suspect session): the same path as the person's yes.
+                        // Under an open window (the judge on, the session not suspect) what was
+                        // set aside after it opened and the window may answer is approved by it,
+                        // through the same path as the person's yes; the rest keeps its box.
                         let suspect = s.suspect();
-                        if !suspect && clio_toolhost::grant::current(&st).is_some() {
+                        if !suspect && let Some(w) = super::pending::window_now(d) {
                             for p in s.waiting() {
-                                if clio_toolhost::pending::secret_of(&p).is_none() {
+                                if clio_toolhost::grant::may_answer(&w, &p) {
                                     let _ = tx.send(Input::Bg(Bg::Granted(s.grant(&p.id))));
                                 }
                             }

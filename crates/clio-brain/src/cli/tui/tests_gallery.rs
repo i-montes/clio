@@ -432,7 +432,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     out.push(("one box, three items of different kinds, scrolled", a));
     // A window open: the status line says how long is left and what waits.
     let mut a = conversation(true);
-    let ends = i64::try_from(a.now_ms).unwrap() + 3 * 3_600_000 + 12 * 60_000;
+    let ends = crate::cli::now_ms() + 3 * 3_600_000 + 12 * 60_000 + 30_000;
     let (a, _) = super::tests::feed(
         {
             a.chat.approvals.waiting = 0;
@@ -444,6 +444,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
                 ends: Some(ends),
                 hours: 4,
                 suspect: false,
+                judge: true,
             }),
             Input::Bg(Bg::Approvals {
                 session: "sid".into(),

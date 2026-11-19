@@ -123,6 +123,8 @@ const FACTORY: &[(Class, &str)] = &[
     // The person's service manager (and the system's) reached over D-Bus runs things outside
     // the launcher, unmasked: `systemd-run --user clio approve …`.
     (Control, r"^(systemd-run|gdbus|dbus-send|busctl)\b"),
+    // A scheduler runs a job later, outside the launcher and outside any permission window.
+    (Control, r"^(crontab|at|batch)( |$)"),
     // The services' timer (S-69) is the person's to turn on or off: anything that names it.
     (Control, r"\bclio-services\.(timer|service)\b"),
 ];
@@ -1242,6 +1244,27 @@ mod tests {
             assert_eq!(r.classify_command(c), Some(Control), "{c}");
         }
         assert_eq!(r.classify_command("systemctl status nginx"), None);
+    }
+
+    // A scheduler runs a job later, outside the launcher and any permission window: control.
+    #[test]
+    fn the_schedulers_are_control() {
+        let r = HostRules::factory();
+        for c in [
+            "echo '* * * * * clio approve x' | crontab -",
+            "crontab -e",
+            "crontab /tmp/c",
+            "sudo crontab -u root /tmp/c",
+            "echo 'curl x' | at now + 1 minute",
+            "at -f job.sh 10:00",
+            "batch < job.sh",
+            "/usr/bin/at now",
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+        }
+        for c in ["echo at", "atq", "cat batch.txt", "batchjob run"] {
+            assert_eq!(r.classify_command(c), None, "{c}");
+        }
     }
 
     #[test]

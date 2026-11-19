@@ -916,16 +916,15 @@ pub fn confirm(d: &Dirs, name: &str, shown: &str) -> Res<String> {
 
 fn set_on(d: &Dirs, name: &str, on: bool) -> Res<String> {
     let root = root(d);
-    // One installed before approving turned it on: turning it on takes its tools as they are
-    // (a changed one still asks).
-    if on {
-        let _l = m::lock_root(&root)?;
-        let mut st = m::load_state(&root, name)
-            .ok_or_else(|| format!("there is no MCP server «{}»", sanitize::line(name)))?;
-        if !st.confirmed {
-            st.confirmed = true;
-            m::save_state(&root, &st)?;
-        }
+    // One installed by an older version, whose tools were never shown to the person: they see
+    // them first (`/mcp confirm` shows them and turns it on).
+    if on && !m::load_state(&root, name).is_some_and(|s| s.confirmed) {
+        return Err(format!(
+            "«{}» was installed by an earlier version of Clio and you have not seen its tools yet: /mcp show {} lists them, and /mcp confirm {} (or clio mcp confirm) shows them and turns it on",
+            sanitize::line(name),
+            sanitize::line(name),
+            sanitize::line(name)
+        ));
     }
     let why = if on { "" } else { skills::OFF_BY_PERSON };
     skills::set_enabled_in(&root, Kind::Mcp, name, on, why)
@@ -1617,6 +1616,13 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
             Mode::Free
         );
         set_on(e.d(), "srv", false).unwrap();
+        assert!(!m::is_on(&e.root(), "srv"));
+        // One an older version installed and never showed: `on` refuses and says how to see it.
+        let mut old = m::load_state(&e.root(), "srv").unwrap();
+        old.confirmed = false;
+        m::save_state(&e.root(), &old).unwrap();
+        let refused = set_on(e.d(), "srv", true).unwrap_err();
+        assert!(refused.contains("/mcp show srv"), "{refused}");
         assert!(!m::is_on(&e.root(), "srv"));
         remove(e.d(), "srv").unwrap();
         assert!(
