@@ -196,7 +196,7 @@ fn a_request_waits_for_the_person_once_and_is_told_it_is_answered_later() {
     assert!(r.ok, "{}", r.content);
     assert!(
         r.content.ends_with(
-            ": the person will be asked in the chat, possibly later (they can answer now with /pending), and their answer reaches you in a later turn; go on with what does not need it"
+            ": the person is asked for it in the chat when this turn ends (a permission window never answers a secret), and their answer reaches you in a later turn; go on with what does not need it"
         ),
         "{}",
         r.content
@@ -225,7 +225,7 @@ fn a_request_waits_for_the_person_once_and_is_told_it_is_answered_later() {
     ask(&e, "s1", req("c"));
     let r = ask(&e, "s1", req("d"));
     assert!(
-        r.ok && r.content.contains("the person will be asked"),
+        r.ok && r.content.contains("the person is asked for it"),
         "{}",
         r.content
     );

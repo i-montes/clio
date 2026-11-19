@@ -41,7 +41,7 @@ pub enum Class {
     Service,
     /// Not an action: an MCP server the model proposed (S-70), with npm's facts about it. Every
     /// new server and every new version waits as this; approved, the person's `clio` installs,
-    /// probes and registers it (off until its tools are confirmed); never run.
+    /// probes and registers it, on; never run.
     Mcp,
 }
 
@@ -286,8 +286,8 @@ pub struct HostRules {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostFile {
-    /// The old daily cap of questions, still read so an older file loads: the chat's window
-    /// (`approvals.every_hours`) replaced it.
+    /// The old daily cap of questions, still read so an older file loads: the permission window
+    /// (`approvals.grant_hours`) replaced it.
     #[serde(default, rename = "questions_per_day")]
     _questions_per_day: Option<serde::de::IgnoredAny>,
     #[serde(default)]

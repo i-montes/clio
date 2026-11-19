@@ -278,6 +278,7 @@ impl ToolHost {
             });
         }
         self.mark(&req.session, "suspect");
+        self.close_window_flagged();
         // Kept for the person, private: the text is cleaned (no known secret in it).
         let dir = self.run_dir.join("withheld");
         let file = dir.join(format!(
