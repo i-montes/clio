@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 use clio_brain::pi::round::State;
 use clio_brain::pi::rpc::RunSummary;
@@ -128,6 +127,7 @@ fn a_round_that_cannot_run_says_why_once() {
 
 /// A stand-in for `systemd-run`: logs its arguments, starts the command in the background and
 /// exits 0 (as a scope that took the command).
+#[cfg(target_os = "linux")]
 fn fake_systemd_run(dir: &Path) -> PathBuf {
     let p = dir.join("sr");
     std::fs::write(
@@ -144,6 +144,7 @@ fn fake_systemd_run(dir: &Path) -> PathBuf {
 #[cfg(target_os = "linux")]
 #[test]
 fn run_due_never_waits_for_a_round() {
+    use std::time::{Duration, Instant};
     let t = tempfile::tempdir().unwrap();
     let sr = fake_systemd_run(t.path());
     // A round that takes 2 s: started, not waited for.
