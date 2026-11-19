@@ -1179,11 +1179,16 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                             super::sessions::age_and_count(r, crate::cli::now_ms(), app.theme.dot())
                         })
                         .unwrap_or_default();
+                    let when = if when.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {} {when}", app.theme.dot())
+                    };
                     app.confirm = Some(Confirm::new(
                         Action::DeleteSession,
                         file,
                         0,
-                        format!("\"{title}\" {} {when}: {what}", app.theme.dot()),
+                        format!("\"{title}\"{when}: {what}"),
                     ));
                 }
                 Ok(_) => {}
@@ -1894,7 +1899,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
         ),
         Action::Archive => format!("Archive memory m{} (it will no longer be remembered)", c.id),
         Action::DeleteSession => {
-            "Delete the session? The conversation goes to the trash for 30 days (`clio sessions restore` brings it back); the working copy, if it has one, is removed for good:".to_owned()
+            "Delete the session? All of it goes to the trash for 30 days, and `clio sessions restore` brings it back whole:".to_owned()
         }
         Action::Approve => format!("Clio set aside {}. Run it?", c.id),
         Action::UndoSession => "Undo this session's file changes in".to_owned(),

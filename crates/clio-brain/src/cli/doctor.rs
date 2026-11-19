@@ -1083,6 +1083,7 @@ mod tests {
             file,
             trash: data.join("trash/sessions"),
             id: "r1".into(),
+            lock: None,
             title: "t".into(),
             run: None,
             unapplied: Some(0),

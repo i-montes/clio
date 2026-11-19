@@ -2441,6 +2441,23 @@ mod tests {
         assert!(app.flash.as_deref().is_some_and(|f| f.contains("trash")));
     }
 
+    // A row with no age and no message count has nothing to put after the title.
+    #[test]
+    fn the_delete_dialog_has_no_dangling_separator() {
+        let mut app = super::super::tests_gallery::conversation(true);
+        app.screen = Screen::Sessions;
+        let (app, _) = super::super::app::update(
+            app,
+            super::super::app::Input::Bg(super::super::app::Bg::SessionPlan(Ok((
+                "/s/not-listed.jsonl".into(),
+                "Just a title".into(),
+                "the conversation only".into(),
+            )))),
+        );
+        let c = app.confirm.unwrap();
+        assert_eq!(c.workspace, "\"Just a title\": the conversation only");
+    }
+
     #[test]
     fn the_selector_opens_new_existing_and_explains_what_cannot_open() {
         use crate::cli::chat::{Row, RowKind};

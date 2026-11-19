@@ -174,7 +174,7 @@ fn remove_sessions(dirs: &Dirs, names: &[String], all: bool, yes: bool) -> Res<i
     let risky = plans.iter().filter(|p| p.unapplied != Some(0)).count();
     let question = if risky > 0 {
         format!(
-            "Delete {} session(s)? {risky} have changes not applied that will be lost",
+            "Delete {} session(s)? {risky} have changes not applied (they stay in the trash for 30 days)",
             plans.len()
         )
     } else {

@@ -1,11 +1,12 @@
-//! Deleting Pi sessions, for the person: the conversation file in Pi's sessions folder goes to the
-//! trash (`<data>/trash/sessions/<unix-ms>-<id>/`, 30 days, `clio sessions restore` brings it
-//! back) and, when the session is one of Clio's, its working copy (`runs/<id>`) and the copies of
-//! the conversation Claude Code kept (the claude connector) are removed for good, as they always
-//! were. The memory is not touched. A copy with changes not applied to the person's folder is
-//! said, so it is never lost by surprise.
+//! Deleting Pi sessions, for the person: nothing is removed for good. The conversation file in Pi's
+//! sessions folder and, when the session is one of Clio's, its working copy (`runs/<id>`, as
+//! `<entry>/run`) and the copies of the conversation Claude Code kept (the claude connector, in
+//! Pi's HOME, as `<entry>/claude/<name>`) are renamed into one trash entry,
+//! `<data>/trash/sessions/<unix-ms>-<id>/`, for 30 days; `clio sessions restore` puts each piece
+//! back where it was. The memory is not touched. A copy with changes not applied to the person's
+//! folder is said, so it is never lost by surprise.
 
-use std::fs::{DirBuilder, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -14,10 +15,12 @@ use clio_brain::pi::launch::valid_id;
 use clio_brain::pi::sessions::{SessionInfo, read_session};
 use clio_core::Clock;
 
+use super::chat::local::OPEN_ELSEWHERE;
 use super::home::Dirs;
 use super::runs::Run;
+use super::tui::sanitize;
 use super::work;
-use super::{Res, io_err, mkdir_private, set_mode};
+use super::{Res, io_err, mkdir_private};
 
 /// What deleting one session removes.
 pub struct Plan {
@@ -25,6 +28,8 @@ pub struct Plan {
     /// Where the conversation goes (`<data>/trash/sessions`), and the id its folder is named with.
     pub trash: PathBuf,
     pub id: String,
+    /// The run folder's lock (`session.lock`): a conversation open in another `clio` holds it.
+    pub lock: Option<PathBuf>,
     pub title: String,
     /// Clio's working copy of the session, when it has one.
     pub run: Option<Run>,
@@ -57,19 +62,8 @@ pub fn plan(dirs: &Dirs, sessions_dir: &Path, s: &SessionInfo) -> Res<Plan> {
     Ok(Plan {
         file: s.path.clone(),
         trash: trash_dir(dirs),
-        // The header's id is untrusted: only what is safe in a folder name.
-        id: s
-            .id
-            .chars()
-            .take(128)
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "._-".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect(),
+        id: entry_id(&s.id, &s.path),
+        lock: valid_id(&s.id).then(|| dirs.runs.join(&s.id).join("session.lock")),
         title: s.title.clone(),
         run,
         unapplied,
@@ -152,40 +146,131 @@ fn entry_name(name: &str) -> Option<(i64, &str)> {
     (ms.bytes().all(|b| b.is_ascii_digit()) && valid_id(id)).then_some((ms.parse().ok()?, id))
 }
 
+/// What is safe in a folder name, at most 128 characters.
+fn clean_id(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c))
+        .take(128)
+        .collect()
+}
+
+/// The id a trash folder is named with: the header's (untrusted) id cleaned, else the file's
+/// cleaned name, else `session`.
+fn entry_id(id: &str, file: &Path) -> String {
+    [id, file.file_stem().and_then(|s| s.to_str()).unwrap_or("")]
+        .into_iter()
+        .map(clean_id)
+        .find(|c| !c.is_empty())
+        .unwrap_or_else(|| "session".into())
+}
+
+/// A rename that never replaces what is at `to` (the kernel's `RENAME_NOREPLACE`).
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use rustix::{fs::CWD, fs::RenameFlags, io::Errno};
+    match rustix::fs::renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        // A filesystem without the flag: the plain rename after looking.
+        Err(Errno::INVAL | Errno::NOSYS) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(from, to)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Opens a file without following a link.
+fn open_nofollow(p: &Path, write: bool) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        .open(p)
+}
+
+/// 0600 on a regular file, through the open file: a link put in its place is never followed.
+fn make_private(p: &Path) -> Res<()> {
+    let f = open_nofollow(p, false).map_err(|e| io_err(p, &e))?;
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(format!("{} is not a regular file", p.display()));
+    }
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map_err(|e| io_err(p, &e))
+}
+
 /// Moves a file without ever following a link, and never over another file: a rename, and only
 /// when that fails for being another filesystem, a copy (born 0600) and then the removal.
 fn move_file(from: &Path, to: &Path) -> Res<()> {
-    let e = match std::fs::rename(from, to) {
-        Ok(()) => return set_mode(to, 0o600),
+    let e = match rename_noreplace(from, to) {
+        Ok(()) => return Ok(()),
         Err(e) if e.kind() == ErrorKind::CrossesDevices => e,
         Err(e) => return Err(format!("{} to {}: {e}", from.display(), to.display())),
     };
-    let copied = (|| -> std::io::Result<()> {
-        let mut src = OpenOptions::new()
-            .read(true)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
-            .open(from)?;
-        if !src.metadata()?.is_file() {
-            return Err(e);
-        }
-        let mut dst = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(to)?;
-        std::io::copy(&mut src, &mut dst)?;
-        dst.sync_all()
-    })();
-    if let Err(e) = copied {
+    let fail = |e: std::io::Error| format!("{} to {}: {e}", from.display(), to.display());
+    let mut src = open_nofollow(from, false).map_err(fail)?;
+    if !src.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(fail(e));
+    }
+    // Created here or not at all: what is already at `to` is never touched.
+    let mut dst = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)
+        .map_err(fail)?;
+    if let Err(e) = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all()) {
         let _ = std::fs::remove_file(to);
-        return Err(format!("{} to {}: {e}", from.display(), to.display()));
+        return Err(fail(e));
     }
     std::fs::remove_file(from).map_err(|e| io_err(from, &e))
 }
 
-/// Removes the session file (into the trash: nothing else is removed if that fails), then its
-/// copy and Claude Code's. A link inside is removed, not followed.
+/// A file with `move_file`, a folder (a run, Claude Code's copy) by a rename alone.
+fn move_any(from: &Path, to: &Path) -> Res<()> {
+    if std::fs::symlink_metadata(from).is_ok_and(|m| m.is_file()) {
+        return move_file(from, to);
+    }
+    rename_noreplace(from, to).map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
+}
+
+/// Moves each piece (`from`, `to`); if one fails, the ones already moved go back and the error
+/// is returned: all or nothing.
+fn move_all(pieces: &[(PathBuf, PathBuf)]) -> Res<()> {
+    for (i, (from, to)) in pieces.iter().enumerate() {
+        let r = match to.parent() {
+            Some(d) if !d.exists() => mkdir_private(d),
+            _ => Ok(()),
+        }
+        .and_then(|()| move_any(from, to));
+        if let Err(e) = r {
+            for (f, t) in pieces[..i].iter().rev() {
+                let _ = move_any(t, f);
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Takes the run folder's lock without waiting; held until the file is dropped. `None` when
+/// there is no lock file (nobody has opened that conversation).
+fn hold_lock(lock: &Path) -> Res<Option<File>> {
+    let f = match open_nofollow(lock, true) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_err(lock, &e)),
+    };
+    rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| OPEN_ELSEWHERE.to_owned())?;
+    Ok(Some(f))
+}
+
+/// Moves the session into the trash: its file first, then its working copy and Claude Code's;
+/// if any of them cannot move, the others go back and nothing is deleted. Refused while the
+/// conversation is open in another `clio`.
 pub fn delete(p: &Plan) -> Res<()> {
+    let _lock = p.lock.as_deref().map(hold_lock).transpose()?;
     let name = p.file.file_name().ok_or("the session has no file name")?;
     mkdir_private(&p.trash)?;
     let dir = p.trash.join(format!("{}-{}", super::now_ms(), p.id));
@@ -193,15 +278,30 @@ pub fn delete(p: &Plan) -> Res<()> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| io_err(&dir, &e))?;
-    if let Err(e) = move_file(&p.file, &dir.join(name)) {
+    let file = dir.join(name);
+    if let Err(e) = move_file(&p.file, &file) {
         let _ = std::fs::remove_dir(&dir);
         return Err(e);
     }
-    if let Some(run) = &p.run {
-        std::fs::remove_dir_all(&run.path).map_err(|e| format!("{}: {e}", run.path.display()))?;
-    }
+    // Pi can write the sessions folder: if a link took the file's place it is in the trash now,
+    // and nothing is chmoded through it.
+    make_private(&file)?;
+    let mut rest: Vec<(PathBuf, PathBuf)> = p
+        .run
+        .iter()
+        .map(|r| (r.path.clone(), dir.join("run")))
+        .collect();
     for d in &p.claude {
-        std::fs::remove_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        rest.push((
+            d.clone(),
+            dir.join("claude").join(d.file_name().unwrap_or_default()),
+        ));
+    }
+    if let Err(e) = move_all(&rest) {
+        let _ = move_file(&file, &p.file);
+        let _ = std::fs::remove_dir(dir.join("claude"));
+        let _ = std::fs::remove_dir(&dir);
+        return Err(e);
     }
     Ok(())
 }
@@ -226,6 +326,7 @@ pub fn purge_trash(root: &Path, clock: &dyn Clock) {
 }
 
 /// A conversation in the trash.
+#[derive(Debug)]
 struct Trashed {
     dir: PathBuf,
     name: String,
@@ -271,10 +372,37 @@ fn trashed(root: &Path) -> Vec<Trashed> {
 
 /// The usage of `clio sessions`.
 const USAGE: &str = "usage: clio sessions restore [id]
-  restore           lists the conversations in the trash (deleted in the last 30 days)
-  restore <id>      brings one back to the sessions folder (the start of its id is enough);
-                    it refuses if a file of that name is already there. A working copy that
-                    was deleted with it is not in the trash and does not come back";
+  restore           lists the conversations in the trash (deleted in the last 30 days), with the
+                    date deleted (local time), the messages, the title and the entry name
+  restore <id>      brings one back, whole: its conversation to the sessions folder and, if it
+                    had them, its working copy and Claude Code's copies where they were. <id> is
+                    the entry name, the id or the start of the id. It refuses, and restores
+                    nothing, if any of the places is taken";
+
+/// The entry `want` names: the entry name, else the id, else the start of an id; one only.
+fn pick<'a>(all: &'a [Trashed], want: &str) -> Res<&'a Trashed> {
+    if want.is_empty() {
+        return Err("give the id (or the entry name) of what to restore".into());
+    }
+    let tiers: [Vec<&Trashed>; 3] = [
+        all.iter().filter(|t| t.name == want).collect(),
+        all.iter().filter(|t| t.id == want).collect(),
+        all.iter().filter(|t| t.id.starts_with(want)).collect(),
+    ];
+    let Some(hits) = tiers.into_iter().find(|h| !h.is_empty()) else {
+        return Err(format!(
+            "nothing in the trash starts with {:?} (see `clio sessions restore`)",
+            sanitize::line(want)
+        ));
+    };
+    match hits.as_slice() {
+        [one] => Ok(one),
+        _ => Err(format!(
+            "{:?} fits more than one entry in the trash: give more of the id, or the whole entry name",
+            sanitize::line(want)
+        )),
+    }
+}
 
 /// `clio sessions restore [id]`.
 pub fn run(dirs: &Dirs, argv: &[String]) -> Res<i32> {
@@ -290,40 +418,63 @@ pub fn run(dirs: &Dirs, argv: &[String]) -> Res<i32> {
     let Some(want) = argv.get(1) else {
         if all.is_empty() {
             println!("the trash is empty");
+            return Ok(0);
         }
+        println!("deleted (local time)  messages  title  entry");
+        let off = super::pending::local_offset() * 1000;
         for t in &all {
             let (n, title) = t
                 .info
                 .as_ref()
                 .map_or((0, "(unreadable)"), |i| (i.messages, &i.title));
-            println!("{}  {n:>5} msgs  {title}  {}", super::stamp(t.at_ms), t.id);
+            println!(
+                "{}  {n:>8}  {}  {}",
+                super::stamp(t.at_ms + off),
+                sanitize::line(title),
+                t.name
+            );
         }
         return Ok(0);
     };
-    let hits: Vec<&Trashed> = all
+    let t = pick(&all, want)?;
+    let sessions = super::pi::paths(dirs).sessions_dir();
+    let file_name = t.file.file_name().ok_or("no file name")?;
+    // Each piece back where it was; the folders of the entry say what it holds.
+    let mut pieces = vec![(t.file.clone(), sessions.join(file_name))];
+    if std::fs::symlink_metadata(t.dir.join("run")).is_ok_and(|m| m.is_dir()) {
+        pieces.push((t.dir.join("run"), dirs.runs.join(&t.id)));
+    }
+    let projects = super::pi::paths(dirs).home_dir().join(".claude/projects");
+    for e in std::fs::read_dir(t.dir.join("claude"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if e.file_type().is_ok_and(|f| f.is_dir()) {
+            pieces.push((e.path(), projects.join(e.file_name())));
+        }
+    }
+    if let Some((_, taken)) = pieces
         .iter()
-        .filter(|t| t.name == *want || t.id.starts_with(want.as_str()))
-        .collect();
-    let [t] = hits.as_slice() else {
-        return Err(match hits.len() {
-            0 => format!("nothing in the trash starts with {want:?} (see `clio sessions restore`)"),
-            _ => format!("{want:?} starts more than one id in the trash: give more of it"),
-        });
-    };
-    let dir = super::pi::paths(dirs).sessions_dir();
-    let to = dir.join(t.file.file_name().ok_or("no file name")?);
-    // shortcut: a file made between this check and the rename would be replaced; a person at a
-    // terminal does not race themselves, add a hard link if that ever matters.
-    if std::fs::symlink_metadata(&to).is_ok() {
+        .find(|(_, to)| std::fs::symlink_metadata(to).is_ok())
+    {
         return Err(format!(
             "{} is already there: nothing was restored",
-            to.display()
+            taken.display()
         ));
     }
-    mkdir_private(&dir)?;
-    move_file(&t.file, &to)?;
+    if !sessions.exists() {
+        mkdir_private(&sessions)?;
+    }
+    make_private(&t.file)?;
+    move_all(&pieces)?;
+    let _ = std::fs::remove_dir(t.dir.join("claude"));
     let _ = std::fs::remove_dir(&t.dir);
-    println!("restored {} to {}", t.id, to.display());
+    println!(
+        "restored {} to {}",
+        t.name,
+        sanitize::line(&pieces[0].1.display().to_string())
+    );
     Ok(0)
 }
 
@@ -428,6 +579,13 @@ mod tests {
         assert!(!theirs.exists() && elsewhere.exists());
     }
 
+    fn session_text(id: &str, cwd: &Path) -> String {
+        format!(
+            "{{\"type\":\"session\",\"id\":\"{id}\",\"cwd\":\"{}\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hello there\"}}}}\n",
+            cwd.display()
+        )
+    }
+
     const SESSION: &str = "{\"type\":\"session\",\"id\":\"r1\",\"cwd\":\"/x\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hello there\"}}\n";
 
     /// A session file in Pi's sessions folder of `dirs`, and its plan.
@@ -442,9 +600,54 @@ mod tests {
 
     fn entries(dirs: &Dirs) -> Vec<PathBuf> {
         std::fs::read_dir(trash_dir(dirs))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect()
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default()
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions())
+            & 0o777
+    }
+
+    /// One of Clio's own sessions: a copy-mode one (its run folder with the sandbox, the seal, the
+    /// lock and the marks) or a host-mode one (the run folder of the home). Returns its plan.
+    fn clio_session(dirs: &Dirs, id: &str, host: bool) -> (PathBuf, Plan) {
+        let run = dirs.runs.join(id);
+        let cwd = if host {
+            dirs.home.clone()
+        } else {
+            run.join("sandbox")
+        };
+        std::fs::create_dir_all(run.join("sandbox")).unwrap();
+        std::fs::create_dir_all(run.join("toolhost")).unwrap();
+        let meta = serde_json::json!({"id": id, "workspace": dirs.home, "instruction": "x", "created_ms": 1, "host": host});
+        std::fs::write(run.join("meta.json"), meta.to_string()).unwrap();
+        std::fs::write(run.join("manifest.json"), "{}").unwrap();
+        std::fs::write(run.join("session-seal.json"), "{\"size\":1}").unwrap();
+        std::fs::write(run.join("session.lock"), "").unwrap();
+        std::fs::write(run.join("toolhost/tainted.json"), "{\"suspect\":true}").unwrap();
+        let sessions = super::super::pi::paths(dirs).sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let file = sessions.join(format!("2026_{id}.jsonl"));
+        std::fs::write(&file, session_text(id, &cwd.canonicalize().unwrap())).unwrap();
+        let s = read_session(&file).unwrap();
+        (sessions.clone(), plan(dirs, &sessions, &s).unwrap())
+    }
+
+    /// Whether the drawer would open the session (a row of Clio's own, not "another tool made it").
+    fn opens(dirs: &Dirs) -> Vec<bool> {
+        use super::super::chat::SessionSource;
+        super::super::chat::local::LocalSource::new(std::sync::Arc::new(Dirs {
+            config: dirs.config.clone(),
+            data: dirs.data.clone(),
+            runs: dirs.runs.clone(),
+            runtime: None,
+            home: dirs.home.clone(),
+        }))
+        .list()
+        .iter()
+        .map(|r| r.unavailable.is_none())
+        .collect()
     }
 
     #[test]
@@ -454,8 +657,8 @@ mod tests {
         let dirs = dirs_in(t.path());
         let (_, p) = session_in(&dirs, "2026_r1.jsonl");
         std::fs::set_permissions(&p.file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        // The run folder goes for good, as it always did: the trash keeps the conversation only.
         std::fs::create_dir_all(dirs.runs.join("r1/sandbox")).unwrap();
+        std::fs::write(dirs.runs.join("r1/sandbox/f"), "x").unwrap();
         let p = Plan {
             run: Some(Run {
                 id: "r1".into(),
@@ -472,12 +675,15 @@ mod tests {
             name.ends_with("-r1") && entry_name(&name).is_some(),
             "{name}"
         );
-        assert_eq!(std::fs::read_dir(&e[0]).unwrap().count(), 1);
         assert_eq!(
             std::fs::read_to_string(e[0].join("2026_r1.jsonl")).unwrap(),
             SESSION
         );
-        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // The run folder is in the entry, whole: nothing is removed for good.
+        assert_eq!(
+            std::fs::read_to_string(e[0].join("run/sandbox/f")).unwrap(),
+            "x"
+        );
         assert_eq!(mode(&e[0].join("2026_r1.jsonl")), 0o600);
         assert_eq!(
             (
@@ -490,57 +696,179 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_move_deletes_nothing() {
+    fn a_failed_move_deletes_nothing_and_leaves_no_entry() {
         let t = tempfile::tempdir().unwrap();
         let dirs = dirs_in(t.path());
-        let (_, p) = session_in(&dirs, "2026_r1.jsonl");
-        std::fs::create_dir_all(dirs.runs.join("r1/sandbox")).unwrap();
-        // The trash cannot be made: its place is a file.
-        std::fs::create_dir_all(&dirs.data).unwrap();
-        std::fs::write(dirs.data.join("trash"), "x").unwrap();
-        let p = Plan {
-            run: Some(Run {
-                id: "r1".into(),
-                path: dirs.runs.join("r1"),
-            }),
-            ..p
+        let (sessions, p) = clio_session(&dirs, "r1", false);
+        let before = std::fs::read(&p.file).unwrap();
+        // The rename of the file itself fails (it is not there): the entry folder is cleaned up.
+        let gone = Plan {
+            file: sessions.join("nope.jsonl"),
+            ..clone_plan(&p)
         };
+        assert!(delete(&gone).is_err());
+        assert!(entries(&dirs).is_empty() && dirs.runs.join("r1/sandbox").exists());
+        // The file moves, then a piece after it cannot (Claude Code's copy is not there): the
+        // file and the run folder go back, and the entry folder is gone.
+        let bad = Plan {
+            claude: vec![t.path().join("no-such-folder")],
+            ..clone_plan(&p)
+        };
+        assert!(delete(&bad).is_err());
+        assert_eq!(std::fs::read(&p.file).unwrap(), before);
+        assert!(dirs.runs.join("r1/toolhost/tainted.json").exists());
+        assert!(entries(&dirs).is_empty(), "{:?}", entries(&dirs));
+        // The trash cannot be made: its place is a file.
+        std::fs::remove_dir_all(dirs.data.join("trash")).unwrap();
+        std::fs::write(dirs.data.join("trash"), "x").unwrap();
         assert!(delete(&p).is_err());
-        assert!(p.file.exists() && dirs.runs.join("r1/sandbox").exists());
+        assert_eq!(std::fs::read(&p.file).unwrap(), before);
+        assert!(dirs.runs.join("r1/sandbox").exists());
+    }
+
+    fn clone_plan(p: &Plan) -> Plan {
+        Plan {
+            file: p.file.clone(),
+            trash: p.trash.clone(),
+            id: p.id.clone(),
+            lock: p.lock.clone(),
+            title: p.title.clone(),
+            run: p.run.as_ref().map(|r| Run {
+                id: r.id.clone(),
+                path: r.path.clone(),
+            }),
+            unapplied: p.unapplied,
+            claude: p.claude.clone(),
+        }
     }
 
     #[test]
-    fn restore_brings_it_back_byte_for_byte_and_the_drawer_lists_it_again() {
+    fn a_copy_mode_session_comes_back_whole_and_opens_again() {
         let t = tempfile::tempdir().unwrap();
         let dirs = dirs_in(t.path());
-        let (sessions, p) = session_in(&dirs, "2026_r1.jsonl");
-        delete(&p).unwrap();
-        assert!(
-            clio_brain::pi::sessions::list_sessions(&sessions)
-                .sessions
-                .is_empty()
+        let (sessions, p) = clio_session(&dirs, "r1", false);
+        assert_eq!(opens(&dirs), [true]);
+        let (body, seal, marks) = (
+            std::fs::read(&p.file).unwrap(),
+            std::fs::read(dirs.runs.join("r1/session-seal.json")).unwrap(),
+            std::fs::read(dirs.runs.join("r1/toolhost/tainted.json")).unwrap(),
         );
+        // What Claude Code kept for this copy goes with it, and comes back where it was.
+        let projects = super::super::pi::paths(&dirs)
+            .home_dir()
+            .join(".claude/projects");
+        let slug: String = dirs
+            .runs
+            .join("r1/sandbox")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        std::fs::create_dir_all(projects.join(&slug)).unwrap();
+        std::fs::write(projects.join(&slug).join("cc.jsonl"), "cc").unwrap();
+        let p = plan(&dirs, &sessions, &read_session(&p.file).unwrap()).unwrap();
+        assert_eq!(p.claude, [projects.join(&slug)]);
+        delete(&p).unwrap();
+        assert!(!dirs.runs.join("r1").exists() && !projects.join(&slug).exists());
+        assert!(opens(&dirs).is_empty());
         let entry = entries(&dirs).remove(0);
-        // No id: the list. A start that matches nothing, and the whole entry name, are told apart.
+        // No id: the list. A start that matches nothing, an empty one and another word fail.
         assert_eq!(run(&dirs, &["restore".into()]).unwrap(), 0);
         assert!(run(&dirs, &["restore".into(), "zz".into()]).is_err());
+        assert!(run(&dirs, &["restore".into(), String::new()]).is_err());
         assert!(run(&dirs, &["other".into()]).is_err());
-        // A file of that name in the way: refused, and both stay as they are.
-        std::fs::write(&p.file, "mine").unwrap();
+        // Any one place taken: refused, and nothing at all is restored.
+        std::fs::create_dir_all(projects.join(&slug)).unwrap();
         let e = run(&dirs, &["restore".into(), "r".into()]).unwrap_err();
         assert!(e.contains("already there"), "{e}");
+        assert!(!p.file.exists() && !dirs.runs.join("r1").exists());
+        assert!(entry.join("run").exists() && entry.join("2026_r1.jsonl").exists());
+        std::fs::remove_dir(projects.join(&slug)).unwrap();
+        // The file's own name in the way, too.
+        std::fs::write(&p.file, "mine").unwrap();
+        assert!(run(&dirs, &["restore".into(), "r".into()]).is_err());
         assert_eq!(std::fs::read_to_string(&p.file).unwrap(), "mine");
-        assert!(entry.join("2026_r1.jsonl").exists());
+        assert!(!dirs.runs.join("r1").exists());
         std::fs::remove_file(&p.file).unwrap();
-        // The unique start of the id restores it.
+        // The unique start of the id restores all of it.
         assert_eq!(run(&dirs, &["restore".into(), "r".into()]).unwrap(), 0);
-        assert_eq!(std::fs::read_to_string(&p.file).unwrap(), SESSION);
+        assert_eq!(std::fs::read(&p.file).unwrap(), body);
+        assert_eq!(
+            std::fs::read(dirs.runs.join("r1/session-seal.json")).unwrap(),
+            seal
+        );
+        assert_eq!(
+            std::fs::read(dirs.runs.join("r1/toolhost/tainted.json")).unwrap(),
+            marks
+        );
+        assert_eq!(
+            std::fs::read(projects.join(&slug).join("cc.jsonl")).unwrap(),
+            b"cc"
+        );
         assert!(!entry.exists());
+        // It is one of Clio's again, and the drawer lists it.
+        assert_eq!(opens(&dirs), [true]);
         let l = clio_brain::pi::sessions::list_sessions(&sessions);
         assert_eq!(
             (l.sessions.len(), l.sessions[0].title.as_str()),
             (1, "hello there")
         );
+    }
+
+    #[test]
+    fn a_host_mode_session_keeps_its_run_folder_and_marks_and_opens_after_restore() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(t.path());
+        let (_, p) = clio_session(&dirs, "h1", true);
+        assert_eq!(opens(&dirs), [true]);
+        assert!(p.run.is_none());
+        delete(&p).unwrap();
+        // As always: a host session has no working copy, and its marks stay where they are.
+        assert!(dirs.runs.join("h1/toolhost/tainted.json").exists());
+        assert!(opens(&dirs).is_empty());
+        assert!(!entries(&dirs)[0].join("run").exists());
+        assert_eq!(run(&dirs, &["restore".into(), "h1".into()]).unwrap(), 0);
+        assert_eq!(opens(&dirs), [true]);
+        assert!(dirs.runs.join("h1/toolhost/tainted.json").exists());
+    }
+
+    #[test]
+    fn a_conversation_open_in_another_clio_is_not_deleted() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(t.path());
+        for (id, host) in [("r1", false), ("h1", true)] {
+            let (_, p) = clio_session(&dirs, id, host);
+            let kept = entries(&dirs).len();
+            // Another `clio` holds the run folder's lock.
+            let held = File::open(dirs.runs.join(id).join("session.lock")).unwrap();
+            rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+            assert_eq!(delete(&p).unwrap_err(), OPEN_ELSEWHERE);
+            assert!(p.file.exists() && dirs.runs.join(id).join("sandbox").exists());
+            assert_eq!(entries(&dirs).len(), kept);
+            drop(held);
+            delete(&p).unwrap();
+            assert!(!p.file.exists());
+        }
+    }
+
+    #[test]
+    fn a_link_put_in_the_files_place_is_never_chmoded_nor_restored_through() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(t.path());
+        let (_, p) = session_in(&dirs, "2026_r1.jsonl");
+        // After the check and before the rename, the file becomes a link to a folder.
+        let target = t.path().join("home");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_file(&p.file).unwrap();
+        std::os::unix::fs::symlink(&target, &p.file).unwrap();
+        assert!(delete(&p).is_err());
+        assert_eq!(mode(&target), 0o755);
+        // The link is in the trash (it is not a conversation: it is never listed).
+        assert!(entries(&dirs).len() == 1 && trashed(&trash_dir(&dirs)).is_empty());
     }
 
     #[test]
@@ -568,6 +896,8 @@ mod tests {
         ] {
             make(n);
         }
+        // The old entry holds a run folder too: it goes whole.
+        std::fs::create_dir_all(root.join(&old).join("run/sandbox")).unwrap();
         // What is not a folder, a link to a folder elsewhere, and a sibling of the trash.
         std::fs::write(root.join("6-file"), "x").unwrap();
         let outside = t.path().join("outside");
@@ -596,36 +926,110 @@ mod tests {
             t.path().join("data/trash/other/1-old").exists()
                 && t.path().join("data/runs/1-old").exists()
         );
-        // A day later the other one is old too; a missing trash is nothing.
+        // A few days later the other one is old too; a missing trash is nothing.
         clock.advance(3 * day);
         purge_trash(&root, &clock);
         assert!(!left(&fresh));
         purge_trash(&t.path().join("nope"), &clock);
     }
 
-    // Another filesystem (rename fails): copied private, then removed; a link is never followed.
+    // Another filesystem (rename fails): copied private, then removed. What is at the destination
+    // is never replaced nor removed, and a link is never followed or chmoded.
     #[test]
-    fn the_copy_fallback_is_private_and_never_follows_a_link() {
+    fn a_move_is_private_never_replaces_and_never_follows_a_link() {
+        use std::os::unix::fs::PermissionsExt;
         let shm = Path::new("/dev/shm");
         let t = tempfile::tempdir().unwrap();
+        // `from` is on another filesystem than `to` when the machine has /dev/shm.
         let from = tempfile::tempdir_in(if shm.is_dir() { shm } else { t.path() }).unwrap();
         let a = from.path().join("a.jsonl");
         std::fs::write(&a, SESSION).unwrap();
+        std::fs::set_permissions(&a, std::fs::Permissions::from_mode(0o644)).unwrap();
         let to = t.path().join("a.jsonl");
+        // A file that is there is kept: the move fails, the source stays.
+        std::fs::write(&to, "mine").unwrap();
+        assert!(move_file(&a, &to).is_err());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), SESSION);
+        std::fs::remove_file(&to).unwrap();
         move_file(&a, &to).unwrap();
         assert!(!a.exists());
         assert_eq!(std::fs::read_to_string(&to).unwrap(), SESSION);
-        // Never over a file already there (copy path); a link source is refused.
+        // The mode is the caller's to set (through the file): it was 0644 or the copy's 0600.
+        make_private(&to).unwrap();
+        assert_eq!(mode(&to), 0o600);
+        // A link: never chmoded through, and a link source is not copied.
         let target = t.path().join("target");
         std::fs::write(&target, "secret").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
         let link = from.path().join("l.jsonl");
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(make_private(&link).is_err());
         let into = t.path().join("l.jsonl");
-        let r = move_file(&link, &into);
-        // On one filesystem a rename moves the link itself; across two, the copy refuses it.
-        assert!(r.is_err() || std::fs::symlink_metadata(&into).unwrap().is_symlink());
+        let _ = move_file(&link, &into);
+        assert_eq!(mode(&target), 0o644);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "secret");
         assert!(!into.exists() || std::fs::symlink_metadata(&into).unwrap().is_symlink());
+        // On one filesystem the same: a rename never replaces.
+        let (b, c) = (t.path().join("b"), t.path().join("c"));
+        std::fs::write(&b, "b").unwrap();
+        std::fs::write(&c, "c").unwrap();
+        assert!(move_file(&b, &c).is_err());
+        assert_eq!(std::fs::read_to_string(&c).unwrap(), "c");
+        assert!(rename_noreplace(&b, &c).is_err() && b.exists());
+    }
+
+    #[test]
+    fn the_folder_is_named_with_the_cleaned_id_else_the_file_name_else_session() {
+        let f = Path::new("/s/2026-11-18_abc.jsonl");
+        assert_eq!(entry_id("r1", f), "r1");
+        assert_eq!(entry_id("a/b c", f), "abc");
+        assert_eq!(entry_id("///", f), "2026-11-18_abc");
+        assert_eq!(entry_id("", f), "2026-11-18_abc");
+        assert_eq!(entry_id("///", Path::new("/s/ ?.jsonl")), "session");
+        assert!(valid_id(&entry_id(&"x".repeat(300), f)));
+        // And such a session is deleted into a folder that is listed and restored.
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(t.path());
+        let sessions = super::super::pi::paths(&dirs).sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let file = sessions.join("2026_x.jsonl");
+        std::fs::write(&file, SESSION).unwrap();
+        let p = plan(&dirs, &sessions, &info(file.clone(), "///", None)).unwrap();
+        delete(&p).unwrap();
+        assert_eq!(trashed(&trash_dir(&dirs))[0].id, "2026_x");
+        run(&dirs, &["restore".into(), "2026".into()]).unwrap();
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn an_entry_name_or_an_exact_id_wins_over_a_start_and_a_tie_is_told() {
+        let t = |name: &str| {
+            let (at_ms, id) = entry_name(name).unwrap();
+            Trashed {
+                dir: PathBuf::from(name),
+                name: name.into(),
+                id: id.into(),
+                at_ms,
+                file: PathBuf::new(),
+                info: None,
+            }
+        };
+        let all = [t("5-ab"), t("6-abc"), t("7-abc"), t("8-xyz")];
+        assert!(pick(&all, "").is_err());
+        assert_eq!(pick(&all, "5-ab").unwrap().name, "5-ab");
+        // `ab` is the whole id of one and the start of two others: the exact id wins.
+        assert_eq!(pick(&all, "ab").unwrap().name, "5-ab");
+        assert_eq!(pick(&all, "x").unwrap().name, "8-xyz");
+        // Two entries of one id: the id alone is a tie, the entry name breaks it.
+        assert!(pick(&all, "abc").unwrap_err().contains("more than one"));
+        assert_eq!(pick(&all, "7-abc").unwrap().name, "7-abc");
+        assert!(pick(&all, "a").unwrap_err().contains("more than one"));
+        assert!(
+            pick(&all, "nothing")
+                .unwrap_err()
+                .contains("nothing in the trash")
+        );
     }
 
     #[test]

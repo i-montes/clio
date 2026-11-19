@@ -2020,3 +2020,29 @@ fn a_deleted_session_is_restored_from_the_trash_byte_for_byte() {
             .contains("usage: clio sessions restore")
     );
 }
+
+// What `restore` prints about a file Pi named is cleaned of terminal control, and an empty
+// argument is refused.
+#[test]
+fn restore_prints_nothing_a_terminal_would_act_on() {
+    let e = Env::new();
+    let dir = e.home().join(".local/share/clio/pi/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    for d in [&dir, dir.parent().unwrap()] {
+        std::fs::set_permissions(d, PermissionsExt::from_mode(0o700)).unwrap();
+    }
+    let body = "{\"type\":\"session\",\"id\":\"abc-123\",\"cwd\":\"/x\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hola\"}}\n";
+    let file = dir.join("x\u{1b}[2J\u{1b}]52;c;ZXZpbA==\u{7}_abc-123.jsonl");
+    std::fs::write(&file, body).unwrap();
+    e.clio(&["pi", "sessions", "rm", "abc-123", "--yes"]);
+    assert!(!e.try_clio(&["sessions", "restore", ""]).status.success());
+    let list = e.clio(&["sessions", "restore"]);
+    let out = e.clio(&["sessions", "restore", "abc-123"]);
+    for shown in [&list, &out] {
+        assert!(
+            !shown.chars().any(|c| c.is_control() && c != '\n'),
+            "{shown:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), body);
+}
