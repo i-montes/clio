@@ -29,6 +29,7 @@ pub mod grant;
 pub mod host;
 mod jobs;
 mod judge;
+pub mod manage;
 pub mod mcp;
 mod memory;
 mod ops;
@@ -284,6 +285,8 @@ pub struct ToolHost {
     mcp_off: Option<String>,
     /// The MCP servers this host started, each once (S-70).
     mcp_pool: mcp::Pool,
+    /// When each session called a manage tool (the brake on `manage`).
+    manages: Mutex<HashMap<String, Vec<std::time::Instant>>>,
 }
 
 /// The folders host-mode commands see read-only inside Clio's masked ones: the skills' `live/`
@@ -475,6 +478,7 @@ impl ToolHost {
             mcp: cfg.mcp,
             mcp_off: cfg.mcp_unavailable,
             mcp_pool: pool,
+            manages: Mutex::new(HashMap::new()),
         })
     }
 
@@ -760,6 +764,7 @@ impl ToolHost {
             "mcp_propose" => return self.mcp_propose(&req, &map),
             "mcp_tools" => return self.mcp_tools(&req, &map),
             "mcp_call" => return self.mcp_call(&req, &map),
+            "service_manage" | "skill_manage" | "mcp_manage" => return self.manage(&req, &map),
             _ => {}
         }
         if map

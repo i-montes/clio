@@ -223,7 +223,9 @@ fn made_of(p: &Pending, class: Class) -> Option<SkillOf<'_>> {
                 .collect()
         })
         .unwrap_or_default();
-    (p.class == class).then(|| (s("name"), s("description"), s("skill_md"), files))
+    // A request about what Clio created (`manage`) shares the class, never the shape.
+    (p.class == class && !crate::manage::is_manage(p))
+        .then(|| (s("name"), s("description"), s("skill_md"), files))
 }
 
 /// The person's `clio` sets aside a reviewed skill draft (S-68): `args` holds the whole draft
@@ -329,6 +331,22 @@ pub fn approve_service(
     register: impl FnOnce(&Pending) -> Result<String, String>,
 ) -> Result<Pending, String> {
     approve_made(state, id, (now_ms, granted), Class::Service, register)
+}
+
+/// The person (or, when `granted`, their permission window) approves request `id` about what Clio
+/// created (`manage`): `act` (the person's `clio`, with the person's own commands' functions)
+/// carries it out as it was stored (same hash), once; a failure leaves it waiting.
+pub fn approve_manage(
+    state: &Path,
+    id: &str,
+    (now_ms, granted): (i64, Option<&str>),
+    act: impl FnOnce(&Pending) -> Result<String, String>,
+) -> Result<Pending, String> {
+    let p = check(state, id, now_ms)?;
+    if !crate::manage::is_manage(&p) {
+        return Err(format!("{id} is not a request about what Clio created"));
+    }
+    approve_made(state, id, (now_ms, granted), p.class, act)
 }
 
 /// The action log's rule for an approval: the person's own (`rule`), or a permission window's.

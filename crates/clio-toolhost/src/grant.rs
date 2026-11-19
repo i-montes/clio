@@ -7,11 +7,13 @@
 //! commands.
 //!
 //! A window answers only acts whose effect ends with the act (`covers`): commands of class
-//! `delete`, `spend` and `send`, an `ask` MCP tool call, a skill that would wait. It never answers
-//! `control` (Clio's own commands and folders, the service manager, D-Bus, units, sudoers, keys,
-//! schedulers: from there a fooled model could rewrite this file or schedule a yes), a secret, a
-//! change to the person's blocks, a service or an MCP server: those always ask the person. No
-//! window opens, and an open one closes, while the judge is off.
+//! `delete`, `spend` and `send`, an `ask` MCP tool call, a skill that would wait, and turning what
+//! Clio created back on, back or away (`manage`: `on`, `undo`, `remove`, kept in `removed/`). It
+//! never answers `control` (Clio's own commands and folders, the service manager, D-Bus, units,
+//! sudoers, keys, schedulers: from there a fooled model could rewrite this file or schedule a
+//! yes), a secret, a change to the person's blocks, a new service or MCP server, `on` of what the
+//! person turned off or `remove` of a skill Clio ships: those always ask the person. No window
+//! opens, and an open one closes, while the judge is off.
 //!
 //! What a window approves is recorded before it runs (`begin`) and its outcome after (`done`), in
 //! `<state>/grants/<id>.jsonl`, whose first line is the window itself. A missing or damaged file
@@ -107,17 +109,24 @@ pub fn boot_id() -> Option<String> {
 }
 
 /// May a window answer `p` by itself: only an act whose effect ends with the act (a command of
-/// class delete, spend or send, an `ask` MCP tool call, a skill that would wait). Never control,
-/// a secret, a change to the person's blocks, a service, an MCP server, a tool that changed since
-/// the person confirmed it, or a suspect session's reach out: those always ask the person.
+/// class delete, spend or send, an `ask` MCP tool call, a skill that would wait, `on`, `undo` or
+/// `remove` of what Clio created). Never control, a secret, a change to the person's blocks, a new
+/// service or MCP server, a tool that changed since the person confirmed it, a suspect session's
+/// act, `on` of what the person turned off or `remove` of a shipped skill: those always ask.
 pub fn covers(p: &Pending) -> bool {
+    // Turning back on, back or away what Clio created ends with the act and can be recovered
+    // (`removed/`); one that carries a reason (the person turned it off, a skill Clio ships, a
+    // suspect session) always asks. Registering a service or a server never comes here.
+    let manage = crate::manage::is_manage(p);
     match p.class {
-        Class::Delete | Class::Spend | Class::Skill => true,
+        Class::Delete | Class::Spend => true,
+        Class::Skill => !manage || p.reason.is_none(),
+        Class::Service | Class::Mcp => manage && p.reason.is_none(),
         Class::Send => p
             .reason
             .as_deref()
             .is_none_or(|r| r == crate::mcp::ASK_TOOL),
-        Class::Control | Class::Secret | Class::Memory | Class::Service | Class::Mcp => false,
+        Class::Control | Class::Secret | Class::Memory => false,
     }
 }
 
