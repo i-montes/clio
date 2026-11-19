@@ -17,4 +17,6 @@ pub use normalize::{NormalizedAction, confine, domain_matches, host_of};
 pub use types::{
     ActionRequest, ArgKind, ArgSpec, Budget, Decision, Egress, Outcome, SessionInfo, ToolDecl,
 };
-pub use untrusted::{Html, ModelOutput, OutputError, Session, Source, wrap_untrusted};
+pub use untrusted::{
+    Html, ModelOutput, OutputError, Session, Source, untrusted_tail, wrap_untrusted,
+};
