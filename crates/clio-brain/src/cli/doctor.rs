@@ -850,8 +850,8 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
     if dirs.runtime.is_none() {
         o.say(
             Level::Warn,
-            "XDG_RUNTIME_DIR is not set, the vault sockets cannot be checked".into(),
-            Some("Log in through a normal session so that it exists.".into()),
+            "there is no private runtime folder, the vault sockets cannot be checked".into(),
+            Some("Log in through a normal session (XDG_RUNTIME_DIR), or remove the temporary clio-<uid> folder that is not yours.".into()),
         );
     }
     data_audit(&mut o, &dirs.data);

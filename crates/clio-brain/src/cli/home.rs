@@ -43,9 +43,11 @@ impl Dirs {
             config: home.join(".config/clio"),
             runs: data.join("runs"),
             data,
-            runtime: std::env::var_os("XDG_RUNTIME_DIR")
-                .filter(|v| !v.is_empty())
-                .map(|v| PathBuf::from(v).join("clio")),
+            runtime: runtime_dir(
+                std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()),
+                Path::new("/run/user"),
+                &std::env::temp_dir(),
+            ),
             home,
         })
     }
@@ -77,8 +79,38 @@ impl Dirs {
     pub fn need_runtime(&self) -> Res<&Path> {
         self.runtime
             .as_deref()
-            .ok_or_else(|| "XDG_RUNTIME_DIR is not set (log in through a normal session)".into())
+            .ok_or_else(|| {
+                "no private runtime folder: XDG_RUNTIME_DIR is not set and the temporary one is not this user's".into()
+            })
     }
+}
+
+/// The folder of Clio's sockets, the same for every command: `$XDG_RUNTIME_DIR/clio`; without it
+/// (a container, `su`, cron), `<run_user>/<uid>/clio` when that folder is this user's; else a
+/// private `clio-<uid>` in `tmp`, made 0700 here. `None` when that one is a symlink, someone
+/// else's or open to others: nothing of Clio's goes there.
+pub fn runtime_dir(
+    xdg: Option<std::ffi::OsString>,
+    run_user: &Path,
+    tmp: &Path,
+) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if let Some(x) = xdg {
+        return Some(PathBuf::from(x).join("clio"));
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let ours = |p: &Path, private: bool| {
+        std::fs::symlink_metadata(p)
+            .is_ok_and(|m| m.is_dir() && m.uid() == uid && (!private || m.mode() & 0o077 == 0))
+    };
+    let run = run_user.join(uid.to_string());
+    if ours(&run, false) {
+        return Some(run.join("clio"));
+    }
+    let p = tmp.join(format!("clio-{uid}"));
+    // Born 0700; one already there is checked, never followed.
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&p);
+    ours(&p, true).then_some(p)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -784,6 +816,41 @@ mod tests {
 
     fn cmd(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
+    }
+
+    // Without XDG_RUNTIME_DIR the sockets still have a home: `/run/user/<uid>` when it is ours,
+    // else a private folder made here; a symlink or an open folder there is refused.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_runtime_folder_without_xdg_runtime_dir_is_private_or_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let (run, tmp) = (t.path().join("run"), t.path().join("tmp"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let xdg = Some(std::ffi::OsString::from("/x"));
+        assert_eq!(runtime_dir(xdg, &run, &tmp), Some(PathBuf::from("/x/clio")));
+        // No /run/user/<uid>: a 0700 folder in the temporary one.
+        let p = runtime_dir(None, &run, &tmp).unwrap();
+        assert_eq!(p, tmp.join(format!("clio-{uid}")));
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // Open to others: refused.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(runtime_dir(None, &run, &tmp), None);
+        // A symlink in its place (to a folder of ours, even): refused, never followed.
+        std::fs::remove_dir(&p).unwrap();
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &p).unwrap();
+        assert_eq!(runtime_dir(None, &run, &tmp), None);
+        // `/run/user/<uid>` of ours wins.
+        std::fs::create_dir_all(run.join(uid.to_string())).unwrap();
+        assert_eq!(
+            runtime_dir(None, &run, &tmp),
+            Some(run.join(uid.to_string()).join("clio"))
+        );
     }
 
     // A cap edited by hand is held to 50k–1M when read; a missing one is the default.
