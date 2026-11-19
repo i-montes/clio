@@ -1371,6 +1371,7 @@ mod tests {
             run: waiting_id.into_owned(),
             session: "s".into(),
             created_ms: 0,
+            seq: 0,
             expires_ms: i64::MAX,
             state: State::Waiting,
             reason: None,

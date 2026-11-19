@@ -47,6 +47,10 @@ pub struct Pending {
     pub run: String,
     pub session: String,
     pub created_ms: i64,
+    /// The order it was set aside in this store, for items of the same millisecond (filled by
+    /// `set_aside`; 0 in items older than it, which then go by id).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub seq: u64,
     pub expires_ms: i64,
     pub state: State,
     /// Why it waits when its class alone would not say it (a suspect session reaching out).
@@ -287,6 +291,7 @@ fn set_aside_made(
         run: run.to_owned(),
         session: session.to_owned(),
         created_ms: now,
+        seq: 0,
         expires_ms: now + DAY_MS,
         state: State::Waiting,
         reason: Some(reason.to_owned()),
@@ -543,8 +548,9 @@ fn load(state: &Path, id: &str) -> Result<Pending, String> {
     serde_json::from_str(&text).map_err(|e| format!("pending item {id} is damaged: {e}"))
 }
 
-/// Every pending action of this machine, oldest first. One more than 7 days past its time is
-/// removed here (with its claim), best effort.
+/// Every pending action of this machine, oldest first (of one millisecond, in the order they
+/// were set aside). One more than 7 days past its time is removed here (with its claim), best
+/// effort.
 pub fn list(state: &Path) -> Vec<Pending> {
     let now = now_ms();
     let mut all: Vec<Pending> = fs::read_dir(dir(state))
@@ -563,8 +569,12 @@ pub fn list(state: &Path) -> Vec<Pending> {
             true
         })
         .collect();
-    all.sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
+    all.sort_by(|a, b| (a.created_ms, a.seq, &a.id).cmp(&(b.created_ms, b.seq, &b.id)));
     all
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Why a pending that is not waiting does not run.
@@ -626,7 +636,9 @@ pub fn reject(state: &Path, id: &str) -> Result<Pending, String> {
 /// action in the same session. A session with `MAX_WAITING` items waiting gets no more.
 pub(crate) fn set_aside(state: &Path, mut p: Pending) -> Result<Pending, String> {
     p.hash = hash_of(&p.tool, &p.args);
-    let waiting: Vec<Pending> = list(state)
+    let all = list(state);
+    p.seq = all.iter().map(|o| o.seq).max().unwrap_or(0) + 1;
+    let waiting: Vec<Pending> = all
         .into_iter()
         .filter(|o| {
             o.session == p.session && o.state == State::Waiting && o.expires_ms > p.created_ms
@@ -784,6 +796,7 @@ impl ToolHost {
             run: run.to_owned(),
             session: req.session.clone(),
             created_ms: now,
+            seq: 0,
             expires_ms: now + DAY_MS,
             state: State::Waiting,
             reason: reason.map(str::to_owned),
@@ -1142,6 +1155,7 @@ impl ToolHost {
             run: cfg.run.clone(),
             session: req.session.clone(),
             created_ms: now,
+            seq: 0,
             expires_ms: now + DAY_MS,
             state: State::Waiting,
             reason: None,
@@ -1188,6 +1202,7 @@ fn tests_item_at(session: &str, n: usize, now: i64) -> Pending {
         run: "r".into(),
         session: session.into(),
         created_ms: now,
+        seq: 0,
         expires_ms: now + DAY_MS,
         state: State::Waiting,
         reason: None,
@@ -1211,6 +1226,7 @@ mod tests {
             run: "r".into(),
             session: "s".into(),
             created_ms: 0,
+            seq: 0,
             expires_ms: 1,
             state: State::Waiting,
             reason: None,
@@ -1274,6 +1290,23 @@ mod tests {
         // One answered makes room.
         reject(t.path(), &ids[0]).unwrap();
         assert!(set_aside(t.path(), item("s", 99, now)).is_ok());
+    }
+
+    // Items of the same millisecond are listed in the order they were set aside, whatever their
+    // ids; an older item without a sequence goes first, by time.
+    #[test]
+    fn items_of_one_millisecond_are_listed_as_they_were_set_aside() {
+        let t = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let mut old = item("s", 100, now - 1);
+        old.id = "ffffffff".into();
+        save(t.path(), &old).unwrap();
+        let ids: Vec<String> = (0..8)
+            .map(|n| set_aside(t.path(), item("s", n, now)).unwrap().id)
+            .collect();
+        let listed: Vec<String> = list(t.path()).into_iter().map(|p| p.id).collect();
+        assert_eq!(listed[0], "ffffffff");
+        assert_eq!(listed[1..], ids[..]);
     }
 
     // A permission window never answers a secret request: the value is the person's to type.

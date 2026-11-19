@@ -299,6 +299,7 @@ fn tell(
         run: run_id.to_owned(),
         session: session.to_owned(),
         created_ms: r.at_ms,
+        seq: 0,
         expires_ms: r.at_ms,
         state: State::Waiting,
         reason: None,

@@ -1266,6 +1266,7 @@ pub(super) fn mcp_call_ask(arguments: &serde_json::Value) -> super::ask::BlockAs
         run: "r1".into(),
         session: "sid".into(),
         created_ms: 0,
+        seq: 0,
         expires_ms: 1,
         state: clio_toolhost::pending::State::Waiting,
         reason: Some("this tool of the server may change something".into()),

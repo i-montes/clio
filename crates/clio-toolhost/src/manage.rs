@@ -591,6 +591,7 @@ impl ToolHost {
             run: h.cfg.run.clone(),
             session: req.session.clone(),
             created_ms: now,
+            seq: 0,
             expires_ms: now + 24 * 3600 * 1000,
             state: State::Waiting,
             reason: reason.map(str::to_owned),
