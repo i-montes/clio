@@ -794,7 +794,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 			name: "service_write",
 			label: "service_write",
 			description:
-				"Propose a service, or a new version of one (same name = update): a program that runs by itself on a schedule (every N minutes, hours or days; daily at a time), with no model, as the person, the machine read-only except its state folder ($CLIO_STATE_DIR) and the paths in `writes`, and the network only to the hosts in `network`. Exit 0 when all is well, 10 when the person should look, anything else on a failure. It is never registered by itself: Clio's judge reads it, a reviewer runs `verify`, and then the person approves it or not. The result comes by itself with a later message. Read the service-creator skill first.",
+				"Propose a service, or a new version of one (same name = update): a program that runs by itself on a schedule (every N minutes, hours or days; daily at a time), with no model, as the person, the machine read-only except its state folder ($CLIO_STATE_DIR) and the paths in `writes`, nothing of the home visible but its own folder and the paths in `reads`, and the network only to the hosts in `network`. Exit 0 when all is well, 10 when the person should look, anything else on a failure. It is never registered by itself: Clio's judge reads it, a reviewer runs `verify`, and then the person approves it or not. The result comes by itself with a later message. Read the service-creator skill first.",
 			promptSnippet: "Propose a scheduled program (the person approves it).",
 			promptGuidelines: [
 				"service_write: only when the person wants something done again and again on a schedule; read the service-creator skill first; never a secret in it (declare it in `secrets`). Nothing else turns a service on, off or runs it: the person does.",
@@ -842,7 +842,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 							additionalProperties: false,
 						},
 					},
-					writes: LIST("Absolute paths under the home it may write besides its state folder.", 10),
+					writes: LIST("Absolute paths under the home it may write besides its state folder: existing, no name starting with a dot, no repository or code inside.", 10),
+					reads: LIST("Absolute paths under the home it may read (read-only); nothing else of the home is visible to it. Existing; never the home itself, ~/.ssh, ~/.gnupg or Clio's folders.", 10),
 					limits: {
 						type: "object",
 						properties: {

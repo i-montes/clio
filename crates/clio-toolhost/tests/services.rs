@@ -77,6 +77,7 @@ fn env_with(host: bool, judge_on: bool) -> Env {
         network: vec![],
         secrets: vec![],
         writes: vec![],
+        reads: vec![],
         limits: services::DEFAULT_LIMITS,
     };
     let v = svc.join("versions/backup/1");
@@ -199,13 +200,17 @@ fn service_write_stores_a_judged_draft_and_touches_no_service() {
 }
 
 // S-69: a schedule under 5 minutes or in cron, a secret in the text, a write path that is Clio's,
-// ~/.ssh or a shell's start file, a secret for an undeclared host, limits over the maximum, an
-// order hidden in a file, or no judge: refused, nothing stored.
+// ~/.ssh, a shell's start file, under a dot name, a repository or not there, a read path that is
+// the home, ~/.ssh or Clio's, a host of the machine's own network, a secret for an undeclared
+// host, limits over the maximum, an order hidden in a file, or no judge: refused, nothing stored.
 #[test]
 fn a_service_draft_that_fails_a_check_is_refused_and_nothing_is_stored() {
     let e = env_with(true, true);
     let home = e.home.display().to_string();
     let data = e.data.display().to_string();
+    for d in [".ssh", ".config/git", "project/.git"] {
+        std::fs::create_dir_all(e.home.join(d)).unwrap();
+    }
     for (k, v) in [
         ("schedule", json!({"every": "1m"})),
         ("schedule", json!({"every": "*/5 * * * *"})),
@@ -220,6 +225,14 @@ fn a_service_draft_that_fails_a_check_is_refused_and_nothing_is_stored() {
         ("writes", json!([format!("{data}/services")])),
         ("writes", json!(["/etc/cron.d"])),
         ("writes", json!([format!("{home}/x/../.ssh")])),
+        ("writes", json!([format!("{home}/project")])),
+        ("writes", json!([format!("{home}/.config/git")])),
+        ("writes", json!([format!("{home}/not-there")])),
+        ("reads", json!([home.clone()])),
+        ("reads", json!([format!("{home}/.ssh")])),
+        ("reads", json!([format!("{data}/services")])),
+        ("network", json!(["db.localhost"])),
+        ("network", json!(["metadata.google.internal"])),
         (
             "secrets",
             json!([{"name": "k", "env": "K", "host": "evil.example.com"}]),

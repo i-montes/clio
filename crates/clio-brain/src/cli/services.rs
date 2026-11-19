@@ -11,9 +11,13 @@
 //! - `locks/<name>.lock`: held while it runs; a run due meanwhile is skipped.
 //!
 //! A run: the version's files must still be what was approved (else it pauses), its secrets come
-//! from the vault only for its declared hosts (else it waits), and the host launcher runs it as
-//! the person with the machine read-only but its state folder and declared paths, no new
-//! privileges, its limits, and the network only through an allow-list proxy of its hosts.
+//! from the vault only when the vault lets each go to every one of its hosts (else it waits, and
+//! is tried again at most every 15 minutes), and the host launcher runs it under bwrap as the
+//! person: the machine read-only, nothing of the home but its version folder, the paths it
+//! declared to read (read-only) and to write, its state folder; `/run` hidden; no new privileges;
+//! its limits (a transient user scope's cgroup when one starts, else per process); `umask 077`;
+//! and the network only through an allow-list proxy of its hosts that connects only to public
+//! addresses.
 
 use std::fs;
 use std::io::Read;
@@ -36,6 +40,8 @@ pub const PAUSED_FAILS: &str = "paused: three failed runs in a row";
 pub const PAUSED_CHANGED: &str = "paused: its files changed on disk after it was approved";
 /// Notices kept.
 const KEPT_NOTICES: usize = 50;
+/// A service waiting for the vault or a secret is tried again by the timer at most this often.
+pub const WAIT_RETRY_MS: i64 = 15 * 60_000;
 /// The timer's two units, in `~/.config/systemd/user`.
 pub const UNITS: [&str; 2] = ["clio-services.service", "clio-services.timer"];
 
@@ -158,6 +164,13 @@ pub fn register_approved(d: &Dirs, p: &clio_toolhost::pending::Pending) -> Res<S
         .find_map(|w| sv::write_refused(w, &d.home, &d.control()))
     {
         return Err(format!("writes: {why}: nothing was registered"));
+    }
+    if let Some(why) = m
+        .reads
+        .iter()
+        .find_map(|r| sv::read_refused(r, &d.home, &d.control()))
+    {
+        return Err(format!("reads: {why}: nothing was registered"));
     }
     // Stored in path order: what a run reads back from the folder is hashed the same way.
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -340,6 +353,12 @@ impl<'a> Runner<'a> {
     /// Runs `name` now (`by`: `timer` or `person`): `Ok(None)` when it was skipped because a run
     /// of it is still going. Every other end is a recorded run.
     pub fn run(&self, name: &str, by: &str) -> Res<Option<Run>> {
+        self.run_checked(name, by, None)
+    }
+
+    /// `run`; with `due_at`, only if it is still due then once its lock is taken (`due_now`):
+    /// a run started meanwhile, or a wait less than 15 minutes ago, makes it `Ok(None)`.
+    pub fn run_checked(&self, name: &str, by: &str, due_at: Option<i64>) -> Res<Option<Run>> {
         let root = root(self.dirs);
         let r =
             skills::record(&root, name).ok_or_else(|| format!("there is no service «{name}»"))?;
@@ -362,6 +381,12 @@ impl<'a> Runner<'a> {
         if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
             return Ok(None);
         }
+        if let Some(now) = due_at
+            && !due_now(&root, name, now)?
+        {
+            return Ok(None);
+        }
+        let prev = sv::runs(&root, name).last().cloned();
         let start = now_ms();
         let began = std::time::Instant::now();
         let mut run = Run {
@@ -373,6 +398,7 @@ impl<'a> Runner<'a> {
             why: String::new(),
             tail: String::new(),
             by: by.into(),
+            limits: String::new(),
         };
         let m = match verified(&root, &r) {
             Ok(m) => m,
@@ -393,13 +419,14 @@ impl<'a> Runner<'a> {
             run.why = why;
         }
         save_run(&root, name, run.clone())?;
-        self.after(&root, name, &run);
+        self.after(&root, name, &run, prev.as_ref());
         self.log(name, &run, !m.network.is_empty());
         Ok(Some(run))
     }
 
-    /// The failures in a row, the pause after the third, and the notice of an `attention`.
-    fn after(&self, root: &Path, name: &str, run: &Run) {
+    /// The failures in a row, the pause after the third, the notice of an `attention`, and of a
+    /// wait once (not again while it waits for the same thing).
+    fn after(&self, root: &Path, name: &str, run: &Run, prev: Option<&Run>) {
         let mut paused = false;
         let counted = update_record(root, name, |r| match run.outcome.as_str() {
             "ok" | "attention" => r.failures = 0,
@@ -423,13 +450,29 @@ impl<'a> Runner<'a> {
                 &format!("{PAUSED_FAILS}; clio services logs {name} shows why"),
             );
         }
+        if run.outcome == "waiting"
+            && !prev.is_some_and(|p| p.outcome == "waiting" && p.why == run.why)
+        {
+            notice(
+                root,
+                name,
+                &format!(
+                    "{}; it is tried again every {} minutes",
+                    run.why,
+                    WAIT_RETRY_MS / 60_000
+                ),
+            );
+        }
         if run.outcome == "attention" {
-            let first: Vec<&str> = run
+            // Its last lines: a service prints why last.
+            let mut first: Vec<&str> = run
                 .tail
                 .lines()
+                .rev()
                 .filter(|l| !l.trim().is_empty())
                 .take(3)
                 .collect();
+            first.reverse();
             notice(
                 root,
                 name,
@@ -471,18 +514,27 @@ impl<'a> Runner<'a> {
         let control = d.control();
         let mut writable = vec![state_dir(root, &r.name)];
         mkdir_private(&writable[0])?;
+        // Checked again before each run: what is there now, not what was there at approval.
         for w in &m.writes {
             if let Some(why) = sv::write_refused(w, &d.home, &control) {
                 return Err(format!("writes: {why}"));
             }
-            let p = PathBuf::from(w);
-            match p.canonicalize() {
-                Ok(c) if c == p => writable.push(p),
-                Ok(_) => return Err(format!("{w}: a link is never a write path")),
-                Err(_) => return Err(format!("{w} does not exist")),
-            }
+            writable.push(PathBuf::from(w));
         }
-        // The secrets: only from the vault, only for a declared host, only as their variable.
+        let vdir = skills::version_dir(root, &r.name, r.current);
+        let mut shows = vec![vdir.clone()];
+        for p in &m.reads {
+            if let Some(why) = sv::read_refused(p, &d.home, &control) {
+                return Err(format!("reads: {why}"));
+            }
+            shows.push(PathBuf::from(p));
+        }
+        // The forwarder (`clio pi-net`) runs inside: the binary is shown when the home hides it.
+        if self.exe.starts_with(&d.home) {
+            shows.push(self.exe.clone());
+        }
+        // The secrets: only from the vault, only when it lets each go to every declared host (the
+        // run can send it to any of them), only as their variable.
         let scrub = Scrubber::default();
         let mut input = Vec::new();
         let mut prefix = String::new();
@@ -493,16 +545,28 @@ impl<'a> Runner<'a> {
                 return Ok(());
             };
             let vault = VaultClient::new(g);
+            let trace = format!("service:{}", r.name);
+            let wait = |e: &VaultError, name: &str, host: &str| match e {
+                VaultError::Locked => "waiting for the vault (it is locked)".to_owned(),
+                VaultError::Io(_) => "waiting for the vault (it is not running)".into(),
+                _ => format!(
+                    "waiting for the secret {name} to be allowed to reach {host} (clio vault put {name} --dest service:{host})"
+                ),
+            };
             for s in &m.secrets {
-                if !m.network.contains(&s.host) {
+                if !m.network.iter().any(|h| sv::host_of(h) == s.host) {
                     return Err(format!("the secret {} is for an undeclared host", s.name));
                 }
-                match vault.resolve(
-                    &s.name,
-                    "service",
-                    sv::host_of(&s.host),
-                    &format!("service:{}", r.name),
-                ) {
+                for h in &m.network {
+                    if let Err(e) = vault.check(&s.name, "service", Some(sv::host_of(h)), &trace) {
+                        run.outcome = "waiting".into();
+                        run.why = wait(&e, &s.name, sv::host_of(h));
+                        return Ok(());
+                    }
+                }
+            }
+            for s in &m.secrets {
+                match vault.resolve(&s.name, "service", &s.host, &trace) {
                     Ok(v) => {
                         scrub.add(&s.name, v.expose());
                         input.extend_from_slice(v.expose().as_bytes());
@@ -515,21 +579,14 @@ impl<'a> Runner<'a> {
                     Err(e) => {
                         input.fill(0);
                         run.outcome = "waiting".into();
-                        run.why = match e {
-                            VaultError::Locked => "waiting for the vault (it is locked)".into(),
-                            VaultError::Io(_) => "waiting for the vault (it is not running)".into(),
-                            _ => format!(
-                                "waiting for the secret {} (clio vault put {} --dest service:{})",
-                                s.name,
-                                s.name,
-                                sv::host_of(&s.host)
-                            ),
-                        };
+                        run.why = wait(&e, &s.name, &s.host);
                         return Ok(());
                     }
                 }
             }
         }
+        // What it writes is its own: private, as everything of Clio's (S-23).
+        let prefix = format!("umask 077; {prefix}");
         let mut env = vec![
             (
                 "CLIO_STATE_DIR".to_owned(),
@@ -537,14 +594,12 @@ impl<'a> Runner<'a> {
             ),
             ("CLIO_SERVICE".to_owned(), r.name.clone()),
         ];
-        let vdir = skills::version_dir(root, &r.name, r.current);
-        let mut shows = vec![vdir.clone()];
         let mut command = format!("{prefix}exec </dev/null; {}", m.command);
         let proxy = if m.network.is_empty() {
             None
         } else {
             let allow: Vec<String> = m.network.iter().filter_map(|h| sv::host_port(h)).collect();
-            let p = clio_brain::pi::net::EgressProxy::start_many(&self.proxy_parent, &allow)?;
+            let p = clio_brain::pi::net::EgressProxy::start_service(&self.proxy_parent, &allow)?;
             shows.push(p.dir().to_path_buf());
             for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
                 env.push((k.into(), clio_brain::pi::net::PROXY_URL.into()));
@@ -559,13 +614,11 @@ impl<'a> Runner<'a> {
             Some(p)
         };
         let mut masks = control;
-        // `/run` too: the person's D-Bus (`systemd-run --user` would start something outside the
-        // jail), Docker's socket and the vault's sockets live there; the proxy folder is a window.
-        masks.extend([
-            d.home.join(".ssh"),
-            d.home.join(".gnupg"),
-            PathBuf::from("/run"),
-        ]);
+        // The whole home: its sockets (what starts programs: a process manager, a terminal
+        // multiplexer) and its credentials; and `/run`: the person's D-Bus (`systemd-run --user`
+        // would start something outside the jail), Docker's socket and the vault's sockets. The
+        // version folder, the declared paths and the proxy folder are windows.
+        masks.extend([d.home.clone(), PathBuf::from("/run")]);
         let job = ServiceRun {
             job: HostJob {
                 command,
@@ -585,7 +638,8 @@ impl<'a> Runner<'a> {
         };
         let out = self.jail.run_service(&job, input, &|| false);
         drop(proxy);
-        let out = out?;
+        let (out, scoped) = out?;
+        run.limits = if scoped { "cgroup" } else { "per-process" }.into();
         let both = format!("{}{}", out.stdout, out.stderr);
         // Its own secrets by value, then the vault's (every secret it holds); a vault that cannot
         // filter means the output is not kept.
@@ -626,33 +680,93 @@ impl<'a> Runner<'a> {
     }
 }
 
-/// Everything due now, one after the other (`clio services run-due`, from the timer).
+/// Whether `name` runs now from the timer: on, due by its schedule, and not waiting for the
+/// vault or a secret since less than `WAIT_RETRY_MS`. `Err`: its manifest does not read.
+fn due_now(root: &Path, name: &str, now: i64) -> Res<bool> {
+    let Some(rec) = sv::record(root, name) else {
+        return Ok(false);
+    };
+    if rec["enabled"] != serde_json::Value::Bool(true) {
+        return Ok(false);
+    }
+    let m = sv::current_manifest(root, &rec).ok_or("its manifest does not read")?;
+    let runs = sv::runs(root, name);
+    if runs
+        .last()
+        .is_some_and(|l| l.outcome == "waiting" && now - l.start_ms < WAIT_RETRY_MS)
+    {
+        return Ok(false);
+    }
+    Ok(sv::due(
+        &m.schedule,
+        sv::last_start(&runs),
+        sv::since_of(&rec),
+        now,
+        sv::local_offset(now),
+    ))
+}
+
+/// Starts `<exe> services run-timer <name>` in a transient user scope of its own and does not
+/// wait for it: `Ok` once it is in its scope (out of the timer's unit, which may then end without
+/// stopping it) or already ended well. `Err`: no scope (it ran nothing).
+fn start_detached(systemd_run: &Path, exe: &Path, name: &str) -> Res<()> {
+    let mut child = std::process::Command::new(systemd_run)
+        .args(["--user", "--scope", "--quiet", "--collect", "--"])
+        .arg(exe)
+        .args(["services", "run-timer", name])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", systemd_run.display()))?;
+    let mine = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            return if st.success() {
+                Ok(())
+            } else {
+                Err(format!("its scope did not start ({st})"))
+            };
+        }
+        let theirs = fs::read_to_string(format!("/proc/{}/cgroup", child.id())).unwrap_or_default();
+        if !theirs.is_empty() && theirs != mine {
+            return Ok(());
+        }
+        if std::time::Instant::now() > until {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("its scope did not start in 10 s".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Everything due now (`clio services run-due`, from the timer). With scopes (the launcher's
+/// `systemd-run`), each in its own, not waited for: a slow one holds up no other, and its lock
+/// keeps two runs of it apart. Else, or when its scope does not start, one after the other.
 pub fn run_due(runner: &Runner<'_>, now: i64) -> Vec<String> {
     let root = root(runner.dirs);
-    let offset = sv::local_offset(now);
     let mut out = vec![];
     for r in skills::records(&root) {
-        if !r.enabled {
-            continue;
+        match due_now(&root, &r.name, now) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                out.push(format!("{}: {e}", r.name));
+                continue;
+            }
         }
-        let Some(rec) = sv::record(&root, &r.name) else {
-            continue;
-        };
-        let Some(m) = sv::current_manifest(&root, &rec) else {
-            out.push(format!("{}: its manifest does not read", r.name));
-            continue;
-        };
-        let runs = sv::runs(&root, &r.name);
-        if !sv::due(
-            &m.schedule,
-            sv::last_start(&runs),
-            sv::since_of(&rec),
-            now,
-            offset,
-        ) {
-            continue;
+        if let Some(sr) = runner.jail.scope() {
+            match start_detached(sr, &runner.exe, &r.name) {
+                Ok(()) => {
+                    out.push(format!("{}: started in a scope of its own", r.name));
+                    continue;
+                }
+                Err(e) => eprintln!("clio services: «{}»: {e}; it runs here", r.name),
+            }
         }
-        out.push(match runner.run(&r.name, "timer") {
+        out.push(match runner.run_checked(&r.name, "timer", Some(now)) {
             Ok(Some(x)) => format!("{}: {}", r.name, x.outcome),
             Ok(None) => format!("{}: skipped, a run of it is still going", r.name),
             Err(e) => format!("{}: {e}", r.name),
@@ -687,7 +801,7 @@ fn units(exe: &Path) -> Res<[(&'static str, String); 2]> {
         (
             UNITS[0],
             format!(
-                "# Written by `clio services enable`; `clio services disable` removes it.\n[Unit]\nDescription=Clio's services: run what is due\n\n[Service]\nType=oneshot\nExecStart={e} services run-due\nNoNewPrivileges=yes\n"
+                "# Written by `clio services enable`; `clio services disable` removes it.\n[Unit]\nDescription=Clio's services: run what is due\n\n[Service]\nType=oneshot\nExecStart={e} services run-due\nNoNewPrivileges=yes\nUMask=0077\n"
             ),
         ),
         (
@@ -774,6 +888,34 @@ pub fn disable_in(home: &Path, systemctl: Option<&Path>) -> Res<Vec<String>> {
     }
     out.push("the timer is off: services run only with clio services run <name>".into());
     Ok(out)
+}
+
+/// Draft time (S-69): a secret of `m` the vault, as it is now, does not let go to one of `m`'s
+/// hosts (the run could send it to any of them), and why; `None` when it lets each go to all, or
+/// cannot say yet (not running, locked, the secret not stored: each run then waits until it can).
+pub fn secret_hosts_refused(d: &Dirs, m: &Manifest) -> Option<String> {
+    let g = super::vault::gateway_socket(d).ok()?;
+    secret_hosts_refused_by(&VaultClient::new(&g), m)
+}
+
+fn secret_hosts_refused_by(vault: &VaultClient, m: &Manifest) -> Option<String> {
+    for s in &m.secrets {
+        for h in &m.network {
+            let host = sv::host_of(h);
+            if let Err(VaultError::Denied(_)) = vault.check(
+                &s.name,
+                "service",
+                Some(host),
+                &format!("service:{}", m.name),
+            ) {
+                return Some(format!(
+                    "the secret {} may not go to {host}, and the service could send it to every host in network: declare only hosts the vault lets that secret go to, or ask the person to allow it (clio vault put {} --dest service:{host})",
+                    s.name, s.name
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// For `clio doctor`: services are on, and bwrap is missing or the timer is not active.
@@ -864,10 +1006,15 @@ fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
     let mut out = vec![];
     for r in runs.iter().rev() {
         out.push(super::tui::sanitize::line(&format!(
-            "{} · v{} · by {}",
+            "{} · v{} · by {}{}",
             sv::run_line(r, now, offset),
             r.version,
-            r.by
+            r.by,
+            if r.limits.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} limits", r.limits)
+            }
         )));
         out.extend(
             r.tail
@@ -886,7 +1033,9 @@ vault's sockets through another process's /proc/<pid>/root";
 /// The launcher a service runs under: bwrap, whose own pid namespace and /proc hide every other
 /// process, or a refusal that says why.
 fn service_jail() -> Res<HostJail> {
-    HostJail::with(clio_node::Launcher::Bwrap).map_err(|e| format!("{NOT_SYSTEMD}; and bwrap: {e}"))
+    HostJail::with(clio_node::Launcher::Bwrap)
+        .map(HostJail::with_user_scopes)
+        .map_err(|e| format!("{NOT_SYSTEMD}; and bwrap: {e}"))
 }
 
 fn run_now(d: &Dirs, name: &str) -> Res<String> {
@@ -969,6 +1118,17 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
             let jail = service_jail()?;
             let runner = Runner::new(d, &jail)?;
             print(run_due(&runner, now_ms()))
+        }
+        // One service from `run-due`, in its own scope: only if it is still due.
+        Some("run-timer") => {
+            let n = name()?;
+            let jail = service_jail()?;
+            let runner = Runner::new(d, &jail)?;
+            match runner.run_checked(&n, "timer", Some(now_ms()))? {
+                Some(r) => println!("{n}: {}", r.outcome),
+                None => println!("{n}: not due, or a run of it is still going"),
+            }
+            Ok(())
         }
         Some(other) => Err(format!(
             "clio services: unknown {other:?} (list, show, on, off, undo, remove, run, logs, enable, disable, run-due)"
@@ -1076,6 +1236,7 @@ mod tests {
             network: vec![],
             secrets: vec![],
             writes: vec![],
+            reads: vec![],
             limits: sv::Limits {
                 cpu_percent: 50,
                 memory_mb: 512,
@@ -1110,6 +1271,10 @@ mod tests {
     fn bwrap() -> Option<HostJail> {
         let h = HostJail::with(Launcher::Bwrap).ok()?;
         let t = tmp();
+        if t.path().starts_with("/tmp") {
+            eprintln!("SKIPPED (the build folder is under /tmp, which a run does not see)");
+            return None;
+        }
         let j = HostJob {
             command: "true".into(),
             cwd: t.path().into(),
@@ -1502,6 +1667,49 @@ mod tests {
         }
         assert_eq!(sv::runs(&root(&d), "web").len(), 1);
         assert_eq!(skills::record(&root(&d), "web").unwrap().failures, 0);
+        // The person is told once, not on every try.
+        let told = take_notices(&d);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].contains("web-key") && told[0].contains("15 minutes"),
+            "{told:?}"
+        );
+
+        // A host declared with its port: the secret's host is its name (fix: it failed every run).
+        let mut ported = manifest("ported", "echo \"len ${#STATUS_KEY}\"");
+        ported.network = vec!["api.example.com:8443".into()];
+        ported.secrets = m.secrets.clone();
+        approve(&d, &ported, &[]);
+        let x = r.run("ported", "timer").unwrap().unwrap();
+        assert_eq!(x.outcome, "ok", "{x:?}");
+        assert!(x.tail.contains(&format!("len {}", VALUE.len())), "{x:?}");
+
+        // A second host the vault does not let the secret go to: the run could send it there,
+        // so it waits (not a failure) and nothing runs; the draft is refused when the vault can
+        // already tell, and not when it cannot (a secret not stored yet).
+        let mut two = manifest("two", "echo \"ran $STATUS_KEY\"");
+        two.network = vec!["api.example.com".into(), "other.example.net".into()];
+        two.secrets = m.secrets.clone();
+        let vc = VaultClient::new(&rt.join("vault-gateway.sock"));
+        let why = secret_hosts_refused_by(&vc, &two).unwrap();
+        assert!(
+            why.contains("status-key") && why.contains("other.example.net"),
+            "{why}"
+        );
+        assert_eq!(secret_hosts_refused_by(&vc, &m), None);
+        assert_eq!(secret_hosts_refused_by(&vc, &ported), None);
+        let mut unknown = two.clone();
+        unknown.secrets[0].name = "not-stored-yet".into();
+        assert_eq!(secret_hosts_refused_by(&vc, &unknown), None);
+        approve(&d, &two, &[]);
+        let x = r.run("two", "timer").unwrap().unwrap();
+        assert_eq!(x.outcome, "waiting", "{x:?}");
+        assert!(
+            x.why.contains("other.example.net") && !x.tail.contains("ran"),
+            "{x:?}"
+        );
+        assert_eq!(skills::record(&root(&d), "two").unwrap().failures, 0);
+        let _ = take_notices(&d);
 
         // A service that declared nothing gets nothing.
         approve(&d, &manifest("none", "echo \"key [$STATUS_KEY]\""), &[]);
@@ -1513,8 +1721,9 @@ mod tests {
                 .contains("key []")
         );
 
-        // The vault locked, then no vault: waits.
+        // The vault locked, then no vault: waits; nothing can be told at draft time.
         v.lock();
+        assert_eq!(secret_hosts_refused_by(&vc, &two), None);
         let x = r.run("with-key", "timer").unwrap().unwrap();
         assert_eq!(
             (x.outcome.as_str(), x.why.contains("locked")),
@@ -1584,7 +1793,8 @@ mod tests {
         }
         let svc = fs::read_to_string(units.join(UNITS[0])).unwrap();
         assert!(
-            svc.contains("ExecStart=/usr/local/bin/clio services run-due"),
+            svc.contains("ExecStart=/usr/local/bin/clio services run-due")
+                && svc.contains("\nUMask=0077\n"),
             "{svc}"
         );
         let timer = fs::read_to_string(units.join(UNITS[1])).unwrap();
@@ -1648,5 +1858,243 @@ mod tests {
             run_due(&r, now + 9 * 3_600_000).is_empty(),
             "an off service is not run"
         );
+    }
+
+    /// A Unix socket at `path` (this test's own), accepting.
+    fn listening(path: &Path) -> std::os::unix::net::UnixListener {
+        let l = std::os::unix::net::UnixListener::bind(path).unwrap();
+        let c = l.try_clone().unwrap();
+        std::thread::spawn(move || {
+            for s in c.incoming().flatten() {
+                drop(s);
+            }
+        });
+        l
+    }
+
+    // S-69, with `bwrap`: a run sees nothing of the home but what it declared. A socket in the
+    // home (a process manager's, a terminal multiplexer's: the way out of the jail) cannot be
+    // connected to; a file outside `reads` and a credentials folder cannot be read; a declared
+    // read path is read and not written; what it writes is private (`umask 077`).
+    #[test]
+    fn a_run_sees_nothing_of_the_home_but_what_it_declared() {
+        let Some(jail) = bwrap() else { return };
+        if !Path::new("/usr/bin/python3").is_file() {
+            eprintln!("SKIPPED (no python3 to connect with; nothing was tested)");
+            return;
+        }
+        let t = tmp();
+        let d = dirs_in(t.path());
+        let r = runner(&d, &jail, t.path());
+        let (notes, out) = (d.home.join("notes"), d.home.join("out"));
+        for p in [&notes, &out, &d.home.join(".aws")] {
+            fs::create_dir_all(p).unwrap();
+        }
+        fs::write(notes.join("a.txt"), "the notes\n").unwrap();
+        fs::write(d.home.join("secret.txt"), "not declared").unwrap();
+        fs::write(d.home.join(".aws/credentials"), "aws key").unwrap();
+        let sock = d.home.join("pm.sock");
+        let _l = listening(&sock);
+        let q = |p: &Path| quote(&p.display().to_string());
+        let script = format!(
+            "python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' {sock} 2>/dev/null && echo LEAK socket\n\
+             cat {secret} 2>/dev/null && echo LEAK secret\n\
+             cat {aws} 2>/dev/null && echo LEAK aws\n\
+             cat {notes}/a.txt\n\
+             echo x > {notes}/new 2>/dev/null && echo LEAK wrote-a-read-path\n\
+             echo s > \"$CLIO_STATE_DIR/s\"\n\
+             echo o > {out}/o\n",
+            sock = q(&sock),
+            secret = q(&d.home.join("secret.txt")),
+            aws = q(&d.home.join(".aws/credentials")),
+            notes = q(&notes),
+            out = q(&out),
+        );
+        let mut m = manifest("reader", "bash run.sh");
+        m.reads = vec![notes.display().to_string()];
+        m.writes = vec![out.display().to_string()];
+        approve(
+            &d,
+            &m,
+            &[SkillFile {
+                path: "run.sh".into(),
+                content: script,
+            }],
+        );
+        let x = r.run("reader", "person").unwrap().unwrap();
+        assert_eq!(x.outcome, "ok", "{x:?}");
+        assert!(!x.tail.contains("LEAK"), "{}", x.tail);
+        assert!(x.tail.contains("the notes"), "{}", x.tail);
+        assert_eq!(x.limits, "per-process");
+        assert!(!notes.join("new").exists());
+        for f in [root(&d).join("state/reader/s"), out.join("o")] {
+            assert_eq!(
+                fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "{}",
+                f.display()
+            );
+        }
+        // Outside the jail the socket does connect: the check above is a real one.
+        assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+    }
+
+    // S-69: a service waiting for the vault is tried again by the timer at most every 15
+    // minutes; a run held by its lock, or no longer due once the lock is taken, is skipped.
+    #[test]
+    fn a_waiting_service_backs_off_and_the_lock_and_due_are_checked_again() {
+        let Some(jail) = bwrap() else { return };
+        let t = tmp();
+        let d = dirs_in(t.path());
+        let mut r = runner(&d, &jail, t.path());
+        r.gateway = None;
+        let mut m = manifest("keyed", "true");
+        m.network = vec!["api.example.com".into()];
+        m.secrets = vec![sv::SecretUse {
+            name: "k".into(),
+            env: "K".into(),
+            host: "api.example.com".into(),
+        }];
+        approve(&d, &m, &[]);
+        let now = now_ms();
+        assert_eq!(run_due(&r, now), ["keyed: waiting"]);
+        assert!(
+            run_due(&r, now + 60_000).is_empty(),
+            "not again a minute later"
+        );
+        assert!(run_due(&r, now + WAIT_RETRY_MS - 60_000).is_empty());
+        assert_eq!(
+            run_due(&r, now + WAIT_RETRY_MS + 60_000),
+            ["keyed: waiting"]
+        );
+        assert_eq!(take_notices(&d).len(), 1, "told once");
+        // The person can still run it by hand.
+        assert_eq!(
+            r.run("keyed", "person").unwrap().unwrap().outcome,
+            "waiting"
+        );
+
+        approve(&d, &manifest("busy", "true"), &[]);
+        let lp = root(&d).join("locks/busy.lock");
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lp)
+            .unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        assert!(r.run_checked("busy", "timer", Some(now)).unwrap().is_none());
+        drop(held);
+        let x = r.run_checked("busy", "timer", Some(now)).unwrap().unwrap();
+        assert_eq!(x.outcome, "ok");
+        // It ran meanwhile: no longer due when its lock is taken again.
+        assert!(r.run_checked("busy", "timer", Some(now)).unwrap().is_none());
+    }
+
+    /// A stand-in for `systemd-run` in `dir`: logs its arguments; `ok` exits 0 without running
+    /// anything (as a scope that took the command away), else fails (no scope).
+    fn fake_systemd_run(dir: &Path, ok: bool) -> PathBuf {
+        let p = dir.join(if ok { "sr-ok" } else { "sr-fails" });
+        fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"$0.log\"\nexit {}\n",
+                if ok { 0 } else { 1 }
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    // S-69: with scopes, each due service starts in its own (`clio services run-timer <name>`)
+    // and is not waited for; when its scope does not start, it runs here as before.
+    #[test]
+    fn run_due_starts_each_service_in_its_own_scope_or_runs_it_here() {
+        let Some(jail) = bwrap() else { return };
+        let t = tmp();
+        let d = dirs_in(t.path());
+        approve(
+            &d,
+            &manifest("hourly", "echo x >> \"$CLIO_STATE_DIR/n\""),
+            &[],
+        );
+        let ok = fake_systemd_run(t.path(), true);
+        let scoped = jail.clone().with_scope(Some(ok.clone()));
+        let r = runner(&d, &scoped, t.path());
+        let now = now_ms();
+        assert_eq!(run_due(&r, now), ["hourly: started in a scope of its own"]);
+        assert_eq!(
+            fs::read_to_string(format!("{}.log", ok.display())).unwrap(),
+            format!(
+                "--user --scope --quiet --collect -- {} services run-timer hourly\n",
+                r.exe.display()
+            )
+        );
+        assert!(!root(&d).join("state/hourly/n").exists(), "not run here");
+        let fails = jail
+            .clone()
+            .with_scope(Some(fake_systemd_run(t.path(), false)));
+        let r = runner(&d, &fails, t.path());
+        assert_eq!(run_due(&r, now), ["hourly: ok"]);
+        assert_eq!(
+            fs::read_to_string(root(&d).join("state/hourly/n")).unwrap(),
+            "x\n"
+        );
+    }
+
+    // S-69: removing a service takes its state and its runs with it (kept in `removed/`): a later
+    // service of the same name starts with neither. Not while it runs.
+    #[test]
+    fn a_removed_service_takes_its_state_and_runs_and_a_new_one_starts_empty() {
+        let t = tmp();
+        let d = dirs_in(t.path());
+        let root = root(&d);
+        approve(&d, &manifest("gone", "true"), &[]);
+        fs::write(state_dir(&root, "gone").join("seen"), "old state").unwrap();
+        let run = Run {
+            start_ms: 1,
+            ms: 1,
+            version: 1,
+            outcome: "ok".into(),
+            exit: Some(0),
+            why: String::new(),
+            tail: "old output".into(),
+            by: "timer".into(),
+            limits: String::new(),
+        };
+        save_run(&root, "gone", run).unwrap();
+        mkdir_private(&root.join("locks")).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("locks/gone.lock"))
+            .unwrap();
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive).unwrap();
+        assert!(
+            skills::remove_in(&root, Kind::Service, "gone").is_err(),
+            "not while it runs"
+        );
+        drop(held);
+        skills::remove_in(&root, Kind::Service, "gone").unwrap();
+        let kept = fs::read_dir(root.join("removed"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read_to_string(kept.join("state/seen")).unwrap(),
+            "old state"
+        );
+        assert!(
+            fs::read_to_string(kept.join("runs.json"))
+                .unwrap()
+                .contains("old output")
+        );
+        approve(&d, &manifest("gone", "true"), &[]);
+        assert_eq!(fs::read_dir(state_dir(&root, "gone")).unwrap().count(), 0);
+        assert!(sv::runs(&root, "gone").is_empty());
     }
 }

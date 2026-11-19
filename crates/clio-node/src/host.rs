@@ -42,12 +42,17 @@ pub struct HostJail {
     uid: u32,
     gid: u32,
     user: String,
+    /// `systemd-run`, for a service's run in a transient user scope (`with_scope`); `None`: never.
+    scope: Option<PathBuf>,
 }
+
+/// The most processes a service's run may have at once.
+pub const SERVICE_TASKS: u32 = 256;
 
 /// One command to run on the host.
 #[derive(Debug, Clone)]
 pub struct HostJob {
-    /// Goes to `bash -lc`.
+    /// Goes to `bash -lc` (a service's to `bash -c`: no login files).
     pub command: String,
     pub cwd: PathBuf,
     pub home: PathBuf,
@@ -61,16 +66,21 @@ pub struct HostJob {
     /// Folders inside a mask shown as they are, read-only (Clio's registered skills): a command
     /// can read and run what is there and change none of it. One that does not exist is skipped.
     pub shows: Vec<PathBuf>,
-    /// A review's command: everything read-only but `/tmp`, and no new privileges (no `sudo`).
+    /// A review's command: everything read-only, a `/tmp` and `/dev` of its own, `/run` hidden,
+    /// no new privileges (no `sudo`) and, with `Bwrap`, no Unix socket of its own (a seccomp
+    /// filter refuses `socket(AF_UNIX, ...)`): a socket anywhere it can see cannot be connected to.
     pub read_only: bool,
 }
 
 /// A service's run (stage 3, S-69): `job` (its command, its files' folder as `cwd`, masks, the
 /// windows it may read and its time limit) with the whole machine read-only but `writable`, a
-/// private `/tmp` and `/dev`, no new privileges and no network of its own: `job.network` must be
-/// false, and its only way out is a proxy socket in one of `job.shows`. Limits: with `Systemd`,
-/// `CPUQuota`, `MemoryMax` (no swap) and `RuntimeMaxSec`; with `Bwrap`, `prlimit --as` and
-/// `--cpu` on each process and `nice -n 19` (no cgroup: per process, not for the whole run).
+/// private `/tmp` (and `/dev/shm`) the size of its memory and a `/dev` of its own, no new
+/// privileges and no network of its own: `job.network` must be false, and its only way out is a
+/// proxy socket in one of `job.shows`. Limits: with `Systemd`, `CPUQuota`, `MemoryMax` (no swap)
+/// and `RuntimeMaxSec`; with `Bwrap`, inside a transient user scope when one starts
+/// (`with_scope`: `MemoryMax`, `MemorySwapMax=0`, `CPUQuota`, `TasksMax`, cgroup limits for the
+/// whole run), else `prlimit --as`, `--cpu` and `--nproc` on each process (per process, not for
+/// the whole run); always `nice -n 19`.
 #[derive(Debug, Clone)]
 pub struct ServiceRun {
     pub job: HostJob,
@@ -226,7 +236,68 @@ impl HostJail {
             uid,
             gid,
             user,
+            scope: None,
         })
+    }
+
+    /// Services' runs (with `Bwrap`) go in a transient user scope through `systemd_run`, when one
+    /// starts; `with_user_scopes` finds it in the system folders. Nothing else uses it.
+    #[must_use]
+    pub fn with_scope(mut self, systemd_run: Option<PathBuf>) -> Self {
+        self.scope = systemd_run;
+        self
+    }
+
+    /// The `systemd-run` services' runs go through, if any (`with_scope`).
+    pub fn scope(&self) -> Option<&Path> {
+        self.scope.as_deref()
+    }
+
+    /// `with_scope` with the system's `systemd-run`, if it is installed.
+    #[must_use]
+    pub fn with_user_scopes(self) -> Self {
+        self.with_scope(find_in_trusted("systemd-run"))
+    }
+
+    /// The program and arguments that put what follows them in a transient user scope with the
+    /// service's limits: `env XDG_RUNTIME_DIR=… systemd-run --user --scope … --`. `None` without
+    /// a `systemd-run` or `env`. The person's own user manager: no `sudo`, no unit file.
+    pub fn scope_prefix(&self, run: &ServiceRun) -> Option<(PathBuf, Vec<String>)> {
+        let systemd_run = self.scope.as_ref()?;
+        let env = find_in_trusted("env")?;
+        let mut a = vec![
+            // The user manager's bus; nothing else of the caller's (the environment is cleared).
+            format!("XDG_RUNTIME_DIR=/run/user/{}", self.uid),
+            systemd_run.to_string_lossy().into_owned(),
+            "--user".into(),
+            "--scope".into(),
+            "--quiet".into(),
+            "--collect".into(),
+        ];
+        for p in [
+            format!("MemoryMax={}M", run.memory_mb),
+            "MemorySwapMax=0".into(),
+            format!("CPUQuota={}%", run.cpu_percent),
+            format!("TasksMax={SERVICE_TASKS}"),
+        ] {
+            a.extend(["-p".into(), p]);
+        }
+        a.push("--".into());
+        Some((env, a))
+    }
+
+    /// Whether a scope with `run`'s limits starts now: `true` runs in it. Any failure (no user
+    /// manager, no bus, a refused property) is `false`, and the run takes the per-process limits.
+    fn scope_starts(&self, run: &ServiceRun) -> bool {
+        let (Tools::Bwrap(_), Some((env, mut a)), Some(t)) =
+            (&self.tools, self.scope_prefix(run), find_in_trusted("true"))
+        else {
+            return false;
+        };
+        a.push(t.to_string_lossy().into_owned());
+        quiet(Command::new(env).args(a))
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     pub fn launcher(&self) -> Launcher {
@@ -238,12 +309,16 @@ impl HostJail {
 
     /// The program and argv that would run `job`. Public so tests (and a reviewer) can read them.
     pub fn args(&self, job: &HostJob) -> Result<(PathBuf, Vec<String>), String> {
-        self.build(job, &unit_name(), None)
+        self.build(job, &unit_name(), None, false)
     }
 
-    /// The program and argv that would run a service's `run`.
-    pub fn service_args(&self, run: &ServiceRun) -> Result<(PathBuf, Vec<String>), String> {
-        self.build(&run.job, &unit_name(), Some(run))
+    /// The program and argv that would run a service's `run`; `scoped`: in a transient scope.
+    pub fn service_args(
+        &self,
+        run: &ServiceRun,
+        scoped: bool,
+    ) -> Result<(PathBuf, Vec<String>), String> {
+        self.build(&run.job, &unit_name(), Some(run), scoped)
     }
 
     fn build(
@@ -251,6 +326,7 @@ impl HostJail {
         job: &HostJob,
         unit: &str,
         svc: Option<&ServiceRun>,
+        scoped: bool,
     ) -> Result<(PathBuf, Vec<String>), String> {
         if let Some(s) = svc {
             if job.network || job.timeout.is_none() || job.read_only {
@@ -282,7 +358,17 @@ impl HostJail {
             }
             Ok(out)
         };
-        let masks = canon(&job.masks, "mask")?;
+        let mut asked = job.masks.clone();
+        // A review's command: `/run` (the person's D-Bus, sockets of what starts programs) too.
+        if job.read_only {
+            asked.push(PathBuf::from("/run"));
+        }
+        let mut masks = canon(&asked, "mask")?;
+        // A mask inside another is hidden by it already (Clio's data inside a masked home).
+        masks.sort();
+        masks.dedup();
+        let all = masks.clone();
+        masks.retain(|m| !all.iter().any(|o| o != m && Path::new(m).starts_with(o)));
         let shows = canon(&job.shows, "shown folder")?;
         // A service's writable paths: each must exist and be named as it is (no link in it).
         let mut writable = Vec::new();
@@ -312,27 +398,34 @@ impl HostJail {
         env.extend(svc.iter().flat_map(|s| s.env.iter().cloned()));
         let mut shell = vec![
             self.bash.to_string_lossy().into_owned(),
-            "-lc".into(),
+            if svc.is_some() { "-c" } else { "-lc" }.into(),
             job.command.clone(),
         ];
-        // Bwrap has no cgroup of its own: each process gets the limits, and the lowest priority.
+        // Bwrap has no cgroup of its own: in a scope the cgroup holds the limits; without one each
+        // process gets them. Always the lowest priority.
         if let (Some(s), Tools::Bwrap(_)) = (svc, &self.tools) {
             let need = |n: &str| {
                 find_in_trusted(n).ok_or_else(|| {
                     format!("{n} is not installed: a service's limits cannot be enforced")
                 })
             };
-            let secs = job.timeout.map_or(0, |t| t.as_secs());
-            let cpu = (secs * u64::from(s.cpu_percent)).div_ceil(100).max(1);
-            let mut pre = vec![
-                need("prlimit")?.to_string_lossy().into_owned(),
-                format!("--as={}", s.memory_mb * 1024 * 1024),
-                format!("--cpu={cpu}"),
-                "--".into(),
+            let mut pre = vec![];
+            if !scoped {
+                let secs = job.timeout.map_or(0, |t| t.as_secs());
+                let cpu = (secs * u64::from(s.cpu_percent)).div_ceil(100).max(1);
+                pre.extend([
+                    need("prlimit")?.to_string_lossy().into_owned(),
+                    format!("--as={}", s.memory_mb * 1024 * 1024),
+                    format!("--cpu={cpu}"),
+                    format!("--nproc={SERVICE_TASKS}"),
+                    "--".into(),
+                ]);
+            }
+            pre.extend([
                 need("nice")?.to_string_lossy().into_owned(),
                 "-n".into(),
                 "19".into(),
-            ];
+            ]);
             pre.append(&mut shell);
             shell = pre;
         }
@@ -346,14 +439,20 @@ impl HostJail {
                     "--bind"
                 };
                 a.extend([root, "/", "/"].map(String::from));
-                if job.read_only {
-                    a.extend(["--bind", "/tmp", "/tmp"].map(String::from));
-                }
-                // A service: a /tmp and a /dev of its own (the host's /dev/shm is writable).
-                if svc.is_some() {
-                    a.extend(
-                        ["--tmpfs", "/tmp", "--dev", "/dev", "--unshare-ipc"].map(String::from),
-                    );
+                // A service or a review: a /tmp and a /dev of its own (the host's /tmp holds
+                // other programs' sockets, its /dev/shm is writable). A service's are no larger
+                // than its memory.
+                let size = svc.map(|s| (s.memory_mb * 1024 * 1024).to_string());
+                if svc.is_some() || job.read_only {
+                    if let Some(n) = &size {
+                        a.extend(["--size".into(), n.clone()]);
+                    }
+                    a.extend(["--tmpfs", "/tmp", "--dev", "/dev"].map(String::from));
+                    if let Some(n) = &size {
+                        a.extend(["--size".into(), n.clone()]);
+                        a.extend(["--tmpfs", "/dev/shm"].map(String::from));
+                    }
+                    a.push("--unshare-ipc".into());
                 } else {
                     a.extend(["--dev-bind", "/dev", "/dev"].map(String::from));
                 }
@@ -453,7 +552,8 @@ impl HostJail {
                 if job.read_only {
                     for p in [
                         "ReadOnlyPaths=/",
-                        "ReadWritePaths=/tmp",
+                        "PrivateTmp=yes",
+                        "PrivateDevices=yes",
                         "NoNewPrivileges=yes",
                     ] {
                         a.extend(["-p".into(), p.into()]);
@@ -477,6 +577,15 @@ impl HostJail {
             }
         };
         a.extend(shell);
+        // In the scope, the jail exactly as it is.
+        if let (true, Some(s), Tools::Bwrap(_)) = (scoped, svc, &self.tools) {
+            let (env, mut pre) = self
+                .scope_prefix(s)
+                .ok_or("a scope needs systemd-run and env")?;
+            pre.push(program.to_string_lossy().into_owned());
+            pre.append(&mut a);
+            return Ok((env, pre));
+        }
         Ok((program, a))
     }
 
@@ -508,14 +617,17 @@ impl HostJail {
     }
 
     /// Runs a service's `run` and waits for it; `input` is its standard input (the secrets it
-    /// reads into its variables: never an argument, never a file).
+    /// reads into its variables: never an argument, never a file). With it, whether its limits
+    /// were a cgroup's (a scope started) or each process's.
     pub fn run_service(
         &self,
         run: &ServiceRun,
         input: Vec<u8>,
         cancel: &dyn Fn() -> bool,
-    ) -> Result<JailOutput, String> {
-        self.run_inner_with(&run.job, cancel, None, Some(run), Some(input))
+    ) -> Result<(JailOutput, bool), String> {
+        let scoped = self.scope_starts(run);
+        self.run_inner_with(&run.job, cancel, None, Some(run), Some(input), scoped)
+            .map(|o| (o, scoped))
     }
 
     fn run_inner(
@@ -524,7 +636,7 @@ impl HostJail {
         cancel: &dyn Fn() -> bool,
         sink: Option<&Sink>,
     ) -> Result<JailOutput, String> {
-        self.run_inner_with(job, cancel, sink, None, None)
+        self.run_inner_with(job, cancel, sink, None, None, false)
     }
 
     fn run_inner_with(
@@ -534,9 +646,27 @@ impl HostJail {
         sink: Option<&Sink>,
         svc: Option<&ServiceRun>,
         input: Option<Vec<u8>>,
+        scoped: bool,
     ) -> Result<JailOutput, String> {
         let unit = unit_name();
-        let (program, args) = self.build(job, &unit, svc)?;
+        let (program, mut args) = self.build(job, &unit, svc, scoped)?;
+        // A review's command under bwrap: its seccomp filter, on a descriptor bwrap inherits. Kept
+        // open until it has started; another thread's child may inherit it too (a few bytes of
+        // filter, nothing else).
+        let _filter = match (&self.tools, job.read_only) {
+            (Tools::Bwrap(_), true) => {
+                let f = seccomp_fd()?;
+                args.splice(
+                    0..0,
+                    [
+                        "--seccomp".into(),
+                        std::os::fd::AsRawFd::as_raw_fd(&f).to_string(),
+                    ],
+                );
+                Some(f)
+            }
+            _ => None,
+        };
         // Killing the `sudo` client does not stop the unit: systemd has to.
         let stop = match &self.tools {
             Tools::Systemd { sudo, ctl, .. } => vec![
@@ -623,8 +753,73 @@ impl HostJail {
     }
 }
 
+/// A seccomp program (classic BPF, as `bwrap --seccomp` reads it) that refuses
+/// `socket(AF_UNIX, ...)` with `EACCES` and allows every other call; a call of another
+/// architecture (or x32) is refused or kills. `None` on an architecture it does not know.
+pub fn no_unix_sockets() -> Option<Vec<u8>> {
+    let (arch, socket): (u32, u32) = if cfg!(target_arch = "x86_64") {
+        (0xC000_003E, 41)
+    } else if cfg!(target_arch = "aarch64") {
+        (0xC000_00B7, 198)
+    } else {
+        return None;
+    };
+    // The low half of the first argument in `struct seccomp_data` (nr, arch, ip, args[6]).
+    let arg0 = if cfg!(target_endian = "little") {
+        16
+    } else {
+        20
+    };
+    let (ld, jeq, jge, ret) = (0x20u16, 0x15u16, 0x35u16, 0x06u16);
+    let program: [(u16, u8, u8, u32); 10] = [
+        (ld, 0, 0, 4),                 // the architecture
+        (jeq, 1, 0, arch),             // ours: on
+        (ret, 0, 0, 0x8000_0000),      // another: kill the process
+        (ld, 0, 0, 0),                 // the call's number
+        (jge, 4, 0, 0x4000_0000),      // x32: refused
+        (jeq, 0, 2, socket),           // not socket(): allowed
+        (ld, 0, 0, arg0),              // its domain
+        (jeq, 1, 0, 1),                // AF_UNIX: refused
+        (ret, 0, 0, 0x7fff_0000),      // allow
+        (ret, 0, 0, 0x0005_0000 | 13), // EACCES
+    ];
+    Some(
+        program
+            .iter()
+            .flat_map(|(c, t, f, k)| {
+                let mut b = c.to_ne_bytes().to_vec();
+                b.extend([*t, *f]);
+                b.extend(k.to_ne_bytes());
+                b
+            })
+            .collect(),
+    )
+}
+
+/// `no_unix_sockets` in a memory file at its start, open WITHOUT close-on-exec (bwrap reads it).
+fn seccomp_fd() -> Result<std::fs::File, String> {
+    use std::io::{Seek, Write};
+    let program = no_unix_sockets()
+        .ok_or("a review's commands need a seccomp filter this architecture does not have")?;
+    let fd = rustix::fs::memfd_create("clio-seccomp", rustix::fs::MemfdFlags::empty())
+        .map_err(|e| format!("seccomp filter: {e}"))?;
+    let mut f = std::fs::File::from(fd);
+    f.write_all(&program)
+        .and_then(|()| f.rewind())
+        .map_err(|e| format!("seccomp filter: {e}"))?;
+    Ok(f)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_seccomp_program_is_ten_instructions_ending_in_allow_and_eacces() {
+        let p = super::no_unix_sockets().unwrap();
+        assert_eq!(p.len(), 10 * 8);
+        let k = |i: usize| u32::from_ne_bytes(p[i * 8 + 4..i * 8 + 8].try_into().unwrap());
+        assert_eq!((k(8), k(9)), (0x7fff_0000, 0x0005_000d));
+    }
+
     #[test]
     fn the_units_of_a_process_are_stopped_by_its_pid() {
         let a = super::stop_units_args(std::path::Path::new("/usr/bin/systemctl"), 42);

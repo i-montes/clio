@@ -666,6 +666,23 @@ pub fn remove(root: &Path, name: &str) -> Res<String> {
 pub(crate) fn remove_in(root: &Path, kind: Kind, name: &str) -> Res<String> {
     let _l = lock_in(root, kind)?;
     known_kind(root, kind, name)?;
+    // Not while a run of it goes on (its lock): what it writes would land in a removed service.
+    let _running = if kind == Kind::Service {
+        let lp = root.join("locks").join(format!("{name}.lock"));
+        match fs::OpenOptions::new().write(true).open(&lp) {
+            Ok(f) => {
+                if rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                    .is_err()
+                {
+                    return Err(format!("«{name}» is running now: remove it when it ends"));
+                }
+                Some(f)
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     if kind == Kind::Skill {
         uninstall(root, name)?;
     }
@@ -677,6 +694,17 @@ pub(crate) fn remove_in(root: &Path, kind: Kind, name: &str) -> Res<String> {
     }
     let rec = record_path(root, name);
     fs::rename(&rec, to.join("record.json")).map_err(|e| io_err(&rec, &e))?;
+    // A service's state and runs go with it: a later one of the same name starts empty.
+    if kind == Kind::Service {
+        for (from, keep) in [
+            (root.join("state").join(name), "state"),
+            (root.join("runs").join(format!("{name}.json")), "runs.json"),
+        ] {
+            if from.exists() {
+                fs::rename(&from, to.join(keep)).map_err(|e| io_err(&from, &e))?;
+            }
+        }
+    }
     Ok(format!(
         "«{name}» was removed (kept in {}){}",
         to.display(),

@@ -929,7 +929,9 @@ fn a_skill_box_shows_the_whole_skill_and_is_approved_only_after_its_end() {
 }
 
 // S-69: a service's Approval box shows what it is for, its schedule, command, hosts, secrets
-// (name → host), write paths, limits, the review's verdict and notes, and every file whole; it
+// (each with every host it can reach), read and write paths, limits (and how they are held), the
+// review's verdict and notes, and every file whole; a service that reads nothing of the home says
+// so; it
 // scrolls, never cut; a click, the wheel or a paste never answers it, a key before the quiet
 // second or before its end was shown does not arm it, and only then `y` approves it.
 #[test]
@@ -942,7 +944,9 @@ fn a_service_box_shows_everything_it_grants_and_is_approved_only_after_its_end()
         env: "STATUSPAGE_KEY".into(),
         host: "api.statuspage.io".into(),
     }];
+    m.network.push("example.org".into());
     m.writes = vec!["/home/ivan/reports".into()];
+    m.reads = vec!["/home/ivan/notes".into()];
     let long: String = (1..=40).map(|i| format!("echo step-{i}\n")).collect();
     let b = service_ask(
         &m,
@@ -1023,10 +1027,12 @@ fn a_service_box_shows_everything_it_grants_and_is_approved_only_after_its_end()
         "schedule: every 1h",
         "command: bash check.sh",
         "hosts it may reach: api.statuspage.io",
-        "secrets: statuspage-key for api.statuspage.io only (as",
-        "$STATUSPAGE_KEY)",
+        "secrets: statuspage-key (as $STATUSPAGE_KEY) can reach",
+        "api.statuspage.io, example.org",
+        "it may read: /home/ivan/notes",
         "it may write: its state folder, /home/ivan/reports",
-        "limits: 50% CPU, 512 MB, 300 s",
+        "limits: 50% CPU, 512 MB of memory (its /tmp counts), 256 processes, 300 s;",
+        "for the whole run where your user's systemd can hold them, else for each process",
         "review: passes",
         "ran: bash check.sh (exit 0)",
         "--- service.json ---",
@@ -1057,5 +1063,23 @@ fn a_service_box_shows_everything_it_grants_and_is_approved_only_after_its_end()
             id: "s1a2".into(),
             yes: true
         }]
+    );
+}
+
+// S-69: a service that declares no read path is told as one that sees nothing of the home.
+#[test]
+fn a_service_that_reads_nothing_in_the_home_says_so() {
+    use super::tests_gallery::{service_ask, service_manifest};
+    let b = service_ask(
+        &service_manifest(),
+        &[],
+        "passes",
+        "verdict: passes\nran: x\nfindings: none",
+        false,
+    );
+    let rows = b.skill.unwrap().service.unwrap();
+    assert!(
+        rows.contains(&"it may read: nothing in your home".to_owned()),
+        "{rows:?}"
     );
 }

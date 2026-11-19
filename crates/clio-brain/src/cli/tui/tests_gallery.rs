@@ -231,6 +231,7 @@ pub(super) fn service_manifest() -> clio_toolhost::services::Manifest {
         network: vec![],
         secrets: vec![],
         writes: vec![],
+        reads: vec![],
         limits: clio_toolhost::services::DEFAULT_LIMITS,
     }
 }

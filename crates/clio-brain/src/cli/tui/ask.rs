@@ -245,7 +245,8 @@ pub struct SkillAsk {
     /// Each other file: its path and its content, whole.
     pub files: Vec<(String, String)>,
     /// A service (S-69): what the manifest grants, one row each (schedule, command, hosts,
-    /// secrets, writes, limits), the review's verdict and its notes; `None` for a skill.
+    /// secrets and every host each can reach, reads, writes, limits), the review's verdict and
+    /// its notes; `None` for a skill.
     pub service: Option<Vec<String>>,
 }
 
@@ -270,14 +271,28 @@ fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<V
         ),
         format!("command: {}", m.command),
         format!("hosts it may reach: {}", none(&m.network)),
+        // A secret is in the run's variables: it can go to every host above, not only its own.
         format!(
             "secrets: {}",
             none(
                 &m.secrets
                     .iter()
-                    .map(|s| format!("{} for {} only (as ${})", s.name, s.host, s.env))
+                    .map(|s| format!(
+                        "{} (as ${}) can reach {}",
+                        s.name,
+                        s.env,
+                        m.network.join(", ")
+                    ))
                     .collect::<Vec<_>>()
             )
+        ),
+        format!(
+            "it may read: {}",
+            if m.reads.is_empty() {
+                "nothing in your home".to_owned()
+            } else {
+                m.reads.join(", ")
+            }
         ),
         format!(
             "it may write: its state folder{}",
@@ -287,8 +302,11 @@ fn service_rows(p: &clio_toolhost::pending::Pending, manifest: &str) -> Option<V
                 .collect::<String>()
         ),
         format!(
-            "limits: {}% CPU, {} MB, {} s",
-            m.limits.cpu_percent, m.limits.memory_mb, m.limits.seconds
+            "limits: {}% CPU, {} MB of memory (its /tmp counts), {} processes, {} s; for the whole run where your user's systemd can hold them, else for each process",
+            m.limits.cpu_percent,
+            m.limits.memory_mb,
+            clio_node::host::SERVICE_TASKS,
+            m.limits.seconds
         ),
         format!(
             "review: {}",

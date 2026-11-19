@@ -249,6 +249,20 @@ fn bwrap() -> Option<HostJail> {
     }
 }
 
+/// A folder that is not under `/tmp` (the build's own tmp folder): a review's or a service's run
+/// has a `/tmp` of its own and would not see one there. `None` (and why) when the build is under
+/// `/tmp` itself.
+fn outside_tmp() -> Option<TempDir> {
+    let d = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    if d.path().canonicalize().unwrap().starts_with("/tmp") {
+        eprintln!(
+            "SKIPPED (the build folder is under /tmp, which a run does not see; nothing was tested)"
+        );
+        return None;
+    }
+    Some(d)
+}
+
 fn marker() -> String {
     format!(
         "clio-host-test-{}-{}",
@@ -416,9 +430,10 @@ fn a_streamed_command_hands_over_its_output_as_it_comes_and_is_not_cut_for_volum
     );
 }
 
-// S-67: a review's command sees the machine read-only but `/tmp`, and gets no new privileges
+// S-67: a review's command sees the machine read-only, a `/tmp` of its own, and gets no new
+// privileges.
 #[test]
-fn a_read_only_job_writes_only_tmp() {
+fn a_read_only_job_writes_only_its_own_tmp() {
     for l in [Launcher::Bwrap, Launcher::Systemd] {
         let Some(h) = with(l) else { continue };
         let d = TempDir::new().unwrap();
@@ -428,32 +443,38 @@ fn a_read_only_job_writes_only_tmp() {
         match l {
             Launcher::Bwrap => {
                 assert_eq!(after(&a, "--ro-bind"), ["/"], "{a:?}");
-                assert_eq!(after(&a, "--bind"), ["/tmp"], "{a:?}");
+                assert!(after(&a, "--bind").is_empty(), "{a:?}");
+                assert!(after(&a, "--tmpfs").contains(&"/tmp"), "{a:?}");
+                assert!(after(&a, "--tmpfs").contains(&"/run"), "{a:?}");
+                assert_eq!(after(&a, "--dev"), ["/dev"], "{a:?}");
+                for flag in ["--unshare-pid", "--unshare-ipc", "--unshare-net"] {
+                    assert!(a.contains(&flag.to_owned()), "{flag} missing from {a:?}");
+                }
             }
             Launcher::Systemd => {
                 let props = after(&a, "-p");
                 for p in [
                     "ReadOnlyPaths=/",
-                    "ReadWritePaths=/tmp",
+                    "PrivateTmp=yes",
                     "NoNewPrivileges=yes",
+                    "TemporaryFileSystem=/run:ro",
                 ] {
                     assert!(props.contains(&p), "{p} missing from {a:?}");
                 }
+                assert!(!props.contains(&"ReadWritePaths=/tmp"), "{a:?}");
             }
         }
     }
     let Some(h) = bwrap() else {
         return;
     };
-    // A folder outside `/tmp` (the build's own) cannot be written; one under `/tmp` can.
-    let outside = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let inside = TempDir::new().unwrap();
+    // A folder outside `/tmp` (the build's own) cannot be written; its own `/tmp` can, and what
+    // it writes there is not in the host's.
+    let Some(outside) = outside_tmp() else { return };
+    let m = marker();
     let mut j = job(
         outside.path(),
-        &format!(
-            "touch x; echo $? ; touch {}/y; echo $?",
-            inside.path().display()
-        ),
+        &format!("touch x; echo $? ; touch /tmp/{m}; echo $?"),
     );
     j.read_only = true;
     let o = h.run(&j).unwrap();
@@ -463,7 +484,76 @@ fn a_read_only_job_writes_only_tmp() {
         "{o:?}"
     );
     assert!(!outside.path().join("x").exists());
-    assert!(inside.path().join("y").exists());
+    assert!(!Path::new("/tmp").join(&m).exists(), "its /tmp is its own");
+}
+
+/// A Unix socket at `path`, listening, accepting in a thread of its own (this test's own socket).
+fn listening(path: &Path) -> std::os::unix::net::UnixListener {
+    let l = std::os::unix::net::UnixListener::bind(path).unwrap();
+    let c = l.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for s in c.incoming().flatten() {
+            drop(s);
+        }
+    });
+    l
+}
+
+/// Prints `<label> yes` when a Unix socket at `path` can be connected to, `<label> no` if not.
+fn connects(path: &Path, label: &str) -> String {
+    format!(
+        "python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' {} >/dev/null 2>&1 && echo {label} yes || echo {label} no; ",
+        path.display()
+    )
+}
+
+// S-67, for real with `bwrap`: a review's command reaches no Unix socket (one in the host's /tmp,
+// one in the home: the same escape as a terminal multiplexer's), reads nothing of Clio's data
+// but the stage it is shown, and still runs a local command; outside the jail the same sockets
+// do connect (the check itself works).
+#[test]
+fn bwrap_for_real_a_review_reaches_no_socket_and_reads_only_the_stage() {
+    let Some(h) = bwrap() else { return };
+    if !Path::new("/usr/bin/python3").is_file() {
+        eprintln!("SKIPPED (no python3 to connect with; nothing was tested)");
+        return;
+    }
+    let Some(home) = outside_tmp() else { return };
+    let home_path = home.path().canonicalize().unwrap();
+    let in_tmp = TempDir::new_in("/tmp").unwrap();
+    let (a, b) = (in_tmp.path().join("s.sock"), home_path.join("s.sock"));
+    let (_la, _lb) = (listening(&a), listening(&b));
+    let data = home_path.join("data");
+    let stage = data.join("reviews/1/stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(data.join("vault.bin"), "the vault").unwrap();
+    std::fs::write(stage.join("SKILL.md"), "the stage\n").unwrap();
+    let probe = format!(
+        "{}{}cat {}/vault.bin >/dev/null 2>&1 && echo data yes || echo data no; cat {}/SKILL.md; echo $((6 * 7))",
+        connects(&a, "tmp"),
+        connects(&b, "home"),
+        data.display(),
+        stage.display(),
+    );
+    let outside = std::process::Command::new("bash")
+        .args(["-c", &probe])
+        .output()
+        .unwrap();
+    let outside = String::from_utf8_lossy(&outside.stdout);
+    assert!(
+        outside.contains("tmp yes") && outside.contains("home yes"),
+        "the check connects outside the jail: {outside}"
+    );
+    let mut j = job(&home_path, &probe);
+    j.read_only = true;
+    j.masks = vec![data.clone()];
+    j.shows = vec![stage.clone()];
+    let o = h.run(&j).unwrap();
+    assert_eq!(
+        o.stdout.lines().collect::<Vec<_>>(),
+        ["tmp no", "home no", "data no", "the stage", "42"],
+        "{o:?}"
+    );
 }
 
 // ---- services (stage 3, S-69) -----------------------------------------------------------------
@@ -525,7 +615,7 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
     let mut any = false;
     if let Some(h) = with(Launcher::Bwrap) {
         any = true;
-        let (_, a) = h.service_args(&s).unwrap();
+        let (_, a) = h.service_args(&s, false).unwrap();
         assert_eq!(after(&a, "--ro-bind")[0], "/", "{a:?}");
         // Only the state folder (inside the mask) and the declared path, never `/`.
         assert_eq!(after(&a, "--bind"), [state.as_str(), out.as_str()], "{a:?}");
@@ -533,6 +623,11 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
             after(&a, "--tmpfs").contains(&"/tmp"),
             "a private /tmp: {a:?}"
         );
+        // Its /tmp and /dev/shm no larger than its memory.
+        let mb = (256 * 1024 * 1024).to_string();
+        assert_eq!(after(&a, "--size"), [mb.as_str(), mb.as_str()], "{a:?}");
+        let i = a.iter().position(|x| x == "--tmpfs").unwrap();
+        assert_eq!((a[i - 2].as_str(), a[i + 1].as_str()), ("--size", "/tmp"));
         assert!(after(&a, "--tmpfs").contains(&mask.as_str()));
         for flag in [
             "--unshare-net",
@@ -551,15 +646,64 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
             .expect("prlimit");
         assert_eq!(a[i + 1], format!("--as={}", 256 * 1024 * 1024));
         assert_eq!(a[i + 2], "--cpu=10");
+        assert_eq!(a[i + 3], "--nproc=256");
         assert!(
-            a[i + 4].ends_with("/nice") && a[i + 5] == "-n" && a[i + 6] == "19",
+            a[i + 5].ends_with("/nice") && a[i + 6] == "-n" && a[i + 7] == "19",
             "{a:?}"
         );
+        // `bash -c`: no login files.
+        assert!(a.ends_with(&["-c".into(), "true".into()]), "{a:?}");
         assert!(after(&a, "--setenv").contains(&"CLIO_STATE_DIR"));
+
+        // In a scope: `env XDG_RUNTIME_DIR=… systemd-run --user --scope …` with the cgroup's
+        // limits, then the same jail, without the per-process limits.
+        let scoped = h
+            .clone()
+            .with_scope(Some(PathBuf::from("/usr/bin/systemd-run")));
+        let (prog, b) = scoped.service_args(&s, true).unwrap();
+        assert!(prog.ends_with("env"), "{prog:?}");
+        let cut = b.iter().position(|x| x == "--").unwrap();
+        assert_eq!(
+            b[..cut],
+            [
+                format!("XDG_RUNTIME_DIR=/run/user/{}", uid()),
+                "/usr/bin/systemd-run".into(),
+                "--user".into(),
+                "--scope".into(),
+                "--quiet".into(),
+                "--collect".into(),
+                "-p".into(),
+                "MemoryMax=256M".into(),
+                "-p".into(),
+                "MemorySwapMax=0".into(),
+                "-p".into(),
+                "CPUQuota=50%".into(),
+                "-p".into(),
+                "TasksMax=256".into(),
+            ]
+        );
+        assert!(b[cut + 1].ends_with("/bwrap"), "{b:?}");
+        let (_, plain) = h.service_args(&s, false).unwrap();
+        let jail = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .filter(|x| {
+                    !x.contains("prlimit")
+                        && !x.starts_with("--as=")
+                        && !x.starts_with("--cpu=")
+                        && !x.starts_with("--nproc=")
+                })
+                .cloned()
+                .collect()
+        };
+        // The same jail inside (the unit names and the order of everything but the limits).
+        let inner = jail(&b[cut + 2..]);
+        let outer = jail(&plain);
+        assert_eq!(inner.len(), outer.len() - 1, "{inner:?} / {outer:?}");
+        assert!(!b.iter().any(|x| x.contains("prlimit")), "{b:?}");
     }
     if let Some(h) = with(Launcher::Systemd) {
         any = true;
-        let (_, a) = h.service_args(&s).unwrap();
+        let (_, a) = h.service_args(&s, false).unwrap();
         let props = after(&a, "-p");
         for p in [
             "ReadOnlyPaths=/".to_owned(),
@@ -591,15 +735,15 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
         .unwrap();
     let mut bad = s.clone();
     bad.job.network = true;
-    assert!(h.service_args(&bad).is_err());
+    assert!(h.service_args(&bad, false).is_err());
     let mut bad = s.clone();
     bad.job.timeout = None;
-    assert!(h.service_args(&bad).is_err());
+    assert!(h.service_args(&bad, false).is_err());
     let link = d.path().join("link");
     std::os::unix::fs::symlink(d.path().join("out"), &link).unwrap();
     let mut bad = s.clone();
     bad.writable.push(link);
-    assert!(h.service_args(&bad).is_err());
+    assert!(h.service_args(&bad, false).is_err());
 }
 
 // S-69, for real with `bwrap`: a run writes its state folder and its declared path and nothing
@@ -610,9 +754,10 @@ fn a_service_run_has_its_limits_and_writes_only_its_paths_in_both_launchers() {
 fn bwrap_for_real_a_service_run_stays_in_its_bounds() {
     let Some(h) = bwrap() else { return };
     // Not under /tmp: the run's /tmp is its own, empty.
-    let d = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (Some(d), Some(elsewhere)) = (outside_tmp(), outside_tmp()) else {
+        return;
+    };
     let m = marker();
-    let elsewhere = TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let cmd = format!(
         "IFS= read -r -d '' TOKEN || exit 75; export TOKEN; exec </dev/null; \
          t() {{ if eval \"$1\" >/dev/null 2>&1; then echo \"$2 yes\"; else echo \"$2 no\"; fi; }}; \
@@ -633,7 +778,8 @@ fn bwrap_for_real_a_service_run_stays_in_its_bounds() {
         ssh = d.path().canonicalize().unwrap().join("home/.ssh").display(),
     );
     let s = service(d.path(), &cmd);
-    let o = h.run_service(&s, b"abc\0".to_vec(), &|| false).unwrap();
+    let (o, scoped) = h.run_service(&s, b"abc\0".to_vec(), &|| false).unwrap();
+    assert!(!scoped, "no scope unless asked for");
     assert!(o.success(), "{o:?}");
     let lines: Vec<&str> = o.stdout.lines().collect();
     assert_eq!(
@@ -666,7 +812,7 @@ fn bwrap_for_real_a_service_run_stays_in_its_bounds() {
     );
     s.job.timeout = Some(Duration::from_secs(2));
     let t = Instant::now();
-    let o = h.run_service(&s, vec![], &|| false).unwrap();
+    let (o, _) = h.run_service(&s, vec![], &|| false).unwrap();
     assert!(o.timed_out && !o.success(), "{o:?}");
     assert!(t.elapsed() < Duration::from_secs(15));
     gone(&m, "a service's time limit");
@@ -677,6 +823,64 @@ fn bwrap_for_real_a_service_run_stays_in_its_bounds() {
         "python3 -c 'x = bytearray(200 * 1024 * 1024)' && echo allocated",
     );
     s.memory_mb = 64;
-    let o = h.run_service(&s, vec![], &|| false).unwrap();
+    let (o, _) = h.run_service(&s, vec![], &|| false).unwrap();
     assert!(!o.success() && !o.stdout.contains("allocated"), "{o:?}");
+    // Nor 200 MB in its /tmp, which is memory too.
+    let mut s = service(
+        d.path(),
+        "head -c 209715200 /dev/zero > /tmp/f && echo written; ls -l /tmp/f",
+    );
+    s.memory_mb = 64;
+    let (o, _) = h.run_service(&s, vec![], &|| false).unwrap();
+    assert!(!o.stdout.contains("written"), "{o:?}");
+}
+
+/// A stand-in for `systemd-run` in `d`: `ok` runs what follows `--` (as a scope would), else it
+/// fails before running anything (as when no scope can be made).
+fn fake_systemd_run(d: &Path, ok: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = d.join(if ok {
+        "systemd-run-ok"
+    } else {
+        "systemd-run-fails"
+    });
+    let body = if ok {
+        "#!/bin/sh\necho \"$@\" >> \"$0.log\"\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n"
+    } else {
+        "#!/bin/sh\necho 'Failed to start transient scope unit' >&2\nexit 1\n"
+    };
+    std::fs::write(&p, body).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+// S-69: a run goes in a scope when one starts (here a stand-in: this suite never starts a real
+// scope), and takes the per-process limits by itself when it does not; it says which.
+#[test]
+fn a_service_falls_back_to_per_process_limits_when_no_scope_starts() {
+    let Some(h) = bwrap() else { return };
+    let Some(d) = outside_tmp() else { return };
+    let s = service(
+        d.path(),
+        "echo ran; grep -c . /proc/self/limits >/dev/null && echo done",
+    );
+    let fails = h
+        .clone()
+        .with_scope(Some(fake_systemd_run(d.path(), false)));
+    let (o, scoped) = fails.run_service(&s, vec![], &|| false).unwrap();
+    assert!(o.success() && o.stdout.contains("ran"), "{o:?}");
+    assert!(!scoped, "the scope did not start: per-process limits");
+    let fake = fake_systemd_run(d.path(), true);
+    let works = h.clone().with_scope(Some(fake.clone()));
+    let (o, scoped) = works.run_service(&s, vec![], &|| false).unwrap();
+    assert!(o.success() && o.stdout.contains("ran"), "{o:?}");
+    assert!(scoped);
+    // The probe and the run, each with the limits as cgroup properties.
+    let log = std::fs::read_to_string(format!("{}.log", fake.display())).unwrap();
+    assert_eq!(log.lines().count(), 2, "{log}");
+    assert!(
+        log.lines()
+            .all(|l| l.starts_with("--user --scope --quiet --collect -p MemoryMax=256M")),
+        "{log}"
+    );
 }

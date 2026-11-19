@@ -803,9 +803,10 @@ impl ChatSession {
         })
     }
 
-    /// What a service draft's review leads to (S-69): `fails` gives the findings back to the
-    /// model (the third in a row drops it) and the person never sees it; any other verdict sets
-    /// it aside for the person, always, with the verdict and the review's notes in the box.
+    /// What a service draft's review leads to (S-69): `fails`, or a secret the vault says may not
+    /// go to one of its hosts, gives the findings back to the model (the third in a row drops it)
+    /// and the person never sees it; any other verdict sets it aside for the person, always, with
+    /// the verdict and the review's notes in the box.
     /// Nothing registers a service but the person's approval.
     fn after_service_review(
         &self,
@@ -816,7 +817,11 @@ impl ChatSession {
         let a = &rv.answer;
         let name = d.name.clone();
         let (marked, suspect) = marks(d, self.mark_file(), rv.marked);
-        let failed = a.verdict == clio_brain::pi::review::Verdict::Fails;
+        // A secret the vault would not let go to one of its hosts: refused now, when it can tell.
+        let mismatch = serde_json::from_str::<clio_toolhost::services::Manifest>(&d.skill_md)
+            .ok()
+            .and_then(|m| crate::cli::services::secret_hosts_refused(&self.dirs, &m));
+        let failed = a.verdict == clio_brain::pi::review::Verdict::Fails || mismatch.is_some();
         let (attempt, dropped) = skill_count(&mut locked(&self.skill_fails), &name, failed);
         if failed {
             let next = if dropped {
@@ -833,8 +838,9 @@ impl ChatSession {
             };
             return Ok(super::SkillOutcome::ServiceRejected {
                 to_model: format!(
-                    "Your draft {} of the service «{name}» was not offered to the person: its review failed (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
+                    "Your draft {} of the service «{name}» was not offered to the person: {} (attempt {attempt} of {SKILL_ATTEMPTS}). {next}\n\n{}",
                     d.id,
+                    mismatch.as_deref().unwrap_or("its review failed"),
                     a.for_model()
                 ),
                 name,

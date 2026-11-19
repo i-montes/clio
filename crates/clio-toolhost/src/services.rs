@@ -45,6 +45,13 @@ const MAX_COMMAND: usize = 2000;
 const MAX_HOSTS: usize = 10;
 const MAX_SECRETS: usize = 8;
 const MAX_WRITES: usize = 10;
+/// A write path's tree is walked this deep and this far, at most; past it, it is refused.
+const TREE_DEPTH: usize = 4;
+const TREE_ENTRIES: usize = 2000;
+/// Names in a write path's tree that load code or settings by themselves, besides
+/// `PROTECTED_PATHS` and the home's own (`PROTECTED_HOME`): a direnv file, Node's packages
+/// (their `.bin`), a virtualenv.
+const TREE_LOADS: [&str; 3] = [".envrc", "node_modules", "pyvenv.cfg"];
 const MAX_REASON: usize = 300;
 /// Runs kept per service, and the bytes kept of each one's output (its tail).
 pub const KEPT_RUNS: usize = 50;
@@ -119,7 +126,7 @@ pub struct Manifest {
     pub name: String,
     pub description: String,
     pub schedule: Schedule,
-    /// Run with `bash -lc` from the service's files folder (read-only).
+    /// Run with `bash -c` from the service's files folder (read-only).
     pub command: String,
     pub verify: String,
     /// The only hosts it may reach (`host` is port 443, or `host:port`), through a proxy.
@@ -127,6 +134,11 @@ pub struct Manifest {
     pub secrets: Vec<SecretUse>,
     /// Absolute paths under the home it may write, besides its state folder.
     pub writes: Vec<String>,
+    /// Absolute paths under the home it may read (shown read-only): nothing else of the home is
+    /// visible to it. Left out of the text when empty, so a manifest approved before it reads
+    /// back the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
     pub limits: Limits,
 }
 
@@ -149,6 +161,10 @@ pub struct Run {
     /// `timer` or `person`.
     #[serde(default)]
     pub by: String,
+    /// The limits it ran under: `cgroup` (a transient user scope held them for the whole run)
+    /// or `per-process` (no scope could be made: each process had them).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub limits: String,
 }
 
 /// A service draft's id starts with `s` (a skill's is hex digits only). The id decides how the
@@ -227,7 +243,8 @@ pub fn next_ms(s: &Schedule, last: Option<i64>, since: i64, now: i64, offset: i6
 }
 
 /// A host as the proxy allows it: `host:port` (443 when none is given), lowercase, a name of at
-/// least two labels whose last is not a number (no address literal).
+/// least two labels whose last is not a number (no address literal), and not a name kept for the
+/// machine or its own network (`.localhost`, `.local`, `.internal`, `.arpa`).
 pub fn host_port(h: &str) -> Option<String> {
     let (host, port) = match h.rsplit_once(':') {
         Some((host, p)) => (host, p.parse::<u16>().ok().filter(|p| *p > 0)?),
@@ -246,7 +263,11 @@ pub fn host_port(h: &str) -> Option<String> {
         })
         && labels
             .last()
-            .is_some_and(|l| l.bytes().any(|b| b.is_ascii_lowercase()));
+            .is_some_and(|l| l.bytes().any(|b| b.is_ascii_lowercase()))
+        && !matches!(
+            labels.last(),
+            Some(&("localhost" | "local" | "internal" | "arpa"))
+        );
     ok.then(|| format!("{host}:{port}"))
 }
 
@@ -268,11 +289,10 @@ fn valid_env(e: &str) -> bool {
         && !e.ends_with("_PROXY")
 }
 
-/// Why a declared write path is refused, if it is: it must be absolute, plain (no `.`, `..`, link
-/// is checked at run time), under `home` and not the home itself, and neither inside nor above
-/// anything protected: Clio's folders (`control`), the home's `PROTECTED_HOME`, or a folder that
-/// loads code or settings by itself (`PROTECTED_PATHS`, anywhere in it).
-pub fn write_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String> {
+/// Why a declared path (read or write) is refused, if it is: it must be absolute, plain (no `.`,
+/// `..` or doubled `/`), under `home` and not the home itself, neither inside nor above Clio's
+/// folders (`control`) or one of `home`'s `also`, and exist as named (no link in it).
+fn path_refused(p: &str, home: &Path, control: &[PathBuf], also: &[&str]) -> Option<String> {
     let path = Path::new(p);
     let plain = path.is_absolute()
         && p.len() <= 200
@@ -293,15 +313,50 @@ pub fn write_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String
     let protected = control
         .iter()
         .cloned()
-        .chain(PROTECTED_HOME.iter().map(|r| home.join(r)));
+        .chain(also.iter().map(|r| home.join(r)));
     for x in protected {
         if path.starts_with(&x) || x.starts_with(path) {
             return Some(format!(
-                "{}: it is, or holds, {} (never a service's to write)",
+                "{}: it is, or holds, {} (never a service's)",
                 one_line(p),
                 x.display()
             ));
         }
+    }
+    match path.canonicalize() {
+        Ok(c) if c == path => None,
+        Ok(_) => Some(format!("{}: a link is never a service's path", one_line(p))),
+        Err(_) => Some(format!(
+            "{}: it does not exist; it must exist before the service is written",
+            one_line(p)
+        )),
+    }
+}
+
+/// Why a declared read path is refused, if it is (`path_refused`, keys: `~/.ssh`, `~/.gnupg`).
+pub fn read_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String> {
+    path_refused(p, home, control, &[".ssh", ".gnupg"])
+}
+
+/// Why a declared write path is refused, if it is: `path_refused` with the home's
+/// `PROTECTED_HOME`; no name in it under the home that starts with a dot (settings, keys,
+/// what a program loads by itself), nor one of `PROTECTED_PATHS`; and its tree (`TREE_DEPTH`
+/// levels, `TREE_ENTRIES` entries at most, past that refused) holds no repository and nothing
+/// that loads code by itself. Checked at draft time, at approval and before each run.
+pub fn write_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String> {
+    if let Some(why) = path_refused(p, home, control, &PROTECTED_HOME) {
+        return Some(why);
+    }
+    let path = Path::new(p);
+    let under = path.strip_prefix(home).unwrap_or(path);
+    if under
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return Some(format!(
+            "{}: a name that starts with a dot under the home holds settings or code that load by themselves",
+            one_line(p)
+        ));
     }
     if path
         .components()
@@ -311,6 +366,45 @@ pub fn write_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String
             "{}: a folder that loads code or settings by itself",
             one_line(p)
         ));
+    }
+    tree_refused(path).map(|why| format!("{}: {why}; declare a narrower folder", one_line(p)))
+}
+
+/// What in the tree under `top` makes it no service's to write: a repository or something that
+/// loads code by itself, or more than can be checked. Links are not followed.
+fn tree_refused(top: &Path) -> Option<String> {
+    let loads = |n: &str| {
+        crate::PROTECTED_PATHS.contains(&n)
+            || TREE_LOADS.contains(&n)
+            || PROTECTED_HOME.iter().any(|h| !h.contains('/') && *h == n)
+    };
+    let mut todo = vec![(top.to_path_buf(), 0)];
+    let mut seen = 0;
+    while let Some((dir, depth)) = todo.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Some(format!("{} cannot be read", dir.display()));
+        };
+        for e in entries {
+            let Ok(e) = e else {
+                return Some(format!("{} cannot be read", dir.display()));
+            };
+            seen += 1;
+            if depth == TREE_DEPTH || seen > TREE_ENTRIES {
+                return Some(format!(
+                    "it holds more than can be checked ({TREE_ENTRIES} entries within {TREE_DEPTH} levels)"
+                ));
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if loads(&name) {
+                return Some(format!(
+                    "it holds {} (a repository, or something that loads code by itself)",
+                    e.path().display()
+                ));
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                todo.push((e.path(), depth + 1));
+            }
+        }
     }
     None
 }
@@ -412,8 +506,8 @@ pub fn check(m: &Manifest) -> Result<(), String> {
             ));
         }
     }
-    if m.writes.len() > MAX_WRITES {
-        return Err(format!("writes: at most {MAX_WRITES} paths"));
+    if m.writes.len() > MAX_WRITES || m.reads.len() > MAX_WRITES {
+        return Err(format!("writes, reads: at most {MAX_WRITES} paths each"));
     }
     let l = m.limits;
     if !(1..=MAX_LIMITS.cpu_percent).contains(&l.cpu_percent)
@@ -603,6 +697,7 @@ pub fn manifest_of(args: &Map<String, Value>) -> Result<Manifest, String> {
         network: strings(args.get("network"), "network")?,
         secrets,
         writes: strings(args.get("writes"), "writes")?,
+        reads: strings(args.get("reads"), "reads")?,
         limits: limits_of(args.get("limits"))?,
     })
 }
@@ -673,6 +768,13 @@ impl ToolHost {
             .find_map(|w| write_refused(w, &h.cfg.home, &h.cfg.control))
         {
             return fail(&format!("writes: {why}"));
+        }
+        if let Some(why) = m
+            .reads
+            .iter()
+            .find_map(|r| read_refused(r, &h.cfg.home, &h.cfg.control))
+        {
+            return fail(&format!("reads: {why}"));
         }
         let manifest = compose(&m);
         if manifest.len() + files.iter().map(|f| f.content.len()).sum::<usize>() > skills::MAX_TOTAL
@@ -1012,6 +1114,7 @@ mod tests {
             network: vec![],
             secrets: vec![],
             writes: vec![],
+            reads: vec![],
             limits: DEFAULT_LIMITS,
         }
     }
@@ -1137,32 +1240,98 @@ mod tests {
             "hooks.example.org:8443"
         );
         assert_eq!(host_port("api.example.com").unwrap(), "api.example.com:443");
+        // Names kept for the machine and its own network are no service's host.
+        for local in [
+            "db.localhost",
+            "printer.local",
+            "metadata.google.internal",
+            "1.0.0.127.in-addr.arpa",
+            "x.localhost:5432",
+        ] {
+            assert_eq!(host_port(local), None, "{local}");
+        }
+        assert!(host_port("local.example.com").is_some());
+        // An old manifest (no `reads`) reads back as written; one with `reads` keeps them.
+        assert!(!compose(&m()).contains("reads"));
+        let mut r = m();
+        r.reads = vec!["/home/u/notes".into()];
+        assert_eq!(check_stored("stamp", &compose(&r), &[]).unwrap(), r);
     }
 
     #[test]
     fn a_write_path_stays_in_the_home_and_away_from_what_is_protected() {
-        let home = Path::new("/home/u");
-        let control = [PathBuf::from("/home/u/.local/share/clio")];
-        assert_eq!(write_refused("/home/u/backups", home, &control), None);
-        assert_eq!(write_refused("/home/u/sites/a/cache", home, &control), None);
-        for bad in [
-            "/home/u",
-            "/home/u/",
-            "/etc/cron.d",
-            "/home/u/../root",
-            "/home/u/./x",
-            "home/u/x",
-            "/home/u/.ssh",
-            "/home/u/.ssh/authorized_keys",
-            "/home/u/.bashrc",
-            "/home/u/.config/systemd/user",
-            "/home/u/.config",
-            "/home/u/.local",
-            "/home/u/.local/share/clio/services",
-            "/home/u/site/.git/hooks",
-            "/home/u/.local/bin",
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let h = |r: &str| home.join(r).display().to_string();
+        let control = [home.join(".local/share/clio")];
+        for d in [
+            "backups",
+            "sites/a/cache",
+            "project/.git/hooks",
+            "deep/1/2/3/4/5",
+            ".config/git",
+            ".local/share/clio/services",
+            ".ssh",
+            "node/node_modules/.bin",
+            "venv/bin",
+            "many",
         ] {
-            assert!(write_refused(bad, home, &control).is_some(), "{bad}");
+            fs::create_dir_all(home.join(d)).unwrap();
+        }
+        fs::write(home.join("venv/pyvenv.cfg"), "home = /usr").unwrap();
+        fs::write(home.join("sites/a/.envrc"), "export X=1").unwrap();
+        for i in 0..=TREE_ENTRIES {
+            fs::write(home.join(format!("many/{i}")), "").unwrap();
+        }
+        std::os::unix::fs::symlink(home.join("backups"), home.join("link")).unwrap();
+        assert_eq!(write_refused(&h("backups"), &home, &control), None);
+        assert_eq!(write_refused(&h("sites/a/cache"), &home, &control), None);
+        assert_eq!(write_refused(&h("deep/1/2/3"), &home, &control), None);
+        for bad in [
+            h(""),
+            format!("{}/", h("backups")),
+            "/etc/cron.d".into(),
+            h("backups/../.ssh"),
+            h("./backups"),
+            "backups".into(),
+            h(".ssh"),
+            h(".bashrc"),
+            h(".config/systemd/user"),
+            h(".config/git"),
+            h(".config"),
+            h(".local"),
+            h(".local/share/clio/services"),
+            h(".local/bin"),
+            h("project/.git/hooks"),
+            // A tree that holds a repository, code that loads by itself, or too much to check.
+            h("project"),
+            h("sites/a"),
+            h("node"),
+            h("venv"),
+            h("deep"),
+            h("many"),
+            // Not there yet, or a link.
+            h("missing"),
+            h("link"),
+        ] {
+            let why = write_refused(&bad, &home, &control);
+            assert!(why.is_some(), "{bad}");
+        }
+        let why = write_refused(&h("project"), &home, &control).unwrap();
+        assert!(why.contains(".git") && why.contains("narrower"), "{why}");
+        // A read path: anything existing under the home but the home itself, Clio's and keys.
+        assert_eq!(read_refused(&h("project"), &home, &control), None);
+        assert_eq!(read_refused(&h(".config/git"), &home, &control), None);
+        for bad in [
+            h(""),
+            h(".ssh"),
+            h(".local"),
+            h(".local/share/clio/services"),
+            h("link"),
+            h("missing"),
+            "/etc".into(),
+        ] {
+            assert!(read_refused(&bad, &home, &control).is_some(), "{bad}");
         }
     }
 }
