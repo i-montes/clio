@@ -771,6 +771,11 @@ impl Session for ChatSession {
         r.map_err(text)
     }
 
+    fn abort_compaction(&self) {
+        // Best effort: a compaction that ended meanwhile has nothing to cancel.
+        let _ = self.pi.client.abort();
+    }
+
     fn shutdown(&self) {
         if let Ok(mut g) = self.down.lock() {
             if std::mem::replace(&mut *g, true) {

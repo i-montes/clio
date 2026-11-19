@@ -1196,6 +1196,11 @@ impl Ctx {
                     c.cancel();
                 }
             }
+            Cmd::CompactAbort => {
+                if let Some(s) = self.current_chat() {
+                    std::thread::spawn(move || s.abort_compaction());
+                }
+            }
             Cmd::ChatClose => self.stop_chat_later(0),
             Cmd::LoadCommands => self.spawn(
                 |d, _| commands::load_custom(&d.config.join("commands")),

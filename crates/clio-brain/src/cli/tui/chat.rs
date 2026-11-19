@@ -187,6 +187,8 @@ pub struct Chat {
     pub compacting: bool,
     /// The compaction running is Clio's own, the context being over the cap.
     pub auto_compact: bool,
+    /// "Still over the cap" was said: not again until the context is back under it.
+    pub over_cap_said: bool,
     /// The model's checklist (`todo_write`), pinned above the status line.
     pub todo: Vec<super::todo::Item>,
     /// Host mode: commands running in the background, as of the last turn's end.
@@ -254,6 +256,7 @@ impl Chat {
             customs: vec![],
             compacting: false,
             auto_compact: false,
+            over_cap_said: false,
             todo: vec![],
             jobs: 0,
             streamed: false,
@@ -794,13 +797,21 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
 }
 
 fn key_composer(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
+    // Esc stops an automatic compaction (a `/compact` the person asked for is waited for).
+    let c = &mut app.chat;
+    if k.code == KeyCode::Esc && c.compacting && c.auto_compact && !c.running && !c.aborting {
+        c.aborting = true;
+        c.items
+            .push(Item::Note("stopping the automatic compaction…".into()));
+        return vec![Cmd::CompactAbort];
+    }
     let ctx = app.ctx();
     let Some(act) = lookup(ctx, k) else {
         return edit(app, k);
     };
     match act {
         Act::Quit => {
-            if !app.busy() {
+            if !app.busy_to_quit() {
                 app.quit = true;
             }
             return vec![];

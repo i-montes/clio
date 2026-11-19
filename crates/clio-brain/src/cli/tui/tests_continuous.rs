@@ -472,6 +472,79 @@ fn a_context_over_the_cap_is_compacted_when_the_turn_ends() {
     assert_eq!(last_note(&a), "context compacted");
 }
 
+// "Still over the cap" is said once, not after every turn's compaction; once the context is back
+// under the cap, a later one says it again.
+#[test]
+fn still_over_the_cap_is_said_once() {
+    let compacted = || {
+        Input::Bg(Bg::Compacted(
+            Ok("context compacted".into()),
+            Some(210_000),
+            None,
+        ))
+    };
+    let said = |a: &App| {
+        a.chat
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Note(n) if n.contains("still over the cap")))
+            .count()
+    };
+    let (mut a, _) = feed(turn_running(), vec![settled(Some(240_000)), compacted()]);
+    assert_eq!(said(&a), 1);
+    a.chat.running = true;
+    let (mut a, cmds) = feed(a, vec![settled(Some(230_000)), compacted()]);
+    assert!(cmds.contains(&Cmd::Compact(String::new())), "{cmds:?}");
+    assert_eq!(said(&a), 1, "not again");
+    a.chat.running = true;
+    let (mut a, _) = feed(a, vec![settled(Some(100_000))]);
+    a.chat.running = true;
+    let (a, _) = feed(a, vec![settled(Some(240_000)), compacted()]);
+    assert_eq!(said(&a), 2, "back under the cap, then over again");
+}
+
+// An automatic compaction does not keep the person from quitting (Ctrl-C, /quit), and Esc stops
+// it with a quiet note (Pi's `abort` cancels a compaction). A `/compact` the person asked for is
+// still waited for, and Esc does nothing to it.
+#[test]
+fn an_automatic_compaction_can_be_left_or_stopped() {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let ctrl_c = || Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    let (a, _) = feed(turn_running(), vec![settled(Some(240_000))]);
+    assert!(a.chat.compacting && a.chat.auto_compact);
+    let (q, _) = feed(a, vec![ctrl_c()]);
+    assert!(q.quit, "Ctrl-C quits");
+    let (a, _) = feed(turn_running(), vec![settled(Some(240_000))]);
+    let mut inputs = typed("/quit");
+    inputs.push(key(KeyCode::Enter));
+    let (q, _) = feed(a, inputs);
+    assert!(q.quit, "/quit quits");
+
+    let (a, _) = feed(turn_running(), vec![settled(Some(240_000))]);
+    let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
+    assert_eq!(cmds, vec![Cmd::CompactAbort]);
+    assert_eq!(last_note(&a), "stopping the automatic compaction…");
+    let (a, cmds) = feed(a, vec![key(KeyCode::Esc)]);
+    assert!(cmds.is_empty(), "once");
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Compacted(
+            Err("Compaction cancelled".into()),
+            None,
+            None,
+        ))],
+    );
+    assert_eq!(last_note(&a), "the automatic compaction was stopped");
+    assert!(!a.chat.compacting && !a.chat.aborting);
+
+    // The person's own `/compact`: waited for.
+    let (mut a, _) = feed(turn_running(), vec![settled(Some(100_000))]);
+    a.chat.compacting = true;
+    let (a, cmds) = feed(a, vec![key(KeyCode::Esc), ctrl_c()]);
+    assert!(cmds.is_empty() && !a.quit, "{cmds:?}");
+    assert!(a.flash.as_deref().is_some_and(|f| f.contains("compacting")));
+}
+
 // Never while something waits: a question or approval on screen, an approved action still
 // running, a message held. Nor without Pi's number (right after it compacted by itself).
 #[test]

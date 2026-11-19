@@ -484,7 +484,12 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
     let custom = match target {
         Target::Custom(i) => Some(app.chat.customs[i].clone()),
         Target::Builtin(run) => {
-            if command(run).idle && app.busy() {
+            let busy = if run == Run::Quit {
+                app.busy_to_quit()
+            } else {
+                app.busy()
+            };
+            if command(run).idle && busy {
                 return vec![];
             }
             None

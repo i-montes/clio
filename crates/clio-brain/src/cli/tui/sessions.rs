@@ -132,7 +132,7 @@ pub fn key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         return vec![];
     };
     match act {
-        Act::Quit if !app.busy() => app.quit = true,
+        Act::Quit if !app.busy_to_quit() => app.quit = true,
         Act::Back | Act::Sessions => app.screen = Screen::Chat,
         Act::Down => app.sessions.sel = (app.sessions.sel + 1).min(last),
         Act::Up => app.sessions.sel = app.sessions.sel.saturating_sub(1),

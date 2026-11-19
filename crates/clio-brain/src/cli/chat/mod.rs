@@ -177,6 +177,8 @@ pub trait Session: Send + Sync {
     fn command(&self, kind: &str, _fields: Value) -> Result<Value, String> {
         Err(format!("{kind}: not available in this session"))
     }
+    /// Cancels a compaction in flight (Pi's `abort`), beside the `command` that waits for it.
+    fn abort_compaction(&self) {}
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
 }

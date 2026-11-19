@@ -131,6 +131,8 @@ pub enum Cmd {
         text: String,
     },
     ChatAbort,
+    /// Esc during an automatic compaction: Pi's `abort` cancels it.
+    CompactAbort,
     /// The person's answer to an action the session set aside (host mode).
     ChatAnswer {
         id: String,
@@ -625,13 +627,24 @@ impl App {
     /// Whether the chat cannot be left now (quit, another session, a new one, a delete); when
     /// it cannot, the flash says why.
     pub fn busy(&mut self) -> bool {
+        self.busy_unless(false)
+    }
+
+    /// `busy`, but an automatic compaction does not keep the person from quitting: closing stops
+    /// Pi as it always does, and a compaction in flight is simply not recorded (the file is
+    /// append-only). A `/compact` the person asked for is still waited for.
+    pub fn busy_to_quit(&mut self) -> bool {
+        self.busy_unless(true)
+    }
+
+    fn busy_unless(&mut self, quitting: bool) -> bool {
         let why = if self.chat.running {
             "the agent is working: Esc in the chat aborts the turn; then switch session"
         } else if self.answering > 0 {
             "Clio is still running what you approved: wait for it to finish; then switch session"
         } else if self.chat.opening {
             "the session is opening: wait for it to start; then switch session"
-        } else if self.chat.compacting {
+        } else if self.chat.compacting && !(quitting && self.chat.auto_compact) {
             "Pi is compacting the context: wait for it to finish"
         } else {
             return false;
@@ -907,6 +920,9 @@ fn over_cap(app: &mut App) -> Vec<Cmd> {
         || !app.asks.is_empty()
         || app.prompt.is_some()
         || !app.prompts.is_empty();
+    if tokens <= cap {
+        c.over_cap_said = false;
+    }
     if tokens <= cap || waits {
         return vec![];
     }
@@ -1274,9 +1290,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             let c = &mut app.chat;
             c.compacting = false;
             let auto = std::mem::take(&mut c.auto_compact);
+            let stopped = std::mem::take(&mut c.aborting) && auto;
             let ok = r.is_ok();
             c.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
+                Err(_) if stopped => {
+                    super::chat::Item::Note("the automatic compaction was stopped".into())
+                }
                 Err(e) => super::chat::Item::Error(format!("could not compact: {e}")),
             });
             if let Some(r) = refresh {
@@ -1284,7 +1304,8 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             // Not tried again before another turn ends.
             let cap = app.context_cap();
-            if auto && ok && after.is_some_and(|n| n > cap) {
+            if auto && ok && after.is_some_and(|n| n > cap) && !app.chat.over_cap_said {
+                app.chat.over_cap_said = true;
                 app.chat.items.push(super::chat::Item::Note(format!(
                     "the context is still over the cap of {} tokens after compacting: /compact N raises it to N thousand",
                     usage::tokens(cap)
