@@ -487,6 +487,51 @@ fn esc_declines_a_secret_and_a_suspect_session_says_so() {
     assert!(q.typing.is_none() && !q.ready);
 }
 
+// A terminal that sends Shift apart sends Shift+1 as `1` with SHIFT: the secret field, the
+// "Other…" field and the digit shortcuts refuse such a key with a flash instead of taking the
+// wrong character; a shifted letter is its capital, and Shift+Space a space.
+#[test]
+fn a_shifted_non_letter_is_refused_where_the_person_types() {
+    let shifted = |c: char| {
+        Input::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::SHIFT,
+        ))
+    };
+    let (a, _) = feed(chat(), vec![secrets(false), Input::Tick(2_000)]);
+    let (a, _) = feed(a, vec![shifted('1'), shifted('_')]);
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert!(s.value.is_empty());
+    assert_eq!(
+        a.flash.as_deref(),
+        Some("this terminal sends Shift apart: paste the value")
+    );
+    let (a, _) = feed(a, vec![shifted('A'), shifted(' '), ch('!')]);
+    let Some(Prompt::Secret(s)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(s.value.chars(), 3);
+
+    let (a, cmds) = feed(
+        chat(),
+        vec![
+            select("q1", "Which database?", &OPTIONS),
+            Input::Tick(2_000),
+            shifted('1'),
+        ],
+    );
+    assert!(cmds.is_empty() && a.prompt.is_some(), "{cmds:?}");
+    assert!(a.flash.as_deref().unwrap().contains("Shift apart"));
+    let (a, cmds) = feed(a, vec![ch('4'), shifted('-'), shifted('M'), ch('x')]);
+    assert_eq!(cmds, vec![ui("q1", Some(OTHER))]);
+    let Some(Prompt::Question(q)) = &a.prompt else {
+        panic!()
+    };
+    assert_eq!(q.typing.as_deref(), Some("Mx"));
+}
+
 // A store the vault refused: the worker offers the box again (the request still waits) and the
 // error goes to the chat; the box is empty, ready for the value again.
 #[test]

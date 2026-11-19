@@ -601,6 +601,16 @@ fn close(app: &mut App, value: Option<String>) -> Vec<Cmd> {
     }
 }
 
+/// A terminal that sends Shift apart sends Shift+1 as `1` with SHIFT: what was meant depends on
+/// the layout, so a non-letter key with SHIFT is not taken (Shift+Space is a space anywhere).
+fn shift_apart(k: &KeyEvent) -> bool {
+    matches!(k.code, KeyCode::Char(c) if !c.is_alphabetic() && c != ' ')
+        && k.modifiers.contains(KeyModifiers::SHIFT)
+}
+
+/// What the flash says when `shift_apart` refused a key.
+const SHIFT_APART: &str = "this terminal sends Shift apart";
+
 /// The person picked row `i`: an answer goes to Pi; `Other…` opens the field.
 fn choose(app: &mut App, i: usize) -> Vec<Cmd> {
     let Some(Prompt::Question(q)) = &mut app.prompt else {
@@ -635,6 +645,14 @@ pub fn key(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     }
     q.ready = true;
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
+    if shift_apart(k) {
+        app.flash = Some(if q.typing.is_some() {
+            format!("{SHIFT_APART}: type it without that character")
+        } else {
+            format!("{SHIFT_APART}: use the arrows and Enter")
+        });
+        return vec![];
+    }
     if let Some(typed) = &mut q.typing {
         let answer = match k.code {
             KeyCode::Esc => Some(None),
@@ -854,6 +872,10 @@ fn secret_key(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
     }
     s.ready = true;
     let plain = (k.modifiers - KeyModifiers::SHIFT).is_empty();
+    if shift_apart(k) {
+        app.flash = Some(format!("{SHIFT_APART}: paste the value"));
+        return vec![];
+    }
     let value = match k.code {
         KeyCode::Esc => None,
         KeyCode::Enter if plain && !s.value.is_empty() => Some(std::mem::replace(
