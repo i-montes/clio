@@ -84,6 +84,10 @@ pub const PROTECTED_HOME: [&str; 21] = [
     ".local/bin",
     ".cargo/bin",
 ];
+/// Outside the home, what a jail hides too (a service's run, an MCP server, npm for one): the
+/// person's other data, sites and mounts. `/etc`, `/usr`, `/lib*`, `/bin` and `/sbin` stay for the
+/// runtime, TLS and DNS. A read may name a path under one of them (never the root itself).
+pub const HIDDEN_ROOTS: [&str; 7] = ["/home", "/root", "/var", "/srv", "/opt", "/mnt", "/media"];
 /// Variables a service's secret may not take: what the launcher, the shell or the proxy set.
 const RESERVED_ENV: [&str; 13] = [
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "SHELL", "PWD", "OLDPWD", "TMPDIR", "IFS", "ENV",
@@ -290,9 +294,16 @@ pub(crate) fn valid_env(e: &str) -> bool {
 }
 
 /// Why a declared path (read or write) is refused, if it is: it must be absolute, plain (no `.`,
-/// `..` or doubled `/`), under `home` and not the home itself, neither inside nor above Clio's
-/// folders (`control`) or one of `home`'s `also`, and exist as named (no link in it).
-fn path_refused(p: &str, home: &Path, control: &[PathBuf], also: &[&str]) -> Option<String> {
+/// `..` or doubled `/`), under `home` and not the home itself (a read: or under one of
+/// `HIDDEN_ROOTS`, not the root itself, nor the home's folder or one above it), neither inside nor
+/// above Clio's folders (`control`) or one of `home`'s `also`, and exist as named (no link in it).
+fn path_refused(
+    p: &str,
+    home: &Path,
+    control: &[PathBuf],
+    also: &[&str],
+    read: bool,
+) -> Option<String> {
     let path = Path::new(p);
     let plain = path.is_absolute()
         && p.len() <= 200
@@ -307,8 +318,19 @@ fn path_refused(p: &str, home: &Path, control: &[PathBuf], also: &[&str]) -> Opt
     if !plain {
         return Some(format!("{}: an absolute, plain path", one_line(p)));
     }
-    if !path.starts_with(home) || path == home {
-        return Some(format!("{}: only under the home folder", one_line(p)));
+    let under_root = |r: &&str| path.starts_with(r) && path != Path::new(r);
+    let inside = (path.starts_with(home) && path != home)
+        || (read && HIDDEN_ROOTS.iter().any(under_root) && !home.starts_with(path));
+    if !inside {
+        return Some(format!(
+            "{}: only under the home folder{}",
+            one_line(p),
+            if read {
+                " (or under /var, /srv, /opt, /mnt, /media, /root or /home, never one of them itself)"
+            } else {
+                ""
+            }
+        ));
     }
     let protected = control
         .iter()
@@ -333,9 +355,10 @@ fn path_refused(p: &str, home: &Path, control: &[PathBuf], also: &[&str]) -> Opt
     }
 }
 
-/// Why a declared read path is refused, if it is (`path_refused`, keys: `~/.ssh`, `~/.gnupg`).
+/// Why a declared read path is refused, if it is (`path_refused`, keys: `~/.ssh`, `~/.gnupg`):
+/// under the home or one of `HIDDEN_ROOTS`.
 pub fn read_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String> {
-    path_refused(p, home, control, &[".ssh", ".gnupg"])
+    path_refused(p, home, control, &[".ssh", ".gnupg"], true)
 }
 
 /// Why a declared write path is refused, if it is: `path_refused` with the home's
@@ -344,7 +367,7 @@ pub fn read_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String>
 /// levels, `TREE_ENTRIES` entries at most, past that refused) holds no repository and nothing
 /// that loads code by itself. Checked at draft time, at approval and before each run.
 pub fn write_refused(p: &str, home: &Path, control: &[PathBuf]) -> Option<String> {
-    if let Some(why) = path_refused(p, home, control, &PROTECTED_HOME) {
+    if let Some(why) = path_refused(p, home, control, &PROTECTED_HOME, false) {
         return Some(why);
     }
     let path = Path::new(p);
@@ -1352,8 +1375,26 @@ mod tests {
             h("link"),
             h("missing"),
             "/etc".into(),
+            "/var".into(),
+            "/home".into(),
+            "/var/../etc".into(),
         ] {
             assert!(read_refused(&bad, &home, &control).is_some(), "{bad}");
         }
+        // Under a hidden root outside the home: a read may name it; a write never.
+        let var = tempfile::TempDir::new_in("/var/tmp").ok();
+        if let Some(v) = &var {
+            let p = v.path().display().to_string();
+            assert_eq!(read_refused(&p, &home, &control), None);
+            assert!(write_refused(&p, &home, &control).is_some());
+        }
+        assert!(
+            read_refused(
+                &home.parent().unwrap().display().to_string(),
+                &home,
+                &control
+            )
+            .is_some()
+        );
     }
 }

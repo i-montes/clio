@@ -658,10 +658,8 @@ impl Runner<'_> {
             }
             shows.push(PathBuf::from(p));
         }
-        // The forwarder (`clio pi-net`) runs inside: the binary is shown when the home hides it.
-        if self.exe.starts_with(&d.home) {
-            shows.push(self.exe.clone());
-        }
+        // The forwarder (`clio pi-net`) runs inside: the binary is shown when a mask hides it.
+        shows.push(self.exe.clone());
         let scrub = Scrubber::default();
         let mut input = Vec::new();
         let mut prefix = String::new();
@@ -743,10 +741,13 @@ impl Runner<'_> {
         };
         let mut masks = control;
         // The whole home: its sockets (what starts programs: a process manager, a terminal
-        // multiplexer) and its credentials; and `/run`: the person's D-Bus (`systemd-run --user`
-        // would start something outside the jail), Docker's socket and the vault's sockets. The
-        // version folder, the declared paths and the proxy folder are windows.
+        // multiplexer) and its credentials; `/run`: the person's D-Bus (`systemd-run --user`
+        // would start something outside the jail), Docker's socket and the vault's sockets; and
+        // the rest of the machine's data (`/var`, `/srv`, `/opt`, `/mnt`, `/media`, `/root`, every
+        // home): sites, databases, backups. The version folder, the declared paths, the proxy
+        // folder, Node and the `clio` binary are windows.
         masks.extend([d.home.clone(), PathBuf::from("/run")]);
+        masks.extend(sv::HIDDEN_ROOTS.iter().map(PathBuf::from));
         let job = ServiceRun {
             job: HostJob {
                 command,
@@ -1279,7 +1280,7 @@ fn say(r: Res<String>) -> Res<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::time::Instant;
@@ -2032,6 +2033,75 @@ mod tests {
         }
         // Outside the jail the socket does connect: the check above is a real one.
         assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+    }
+
+    /// A stand-in for `/var/www` (a site's files, world-readable) and a folder declared to be read,
+    /// both really under `/var`; `None` (the test says it was skipped) when `/var/tmp` is not
+    /// writable here.
+    pub(crate) fn var_www() -> Option<(TempDir, PathBuf, PathBuf)> {
+        let Ok(v) = TempDir::new_in("/var/tmp") else {
+            eprintln!("SKIPPED (/var/tmp is not writable here, nothing was tested)");
+            return None;
+        };
+        let (site, open) = (v.path().join("www/site"), v.path().join("open"));
+        for p in [&site, &open] {
+            fs::create_dir_all(p).unwrap();
+        }
+        fs::write(site.join("config.php"), "db password").unwrap();
+        fs::write(open.join("a.txt"), "declared\n").unwrap();
+        for p in [
+            v.path().to_path_buf(),
+            v.path().join("www"),
+            site.clone(),
+            open.clone(),
+        ] {
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        for f in [site.join("config.php"), open.join("a.txt")] {
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        Some((v, site.join("config.php"), open))
+    }
+
+    // S-69, with bwrap: the machine's data outside the home is hidden too (`/var`, `/srv`, `/opt`,
+    // `/mnt`, `/media`, `/root`, every home): a site's world-readable files under `/var` are not
+    // readable from a run; a folder there it declared to read is, read-only.
+    #[test]
+    fn a_run_sees_nothing_of_var_but_what_it_declared() {
+        let Some(jail) = bwrap() else { return };
+        let Some((_v, site, open)) = var_www() else {
+            return;
+        };
+        let t = tmp();
+        let d = dirs_in(t.path());
+        let r = runner(&d, &jail, t.path());
+        let q = |p: &Path| quote(&p.display().to_string());
+        let script = format!(
+            "cat {site} 2>/dev/null && echo LEAK site\n\
+             find /srv /opt /mnt /media /root -mindepth 1 2>/dev/null | grep -q . && echo LEAK roots\n\
+             cat {open}/a.txt\n\
+             echo x > {open}/new 2>/dev/null && echo LEAK wrote-a-read-path\n\
+             echo s > \"$CLIO_STATE_DIR/n\"\n",
+            site = q(&site),
+            open = q(&open),
+        );
+        let mut m = manifest("var-reader", "bash run.sh");
+        m.reads = vec![open.display().to_string()];
+        approve(
+            &d,
+            &m,
+            &[SkillFile {
+                path: "run.sh".into(),
+                content: script,
+            }],
+        );
+        let x = r.run("var-reader", "person").unwrap().unwrap();
+        assert_eq!(x.outcome, "ok", "{x:?}");
+        assert!(!x.tail.contains("LEAK"), "{}", x.tail);
+        assert!(x.tail.contains("declared"), "{}", x.tail);
+        assert!(!open.join("new").exists());
+        // Outside the jail the site's file is readable: the check above is a real one.
+        assert!(fs::read_to_string(&site).is_ok());
     }
 
     // S-69: a service waiting for the vault is tried again by the timer at most every 15
