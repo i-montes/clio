@@ -1,24 +1,9 @@
 //! Cleaning of text that comes from outside (stderr of Pi, names and titles inside session files,
 //! the model's words when they are shown): no escape sequences, no control or bidi characters.
 
-/// Characters that draw nothing or reorder what is around them, so text can say one thing and read
-/// another or carry a message nobody sees: bidi controls, zero-width and joiner characters, soft
-/// hyphen, the fillers that render as blanks (Hangul, braille blank, combining grapheme joiner),
-/// variation selectors (except U+FE0F, which emoji need) and the tag characters (U+E0000), which
-/// are the way to hide a whole sentence inside text a model will read. One list for every place
-/// that cleans outside text, so they cannot drift apart.
-pub fn is_deceptive(c: char) -> bool {
-    matches!(c,
-        '\u{034F}' | '\u{061C}' | '\u{00AD}' | '\u{115F}' | '\u{1160}' | '\u{180E}'
-        | '\u{200B}'..='\u{200F}'
-        | '\u{2028}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'
-        | '\u{2800}' | '\u{3164}'
-        | '\u{FE00}'..='\u{FE0E}'
-        | '\u{FEFF}' | '\u{FFA0}'
-        | '\u{E0000}'..='\u{E007F}')
-}
+/// Characters that draw nothing or reorder what is around them: the tool host's list, so what it
+/// keeps and what the person is shown are cleaned of the same characters.
+pub use clio_toolhost::is_deceptive;
 
 /// Consumes a CSI sequence after `ESC [`: parameter bytes, intermediate bytes, one final byte. A
 /// character that cannot be part of one (a line break, a letter after a space...) ends it WITHOUT

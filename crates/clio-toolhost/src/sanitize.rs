@@ -2,9 +2,27 @@
 //! goes anywhere a terminal or a log could show it: terminal escape sequences and invisible
 //! characters that could hide or fake text are removed.
 
+/// Characters that draw nothing or reorder what is around them, so text can say one thing and read
+/// another or carry a message nobody sees: bidi controls, zero-width and joiner characters, soft
+/// hyphen, the fillers that render as blanks (Hangul, braille blank, combining grapheme joiner),
+/// line and paragraph separators, variation selectors (except U+FE0F, which emoji need) and the
+/// tag characters (U+E0000), which are the way to hide a whole sentence inside text a model will
+/// read. One list for every place that cleans outside text (the brain's display uses this one), so
+/// what the tool host keeps and what the person is shown cannot drift apart.
+pub fn is_deceptive(c: char) -> bool {
+    matches!(c,
+        '\u{034F}' | '\u{061C}' | '\u{00AD}' | '\u{115F}' | '\u{1160}' | '\u{180E}'
+        | '\u{200B}'..='\u{200F}'
+        | '\u{2028}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}'
+        | '\u{2800}' | '\u{3164}'
+        | '\u{FE00}'..='\u{FE0E}'
+        | '\u{FEFF}' | '\u{FFA0}'
+        | '\u{E0000}'..='\u{E007F}')
+}
+
 /// Removes ANSI escape sequences (CSI, OSC, and two-byte ones), control characters other than
-/// `\n` and `\t`, and the characters that reorder or hide text (bidi controls, zero-width,
-/// byte-order mark, line and paragraph separators).
+/// `\n` and `\t`, and the `is_deceptive` characters.
 pub fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut it = text.chars().peekable();
@@ -41,11 +59,7 @@ pub fn sanitize(text: &str) -> String {
                 None => {}
             },
             '\n' | '\t' => out.push(c),
-            c if c.is_control() => {}
-            '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{2069}'
-            | '\u{feff}' => {}
+            c if c.is_control() || is_deceptive(c) => {}
             c => out.push(c),
         }
     }
@@ -63,7 +77,7 @@ pub fn sanitize(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize;
+    use super::{is_deceptive, sanitize};
 
     #[test]
     fn a_copy_of_the_brains_envelope_in_outside_text_is_defanged() {
@@ -100,6 +114,20 @@ mod tests {
             "keep\nlines\tand tabs é"
         );
         assert_eq!(sanitize("end\u{1b}"), "end");
+    }
+
+    // Tag characters, soft hyphen, the blank fillers and variation selectors hide text as well as
+    // a zero-width space does; U+FE0F stays (emoji need it).
+    #[test]
+    fn tag_characters_and_blank_fillers_are_removed() {
+        let hidden = "a\u{e0041}\u{e0042}b\u{ad}c\u{34f}d\u{3164}e\u{2800}f\u{fe00}g\u{206a}h";
+        assert_eq!(sanitize(hidden), "abcdefgh");
+        assert_eq!(sanitize("❤\u{fe0f}"), "❤\u{fe0f}");
+        assert!(
+            sanitize(&('\u{0}'..='\u{e01ef}').collect::<String>())
+                .chars()
+                .all(|c| !is_deceptive(c) && (!c.is_control() || c == '\n' || c == '\t'))
+        );
     }
 
     /// A control character in the middle of a secret must not survive: the scrubber runs after

@@ -84,6 +84,8 @@ const PIN_DESCRIPTION: &str = "Pin a memory so it comes first in the context";
 const REVERT_DESCRIPTION: &str = "Undo a change you made to the memory (its change number)";
 const BLOCK_DESCRIPTION: &str = "Read one of the person's blocks whole, in order, each entry with its id: identidad (who Clio is and how she speaks), reglas (how she works and her limits), preferencias (who the person is), vigilancia (what she watches) (read-only)";
 const TEXT_SIZE: &str = "the text must have 1 to 1200 characters";
+const HIDDEN_CHARS: &str =
+    "the text has invisible or control characters: write it again with visible characters only";
 const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the person asked in this conversation: add an entry, replace one or remove one. In a session that read outside content it is set aside and written only if the person approves it";
 /// What a session that read outside content hears when it tries to change a block and nobody can
 /// be asked (no person, as in `clio run`): the person's own words only enter from a clean session
@@ -1223,6 +1225,16 @@ impl ToolHost {
         {
             return self.memory_failed(req, out, TEXT_SIZE);
         }
+        // What waits for the person must be exactly what the Approval box shows: a text the
+        // display would clean (an invisible or control character) is refused, not cleaned.
+        if let BlockEdit::Add(t) | BlockEdit::Replace(_, t) = &edit
+            && marked
+            && waits.is_some()
+            && t.chars()
+                .any(|c| (c.is_control() && !c.is_whitespace()) || crate::is_deceptive(c))
+        {
+            return self.memory_failed(req, out, HIDDEN_CHARS);
+        }
         let path = self.run_dir.join("memory-proposals.json");
         let mut budget = match Budget::load(&path) {
             Ok(b) => b,
@@ -1314,6 +1326,13 @@ impl ToolHost {
             BlockEdit::Remove(n) => ("remove", Some(*n), None),
         };
         let mut args = json!({ "name": name, "action": action });
+        if id.is_none() {
+            // An add to a block that does not exist is the model's mistake: nothing waits for it.
+            let block = name.clone();
+            if let Err(why) = self.ask_port(port, move |p| p.block(&block)) {
+                return self.memory_failed(req, out, &why);
+            }
+        }
         if let Some(n) = id {
             let block = name.clone();
             let entries = match self.ask_port(port, move |p| p.block(&block)) {

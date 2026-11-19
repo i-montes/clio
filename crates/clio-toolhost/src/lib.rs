@@ -58,7 +58,7 @@ pub use memory::{
     BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort, Near, Origin,
     ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict, memory_args,
 };
-pub use sanitize::sanitize;
+pub use sanitize::{is_deceptive, sanitize};
 pub use server::Server;
 
 /// The operations the host knows (`filter` is handled apart: it has no effect). Anything else is
