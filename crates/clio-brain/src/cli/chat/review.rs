@@ -615,12 +615,15 @@ fn judge_state(
     work: &TurnWork,
     scrub: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Value, String> {
+    // 40 entries as trained, but files keep up to 10 of them: commands alone never crowd out `wrote:`.
+    let commands = work.commands.len().min(40 - work.files.len().min(10));
+    let files = work.files.len().min(40 - commands);
     let done = work
         .commands
         .iter()
+        .take(commands)
         .map(|c| ("ran", c))
-        .chain(work.files.iter().map(|f| ("wrote", f)))
-        .take(40)
+        .chain(work.files.iter().take(files).map(|f| ("wrote", f)))
         .map(|(k, v)| Ok(format!("{k}: {}", text::line(&scrub(v)?, 300))))
         .collect::<Result<Vec<String>, String>>()?;
     let request = text::line(&scrub(&work.request)?, 2000);
@@ -922,6 +925,45 @@ mod tests {
         assert!(state.contains("ran: xxx"), "{state}");
         let fails = |_: &str| Err("vault down".to_owned());
         assert_eq!(judge_state(&w, &fails).unwrap_err(), "vault down");
+    }
+
+    fn done_of(commands: usize, files: usize) -> Vec<String> {
+        let mut w = work();
+        w.commands = (0..commands).map(|i| format!("cmd{i}")).collect();
+        w.files = (0..files).map(|i| format!("/f{i}")).collect();
+        let state = judge_state(&w, &|t: &str| Ok(t.to_owned())).unwrap();
+        serde_json::from_value(state["done"].clone()).unwrap()
+    }
+
+    #[test]
+    fn written_files_keep_room_in_the_judges_list_of_forty() {
+        let d = done_of(50, 5);
+        assert_eq!(d.len(), 40);
+        assert_eq!(d.iter().filter(|e| e.starts_with("ran: ")).count(), 35);
+        assert_eq!(
+            d[35..],
+            [
+                "wrote: /f0",
+                "wrote: /f1",
+                "wrote: /f2",
+                "wrote: /f3",
+                "wrote: /f4"
+            ]
+        );
+        let d = done_of(50, 50);
+        assert_eq!(d.iter().filter(|e| e.starts_with("ran: ")).count(), 30);
+        assert_eq!(d.iter().filter(|e| e.starts_with("wrote: ")).count(), 10);
+        assert_eq!((d[0].as_str(), d[39].as_str()), ("ran: cmd0", "wrote: /f9"));
+    }
+
+    #[test]
+    fn a_kind_with_nothing_to_share_leaves_all_forty_to_the_other() {
+        let d = done_of(45, 0);
+        assert_eq!(d.len(), 40);
+        assert!(d.iter().all(|e| e.starts_with("ran: ")));
+        let d = done_of(3, 30);
+        assert_eq!(d.len(), 33);
+        assert_eq!(d.iter().filter(|e| e.starts_with("ran: ")).count(), 3);
     }
 
     // Every decision is one private line in the run's `reviews/judged.jsonl`.
