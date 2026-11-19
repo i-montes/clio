@@ -114,6 +114,19 @@ pub fn may_tell(dirs: &Dirs, acts: &[grant::Act], run: &str) -> bool {
     acts.iter().any(|a| a.run == run) || !acts.iter().any(|a| run_open(dirs, &a.run))
 }
 
+/// Some conversation is open in a `clio` (one of the run folders' locks is held).
+pub fn any_open(dirs: &Dirs) -> bool {
+    std::fs::read_dir(&dirs.runs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|run| run_open(dirs, run))
+        })
+}
+
 /// A conversation of run `run` is open in some `clio` (it holds `session.lock`).
 fn run_open(dirs: &Dirs, run: &str) -> bool {
     valid_id(run)

@@ -341,8 +341,8 @@ fn started(
     let show = staged.as_deref().and_then(Path::parent).filter(|_| p.host);
     let id = format!("{}.review-{n}", p.run);
     let main = crate::cli::pi::paths(d);
-    let node = install::find_node(&std::env::var("PATH").unwrap_or_default())
-        .map_err(|e| fail(e.to_string()))?;
+    let node =
+        install::find_node(&crate::cli::pi::node_path(d)).map_err(|e| fail(e.to_string()))?;
     let install = install::locate(&main).map_err(|e| fail(e.to_string()))?;
     let connector = clio_brain::connector::by_provider(&cfg.model.provider)
         .ok_or_else(|| fail("no connector".into()))?;

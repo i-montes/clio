@@ -141,7 +141,7 @@ impl Port {
         let node = match node {
             Some(n) => n,
             None => {
-                clio_brain::pi::install::find_node(&std::env::var("PATH").unwrap_or_default())
+                clio_brain::pi::install::find_node(&super::pi::node_path(&dirs))
                     .map_err(|e| e.to_string())?
                     .path
             }

@@ -42,7 +42,8 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let mut key = None;
     if new_key || !vault::has_model_key(dirs, c) {
         let (value, old_file) = ask_key(dirs, c)?;
-        vault::put(dirs, c.secret, &format!("model:{}", c.domain), &value)?;
+        let value = clio_vault::SecretValue::new(value);
+        store_key(dirs, c, &value)?;
         println!(
             "key for {} stored in the vault (model:{})",
             c.name, c.domain
@@ -53,7 +54,7 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
             std::fs::remove_file(&f).map_err(|e| io_err(&f, &e))?;
             println!("deleted {}", f.display());
         }
-        key = Some(Secret::new(value));
+        key = Some(Secret::new(value.expose()));
     } else if c.name == "opencode" {
         let f = dirs.config.join("opencode-api-key");
         if f.exists() {
@@ -93,6 +94,12 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
         Err(e) => println!("stored, but {} did not answer: {e}", c.name),
     }
     Ok(0)
+}
+
+/// Puts `value` in the vault as connector `c`'s key, allowed only to `model:<its domain>`: what
+/// `clio connect` and `clio setup` store.
+pub fn store_key(dirs: &Dirs, c: &Connector, value: &clio_vault::SecretValue) -> Res<()> {
+    vault::put(dirs, c.secret, &format!("model:{}", c.domain), value)
 }
 
 /// The key to store, and the old key file to offer deleting when it was the source.
@@ -157,7 +164,7 @@ fn ask(question: &str) -> Res<bool> {
 }
 
 /// Sets `model.provider` and `model.model` (remembered as that connector's last model).
-fn switch_config(dirs: &Dirs, c: &Connector, model: &str) -> Res<()> {
+pub fn switch_config(dirs: &Dirs, c: &Connector, model: &str) -> Res<()> {
     edit_model(dirs, |m| set_model(m, c.provider, model))
 }
 

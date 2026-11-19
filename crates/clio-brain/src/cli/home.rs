@@ -303,6 +303,10 @@ pub struct UiCfg {
     /// The chat takes the mouse (clicks, the wheel); off, the terminal selects and copies text.
     #[serde(default)]
     pub mouse: bool,
+    /// The language chosen when Clio was installed (`es` or `en`): the first conversation starts
+    /// in it while the memory holds nothing of the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 /// The reviewer: a second agent that checks a piece of work (`/review`, or when the judge says so).
@@ -683,6 +687,32 @@ fn builtin_adapter(dirs: &Dirs, c: &Connector) -> Res<PathBuf> {
     Ok(p)
 }
 
+/// The folders `clio init` makes (0700), in order, before the runtime folder. Where the person's own slash commands go is
+/// born private, so `clio doctor` (S-23) has nothing to say about a folder the person would
+/// otherwise make with the default permissions.
+pub fn home_folders(dirs: &Dirs) -> [PathBuf; 4] {
+    [
+        dirs.config.clone(),
+        dirs.config.join("commands"),
+        dirs.data.clone(),
+        dirs.runs.clone(),
+    ]
+}
+
+/// Writes the default `config.json` when there is none (an existing one is left as it is);
+/// returns whether it wrote it. No path in the file: an empty command is the adapter inside this
+/// binary, so the file keeps working when Clio is updated or moved to another machine.
+pub fn write_default_config(dirs: &Dirs) -> Res<bool> {
+    let cfg = dirs.config_file();
+    if cfg.exists() {
+        return Ok(false);
+    }
+    let c = Config::default_with(Vec::new());
+    let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
+    write_private(&cfg, text.as_bytes())?;
+    Ok(true)
+}
+
 pub fn init(dirs: &Dirs) -> Res<()> {
     let st = Style::stdout();
     let ok = st.mark(Level::Pass);
@@ -700,12 +730,9 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         );
         Ok(())
     };
-    made(&dirs.config)?;
-    // Where the person's own slash commands go: born private, so `clio doctor` (S-23) has nothing
-    // to say about a folder the person would otherwise make with the default permissions.
-    made(&dirs.config.join("commands"))?;
-    made(&dirs.data)?;
-    made(&dirs.runs)?;
+    for d in home_folders(dirs) {
+        made(&d)?;
+    }
     made(dirs.need_runtime()?)?;
 
     // The memory file lives here and nowhere else; it is created now so the first run finds it.
@@ -720,15 +747,10 @@ pub fn init(dirs: &Dirs) -> Res<()> {
         Err(e) => println!("{}  memory: {e}", st.mark(Level::Warn)),
     }
     let cfg = dirs.config_file();
-    if cfg.exists() {
-        println!("{ok}  exists       {} (left as it is)", cfg.display());
-    } else {
-        // No path in the file: an empty command is the adapter inside this binary, so the file
-        // keeps working when Clio is updated or moved to another machine.
-        let c = Config::default_with(Vec::new());
-        let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
-        write_private(&cfg, text.as_bytes())?;
+    if write_default_config(dirs)? {
         println!("{ok}  created      {} (0600)", cfg.display());
+    } else {
+        println!("{ok}  exists       {} (left as it is)", cfg.display());
     }
     super::pi::init_lines(dirs);
     // The active connector (a new config is OpenCode); the key is never shown.

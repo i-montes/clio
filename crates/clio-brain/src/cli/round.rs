@@ -185,6 +185,8 @@ pub fn run_due(d: &Dirs, now: i64) -> Vec<String> {
         Err(e) => return vec![format!("round: {e}")],
     };
     run_due_with(d, now, &|cfg| ready(d, cfg), &|cfg| {
+        // Whether a newer Clio exists, asked at most once a day: the round may tell the person.
+        super::update::refresh(d, now);
         start(
             clio_node::host::systemd_run().as_deref(),
             cfg.round.max_seconds,
@@ -320,6 +322,8 @@ fn request(d: &Dirs, st: &St, now: i64) -> String {
         };
         format!("{title}\n{body}")
     };
+    // A newer Clio, when there is one: told once like any notice (its key reused after).
+    let clio = super::update::notice(d).map(|n| section("About Clio herself:", vec![n]));
     [
         section(
             "What the person asked you to watch (their block «vigilancia»):",
@@ -334,6 +338,9 @@ fn request(d: &Dirs, st: &St, now: i64) -> String {
             told,
         ),
     ]
+    .into_iter()
+    .chain(clio)
+    .collect::<Vec<_>>()
     .join("\n\n")
 }
 

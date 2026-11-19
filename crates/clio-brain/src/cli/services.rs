@@ -916,7 +916,7 @@ fn units(exe: &Path) -> Res<[(&'static str, String); 2]> {
     ])
 }
 
-fn user_name() -> Option<String> {
+pub(crate) fn user_name() -> Option<String> {
     let uid = fs::metadata("/proc/self").ok()?.uid().to_string();
     fs::read_to_string("/etc/passwd")
         .ok()?
@@ -926,7 +926,10 @@ fn user_name() -> Option<String> {
         .map(|f| f[0].to_owned())
 }
 
-fn systemctl() -> Option<PathBuf> {
+pub(crate) fn systemctl() -> Option<PathBuf> {
+    if let Some(d) = super::setup::test_system() {
+        return Some(d.join("systemctl")).filter(|p| p.is_file());
+    }
     ["/usr/bin/systemctl", "/bin/systemctl"]
         .iter()
         .map(PathBuf::from)
@@ -1046,8 +1049,13 @@ pub fn timer_warning(d: &Dirs) -> Option<String> {
 /// Whether the services timer runs: its two files are there and the person's systemd says it is
 /// active (not asked when the files are missing).
 pub(crate) fn timer_active(home: &Path) -> bool {
+    timer_on(home, systemctl().as_deref())
+}
+
+/// [`timer_active`] with the `systemctl` given (`None`: it is not active).
+pub(crate) fn timer_on(home: &Path, systemctl: Option<&Path>) -> bool {
     timer_files_exist(home)
-        && systemctl().is_some_and(|s| {
+        && systemctl.is_some_and(|s| {
             std::process::Command::new(s)
                 .args(["--user", "is-active", "--quiet", UNITS[1]])
                 .status()

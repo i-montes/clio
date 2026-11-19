@@ -62,6 +62,19 @@ pub trait Recall: Send + Sync {
 pub const COMPACTED_ASK: &str = "the conversation was just compacted: before you answer, save a summary of what has been done so far with memory_session_summary and get the context back with memory_context. This is Clio's own bookkeeping: do not mention it to the person. If the save is declined, go on without saying so, then answer the person's message.";
 /// What Clio asks in the first message of a session while the memory does not know the person.
 pub const PRESENTATION_ASK: &str = "This is your first conversation with this person. Before anything else, introduce yourself in two or three lines with what your identity says. Then ask them these questions, one by one, waiting for each answer: 1) what their name is and how they want you to address them; 2) what they do and what they have on this machine; 3) what they want you to watch; 4) what counts as important enough to tell them about. Save each answer with memory_block_edit: what is about the person in «preferencias» and each thing to watch in «vigilancia», one per entry. If they want to change who you are or how you speak, change «identidad» or «reglas». If they do not want to answer now, save in «preferencias» that they preferred not to introduce themselves, and do not insist. Write all of this in the language of the person's memories and blocks; if there are none, in English. When you finish, tell them they can change all this whenever they want, by talking to you.";
+/// The presentation request, in the language chosen at the install when there is one.
+fn presentation_ask(language: Option<&str>) -> String {
+    let default = "if there are none, in English.";
+    match language {
+        Some(l) => PRESENTATION_ASK.replace(
+            default,
+            &format!(
+                "if there are none, in {l} (the language they chose when they installed Clio)."
+            ),
+        ),
+        None => PRESENTATION_ASK.to_owned(),
+    }
+}
 /// What Clio asks with the findings of a review (they follow the message, as data).
 pub const REVIEW_ASK: &str = "An independent review of your last work found the following; fix what is right, and say which findings you do not accept and why.";
 /// What Clio asks with the notes of a review that passed a skill, which is registered already.
@@ -87,6 +100,9 @@ pub struct Settings {
     /// A conversation (the interface), not one instruction (`clio run`): Clio introduces herself
     /// to a person the memory does not know.
     pub presentation: bool,
+    /// The language the person chose when they installed Clio ("Spanish", "English"): the
+    /// presentation is written in it while the memory has nothing in a language of its own.
+    pub language: Option<&'static str>,
 }
 
 /// The vault's scrubber as the brain sees it: an error means the text does not leave and is not
@@ -191,6 +207,7 @@ impl PrePrompt {
                 memory: false,
                 tool_hints: false,
                 presentation: false,
+                language: None,
             },
         )
     }
@@ -288,9 +305,9 @@ impl PrePrompt {
         let presenting = self.presenting();
         self.0.opening.store(false, Ordering::SeqCst);
         let first = if self.0.compacted.swap(false, Ordering::SeqCst) {
-            Some(COMPACTED_ASK)
+            Some(COMPACTED_ASK.to_owned())
         } else {
-            presenting.then_some(PRESENTATION_ASK)
+            presenting.then(|| presentation_ask(self.0.settings.language))
         };
         let review = self
             .0
@@ -298,7 +315,7 @@ impl PrePrompt {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        let asks: Vec<&str> = first.into_iter().chain(review).collect();
+        let asks: Vec<String> = first.into_iter().chain(review.map(str::to_owned)).collect();
         (!asks.is_empty()).then(|| asks.join(" "))
     }
 }
@@ -645,6 +662,33 @@ mod tests {
     }
 
     #[test]
+    fn the_language_chosen_at_the_install_replaces_english_only_in_the_presentation() {
+        assert_eq!(presentation_ask(None), PRESENTATION_ASK);
+        let es = presentation_ask(Some("Spanish"));
+        assert!(
+            es.contains(
+                "if there are none, in Spanish (the language they chose when they installed Clio)."
+            ),
+            "{es}"
+        );
+        assert!(!es.contains("in English"), "{es}");
+        assert!(es.ends_with("by talking to you."));
+        let mut o = opts(false, &[], vec![]);
+        o.fixed = blocks();
+        o.presentation = true;
+        o.presented = false;
+        o.language = Some("Spanish");
+        let r = rig(o);
+        let p = r.pp.prepare("", STAMP);
+        assert!(
+            p.text
+                .contains(&format!("Clio's request: {es}\n</clio-context>")),
+            "{}",
+            p.text
+        );
+    }
+
+    #[test]
     fn the_identity_goes_under_its_own_heading() {
         let mut o = opts(false, &[], vec![cand(9, "Marta vive en Tolú", true)]);
         o.fixed = blocks();
@@ -715,6 +759,7 @@ mod tests {
                 memory: false,
                 tool_hints: false,
                 presentation: true,
+                language: None,
             },
         );
         assert!(!pp.presenting());
@@ -748,6 +793,7 @@ mod tests {
         slow: Duration,
         presentation: bool,
         presented: bool,
+        language: Option<&'static str>,
     }
 
     fn opts(jev: bool, probs: &[(&'static str, f64)], found: Vec<Candidate>) -> Opts {
@@ -760,6 +806,7 @@ mod tests {
             slow: Duration::ZERO,
             presentation: false,
             presented: true,
+            language: None,
         }
     }
 
@@ -806,6 +853,7 @@ mod tests {
                 memory: true,
                 tool_hints: true,
                 presentation: o.presentation,
+                language: o.language,
             },
         );
         Rig {
@@ -995,6 +1043,7 @@ mod tests {
                 memory: true,
                 tool_hints: true,
                 presentation: false,
+                language: None,
             },
         );
         let p = pp.prepare("hola", STAMP);
@@ -1170,6 +1219,7 @@ mod tests {
                 memory: false,
                 tool_hints: false,
                 presentation: false,
+                language: None,
             },
         );
         assert_eq!(pre.closing_text(STAMP), None);

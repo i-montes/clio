@@ -278,6 +278,22 @@ fn the_rounds_request_is_built_from_clios_records_only() {
         request(&e, &St::default(), now).matches("(none)").count(),
         3
     );
+    // A newer Clio is one more section at the end; without one the request is as it was.
+    let before = request(&e, &St::default(), now);
+    assert!(!before.contains("About Clio herself"));
+    std::fs::create_dir_all(&e.data).unwrap();
+    std::fs::write(
+        e.data.join("update.json"),
+        r#"{"checked_ms": 1, "latest": "99.0.0"}"#,
+    )
+    .unwrap();
+    let after = request(&e, &St::default(), now);
+    let extra = after.strip_prefix(before.as_str()).unwrap();
+    assert!(
+        extra.starts_with("\n\nAbout Clio herself:\n- a newer Clio exists:")
+            && extra.contains("99.0.0"),
+        "{extra}"
+    );
 }
 
 // What a round is given is since the last round's START: a service's notice raised after it

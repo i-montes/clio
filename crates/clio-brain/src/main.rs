@@ -17,6 +17,10 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
                                               the sessions next to the chat (CLIO_HARNESS=builtin turns that off);
                                               --host: the tools act on the real machine (the default), --copy: on a copy
                                               (they override \"mode\" in config.json)
+  clio setup                                  the guided installer: installs, updates, repairs or removes Clio
+                                              (clio setup --help for its flags)
+  clio update [--check]                       brings Clio, Pi, its Node, clio-memory and the shipped skills up to date;
+                                              --check only says whether a newer release exists
   clio init                                   creates ~/.config/clio, ~/.local/share/clio and the runtime folder
   clio run [--workspace DIR] [--max-steps N] [--allow-broad] [--debug] [--harness pi|builtin] [--host|--copy] \"instruction\"
                                               --workspace DIR: on a copy of DIR (does not go with --host)
@@ -125,6 +129,8 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
     if !matches!(
         cmd.as_str(),
         "init"
+            | "setup"
+            | "update"
             | "run"
             | "diff"
             | "apply"
@@ -307,6 +313,14 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             }
             cli::mcp_servers::cmd(&dirs, &rest)?;
         }
+        "setup" => {
+            if args.flag("--help") {
+                println!("{}", cli::setup::USAGE);
+                return Ok(0);
+            }
+            return cli::setup::run(&dirs, args.into_raw());
+        }
+        "update" => return cli::update::run(&dirs, args.into_raw()),
         "vault" => vault::run(&dirs, args.into_raw())?,
         "connect" => return connect::run(&dirs, args.into_raw()),
         "memory" => return memory::run(&dirs, args.into_raw()),

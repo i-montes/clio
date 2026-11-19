@@ -47,7 +47,7 @@ fn vault_bin_from(env: Option<std::ffi::OsString>, exe: Option<PathBuf>) -> Res<
 }
 
 /// One line from stdin; with echo off when stdin is a terminal.
-pub(super) fn read_secret(prompt: &str) -> Res<String> {
+pub(crate) fn read_secret(prompt: &str) -> Res<String> {
     let tty = std::io::stdin().is_terminal();
     if tty {
         eprint!("{prompt}: ");
@@ -169,38 +169,82 @@ fn comm(pid: u32) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// Where the vault is: `clio setup` decides from this whether to ask for a new passphrase or the
+/// existing one, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// No vault file yet.
+    Missing,
+    /// The file, and no server.
+    Stopped,
+    Locked,
+    Open,
+}
+
+pub fn state(dirs: &Dirs) -> State {
+    let Ok(p) = paths(dirs) else {
+        return if dirs.data.join("vault.bin").exists() {
+            State::Stopped
+        } else {
+            State::Missing
+        };
+    };
+    if running(&p).is_some() {
+        return match locked(&p) {
+            Some(false) => State::Open,
+            _ => State::Locked,
+        };
+    }
+    if p.vault.exists() {
+        State::Stopped
+    } else {
+        State::Missing
+    }
+}
+
 fn start(dirs: &Dirs) -> Res<()> {
     let p = paths(dirs)?;
+    if let Some(pid) = running(&p)
+        && locked(&p) != Some(true)
+    {
+        return Err(format!(
+            "the vault is already running (pid {pid}) and unlocked"
+        ));
+    }
+    if !p.vault.exists() {
+        println!("creating a new vault at {}", p.vault.display());
+    }
+    let pass = SecretValue::new(read_secret("vault passphrase")?);
+    let pid = start_with(dirs, &pass)?;
+    println!("vault running (pid {pid}), unlocked");
+    Ok(())
+}
+
+/// Creates the vault if there is none, starts its server if it is not running and unlocks it,
+/// all with `pass`, which goes from this process to the vault's file or its socket and nowhere
+/// else (no argument, no other process's input). Returns the server's pid.
+pub fn start_with(dirs: &Dirs, pass: &SecretValue) -> Res<u32> {
+    let p = paths(dirs)?;
     mkdir_private(&p.dir)?;
+    let wrong = || "could not unlock the vault (wrong passphrase?): clio vault start".to_owned();
     if let Some(pid) = running(&p) {
         // Running but locked (a mistyped passphrase, a `lock`): unlock it here, so every "the vault
         // is locked: clio vault start" is an answer.
-        if locked(&p) != Some(true) {
-            return Err(format!(
-                "the vault is already running (pid {pid}) and unlocked"
-            ));
-        }
-        let pass = read_secret("vault passphrase")?;
-        call(
-            &[
-                "--sock".into(),
-                p.person.display().to_string(),
-                "unlock".into(),
-            ],
-            Some(&pass),
-        )
-        .map_err(|_| {
-            "could not unlock the vault (wrong passphrase?): clio vault start".to_owned()
-        })?;
-        println!("vault running (pid {pid}), unlocked");
-        return Ok(());
+        unlock(&p.person, pass).map_err(|_| wrong())?;
+        return Ok(pid);
     }
-    let pass = read_secret("vault passphrase")?;
     let bin = vault_bin()?;
     let s = |x: &std::path::Path| x.display().to_string();
     if !p.vault.exists() {
-        println!("creating a new vault at {}", p.vault.display());
-        call(&["init".into(), "--vault".into(), s(&p.vault)], Some(&pass))?;
+        if let Some(d) = p.vault.parent() {
+            mkdir_private(d)?;
+        }
+        clio_vault::Vault::init(
+            Some(&p.vault),
+            pass.expose(),
+            std::sync::Arc::new(clio_core::SystemClock),
+        )
+        .map_err(|e| format!("could not create the vault: {e}"))?;
     }
     for sock in [&p.gateway, &p.person] {
         let _ = std::fs::remove_file(sock); // stale socket of a dead server
@@ -258,22 +302,43 @@ fn start(dirs: &Dirs) -> Res<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    call(
-        &["--sock".into(), s(&p.person), "unlock".into()],
-        Some(&pass),
-    )
-    .map_err(|_| {
-        abort("could not unlock the vault (wrong passphrase?): clio vault start".into())
-    })?;
-    println!("vault running (pid {}), unlocked", child.id());
-    Ok(())
+    unlock(&p.person, pass).map_err(|_| abort(wrong()))?;
+    Ok(child.id())
+}
+
+/// Unlocks the vault on `sock` with `pass`; the request is wiped once sent.
+fn unlock(sock: &std::path::Path, pass: &SecretValue) -> Res<()> {
+    let mut req = Request::Unlock {
+        passphrase: pass.expose().to_owned(),
+        eager: Vec::new(),
+    };
+    let r = VaultClient::new(sock)
+        .with_timeout(Duration::from_secs(30))
+        .call(&req);
+    if let Request::Unlock { passphrase, .. } = &mut req {
+        clio_vault::wipe(passphrase);
+    }
+    match r {
+        Ok(resp) if resp.ok => Ok(()),
+        Ok(resp) => Err(resp.error.unwrap_or_else(|| "refused".into())),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 fn stop(dirs: &Dirs) -> Res<()> {
+    if stop_server(dirs)? {
+        println!("vault stopped");
+    } else {
+        println!("the vault is not running");
+    }
+    Ok(())
+}
+
+/// Stops the vault's server when it runs; returns whether it did.
+pub fn stop_server(dirs: &Dirs) -> Res<bool> {
     let p = paths(dirs)?;
     let Some(pid) = running(&p) else {
-        println!("the vault is not running");
-        return Ok(());
+        return Ok(false);
     };
     let _ = Command::new("kill").arg(pid.to_string()).status();
     let t = Instant::now();
@@ -283,8 +348,7 @@ fn stop(dirs: &Dirs) -> Res<()> {
     for f in [&p.gateway, &p.person, &p.pid] {
         let _ = std::fs::remove_file(f);
     }
-    println!("vault stopped");
-    Ok(())
+    Ok(true)
 }
 
 fn running_paths(dirs: &Dirs) -> Res<Paths> {
@@ -307,11 +371,22 @@ fn person_call(dirs: &Dirs, sub: &str, args: Vec<String>, stdin: Option<&str>) -
     call(&full, stdin)
 }
 
-/// Stores `value` as the secret `name`, allowed only for `dest` (`TOOL:DOMAIN`). The value goes to
-/// `clio-vault` on its input, never in an argument.
-pub fn put(dirs: &Dirs, name: &str, dest: &str, value: &str) -> Res<()> {
-    let args = vec![name.to_owned(), "--dest".into(), dest.into()];
-    person_call(dirs, "put", args, Some(value))
+/// Stores `value` as the secret `name` (replacing one of that name), allowed only for `dest`
+/// (`TOOL:DOMAIN`): from this process straight to the vault's person socket, never in an argument
+/// or another process's input.
+pub fn put(dirs: &Dirs, name: &str, dest: &str, value: &SecretValue) -> Res<()> {
+    let p = running_paths(dirs)?;
+    let d = Dest::parse(dest).ok_or_else(|| format!("{dest} is not TOOL:DOMAIN"))?;
+    VaultClient::new(&p.person)
+        .with_timeout(Duration::from_secs(10))
+        .put(name, value, Kind::ApiKey, vec![d])
+        .map_err(|e| match e {
+            VaultError::Locked => "the vault is locked: clio vault start".into(),
+            VaultError::InvalidValue => {
+                "that is too short to be a secret: nothing was stored".into()
+            }
+            other => format!("the vault did not store it: {other}"),
+        })
 }
 
 /// The vault's person socket (whether or not the vault runs): `request_secret` asks it, at request
