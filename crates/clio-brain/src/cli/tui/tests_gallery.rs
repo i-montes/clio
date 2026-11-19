@@ -810,6 +810,7 @@ fn command_states() -> Vec<(&'static str, App)> {
     out.push(("/skills", a));
     services_states(&mut out);
     mcp_states(&mut out);
+    manage_states(&mut out);
     out
 }
 
@@ -1142,6 +1143,97 @@ fn services_states(out: &mut Vec<(&'static str, App)>) {
 }
 
 /// A service's approval box on screen, after the quiet second, scrolled `scroll` rows.
+/// A request of the model's about what it created (`*_manage`), set aside, as the box gets it.
+pub(super) fn manage_item(
+    tool: &str,
+    args: serde_json::Value,
+    reason: Option<&str>,
+) -> clio_toolhost::pending::Pending {
+    clio_toolhost::pending::Pending {
+        id: "m1a2b3c4".into(),
+        class: clio_toolhost::manage::kind(tool).unwrap().class,
+        tool: tool.into(),
+        args,
+        hash: String::new(),
+        what: String::new(),
+        run: "r1".into(),
+        session: "sid".into(),
+        created_ms: 0,
+        expires_ms: 1,
+        state: clio_toolhost::pending::State::Waiting,
+        reason: reason.map(str::to_owned),
+        granted: None,
+    }
+}
+
+/// The one box with a manage request in it, after the quiet second.
+pub(super) fn manage_box(p: &clio_toolhost::pending::Pending) -> App {
+    let mut a = conversation(true);
+    let what = format!(
+        "{} {}",
+        crate::cli::pending::label(p),
+        crate::cli::pending::what(p)
+    );
+    a.confirm = super::approvals::one_box(
+        &a,
+        vec![(p.id.clone(), what, super::ask::BlockAsk::new(p, false))],
+    );
+    a.now_ms = 300_000;
+    a.last_key_ms = Some(0);
+    a
+}
+
+/// What Clio does to what she created: the box for a `remove` and an `undo`, an `on` that always
+/// asks, the notes when she turns a service off or runs it by herself, and an act of the window.
+fn manage_states(out: &mut Vec<(&'static str, App)>) {
+    let remove = manage_item(
+        "service_manage",
+        serde_json::json!({"name": "disk-check", "action": "remove", "why": "Replaced by uptime-report", "version": 2}),
+        None,
+    );
+    out.push(("Clio asks to remove a service", manage_box(&remove)));
+    let undo = manage_item(
+        "skill_manage",
+        serde_json::json!({"name": "disk-report", "action": "undo", "why": "Version 3 broke the report", "version": 3, "to": 2}),
+        None,
+    );
+    out.push((
+        "Clio asks to take a skill back a version",
+        manage_box(&undo),
+    ));
+    let on = manage_item(
+        "mcp_manage",
+        serde_json::json!({"name": "github", "action": "on", "why": "Needed for the issues", "version": 1, "off": "turned off by the person"}),
+        Some(clio_toolhost::manage::PERSON_OFF),
+    );
+    out.push((
+        "Clio asks to turn on a server you turned off",
+        manage_box(&on),
+    ));
+    let note = |n: &str| Input::Bg(Bg::SkillNews(vec![], vec![n.into()]));
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![note(
+            "Clio did this by herself: turn the service «disk-check» off (Its disk is gone). «disk-check» is off",
+        )],
+    );
+    out.push(("Clio turned a service off by herself", a));
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![note(
+            "Clio did this by herself: run the service «disk-check» (Check it now). «disk-check»: today 14:02 ok exit 0, 1.2 s (`service_manage logs` shows what it printed)",
+        )],
+    );
+    out.push(("Clio ran a service by herself", a));
+    let (a, _) = super::tests::feed(
+        conversation(true),
+        vec![Input::Bg(Bg::Granted(Ok(
+            "approved under your permission (3 h 12 min left): «service» remove the service «old-report» (version 1): its versions, record, state and runs go to removed/, where they are kept · Clio's reason: Replaced by uptime-report\n«old-report» was removed (kept in /home/ivan/.local/share/clio/services/removed/old-report-1763560000000)".into(),
+        )))],
+    );
+    out.push(("a removal done under your permission window", a));
+}
+
 fn approve_service(a: &mut App, b: super::ask::BlockAsk, scroll: usize) {
     approve_block(a, b);
     let c = a.confirm.as_mut().unwrap();

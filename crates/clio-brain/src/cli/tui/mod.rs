@@ -1071,7 +1071,7 @@ impl Ctx {
                             super::pending::person_said_yes(d, &ids, session.suspect())
                         {
                             let _ = tx.send(Input::Bg(Bg::GrantSaid(Ok(format!(
-                                "permission window open: until {} ({}) Clio approves by herself what deletes, spends or sends, `ask` MCP calls and skills; control, secrets, your blocks, services and MCP servers still ask you. You get a summary when it ends · /grant off closes it",
+                                "permission window open: until {} ({}) Clio approves by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away; control, secrets, your blocks, new services and MCP servers still ask you. You get a summary when it ends · /grant off closes it",
                                 clio_toolhost::pending::local(w.ends_ms, "%H:%M")
                                     .unwrap_or_default(),
                                 clio_toolhost::grant::left_text(w.ends_ms - w.opened_ms)

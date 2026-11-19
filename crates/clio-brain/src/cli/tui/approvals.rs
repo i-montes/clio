@@ -152,7 +152,7 @@ pub fn yes_says(hours: u64, (suspect, judge_off): (bool, bool), base: &str) -> (
         ),
         h => (
             format!(
-                "Yes approves all of this and, for the next {h} hour{}, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end.",
+                "Yes approves all of this and, for the next {h} hour{}, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away; control, your blocks, new services and MCP servers still ask you. You get a summary when they end.",
                 if h == 1 { "" } else { "s" }
             ),
             format!("{base}, then {h} h without asking"),
@@ -161,13 +161,15 @@ pub fn yes_says(hours: u64, (suspect, judge_off): (bool, bool), base: &str) -> (
 }
 
 /// An item labelled `class` («class» or «class · reason», `pending::label`) is one a window
-/// never answers (`grant::covers`, read back from the label).
-fn always_asks(class: &str) -> bool {
+/// never answers (`grant::covers`, read back from the label). A request about what Clio created
+/// (`manage`, its box says so) always asks only when it carries a reason.
+fn always_asks(class: &str, manage: bool) -> bool {
     let inner = class.trim_start_matches('«').trim_end_matches('»');
     let (name, reason) = inner
         .split_once(" · ")
         .map_or((inner, None), |(n, r)| (n, Some(r)));
     match name {
+        _ if manage => reason.is_some(),
         "send" => reason.is_some_and(|r| r != clio_toolhost::mcp::ASK_TOOL),
         n => ["control", "secret", "memory", "service", "mcp"].contains(&n),
     }
@@ -201,7 +203,10 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         } else {
             format!("{id} · ")
         };
-        let note = if hours > 0 && always_asks(&class) {
+        let manage = block
+            .as_ref()
+            .is_some_and(|b| b.action == super::ask::MANAGE);
+        let note = if hours > 0 && always_asks(&class, manage) {
             " · this one always asks you"
         } else {
             ""
@@ -269,6 +274,8 @@ pub fn outcomes(stored: &str) -> (&str, Vec<String>) {
             Some(last)
                 if !(part.starts_with("the person ")
                     || part.starts_with("the permission window ")
+                    || part.starts_with("Clio did ")
+                    || part.starts_with("Clio could not ")
                     || part.starts_with("secret ")) =>
             {
                 last.push_str("\n\n");
@@ -583,7 +590,7 @@ mod tests {
         let (a, seen, t) = read_to_the_end(a, 80, 16, t0 + 2_000);
         let seen = seen.split_whitespace().collect::<Vec<_>>().join(" ");
         for s in [
-            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end.",
+            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away; control, your blocks, new services and MCP servers still ask you. You get a summary when they end.",
             "1 of 3 · a1b2 · «delete»",
             "rm -r /srv/old",
             "2 of 3 · e7f8 · «mcp» · this one always asks you",
@@ -646,7 +653,7 @@ mod tests {
         let (h, k) = super::yes_says(4, (false, false), " yes to all");
         assert_eq!(
             h,
-            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls and skills; control, your blocks, services and MCP servers still ask you. You get a summary when they end."
+            "Yes approves all of this and, for the next 4 hours, lets Clio approve by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away; control, your blocks, new services and MCP servers still ask you. You get a summary when they end."
         );
         assert_eq!(k, " yes to all, then 4 h without asking");
         let (h, k) = super::yes_says(0, (false, false), " yes to all");
@@ -663,16 +670,29 @@ mod tests {
         let text = screen_text(&a, 100, 30);
         assert!(!text.contains("without asking"), "{text}");
         // Control, a block change, a changed MCP tool: "always asks"; a delete, an ask call: not.
-        assert!(super::always_asks("«control»"));
-        assert!(super::always_asks("«memory»"));
+        assert!(super::always_asks("«control»", false));
+        assert!(super::always_asks("«memory»", false));
         assert!(super::always_asks(
-            "«send · the tool changed since the person confirmed it»"
+            "«send · the tool changed since the person confirmed it»",
+            false
         ));
-        assert!(!super::always_asks("«delete»"));
-        assert!(!super::always_asks(&format!(
-            "«send · {}»",
-            clio_toolhost::mcp::ASK_TOOL
-        )));
+        assert!(!super::always_asks("«delete»", false));
+        assert!(!super::always_asks(
+            &format!("«send · {}»", clio_toolhost::mcp::ASK_TOOL),
+            false
+        ));
+        // A new service or server always asks; turning one back on, back or away only with a
+        // reason (the person turned it off, a shipped skill, a flagged session).
+        assert!(super::always_asks(
+            "«service · a service always waits for your approval»",
+            false
+        ));
+        assert!(!super::always_asks("«service»", true));
+        assert!(!super::always_asks("«skill»", true));
+        assert!(super::always_asks(
+            &format!("«mcp · {}»", clio_toolhost::manage::PERSON_OFF),
+            true
+        ));
         let (a, _) = feed(
             idle(),
             vec![asks(vec![
@@ -958,5 +978,69 @@ mod tests {
         let middle = format!("look:\n\n{real}\n\nwhat is this?");
         let a = stored(&middle, &[]);
         assert_eq!(users(&a), [middle]);
+    }
+
+    // S-68 S-69 S-70: a request about what Clio created is in the one box in plain words: the
+    // kind, the name, the act, for `undo` the version it goes back to, for `remove` what goes to
+    // removed/, Clio's reason, and whether it always asks; the box's timing is the same as any.
+    #[test]
+    fn a_manage_request_is_said_in_plain_words_in_the_one_box() {
+        use super::super::tests_gallery::{manage_box, manage_item};
+        let remove = manage_item(
+            "service_manage",
+            serde_json::json!({"name": "disk-check", "action": "remove", "why": "Replaced", "version": 2}),
+            None,
+        );
+        let a = manage_box(&remove);
+        let text = screen_text(&a, 120, 30)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for s in [
+            "m1a2b3c4 · «service»",
+            "Remove the service «disk-check» (version 2): its versions, record,",
+            "state and runs go to removed/, where they are kept?",
+            "Clio's reason: Replaced",
+            "yes, remove it, then 4 h without asking",
+        ] {
+            assert!(text.contains(s), "{s}: {text}");
+        }
+        assert!(!text.contains("always asks you"), "{text}");
+        assert!(
+            !a.confirm.as_ref().unwrap().armed,
+            "the quiet second, as any box"
+        );
+        let undo = manage_item(
+            "skill_manage",
+            serde_json::json!({"name": "disk-report", "action": "undo", "why": "It broke", "version": 3, "to": 2}),
+            None,
+        );
+        let words = |a: &App| {
+            screen_text(a, 120, 30)
+                .split_whitespace()
+                .filter(|w| *w != "│")
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let text = words(&manage_box(&undo));
+        assert!(
+            text.contains("Take the skill «disk-report» back to version 2 (it is at version 3"),
+            "{text}"
+        );
+        assert!(text.contains("yes, go back"), "{text}");
+        let on = manage_item(
+            "mcp_manage",
+            serde_json::json!({"name": "github", "action": "on", "why": "Issues", "version": 1, "off": "turned off by the person"}),
+            Some(clio_toolhost::manage::PERSON_OFF),
+        );
+        let text = words(&manage_box(&on));
+        for s in [
+            "«mcp · the person turned it off: only they turn it back",
+            "this one always asks you",
+            "Turn the MCP server «github» back on (version 1; now it is turned",
+            "yes, turn it on",
+        ] {
+            assert!(text.contains(s), "{s}: {text}");
+        }
     }
 }

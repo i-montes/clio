@@ -1092,7 +1092,7 @@ fn show_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
     Ok(out)
 }
 
-fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
+pub(crate) fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
     let root = root(d);
     sv::record(&root, name).ok_or_else(|| format!("there is no service «{name}»"))?;
     let now = now_ms();
@@ -1136,10 +1136,14 @@ pub(crate) fn service_jail() -> Res<HostJail> {
         .map_err(|e| format!("{NOT_SYSTEMD}; and bwrap: {e}"))
 }
 
-fn run_now(d: &Dirs, name: &str) -> Res<String> {
+/// Runs `name` now through the runner (`by`: `person`, or `clio` when the model asked).
+pub(crate) fn run_by(d: &Dirs, name: &str, by: &str) -> Res<Option<Run>> {
     let jail = service_jail()?;
-    let runner = Runner::new(d, &jail)?;
-    Ok(match runner.run(name, "person")? {
+    Runner::new(d, &jail)?.run(name, by)
+}
+
+fn run_now(d: &Dirs, name: &str) -> Res<String> {
+    Ok(match run_by(d, name, "person")? {
         None => format!("«{name}» is running already: nothing was started"),
         Some(r) => {
             let mut s = format!(
@@ -1297,7 +1301,7 @@ pub(crate) mod tests {
 
     /// Not under `/tmp`: a run's `/tmp` is its own, and what it must see (the fake forwarder) has
     /// to be outside it. Short enough for the proxy's socket path.
-    fn tmp() -> TempDir {
+    pub(crate) fn tmp() -> TempDir {
         let exe = std::env::current_exe().unwrap();
         TempDir::new_in(exe.parent().unwrap().parent().unwrap().parent().unwrap()).unwrap()
     }
@@ -1314,7 +1318,7 @@ pub(crate) mod tests {
         panic!("«{name}» is still locked after 2 s");
     }
 
-    fn dirs_in(root: &Path) -> Dirs {
+    pub(crate) fn dirs_in(root: &Path) -> Dirs {
         let data = root.join("data");
         for p in [
             &data,
@@ -1333,7 +1337,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn manifest(name: &str, command: &str) -> Manifest {
+    pub(crate) fn manifest(name: &str, command: &str) -> Manifest {
         Manifest {
             name: name.into(),
             description: format!("The test service {name}."),
@@ -1371,13 +1375,13 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn approve(d: &Dirs, m: &Manifest, files: &[SkillFile]) {
+    pub(crate) fn approve(d: &Dirs, m: &Manifest, files: &[SkillFile]) {
         let p = set_aside(d, m, files);
         super::super::pending::approve(d, &p.id).unwrap();
     }
 
     /// `bwrap`, if it runs here.
-    fn bwrap() -> Option<HostJail> {
+    pub(crate) fn bwrap() -> Option<HostJail> {
         let h = HostJail::with(Launcher::Bwrap).ok()?;
         let t = tmp();
         if t.path().starts_with("/tmp") {
@@ -1406,7 +1410,7 @@ pub(crate) mod tests {
 
     /// A runner on `d` whose `clio pi-net` is a stand-in that runs the command after `--` (the
     /// forwarder itself is tested with the proxy).
-    fn runner<'a>(d: &'a Dirs, jail: &'a HostJail, root: &Path) -> Runner<'a> {
+    pub(crate) fn runner<'a>(d: &'a Dirs, jail: &'a HostJail, root: &Path) -> Runner<'a> {
         let fake = root.join("fake-clio");
         fs::write(&fake, "#!/bin/sh\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n").unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();

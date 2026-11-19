@@ -125,6 +125,9 @@ fn run_open(dirs: &Dirs, run: &str) -> bool {
 /// What `p` does, for the person: from its arguments (`pending::shown`), key-looking values struck
 /// out. Never the stored `what`. A secret request: its name and where it may go.
 pub fn what(p: &Pending) -> String {
+    if let Some((does, why)) = clio_toolhost::manage::what(p) {
+        return format!("{does} · Clio's reason: {why}");
+    }
     if let Some((name, description, manifest, _)) = pending::mcp_of(p) {
         let at = serde_json::from_str::<clio_toolhost::mcp::Manifest>(manifest)
             .map(|m| format!(" ({}@{})", m.package, m.version))
@@ -265,7 +268,7 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
 pub fn grant_line(dirs: &Dirs) -> String {
     match window_now(dirs) {
         Some(w) => format!(
-            "a permission window is open: {} left (until {}); Clio approves by herself what deletes, spends or sends, `ask` MCP calls and skills (control, secrets, your blocks, services and MCP servers always ask you), and `off` closes it",
+            "a permission window is open: {} left (until {}); Clio approves by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away (control, secrets, your blocks, new services and MCP servers always ask you), and `off` closes it",
             grant::left_text(w.ends_ms - now_ms()),
             pending::local(w.ends_ms, "%H:%M").unwrap_or_default()
         ),
@@ -400,7 +403,13 @@ pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> 
     // stops here.
     let p = pending::check(&state(dirs), id, now_ms())?;
     let at = (now_ms(), granted);
-    let done = if pending::mcp_of(&p).is_some() {
+    let done = if clio_toolhost::manage::is_manage(&p) {
+        // What the model asked of what it created: only here, with the person's own commands'
+        // functions, and only if it is still what the box showed.
+        pending::approve_manage(&state(dirs), id, at, |p| {
+            super::manage::carry_out(dirs, p, granted.is_some())
+        })?
+    } else if pending::mcp_of(&p).is_some() {
         // Downloaded, checked, probed and registered only here, by the person's own `clio`
         // (S-70): never from the jail, never on the model's say-so.
         pending::approve_mcp(&state(dirs), id, at, |p| {

@@ -857,7 +857,7 @@ pub fn show_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
     Ok(out.into_iter().map(|l| sanitize::line(&l)).collect())
 }
 
-fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
+pub(crate) fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
     let root = root(d);
     let ev = m::events(&root, name);
     // A failed install leaves its log (why npm or the probe failed), and no record.
@@ -915,6 +915,11 @@ pub fn confirm(d: &Dirs, name: &str, shown: &str) -> Res<String> {
 }
 
 fn set_on(d: &Dirs, name: &str, on: bool) -> Res<String> {
+    set_on_by(d, name, on, skills::OFF_BY_PERSON)
+}
+
+/// `set_on`, saying who turned it off (`why`): the person, or Clio (`manage`).
+pub(crate) fn set_on_by(d: &Dirs, name: &str, on: bool, why: &str) -> Res<String> {
     let root = root(d);
     // One installed by an older version, whose tools were never shown to the person: they see
     // them first (`/mcp confirm` shows them and turns it on).
@@ -926,8 +931,7 @@ fn set_on(d: &Dirs, name: &str, on: bool) -> Res<String> {
             sanitize::line(name)
         ));
     }
-    let why = if on { "" } else { skills::OFF_BY_PERSON };
-    skills::set_enabled_in(&root, Kind::Mcp, name, on, why)
+    skills::set_enabled_in(&root, Kind::Mcp, name, on, if on { "" } else { why })
 }
 
 /// `allow` (free) or `ask` for one tool.
@@ -959,7 +963,7 @@ fn set_mode(d: &Dirs, name: &str, tool: &str, mode: Mode) -> Res<String> {
     ))
 }
 
-fn remove(d: &Dirs, name: &str) -> Res<String> {
+pub(crate) fn remove(d: &Dirs, name: &str) -> Res<String> {
     skills::remove_in(&root(d), Kind::Mcp, name)
 }
 
