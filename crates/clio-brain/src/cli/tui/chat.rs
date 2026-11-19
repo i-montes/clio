@@ -386,8 +386,17 @@ impl Chat {
                 if typed.trim_start().starts_with(super::review::FINDINGS_MARK) {
                     self.items
                         .push(Item::Note(super::review::REVIEW_TURN.into()));
-                } else if !typed.is_empty() {
-                    self.items.push(Item::User(typed.to_owned()));
+                } else {
+                    // What came of the approvals rode with it: the quiet lines it had live.
+                    let (typed, outcomes) = super::approvals::outcomes(typed);
+                    let started = typed.is_empty() && !outcomes.is_empty();
+                    self.items.extend(outcomes.into_iter().map(Item::Note));
+                    if started {
+                        self.items
+                            .push(Item::Note(super::approvals::APPROVALS_TURN.into()));
+                    } else if !typed.is_empty() {
+                        self.items.push(Item::User(typed.to_owned()));
+                    }
                 }
             }
             Some("assistant") => {

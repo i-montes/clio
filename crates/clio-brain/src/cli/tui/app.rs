@@ -223,9 +223,9 @@ pub enum Cmd {
     Redraw,
 }
 
-/// This session's actions waiting, the line and the box of each, and how many of other sessions
-/// wait.
-pub type Waiting = (Vec<(String, super::commands::Pick)>, usize);
+/// This session's actions waiting, the line and the box of each; the lines of those an answer
+/// began and never finished; and how many of other sessions wait.
+pub type Waiting = (Vec<(String, super::commands::Pick)>, Vec<String>, usize);
 
 /// What a worker thread reports back.
 pub enum Bg {
@@ -273,8 +273,8 @@ pub enum Bg {
     /// Host mode: what the turn set aside, one question each: (id, «class» and what, and the
     /// change itself when it is one to the person's blocks).
     ChatAsks(Vec<(String, String, Option<super::ask::BlockAsk>)>),
-    /// What came of an answer to one of them.
-    ChatAnswered(Result<String, String>),
+    /// What came of an answer to one of them, and whether the person said yes.
+    ChatAnswered(Result<String, String>, bool),
     /// The secrets this turn asked the person for: (id, (name, destination, why)) each, and
     /// whether the session is suspect.
     ChatSecrets(Vec<(String, (String, String, String))>, bool),
@@ -665,6 +665,16 @@ impl App {
         self.last_key_ms.is_none_or(since)
             && self.confirm.as_ref().is_none_or(|c| since(c.shown_ms))
             && self.prompt.as_ref().is_none_or(|p| since(p.shown_ms()))
+    }
+
+    /// Set-aside item `id` has its box on screen or in line.
+    pub fn asking(&self, id: &str) -> bool {
+        let secret =
+            |p: &super::ask::Prompt| matches!(p, super::ask::Prompt::Secret(s) if s.id == id);
+        self.confirm.as_ref().is_some_and(|c| c.id == id)
+            || self.asks.iter().any(|c| c.id == id)
+            || self.prompt.as_ref().is_some_and(secret)
+            || self.prompts.iter().any(secret)
     }
 
     /// Something Clio asks: on screen if nothing else is, else in line.
@@ -1353,6 +1363,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         // They come before the turn settles, so from the session open now.
         Bg::ChatAsks(asks) => {
             for (id, what, block) in asks {
+                if app.asking(&id) {
+                    continue;
+                }
                 let mut c = Confirm::new(Action::Approve, id, 0, what);
                 c.session.clone_from(&app.chat.session_id);
                 c.block = block;
@@ -1363,6 +1376,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::ChatSecrets(asks, suspect) => {
             for (id, what) in asks {
+                if app.asking(&id) {
+                    continue;
+                }
                 let session = app.chat.session_id.clone();
                 let ask =
                     super::ask::SecretAsk::new(&id, &session, (&what.0, &what.1, &what.2), suspect);
@@ -1370,11 +1386,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             }
             vec![]
         }
-        Bg::ChatAnswered(r) => {
+        Bg::ChatAnswered(r, yes) => {
             app.answering = app.answering.saturating_sub(1);
             let a = &mut app.chat.approvals;
             a.waiting = a.waiting.saturating_sub(1);
-            a.answered |= r.is_ok();
+            // Only something done starts a turn; a rejection or a failure rides with the next
+            // message of the person.
+            a.answered |= yes && r.is_ok();
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),
                 Err(e) => super::chat::Item::Error(e),
@@ -1488,11 +1506,15 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         }
         Bg::Pending(r) => {
             match r {
-                Ok((rows, others)) => {
+                Ok((rows, cut, others)) => {
+                    // The count of the status line, from what was just read.
+                    app.chat.approvals.waiting = rows.len();
                     let (mut lines, picks): (Vec<String>, _) = rows.into_iter().unzip();
                     if lines.is_empty() {
                         lines.push("nothing in this session waits for your approval".into());
                     }
+                    // After the picks: none of them can be picked.
+                    lines.extend(cut);
                     let mut m = Modal::text("Pending", lines);
                     m.picks = picks;
                     if others > 0 {

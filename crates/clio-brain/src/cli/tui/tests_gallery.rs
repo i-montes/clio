@@ -411,7 +411,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
     // The person answered both boxes: one turn gives the model what came of them.
     let mut a = conversation(true);
     a.answering = 2;
-    let ok = |m: &str| Input::Bg(Bg::ChatAnswered(Ok(m.into())));
+    let ok = |m: &str| Input::Bg(Bg::ChatAnswered(Ok(m.into()), m.starts_with("approved")));
     let (a, _) = super::tests::feed(
         a,
         vec![
@@ -822,9 +822,10 @@ fn services_states(out: &mut Vec<(&'static str, App)>) {
     ));
     let (a, _) = super::app::update(
         conversation(true),
-        super::app::Input::Bg(super::app::Bg::ChatAnswered(Ok(
-            "approved s1a2b3c4: the service «disk-check» is registered (version 1): it runs every 1h".into(),
-        ))),
+        super::app::Input::Bg(super::app::Bg::ChatAnswered(
+            Ok("approved s1a2b3c4: the service «disk-check» is registered (version 1): it runs every 1h".into()),
+            true,
+        )),
     );
     out.push(("service registered", a));
     // `/services` from a real folder: one fine, one paused, one waiting for the vault.

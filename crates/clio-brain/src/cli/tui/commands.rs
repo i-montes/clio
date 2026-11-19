@@ -987,6 +987,10 @@ pub fn modal_key(app: &mut App, k: &KeyEvent) -> Vec<Cmd> {
         KeyCode::Enter if picks > 0 => {
             let p = m.picks[m.sel.min(picks - 1)].clone();
             app.modal = None;
+            // Already in line: it moves to the front, it is not asked twice.
+            app.asks.retain(|c| c.id != p.id);
+            app.prompts
+                .retain(|q| !matches!(q, super::ask::Prompt::Secret(s) if s.id == p.id));
             let session = app.chat.session_id.clone();
             // A secret is typed into its own box, never approved like an action.
             if let Some((name, dest, why)) = &p.secret {

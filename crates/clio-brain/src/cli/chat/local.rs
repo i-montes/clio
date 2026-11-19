@@ -882,6 +882,16 @@ impl ChatSession {
     }
 }
 
+/// A turn with no words of the person, no findings and no presentation is one the approvals
+/// started: it goes with Clio's request (`Some(true)`), or is no turn at all when there is
+/// nothing to give (`None`: the outcomes went with another message). Any other: `Some(false)`.
+fn approvals_turn(text: &str, findings: bool, presenting: bool, data: &str) -> Option<bool> {
+    if !text.is_empty() || findings || presenting {
+        return Some(false);
+    }
+    (!data.is_empty()).then_some(true)
+}
+
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -941,16 +951,15 @@ impl Session for ChatSession {
             .chain(notes)
             .collect::<Vec<_>>()
             .join("\n\n");
-        // A turn the approvals started: only what came of them, with Clio's request. With
-        // nothing to give (the outcomes went with another message), there is no turn.
-        if text.is_empty() && findings.is_none() && !self.pre.presenting() {
-            if data.is_empty() {
+        match approvals_turn(text, findings.is_some(), self.pre.presenting(), &data) {
+            Some(true) => self.pre.reviewed(APPROVALS_ASK),
+            Some(false) => {}
+            None => {
                 return Ok(RunSummary {
                     handled: true,
                     ..RunSummary::default()
                 });
             }
-            self.pre.reviewed(APPROVALS_ASK);
         }
         let mut given = Vec::new();
         if !data.is_empty() {
@@ -1221,7 +1230,12 @@ impl Session for ChatSession {
             locked(&h.notes).push(format!("the person {note}"));
             return Ok(note);
         }
-        let p = pending::approve(&h.dirs, id)?;
+        // Said yes, but it could not be done: an outcome too, told as such.
+        let p = pending::approve(&h.dirs, id).inspect_err(|e| {
+            locked(&h.notes).push(format!(
+                "the person approved {id}, but it could not be done: {e}"
+            ));
+        })?;
         let what = pending::outcome(&p);
         // What it printed is outside text: the judge reads it before the model does.
         let (shown, flagged) = jev::judged_for_model(
@@ -1656,6 +1670,20 @@ mod tests {
         ));
         assert_eq!(held(SkillNext::Reject, Some("x".into())), SkillNext::Reject);
         assert_eq!(held(SkillNext::Register, None), SkillNext::Register);
+    }
+
+    // A turn with no words of the person is the approvals' only with what came of them to give;
+    // with nothing, there is no turn. Words, findings or a presentation make it another turn.
+    #[test]
+    fn an_empty_turn_is_the_approvals_only_with_outcomes_to_give() {
+        assert_eq!(
+            approvals_turn("", false, false, "the person approved a1"),
+            Some(true)
+        );
+        assert_eq!(approvals_turn("", false, false, ""), None);
+        assert_eq!(approvals_turn("and now?", false, false, "x"), Some(false));
+        assert_eq!(approvals_turn("", true, false, ""), Some(false));
+        assert_eq!(approvals_turn("", false, true, ""), Some(false));
     }
 
     // S-68: a review's notes on a skill go to the model once an hour per name, so a version

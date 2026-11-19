@@ -545,7 +545,10 @@ fn a_secret_the_vault_refused_comes_back_with_the_error_in_the_chat() {
         a,
         vec![
             secrets(false),
-            Input::Bg(Bg::ChatAnswered(Err("linear: the vault is locked".into()))),
+            Input::Bg(Bg::ChatAnswered(
+                Err("linear: the vault is locked".into()),
+                true,
+            )),
         ],
     );
     let Some(Prompt::Secret(s)) = &a.prompt else {

@@ -448,9 +448,10 @@ fn a_turn_that_ended_with_a_question_is_offered_to_the_judge_once_it_is_answered
     assert!(reviews(&cmds).is_empty(), "{cmds:?}");
     let (a, cmds) = feed(
         a,
-        vec![Input::Bg(Bg::ChatAnswered(Ok(
-            "rejected b2: it is not run".into(),
-        )))],
+        vec![Input::Bg(Bg::ChatAnswered(
+            Ok("rejected b2: it is not run".into()),
+            false,
+        ))],
     );
     assert_eq!(
         reviews(&cmds),

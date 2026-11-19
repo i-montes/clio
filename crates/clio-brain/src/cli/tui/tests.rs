@@ -1583,9 +1583,10 @@ fn what_a_turn_set_aside_is_asked_one_by_one_and_only_s_then_enter_runs_it() {
     assert_eq!(a.answering, 2);
     let (a, _) = feed(
         a,
-        vec![Input::Bg(Bg::ChatAnswered(Ok(
-            "approved a1: rm -r datos".into()
-        )))],
+        vec![Input::Bg(Bg::ChatAnswered(
+            Ok("approved a1: rm -r datos".into()),
+            true,
+        ))],
     );
     assert!(matches!(
         a.chat.items.last(),
@@ -1883,7 +1884,7 @@ fn while_an_approved_action_runs_the_chat_cannot_be_left() {
     }
     let (a, _) = feed(
         a,
-        vec![Input::Bg(Bg::ChatAnswered(Ok("approved a1".into())))],
+        vec![Input::Bg(Bg::ChatAnswered(Ok("approved a1".into()), true))],
     );
     let (a, cmds) = feed(a, vec![key(KeyCode::Enter)]);
     assert!(matches!(&cmds[..], [Cmd::ChatOpen { .. }]), "{cmds:?}");

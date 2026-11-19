@@ -21,13 +21,36 @@ pub fn state(dirs: &Dirs) -> PathBuf {
     dirs.data.join("host")
 }
 
-/// What waits for the person, oldest first: one past its time does not wait any more.
+/// What waits for the person, oldest first: one past its time does not wait any more, nor one
+/// an answer began and never finished (`interrupted`).
 pub fn waiting(dirs: &Dirs) -> Vec<Pending> {
     let now = now_ms();
-    pending::list(&state(dirs))
+    let st = state(dirs);
+    pending::list(&st)
         .into_iter()
-        .filter(|p| p.state == State::Waiting && now < p.expires_ms)
+        .filter(|p| {
+            p.state == State::Waiting && now < p.expires_ms && !pending::interrupted(&st, p)
+        })
         .collect()
+}
+
+/// What an answer began and never finished (Clio ended while it ran), oldest first.
+pub fn interrupted(dirs: &Dirs) -> Vec<Pending> {
+    let st = state(dirs);
+    pending::list(&st)
+        .into_iter()
+        .filter(|p| pending::interrupted(&st, p))
+        .collect()
+}
+
+/// One line for an interrupted item: id, class, what, and that it may have run in part.
+pub fn interrupted_line(p: &Pending) -> String {
+    format!(
+        "{}  {}  {}  · interrupted: it may have run in part",
+        p.id,
+        label(p),
+        sanitize::line(&what(p)),
+    )
 }
 
 /// Whether Clio may open the approval boxes by herself now: at least `every_hours` since she last
@@ -159,15 +182,20 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
         );
         return Ok(());
     }
+    let cut = interrupted(dirs);
     if list.is_empty() {
         println!("nothing is waiting for your approval");
-        return Ok(());
     }
     let now = now_ms();
     for p in &list {
         println!("{}", line(p, now));
     }
-    println!("\nclio approve <id> runs it · clio reject <id> drops it");
+    for p in &cut {
+        println!("{}", interrupted_line(p));
+    }
+    if !list.is_empty() {
+        println!("\nclio approve <id> runs it · clio reject <id> drops it");
+    }
     Ok(())
 }
 
@@ -680,6 +708,31 @@ mod tests {
         assert!(state(&d).join("asked.json").exists());
     }
 
+    // An item claimed for an answer that never wrote what came of it (Clio ended while it ran)
+    // is not waiting: it is never offered again, and it is listed as interrupted.
+    #[test]
+    fn an_answer_cut_short_leaves_its_item_interrupted_not_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = dirs_in(tmp.path());
+        let dir = state(&d).join("pending");
+        std::fs::create_dir_all(&dir).unwrap();
+        let item = json!({"id": "ab12", "class": "delete", "tool": "exec",
+            "args": {"command": "rm -r /srv/old"}, "hash": "", "what": "", "run": "r",
+            "session": "s", "created_ms": now_ms(), "expires_ms": now_ms() + 3_600_000,
+            "state": "waiting"});
+        std::fs::write(dir.join("ab12.json"), item.to_string()).unwrap();
+        assert_eq!(waiting(&d).len(), 1);
+        assert!(interrupted(&d).is_empty());
+        std::fs::write(dir.join("ab12.ran"), "").unwrap();
+        assert!(waiting(&d).is_empty());
+        let cut = interrupted(&d);
+        assert_eq!(cut.len(), 1);
+        assert_eq!(
+            interrupted_line(&cut[0]),
+            "ab12  «delete»  rm -r /srv/old  · interrupted: it may have run in part"
+        );
+    }
+
     fn dirs_in(root: &Path) -> Dirs {
         let data = root.join("data");
         Dirs {
@@ -755,7 +808,7 @@ mod tests {
     }
 
     // The value goes from the person's field to the vault, bound to the destination the request
-    // named, and nowhere else: not the pending file, not the day's questions, not the run folder
+    // named, and nowhere else: not the pending file, not the host folder, not the run folder
     // (the toolhost's log and effects), not a debug print, not a panic message.
     #[test]
     fn a_requested_secret_is_stored_bound_and_leaves_no_byte_behind() {

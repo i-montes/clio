@@ -2,7 +2,8 @@
 prints a JSON verdict. Stdlib only. Linux only (it reads /proc).
 
 usage: python3 -I pty_chat_driver.py SCENARIO CONFIG_JSON
-SCENARIO: new_chat | abort | steer | reopen | sigkill | hangup | sigterm | one_turn | reopen_turn
+SCENARIO: new_chat | abort | steer | reopen | sigkill | hangup | sigterm | one_turn | reopen_turn |
+    review | approve | …
 
 The terminal stream is a diff and is not parsed. In a debug build `clio` writes the text of every
 frame to the file named by CLIO_TUI_SCREEN_DUMP: that is what the waits read. Every wait is
@@ -327,6 +328,25 @@ elif scenario == "review":
     out["review_turn"] = wait_screen(fd, "turn started by the review", 30)
     out["fixed"] = wait_screen(fd, cfg["fixed"], 60) and idle(fd)
     if not out["fixed"]:
+        out["screen"] = screen()
+    time.sleep(0.5)
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "approve":
+    # Host mode: a turn whose write is set aside (cfg "ask" / "answer"), the box Clio opens once
+    # the chat is idle, approved (`y`, then Enter), and the turn that approval starts (cfg
+    # "after": what the model answers in it); then leave.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, cfg["ask"], cfg["answer"])
+    out["box"] = wait_screen(fd, "y then Enter", 30)
+    time.sleep(1.5)  # the box hears its first key after a quiet second
+    send(fd, b"y")
+    out["armed"] = wait_screen(fd, "other key", 10)
+    send(fd, ENTER)
+    out["approvals_turn"] = wait_screen(fd, "turn started by the approvals", 30)
+    out["after"] = wait_screen(fd, cfg["after"], 60) and idle(fd)
+    if not out["after"]:
         out["screen"] = screen()
     time.sleep(0.5)
     send(fd, CTRL_C)  # idle: Ctrl-C leaves

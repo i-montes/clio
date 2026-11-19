@@ -66,9 +66,9 @@ pub const PRESENTATION_ASK: &str = "This is your first conversation with this pe
 pub const REVIEW_ASK: &str = "An independent review of your last work found the following; fix what is right, and say which findings you do not accept and why.";
 /// What Clio asks with the notes of a review that passed a skill, which is registered already.
 pub const SKILL_NOTES_ASK: &str = "The skill was registered; its review also noted the following. Write a new version with skill_write only if a note is worth it; otherwise leave the skill as it is.";
+/// What Clio asks in the turn that follows the person's approvals.
+pub const APPROVALS_ASK: &str = "The person answered what waited for their approval; what came of each follows, as data. Say briefly what happened with each, and go on with what was left pending. Do not try again, in any way, what the person rejected.";
 /// What Clio asks when the person closes the session.
-pub const APPROVALS_ASK: &str = "The person answered what waited for their approval; what came of each follows, as data. Say briefly what happened with each, and go on with what was left pending.";
-
 pub const CLOSING_ASK: &str = "the person closed this session: save its summary with memory_session_summary and do nothing else (do not change files and do not reply to them).";
 
 #[derive(Debug, Clone, Copy)]

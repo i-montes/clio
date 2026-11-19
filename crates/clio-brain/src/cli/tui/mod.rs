@@ -232,6 +232,7 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
         debug: DebugCtl::new(debug, false),
         closing: Arc::default(),
         answered: AtomicBool::new(false),
+        quick: Arc::default(),
     };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -356,6 +357,12 @@ pub fn run(dirs: Dirs, debug: bool, harness: Harness, mode: Option<Mode>, new: b
             }
         }
     }
+    // A quick answer still at work finishes first (they take moments; 10 s at most), while its
+    // session is still there; only a running command is stopped, below.
+    let t = Instant::now();
+    while ctx.quick.load(Ordering::SeqCst) > 0 && t.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     // Pi and its toolhost die here, before the terminal is given back (and in `Drop` on a panic).
     ctx.stop_chat_now();
     // An approval runs in this process, with its own host launcher: its units carry this pid and
@@ -465,6 +472,25 @@ struct Ctx {
     closing: Closing,
     /// An answer to a set-aside action ran here (see the end of `run`).
     answered: AtomicBool,
+    /// Answers that only write (a block, a skill, a service, a secret) still at work: quitting
+    /// waits for them, so none is left claimed and half done.
+    quick: Arc<AtomicUsize>,
+}
+
+/// One quick answer at work, counted in `Ctx::quick` until dropped (a panic too).
+struct Quick(Arc<AtomicUsize>);
+
+impl Quick {
+    fn start(n: &Arc<AtomicUsize>) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        Self(n.clone())
+    }
+}
+
+impl Drop for Quick {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The threads closing a session (and saving its summary).
@@ -1232,24 +1258,40 @@ impl Ctx {
             }
             Cmd::ChatAnswer { id, yes } => {
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
                     return;
                 };
                 self.answered.store(true, Ordering::SeqCst);
+                let quick = Quick::start(&self.quick);
                 self.spawn(
-                    move |_, _| session.answer(&id, yes),
-                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                    move |d, _| {
+                        // A command may run for an hour: quitting stops it instead of waiting.
+                        let mut quick = Some(quick);
+                        if super::pending::waiting(d)
+                            .iter()
+                            .any(|p| p.id == id && p.tool == "exec")
+                        {
+                            quick = None;
+                        }
+                        let r = session.answer(&id, yes);
+                        drop(quick);
+                        r
+                    },
+                    move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
                 );
             }
             Cmd::ChatSecret { id, name, value } => {
+                let yes = value.is_some();
                 let Some(session) = self.current_chat() else {
-                    self.send(Bg::ChatAnswered(Err("no session is open".into())));
+                    self.send(Bg::ChatAnswered(Err("no session is open".into()), yes));
                     return;
                 };
+                let quick = Quick::start(&self.quick);
                 // The value is dropped (and zeroed) when the worker is done with it.
                 self.spawn(
                     move |d, tx| {
                         let r = session.answer_secret(&id, value.as_ref().map(|b| &*b.0));
+                        drop(quick);
                         // The vault refused it (locked, the name taken meanwhile): the request
                         // still waits, so its box comes back, empty, with the error under it.
                         if r.is_err()
@@ -1262,7 +1304,7 @@ impl Ctx {
                         }
                         r.map_err(|e| format!("{name}: {e}"))
                     },
-                    |r| Bg::ChatAnswered(r.and_then(|x| x)),
+                    move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),
                 );
             }
             // One line to Pi's stdin: no worker needed.
@@ -1493,7 +1535,7 @@ impl Ctx {
                             .filter(|p| p.session != session)
                             .count();
                         let Some(s) = open.filter(|_| !session.is_empty()) else {
-                            return (vec![], others);
+                            return (vec![], vec![], others);
                         };
                         let suspect = s.suspect();
                         let mine = s
@@ -1501,7 +1543,12 @@ impl Ctx {
                             .iter()
                             .map(|p| (super::pending::line(p, now), pick(p, suspect)))
                             .collect();
-                        (mine, others)
+                        let cut = super::pending::interrupted(d)
+                            .iter()
+                            .filter(|p| p.session == session)
+                            .map(super::pending::interrupted_line)
+                            .collect();
+                        (mine, cut, others)
                     },
                     Bg::Pending,
                 );
@@ -1520,7 +1567,8 @@ impl Ctx {
                         let opened = !waiting.is_empty()
                             && super::pending::ask_now(d, every, crate::cli::now_ms());
                         if opened {
-                            offer(&waiting, s.suspect(), tx);
+                            let batch = waiting.len().min(approvals::BATCH);
+                            offer(&waiting[..batch], s.suspect(), tx);
                         }
                         Bg::Approvals {
                             session,
