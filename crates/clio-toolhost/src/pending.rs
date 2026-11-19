@@ -503,6 +503,52 @@ impl ToolHost {
         self.aside_at(at, req, req.args.clone(), class, reason)
     }
 
+    /// In a review (it cannot ask the person) the action is refused outright, nothing is stored as
+    /// pending, and the refusal goes to the action log (`at`: its state folder and run).
+    pub(crate) fn refuse_in_review(
+        &self,
+        at: Option<(&Path, &str)>,
+        req: &Request,
+        args: &Value,
+        rule: &str,
+        why: &str,
+    ) -> Response {
+        if let Some((state, run)) = at
+            && crate::host::LOGGED.contains(&req.tool.as_str())
+        {
+            let what = args["command"].as_str().or(args["path"].as_str());
+            let what = self.clean(what.unwrap_or(""));
+            let network = args["network"].as_bool() == Some(true);
+            if let Err(e) = log_line(
+                state,
+                run,
+                &req.session,
+                &req.tool,
+                &what,
+                network,
+                "deny",
+                rule,
+                None,
+            ) {
+                eprintln!("clio-toolhost: the action log lost a line: {e}");
+            }
+        }
+        let content = format!("[toolhost] {} was not run: {why}", self.clean(&req.tool));
+        Response {
+            id: req.id.clone(),
+            ok: false,
+            content: content.clone(),
+            data: Value::Null,
+            decision: DecisionOut {
+                outcome: "deny".into(),
+                rule: rule.into(),
+                reason: content,
+            },
+            tainted: self.is_tainted(&req.session),
+            external: false,
+        }
+    }
+
     /// `aside` with where it waits given apart (`state`, `run`, the day's questions) and the
     /// arguments it keeps: a block change waits in a chat that is not in host mode too.
     pub(crate) fn aside_at(
@@ -513,6 +559,15 @@ impl ToolHost {
         class: Class,
         reason: Option<&str>,
     ) -> Response {
+        if self.review {
+            return self.refuse_in_review(
+                Some((state, run)),
+                req,
+                &args,
+                "review/aside",
+                crate::REVIEW_CANNOT_ASK,
+            );
+        }
         let now = now_ms();
         let network = args["network"].as_bool() == Some(true);
         let mut draft = Pending {

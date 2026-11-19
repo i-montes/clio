@@ -12,6 +12,8 @@
 //! `request_secret`: `--secret-state S --secret-run ID --vault-person P` (where requests wait, the
 //! run, the vault's person socket); without them nobody can be asked for a secret.
 //!
+//! `--review`: the service of a review, which cannot ask the person (see `Config::review`).
+//!
 //! Host mode: `--host-home H --host-state S --host-run ID [--host-control P]... [--host-rules
 //! FILE]` (the person's `host.json`). `--work` is then not needed: the tools work on `/`.
 
@@ -41,9 +43,11 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
     let (mut host_home, mut host_state, mut host_run) = (None, None, None);
     let (mut host_control, mut host_rules) = (Vec::new(), None);
     let (mut secret_state, mut secret_run, mut vault_person) = (None, None, None);
+    let mut review = false;
     while let Some(a) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
+            "--review" => review = true,
             "--socket-dir" => dir = Some(PathBuf::from(value()?)),
             "--work" => work = Some(PathBuf::from(value()?)),
             "--scratch" => scratch = Some(PathBuf::from(value()?)),
@@ -121,6 +125,10 @@ pub fn run_with(args: Vec<String>, memory: MemoryFactory<'_>) -> Result<(), Stri
         (None, None, None) => None,
         _ => return Err("--secret-state, --secret-run and --vault-person go together".into()),
     };
+    if review && cfg.secrets.is_some() {
+        return Err("a review (--review) cannot ask the person for a secret".into());
+    }
+    cfg.review = review;
     cfg.host = host;
     cfg.jail = jail;
     cfg.vault = vault.map(|p| VaultClient::new(&p));

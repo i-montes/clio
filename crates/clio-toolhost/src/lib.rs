@@ -148,6 +148,9 @@ pub enum JailMode {
     Auto,
 }
 
+/// What a review is told instead of an action being set aside for the person.
+pub const REVIEW_CANNOT_ASK: &str = "a review cannot ask the person: what needs their approval is not run in a review, and nothing waits for them";
+
 pub struct Config {
     /// The session's working copy: the only folder the tools may touch.
     pub work: PathBuf,
@@ -176,6 +179,9 @@ pub struct Config {
     pub secrets: Option<pending::SecretCfg>,
     /// The time the memory's hourly saves and changes are counted by (S-47).
     pub clock: Arc<dyn Clock>,
+    /// A review (`--review`): nobody can be asked, so what would wait for the person is refused
+    /// outright and nothing is stored as pending; no background commands either.
+    pub review: bool,
 }
 
 impl Config {
@@ -193,6 +199,7 @@ impl Config {
             host: None,
             secrets: None,
             clock: Arc::new(SystemClock),
+            review: false,
         }
     }
 }
@@ -235,6 +242,7 @@ pub struct ToolHost {
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,
     clock: Arc<dyn Clock>,
+    review: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
     /// The service is stopping: a running command is stopped, and nothing new runs.
@@ -400,6 +408,7 @@ impl ToolHost {
             host,
             secrets: cfg.secrets,
             clock: cfg.clock,
+            review: cfg.review,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),
@@ -768,7 +777,9 @@ impl ToolHost {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
             }
-            let why = if d.outcome == Outcome::Ask {
+            let why = if d.outcome == Outcome::Ask && self.review {
+                format!("{REVIEW_CANNOT_ASK} ({})", out.reason)
+            } else if d.outcome == Outcome::Ask {
                 format!(
                     "it needs a person's approval and nobody is available ({})",
                     out.reason
@@ -826,6 +837,17 @@ impl ToolHost {
                 }
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
+                if self.review {
+                    let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
+                    let why = "a review has no background commands: run it in the foreground";
+                    return self.refuse_in_review(
+                        Some(at),
+                        &req,
+                        &req.args,
+                        "review/background",
+                        why,
+                    );
+                }
                 return self.job_start(h, &req, out);
             }
             let (ok, content, data, external) = self

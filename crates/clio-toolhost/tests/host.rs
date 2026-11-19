@@ -557,6 +557,57 @@ fn write_backup(e: &Env, name: &str, content: &str) -> Response {
     )
 }
 
+// S-67: a review cannot ask the person: what would wait is refused, logged, and nothing is pending
+#[test]
+fn a_review_refuses_what_would_wait_for_the_person_and_leaves_nothing_pending() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path().canonicalize().unwrap();
+    let mut c = cfg(&r);
+    c.review = true;
+    let e = Env {
+        home: r.join("home"),
+        config: r.join("clio/config"),
+        state: r.join("clio/data/host"),
+        run: r.join("clio/data/runs/r1"),
+        host: ToolHost::new(c).unwrap(),
+        r,
+        _t: t,
+    };
+    let w = write_backup(&e, "backup.sql", "nuevo");
+    assert!(
+        !w.ok && w.content.contains("a review cannot ask the person"),
+        "{w:?}"
+    );
+    assert_eq!(w.decision.outcome, "deny");
+    assert_eq!(
+        std::fs::read_to_string(e.r.join("outside/backup.sql")).unwrap(),
+        "viejo"
+    );
+    assert!(pending::list(&e.state).is_empty());
+    // The refusal is in the action log, under the review's run.
+    let log = actions(&e);
+    assert!(
+        log.iter()
+            .any(|l| l["outcome"] == "deny" && l["rule"] == "review/aside" && l["run"] == "r1"),
+        "{log:?}"
+    );
+    if exec_ok(&e) {
+        let b = call(
+            &e,
+            "s",
+            "exec",
+            json!({"command": "echo hi", "background": true}),
+        );
+        assert!(
+            !b.ok && b.content.contains("no background commands"),
+            "{b:?}"
+        );
+        let f = call(&e, "s", "exec", json!({"command": "echo hi"}));
+        assert!(f.ok && f.content.contains("hi"), "{f:?}");
+    }
+    assert!(pending::list(&e.state).is_empty());
+}
+
 #[test]
 fn a_listed_action_does_not_run_and_waits_and_the_task_goes_on() {
     let e = env();
