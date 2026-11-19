@@ -29,7 +29,7 @@ const SECRET: &str = "jev";
 const TOOL: &str = "jev";
 const DOMAIN: &str = "api.typesafe.ai";
 /// Temis speaks Jev's protocol (`/v1/systemone`) here, with a key of its own.
-const TEMIS_URL: &str = "https://api.imontes.dev/temis";
+pub const TEMIS_URL: &str = "https://api.imontes.dev/temis";
 
 fn is_temis(base_url: Option<&str>) -> bool {
     base_url.is_some_and(|b| b.trim_end_matches('/') == TEMIS_URL)
@@ -365,6 +365,7 @@ pub fn preprompt(
     run_dir: &Path,
     project: Option<&str>,
     presentation: bool,
+    language: Option<&str>,
 ) -> PrePrompt {
     let models = MemoryLink::model_dirs(&dirs.home);
     let recall: Arc<dyn Recall> = Arc::new(MemoryRecall::new(&dirs.data, &models, project));
@@ -392,6 +393,11 @@ pub fn preprompt(
             memory: cfg.memory,
             tool_hints: cfg.tool_hints,
             presentation,
+            language: match language {
+                Some("es") => Some("Spanish"),
+                Some("en") => Some("English"),
+                _ => None,
+            },
         },
     )
 }

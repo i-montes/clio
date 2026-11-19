@@ -16,15 +16,16 @@ pub fn paths(dirs: &Dirs) -> PiPaths {
     PiPaths::under_data(&dirs.data)
 }
 
-fn path_var() -> String {
-    std::env::var("PATH").unwrap_or_default()
+/// The `PATH` Pi's Node is looked for in: Clio's private Node first.
+pub fn node_path(dirs: &Dirs) -> String {
+    install::with_private_node(&dirs.data, &std::env::var("PATH").unwrap_or_default())
 }
 
 /// The Pi checks of `clio doctor`: Node, Pi installed and equal to the pinned version, and that
 /// Clio's Pi folder is not the person's own `~/.pi`.
 pub fn checks(dirs: &Dirs) -> Vec<(Level, String, Option<String>)> {
     let mut out = Vec::new();
-    match install::find_node(&path_var()) {
+    match install::find_node(&node_path(dirs)) {
         Ok(n) => out.push((
             Level::Pass,
             format!(
@@ -109,7 +110,7 @@ pub fn init_lines(dirs: &Dirs) {
         return;
     }
     let already = install::locate(&p).is_ok_and(|i| install::is_current(&i));
-    match install::install(&p, &path_var()) {
+    match install::install(&p, &node_path(dirs)) {
         Ok(i) => println!(
             "{}  Pi {} {} {} (0700)",
             st.mark(Level::Pass),
@@ -233,7 +234,7 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
         "install" => {
             args.rest()?;
             let p = paths(dirs);
-            let i = install::install(&p, &path_var()).map_err(|e| e.to_string())?;
+            let i = install::install(&p, &node_path(dirs)).map_err(|e| e.to_string())?;
             println!("Pi {} installed in {}", i.version, i.dir.display());
             Ok(0)
         }

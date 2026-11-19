@@ -57,13 +57,9 @@ fn text(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-fn path_var() -> String {
-    std::env::var("PATH").unwrap_or_default()
-}
-
 /// Can Pi run here at all: Node 22.19+ and the pinned install?
 pub fn ready(dirs: &Dirs) -> Res<()> {
-    install::find_node(&path_var()).map_err(text)?;
+    install::find_node(&crate::cli::pi::node_path(dirs)).map_err(text)?;
     install::locate(&crate::cli::pi::paths(dirs)).map_err(text)?;
     Ok(())
 }
@@ -203,7 +199,7 @@ impl SessionSource for LocalSource {
             cfg.model.model = m;
         }
         let paths = crate::cli::pi::paths(d);
-        let node = install::find_node(&path_var()).map_err(text)?;
+        let node = install::find_node(&crate::cli::pi::node_path(d)).map_err(text)?;
         let install = install::locate(&paths).map_err(text)?;
         // `Config::load` guarantees `cfg.model.provider` is a connector.
         let key = crate::cli::vault::model_key(
@@ -401,6 +397,7 @@ impl SessionSource for LocalSource {
             project.as_deref(),
             // Only a new session: an old one is the middle of a conversation.
             self.presentation && matches!(target, Target::New { .. }),
+            cfg.ui.language.as_deref(),
         );
         pre.set_summaries(cfg.memory.session_summary);
         // A session that was marked before (the service leaves the mark in the run folder) is

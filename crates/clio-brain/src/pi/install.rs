@@ -56,7 +56,7 @@ impl NodeInfo {
     }
 }
 
-pub(crate) fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
+pub fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
     path_var
         .split(':')
         .filter(|d| !d.is_empty())
@@ -64,6 +64,17 @@ pub(crate) fn find_in_path(name: &str, path_var: &str) -> Option<PathBuf> {
         .find(|p| {
             std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// `path_var` with Clio's private Node first (`<data>/node/bin`, which `clio setup` installs): Pi
+/// runs on it when it is there, else on the Node of the `PATH`.
+pub fn with_private_node(data: &Path, path_var: &str) -> String {
+    let bin = data.join("node/bin");
+    if bin.join("node").is_file() {
+        format!("{}:{path_var}", bin.display())
+    } else {
+        path_var.to_owned()
+    }
 }
 
 /// Node from `path_var` (pass `$PATH`), at least [`MIN_NODE`]. The error says what to do.
@@ -157,7 +168,7 @@ pub fn claude_code_bin(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Every folder 0700, every file without group/other access (keeps the owner's exec bit).
-fn lock_down(dir: &Path) -> Result<(), PiError> {
+pub fn lock_down(dir: &Path) -> Result<(), PiError> {
     let rd = std::fs::read_dir(dir).map_err(|e| io_err(dir, &e))?;
     for e in rd.filter_map(Result::ok) {
         let p = e.path();

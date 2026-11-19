@@ -145,7 +145,7 @@ fn give_back(out: &mut impl std::io::Write) -> std::io::Result<()> {
 /// A panic on the main thread must not leave the terminal in the alternate screen in raw mode:
 /// restore it first, then let the usual message print on the normal screen. A panic in a worker
 /// thread is caught where it happens and reported on screen, so it prints nothing here.
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().name() == Some("main") {
@@ -182,12 +182,12 @@ pub fn osc52(text: &str) -> String {
     out
 }
 
-/// Restores the terminal when dropped, on every way out of `run`.
-struct Guard;
+/// Restores the terminal when dropped, on every way out of `run` (and of `clio setup`'s screens).
+pub(crate) struct Guard;
 
 impl Guard {
     /// `mouse`: the chat takes clicks and the wheel (selecting text then needs Shift).
-    fn enter(mouse: bool) -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
+    pub(crate) fn enter(mouse: bool) -> Res<(Self, Terminal<CrosstermBackend<Stdout>>)> {
         let e = |x: std::io::Error| format!("terminal: {x}");
         enable_raw_mode().map_err(e)?;
         IN_TUI.store(true, Ordering::SeqCst);

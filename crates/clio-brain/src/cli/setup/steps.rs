@@ -1,0 +1,825 @@
+//! The installer's steps. Each one is idempotent (what is already right is said and left alone),
+//! and `clio update` runs the same functions as the wizard's Update.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use clio_brain::connector::{Connector, by_name, by_provider};
+use clio_vault::SecretValue;
+
+use super::fetch::{self, FRes, Fail, Pins, Release};
+use super::text::{Lang, M};
+use super::{Answer, Ask, Opts, St, Sys, Ui};
+use crate::cli::home::{Config, Dirs};
+use crate::cli::tui::sanitize;
+use crate::cli::{mkdir_private, vault};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Binaries,
+    Folders,
+    System,
+    Node,
+    Pi,
+    Memory,
+    Vault,
+    Model,
+    Judge,
+    Timer,
+    Skills,
+    /// The MCP catalog: the next stage (the design's "Default MCP servers"). Empty, no row.
+    Mcp,
+    Doctor,
+    StopVault,
+    RemoveTimer,
+    RemoveNodePi,
+    RemoveBinaries,
+    RemoveData,
+}
+
+impl Step {
+    pub fn label(self) -> M {
+        match self {
+            Self::Binaries => M::StBinaries,
+            Self::Folders => M::StFolders,
+            Self::System => M::StSystem,
+            Self::Node => M::StNode,
+            Self::Pi => M::StPi,
+            Self::Memory => M::StMemory,
+            Self::Vault => M::StVault,
+            Self::Model => M::StModel,
+            Self::Judge => M::StJudge,
+            Self::Timer => M::StTimer,
+            Self::Skills => M::StSkills,
+            Self::Mcp => M::StSkills,
+            Self::Doctor => M::StDoctor,
+            Self::StopVault => M::StStopVault,
+            Self::RemoveTimer => M::StRemoveTimer,
+            Self::RemoveNodePi => M::StRemoveNodePi,
+            Self::RemoveBinaries => M::StRemoveBinaries,
+            Self::RemoveData => M::StRemoveData,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Install,
+    Update,
+    Repair,
+    RemoveKeep,
+    RemoveAll,
+}
+
+impl Action {
+    /// The steps, in order (the hidden MCP step included).
+    pub fn steps(self) -> Vec<Step> {
+        use Step::*;
+        match self {
+            Self::Install => vec![
+                Folders, System, Node, Pi, Memory, Vault, Model, Judge, Timer, Skills, Mcp, Doctor,
+            ],
+            Self::Update => vec![Binaries, Node, Pi, Memory, Skills, Timer, Doctor],
+            Self::Repair => vec![
+                Folders, System, Node, Pi, Memory, Vault, Timer, Skills, Mcp, Doctor,
+            ],
+            Self::RemoveKeep => vec![StopVault, RemoveTimer, RemoveNodePi, RemoveBinaries],
+            Self::RemoveAll => vec![
+                StopVault,
+                RemoveTimer,
+                RemoveNodePi,
+                RemoveBinaries,
+                RemoveData,
+            ],
+        }
+    }
+
+    /// The steps the person sees.
+    pub fn shown(self) -> Vec<Step> {
+        self.steps()
+            .into_iter()
+            .filter(|s| *s != Step::Mcp)
+            .collect()
+    }
+}
+
+/// One step's ending, before it becomes a row.
+enum Out {
+    Done(String),
+    Warn(String),
+    Skip(String),
+}
+
+/// A run of the installer's steps.
+pub struct Run<'a> {
+    pub dirs: Dirs,
+    pub lang: Lang,
+    pub sys: Sys,
+    pub pins: Pins,
+    pub opts: Opts,
+    pub ui: &'a mut dyn Ui,
+    /// The one thing left for the person, said on the last screen.
+    pub left: Option<M>,
+    pub failed: bool,
+    /// What changed, `name from → to`, for `clio update`.
+    pub changes: Vec<String>,
+    /// The binaries were replaced: the rest must run under the new ones.
+    pub replaced: bool,
+    /// The doctor's line.
+    pub doctor: Option<String>,
+}
+
+impl Run<'_> {
+    fn t(&self, m: M) -> String {
+        m.get(self.lang).to_owned()
+    }
+
+    fn f(&self, m: M, args: &[&str]) -> String {
+        m.fill(self.lang, args)
+    }
+
+    /// Runs `steps`, each row updated as it goes; a failed one does not stop the others.
+    pub fn all(&mut self, steps: &[Step]) {
+        let shown: Vec<Step> = steps.iter().copied().filter(|s| *s != Step::Mcp).collect();
+        for step in steps {
+            let Some(i) = shown.iter().position(|s| s == step) else {
+                self.mcp();
+                continue;
+            };
+            self.ui.set(i, St::Working(None));
+            let st = match self.one(*step, i) {
+                Ok(Out::Done(n)) => St::Done(n),
+                Ok(Out::Warn(n)) => St::Warn(n),
+                Ok(Out::Skip(n)) => St::Skip(n),
+                Err(e) => {
+                    self.failed = true;
+                    let (why, fix) = self.said(&e);
+                    St::Failed(why, fix)
+                }
+            };
+            self.ui.set(i, st);
+            if self.replaced {
+                return;
+            }
+        }
+    }
+
+    fn said(&self, e: &Fail) -> (String, String) {
+        said(self.lang, e)
+    }
+
+    fn one(&mut self, step: Step, i: usize) -> FRes<Out> {
+        match step {
+            Step::Binaries => self.binaries(i),
+            Step::Folders => self.folders(),
+            Step::System => self.system(),
+            Step::Node => self.node(i),
+            Step::Pi => self.pi(),
+            Step::Memory => self.memory(i),
+            Step::Vault => self.vault(),
+            Step::Model => self.model(),
+            Step::Judge => self.judge(),
+            Step::Timer => self.timer(),
+            Step::Skills => crate::cli::skills::ensure(&self.dirs)
+                .map(|()| Out::Done(self.t(M::NoteDone)))
+                .map_err(Fail::Other),
+            Step::Mcp => Ok(Out::Skip(String::new())),
+            Step::Doctor => Ok(self.doctor()),
+            Step::StopVault => {
+                // Without a runtime folder no vault of this home can be running.
+                if self.dirs.runtime.is_some() {
+                    vault::stop_server(&self.dirs).map_err(Fail::Other)?;
+                }
+                Ok(Out::Done(self.t(M::NoteDone)))
+            }
+            Step::RemoveTimer => self.remove_timer(),
+            Step::RemoveNodePi => self.remove_node_pi(),
+            Step::RemoveBinaries => self.remove_binaries(),
+            Step::RemoveData => self.remove_data(),
+        }
+    }
+
+    /// The MCP catalog's step: chosen servers installed with `clio mcp add <name>` (the next
+    /// stage). Nothing yet.
+    fn mcp(&mut self) {}
+
+    fn progress(ui: &mut dyn Ui, i: usize, got: u64, total: u64) {
+        ui.set(i, St::Working(Some((got, total))));
+    }
+
+    // ---- Clio's own binaries -----------------------------------------------------------------
+
+    fn binaries(&mut self, i: usize) -> FRes<Out> {
+        let rel = Release::find(&self.opts.bin)?;
+        if !rel.is_newer() || self.opts.reexec {
+            return Ok(Out::Done(self.t(M::NoteUpToDate)));
+        }
+        let ui = &mut *self.ui;
+        let changed = fetch::install_binaries(&rel, &self.opts.bin, &mut |_, n| {
+            Self::progress(ui, i, n, 0);
+        })?;
+        let from = env!("CARGO_PKG_VERSION");
+        if changed {
+            self.changes.push(format!("clio {from} → {}", rel.version));
+            self.replaced = true;
+        }
+        Ok(Out::Done(self.f(M::NoteFromTo, &[from, &rel.version])))
+    }
+
+    // ---- the home ----------------------------------------------------------------------------
+
+    fn folders(&mut self) -> FRes<Out> {
+        let runtime = self
+            .dirs
+            .need_runtime()
+            .map_err(|_| Fail::Said(M::FailRuntime, M::FixRuntime))?
+            .to_path_buf();
+        let mut created = false;
+        for d in crate::cli::home::home_folders(&self.dirs)
+            .into_iter()
+            .chain([runtime])
+        {
+            created |= !d.is_dir();
+            mkdir_private(&d)?;
+        }
+        if !clio_brain::memory_link::MemoryLink::db_path(&self.dirs.data).exists() {
+            let model = clio_brain::memory_link::EmbedModel::none();
+            clio_brain::memory_link::MemoryLink::open_write(&self.dirs.data, &model)?;
+            created = true;
+        }
+        created |= crate::cli::home::write_default_config(&self.dirs)?;
+        // The language the person chose, for Clio's first conversation; one chosen before stays.
+        if Config::load(&self.dirs).is_ok_and(|c| c.ui.language.is_none()) {
+            let code = self.lang.code();
+            crate::cli::connect::edit_section(&self.dirs, "ui", true, |m| {
+                m.insert("language".into(), code.into());
+            })?;
+            created = true;
+        }
+        Ok(Out::Done(self.t(if created {
+            M::NoteCreated
+        } else {
+            M::NoteThere
+        })))
+    }
+
+    // ---- the system: bubblewrap and lingering, with one sudo moment --------------------------
+
+    fn system(&mut self) -> FRes<Out> {
+        if !self.sys.linux {
+            return Ok(Out::Warn(self.t(M::NoteMac)));
+        }
+        let bwrap = self.sys.find("bwrap").is_none();
+        let linger = self.sys.linger_off();
+        if !bwrap && !linger {
+            return Ok(Out::Done(self.t(M::NoteThere)));
+        }
+        let pm = self.sys.package_manager();
+        let mut cmds: Vec<Vec<String>> = Vec::new();
+        if bwrap && let Some((_, install)) = &pm {
+            cmds.extend(install.iter().cloned());
+        }
+        if linger && let (Some(lc), Some(u)) = (self.sys.find("loginctl"), self.sys.user.clone()) {
+            cmds.push(vec![lc.display().to_string(), "enable-linger".into(), u]);
+        }
+        let wanted = || {
+            let mut w = Vec::new();
+            if bwrap {
+                w.push("bubblewrap");
+            }
+            if linger {
+                w.push("loginctl enable-linger");
+            }
+            w.join(", ")
+        };
+        if cmds.is_empty() {
+            return Ok(Out::Warn(self.t(M::NoteNoPkg)));
+        }
+        let sudo = if self.sys.root {
+            None
+        } else {
+            match self.sys.find("sudo") {
+                Some(s) => Some(s),
+                None => return Ok(Out::Warn(self.f(M::NoteNoSudo, &[&wanted()]))),
+            }
+        };
+        if !self.opts.yes {
+            let mut lines = Vec::new();
+            if bwrap {
+                let name = pm.as_ref().map_or("", |(n, _)| n.as_str());
+                lines.push(self.f(M::SudoBwrap, &[name]));
+            }
+            if linger {
+                lines.push(self.t(M::SudoLinger));
+            }
+            lines.push(self.t(M::SudoHow));
+            let q = Ask::Choice {
+                title: self.t(M::SudoTitle),
+                lines,
+                options: vec![self.t(M::SudoGo), self.t(M::SudoSkip)],
+                default: 0,
+            };
+            if !matches!(self.ui.ask(q), Some(Answer::Choice(0))) {
+                return Ok(Out::Warn(self.t(M::NoteSysSkipped)));
+            }
+        }
+        // The terminal is the person's while these run: `sudo` asks there, once (its own
+        // timestamp covers the next command), and Clio never reads the password.
+        let mut failed = None;
+        self.ui.outside(&mut || {
+            for c in &cmds {
+                let mut cmd = match &sudo {
+                    Some(s) => {
+                        let mut c0 = Command::new(s);
+                        c0.args(c);
+                        c0
+                    }
+                    None => {
+                        let mut c0 = Command::new(&c[0]);
+                        c0.args(&c[1..]);
+                        c0
+                    }
+                };
+                if !cmd.status().is_ok_and(|s| s.success()) {
+                    failed = Some(fetch::name_of(&c[0]));
+                    break;
+                }
+            }
+        });
+        match failed {
+            Some(what) if self.sys.find("bwrap").is_none() => {
+                Ok(Out::Warn(self.f(M::NoteSysFailed, &[&what])))
+            }
+            _ => Ok(Out::Done(self.t(M::NoteDone))),
+        }
+    }
+
+    // ---- Node, Pi, clio-memory ---------------------------------------------------------------
+
+    fn node(&mut self, i: usize) -> FRes<Out> {
+        let Some(a) = self.pins.node.clone() else {
+            return Ok(Out::Warn(self.t(M::NoteNoTarget)));
+        };
+        let ui = &mut *self.ui;
+        let size = 30_000_000;
+        match fetch::install_node(&self.dirs.data, &a, &mut |n| {
+            Self::progress(ui, i, n, size.max(n));
+        })? {
+            None => Ok(Out::Done(a.version.clone())),
+            Some(old) => Ok(Out::Done(self.changed("Node", &old, &a.version))),
+        }
+    }
+
+    /// `name from → to` recorded, and the row's note.
+    fn changed(&mut self, name: &str, from: &str, to: &str) -> String {
+        if from.is_empty() {
+            self.changes.push(format!("{name} {to}"));
+            self.f(M::NoteInstalled, &[to])
+        } else {
+            self.changes.push(format!("{name} {from} → {to}"));
+            self.f(M::NoteFromTo, &[from, to])
+        }
+    }
+
+    fn pi(&mut self) -> FRes<Out> {
+        use clio_brain::pi::install;
+        // As `clio init`: the tests (and a machine that installs Pi on its own) leave it out.
+        if std::env::var_os("CLIO_SKIP_PI_INSTALL").is_some() {
+            return Ok(Out::Skip("CLIO_SKIP_PI_INSTALL".into()));
+        }
+        let paths = crate::cli::pi::paths(&self.dirs);
+        if let Ok(i) = install::locate(&paths)
+            && install::is_current(&i)
+        {
+            return Ok(Out::Done(i.version));
+        }
+        let before = std::fs::read_dir(&paths.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| install::installed_version(&e.path()))
+            .max();
+        let node = crate::cli::pi::node_path(&self.dirs);
+        let mut r = None;
+        self.ui.busy(&mut || {
+            r = Some(
+                paths
+                    .ensure()
+                    .and_then(|()| install::install(&paths, &node))
+                    .map_err(|e| e.to_string()),
+            );
+        });
+        let i = r.unwrap_or_else(|| Err("Pi was not installed".into()))?;
+        // An earlier version's folder goes once the pinned one is in place.
+        for e in std::fs::read_dir(&paths.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = e.path();
+            if p != i.dir && install::installed_version(&p).is_some() {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+        Ok(Out::Done(self.changed(
+            "Pi",
+            before.as_deref().unwrap_or(""),
+            &i.version,
+        )))
+    }
+
+    fn memory(&mut self, i: usize) -> FRes<Out> {
+        let Some(m) = self.pins.memory.clone() else {
+            return Ok(Out::Warn(self.t(M::NoteNoTarget)));
+        };
+        let bin = self.dirs.home.join(".local/bin");
+        let ui = &mut *self.ui;
+        let replaced = fetch::install_memory(&bin, &m, &mut |n| Self::progress(ui, i, n, 0))?;
+        if let Some(model) = self.pins.model.clone() {
+            let total = fetch::model_size(&model);
+            let ui = &mut *self.ui;
+            fetch::install_model(&self.dirs.home, &model, &mut |n| {
+                Self::progress(ui, i, n, total.max(n));
+            })?;
+        }
+        let have = fetch::memory_installed(&bin).unwrap_or_else(|| m.version.clone());
+        Ok(Out::Done(match replaced {
+            Some(old) => self.changed("clio-memory", &old, &m.version),
+            None if fetch::version(&have) > fetch::version(&m.version) => {
+                self.f(M::NoteNewer, &[&have])
+            }
+            None => have,
+        }))
+    }
+
+    // ---- the vault, the model and the judge --------------------------------------------------
+
+    /// A secret from the file the flags named, else from the person (`None`: later).
+    fn secret(&mut self, file: Option<&PathBuf>, q: Ask) -> Option<SecretValue> {
+        if let Some(f) = file {
+            let mut text = std::fs::read_to_string(f).ok()?;
+            let v = SecretValue::new(text.trim_end_matches(['\n', '\r']).to_owned());
+            clio_vault::wipe(&mut text);
+            return (!v.is_empty()).then_some(v);
+        }
+        match self.ui.ask(q) {
+            Some(Answer::Secret(v)) if !v.is_empty() => Some(v),
+            _ => None,
+        }
+    }
+
+    fn vault(&mut self) -> FRes<Out> {
+        if self.opts.no_vault {
+            self.left = Some(M::LeftVault);
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        }
+        self.dirs
+            .need_runtime()
+            .map_err(|_| Fail::Said(M::FailRuntime, M::FixRuntime))?;
+        let state = vault::state(&self.dirs);
+        if state == vault::State::Open {
+            return Ok(Out::Done(self.t(M::NoteOpened)));
+        }
+        let new = state == vault::State::Missing;
+        let file = self.opts.passphrase_file.clone();
+        let mut error = None;
+        for _ in 0..3 {
+            let (title, hint) = if new {
+                (M::VaultNewTitle, M::VaultNewHint)
+            } else {
+                (M::VaultOpenTitle, M::VaultOpenHint)
+            };
+            let q = Ask::Secret {
+                title: self.t(title),
+                lines: vec![self.t(hint)],
+                labels: if new {
+                    vec![self.t(M::FieldPass), self.t(M::FieldAgain)]
+                } else {
+                    vec![self.t(M::FieldPass)]
+                },
+                error: error.take(),
+            };
+            let Some(pass) = self.secret(file.as_ref(), q) else {
+                self.left = Some(M::LeftVault);
+                return Ok(Out::Warn(self.t(M::NoteLater)));
+            };
+            match vault::start_with(&self.dirs, &pass) {
+                Ok(_) => {
+                    return Ok(Out::Done(self.t(if new {
+                        M::NoteNewVault
+                    } else {
+                        M::NoteOpened
+                    })));
+                }
+                Err(e) if !new && e.contains("wrong passphrase") && file.is_none() => {
+                    error = Some(self.t(M::ErrWrongPass));
+                }
+                Err(e) if e.contains("wrong passphrase") => {
+                    return Err(Fail::Said(M::FailPass, M::FixPass));
+                }
+                Err(e) => return Err(Fail::Other(e)),
+            }
+        }
+        self.left = Some(M::LeftVault);
+        Err(Fail::Said(M::FailPass, M::FixPass))
+    }
+
+    /// The connector of the config, when the vault already has its key.
+    fn connected(&self) -> Option<&'static Connector> {
+        let c = Config::load(&self.dirs)
+            .ok()
+            .and_then(|c| by_provider(&c.model.provider))?;
+        vault::has_model_key(&self.dirs, c).then_some(c)
+    }
+
+    fn model(&mut self) -> FRes<Out> {
+        if self.opts.no_model {
+            self.left.get_or_insert(M::LeftModel);
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        }
+        if vault::unlocked(&self.dirs).is_err() {
+            self.left = Some(M::LeftVault);
+            return Ok(Out::Skip(self.t(M::NoteNoVault)));
+        }
+        if let Some(c) = self.connected() {
+            return Ok(Out::Done(c.name.into()));
+        }
+        let c = if self.opts.yes {
+            self.opts.connector.as_deref().and_then(by_name)
+        } else {
+            let q = Ask::Choice {
+                title: self.t(M::ModelTitle),
+                lines: vec![self.t(M::ModelHint)],
+                options: vec![
+                    self.t(M::ModelClaude),
+                    self.t(M::ModelApi),
+                    self.t(M::ModelOpencode),
+                    self.t(M::ModelLater),
+                ],
+                default: 0,
+            };
+            match self.ui.ask(q) {
+                Some(Answer::Choice(0)) => by_name("claude"),
+                Some(Answer::Choice(1)) => by_name("anthropic-api"),
+                Some(Answer::Choice(2)) => by_name("opencode"),
+                _ => None,
+            }
+        };
+        let Some(c) = c else {
+            self.left = Some(M::LeftModel);
+            return Ok(Out::Warn(self.t(M::NoteLater)));
+        };
+        if crate::cli::home::lacks_bridge(&self.dirs, c) {
+            return Err(Fail::Other(
+                "the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install".into(),
+            ));
+        }
+        if c.name == "claude" && !self.opts.yes {
+            self.claude_login();
+        }
+        let hint = match c.name {
+            "claude" => M::KeyClaudeHint,
+            "anthropic-api" => M::KeyApiHint,
+            _ => M::KeyOpencodeHint,
+        };
+        let file = self.opts.key_file.clone();
+        let mut error = None;
+        let key = loop {
+            let q = Ask::Secret {
+                title: self.f(M::KeyTitle, &[c.name]),
+                lines: vec![self.t(hint)],
+                labels: vec![self.t(M::FieldKey)],
+                error: error.take(),
+            };
+            let Some(k) = self.secret(file.as_ref(), q) else {
+                self.left = Some(M::LeftModel);
+                return Ok(Out::Warn(self.t(M::NoteLater)));
+            };
+            if k.expose().trim().starts_with(c.key_prefix) {
+                break SecretValue::new(k.expose().trim().to_owned());
+            }
+            if file.is_some() {
+                return Err(Fail::Other(self.f(M::ErrPrefix, &[c.key_prefix])));
+            }
+            error = Some(self.f(M::ErrPrefix, &[c.key_prefix]));
+        };
+        crate::cli::connect::store_key(&self.dirs, c, &key)?;
+        crate::cli::connect::switch_config(&self.dirs, c, c.default_model)?;
+        Ok(Out::Done(c.name.into()))
+    }
+
+    /// Claude Code's own `setup-token`, on the terminal, when the person wants a token now. It
+    /// runs with Pi's home folder for Clio, so the person's own `~/.claude` is not touched; what
+    /// it shows (the token) is wiped from the terminal before the wizard comes back.
+    fn claude_login(&mut self) {
+        let q = Ask::Choice {
+            title: self.t(M::ClaudeTitle),
+            lines: vec![self.t(M::ClaudeHint)],
+            options: vec![self.t(M::ClaudeGet), self.t(M::ClaudeHave)],
+            default: 0,
+        };
+        if !matches!(self.ui.ask(q), Some(Answer::Choice(0))) {
+            return;
+        }
+        let Ok(claude) = crate::cli::home::claude_code(&self.dirs) else {
+            return;
+        };
+        let home = crate::cli::pi::paths(&self.dirs).home_dir();
+        let copy = self.t(M::ClaudeCopy);
+        self.ui.outside(&mut || {
+            let _ = Command::new(&claude)
+                .arg("setup-token")
+                .env("HOME", &home)
+                .status();
+            println!("\n{copy}");
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            // The screen and its scrollback: the token never stays on the terminal.
+            print!("\x1b[3J\x1b[H\x1b[2J");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        });
+    }
+
+    fn judge(&mut self) -> FRes<Out> {
+        if Config::load(&self.dirs).is_ok_and(|c| c.jev.enabled) {
+            return Ok(Out::Done(self.t(M::NoteThere)));
+        }
+        let url = if self.opts.yes {
+            match (&self.opts.temis_url, &self.opts.temis_key_file) {
+                (Some(u), Some(_)) => Some(u.clone()),
+                _ => None,
+            }
+        } else {
+            let q = Ask::Choice {
+                title: self.t(M::JudgeTitle),
+                lines: vec![self.t(M::JudgeHint)],
+                options: vec![self.t(M::JudgeSkip), self.t(M::JudgeTemis)],
+                default: 0,
+            };
+            if matches!(self.ui.ask(q), Some(Answer::Choice(1))) {
+                let mut error = None;
+                loop {
+                    let q = Ask::Text {
+                        title: self.t(M::TemisUrlTitle),
+                        lines: vec![self.f(M::TemisUrlHint, &[crate::cli::jev::TEMIS_URL])],
+                        label: self.t(M::FieldUrl),
+                        value: crate::cli::jev::TEMIS_URL.into(),
+                        error: error.take(),
+                    };
+                    match self.ui.ask(q) {
+                        Some(Answer::Text(u)) if temis_ok(&u) => break Some(u),
+                        Some(Answer::Text(_)) => error = Some(self.t(M::ErrUrl)),
+                        _ => break None,
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        let Some(url) = url else {
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        };
+        if !temis_ok(&url) {
+            return Err(Fail::Other(self.t(M::ErrUrl)));
+        }
+        if vault::unlocked(&self.dirs).is_err() {
+            return Ok(Out::Skip(self.t(M::NoteNoVault)));
+        }
+        let q = Ask::Secret {
+            title: self.t(M::TemisKeyTitle),
+            lines: vec![self.t(M::TemisKeyHint)],
+            labels: vec![self.t(M::FieldKey)],
+            error: None,
+        };
+        let file = self.opts.temis_key_file.clone();
+        let Some(key) = self.secret(file.as_ref(), q) else {
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        };
+        let (secret, domain) = crate::cli::jev::key_for(Some(&url));
+        vault::put(&self.dirs, secret, &format!("jev:{domain}"), &key)?;
+        crate::cli::connect::edit_section(&self.dirs, "jev", true, |m| {
+            m.insert("enabled".into(), true.into());
+            m.insert("base_url".into(), url.trim_end_matches('/').into());
+        })?;
+        Ok(Out::Done(self.t(M::NoteTemis)))
+    }
+
+    // ---- the timer, the doctor ---------------------------------------------------------------
+
+    fn timer(&mut self) -> FRes<Out> {
+        if !self.sys.linux {
+            return Ok(Out::Skip(self.t(M::NoteMacTimer)));
+        }
+        let Some(sc) = self.sys.find("systemctl") else {
+            return Ok(Out::Skip(self.t(M::NoteSkipped)));
+        };
+        let home = &self.dirs.home;
+        let on = crate::cli::services::timer_on(home, Some(&sc));
+        if self.opts.update {
+            if !on {
+                return Ok(Out::Skip(self.t(M::NoteOff)));
+            }
+            let ok = Command::new(&sc)
+                .args(["--user", "restart", crate::cli::services::UNITS[1]])
+                .status()
+                .is_ok_and(|s| s.success());
+            return Ok(if ok {
+                Out::Done(self.t(M::NoteRestarted))
+            } else {
+                Out::Warn(self.t(M::NoteOff))
+            });
+        }
+        if on {
+            return Ok(Out::Done(self.t(M::NoteOn)));
+        }
+        crate::cli::services::enable_in(home, &self.opts.exe, Some(&sc))?;
+        Ok(Out::Done(self.t(M::NoteOn)))
+    }
+
+    fn doctor(&mut self) -> Out {
+        if !self.opts.doctor {
+            return Out::Skip(self.t(M::NoteSkipped));
+        }
+        let r = crate::cli::doctor::collect_with(&self.dirs, false);
+        let fail = r
+            .checks
+            .iter()
+            .find(|c| c.level == crate::cli::ui::Level::Fail);
+        let line = match fail {
+            None => self.t(M::NoteDoctorOk),
+            Some(c) => sanitize::line(&c.msg),
+        };
+        self.doctor = Some(line.clone());
+        if fail.is_none() {
+            Out::Done(line)
+        } else {
+            Out::Warn(line)
+        }
+    }
+
+    // ---- removing ----------------------------------------------------------------------------
+
+    fn remove_timer(&mut self) -> FRes<Out> {
+        let sc = self.sys.find("systemctl");
+        crate::cli::services::disable_in(&self.dirs.home, sc.as_deref())?;
+        Ok(Out::Done(self.t(M::NoteRemoved)))
+    }
+
+    /// The private Node and Pi's installed versions; Pi's sessions, agent and home folders are
+    /// the person's conversations and stay.
+    fn remove_node_pi(&mut self) -> FRes<Out> {
+        rm(&fetch::node_dir(&self.dirs.data))?;
+        let root = crate::cli::pi::paths(&self.dirs).root;
+        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if fetch::version(&name).is_some() || name.starts_with(".install-") {
+                rm(&e.path())?;
+            }
+        }
+        Ok(Out::Done(self.t(M::NoteRemoved)))
+    }
+
+    fn remove_binaries(&mut self) -> FRes<Out> {
+        for name in fetch::BINARIES {
+            rm(&self.opts.bin.join(name))?;
+        }
+        // What the installer noted about the binaries goes with them.
+        rm(&super::version_file(&self.dirs))?;
+        rm(&crate::cli::update::cache(&self.dirs))?;
+        Ok(Out::Done(self.f(M::NoteKept, &["clio-memory"])))
+    }
+
+    fn remove_data(&mut self) -> FRes<Out> {
+        rm(&self.dirs.config)?;
+        rm(&self.dirs.data)?;
+        if let Some(r) = &self.dirs.runtime {
+            rm(r)?;
+        }
+        Ok(Out::Done(self.t(M::NoteRemoved)))
+    }
+}
+
+/// A failure as one plain sentence and what to do, in the person's language.
+pub(crate) fn said(lang: Lang, e: &Fail) -> (String, String) {
+    match e {
+        Fail::Net(what) => (M::FailNet.fill(lang, &[what]), M::FixNet.get(lang).into()),
+        Fail::Sum(what) => (M::FailSum.fill(lang, &[what]), M::FixSum.get(lang).into()),
+        Fail::Said(why, fix) => (why.get(lang).into(), fix.get(lang).into()),
+        Fail::Other(s) => (sanitize::line(s), M::FixOther.get(lang).into()),
+    }
+}
+
+/// Removes a file or a folder; one that is not there is fine.
+fn rm(p: &Path) -> FRes<()> {
+    let r = match std::fs::symlink_metadata(p) {
+        Err(_) => return Ok(()),
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(p),
+        Ok(_) => std::fs::remove_file(p),
+    };
+    r.map_err(|e| Fail::Other(crate::cli::io_err(p, &e)))
+}
+
+/// Only an address Clio's judge sends the Temis key to.
+fn temis_ok(url: &str) -> bool {
+    crate::cli::jev::key_for(Some(url.trim())).0 == "temis"
+}

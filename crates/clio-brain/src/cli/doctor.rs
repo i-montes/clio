@@ -157,8 +157,9 @@ fn public_listeners() -> Vec<String> {
 }
 
 /// Folders inside the data folder that hold the person's own files, not what Clio wrote: the
-/// copy of a project, the originals `apply` saved, and what npm installed for Pi.
-const NOT_CLIO_OUTPUT: [&str; 4] = ["sandbox", "scratch", "backup", "node_modules"];
+/// copy of a project, the originals `apply` saved, what npm installed for Pi, and the private Node
+/// the installer unpacked (`node`, nodejs.org's own files).
+const NOT_CLIO_OUTPUT: [&str; 5] = ["sandbox", "scratch", "backup", "node_modules", "node"];
 /// A file bigger than this is not read.
 const AUDIT_MAX_BYTES: u64 = 32 << 20;
 
@@ -817,6 +818,12 @@ fn host_report(o: &mut Report, found: Result<(clio_node::Launcher, Result<(), St
 
 /// Runs every check. The host script's own lines are included as checks.
 pub fn collect(dirs: &Dirs) -> Report {
+    collect_with(dirs, true)
+}
+
+/// [`collect`]; without `host_self_test` host mode's console is not tried (that self-test runs
+/// commands, with `sudo` where there is passwordless `sudo`): what the installer shows.
+pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
     let mut o = Report::default();
     let mut folders = vec![dirs.config.clone(), dirs.data.clone()];
     folders.extend(dirs.runtime.clone());
@@ -943,7 +950,9 @@ pub fn collect(dirs: &Dirs) -> Report {
     }
     jail_lines(&mut o);
     pi_jail_line(&mut o, dirs);
-    host_mode_lines(&mut o, dirs);
+    if host_self_test {
+        host_mode_lines(&mut o, dirs);
+    }
     // Outside the repository the script is not there, and that is no problem: nothing is said.
     if let Some(script) = find_host_check() {
         o.host_script = Some(script.display().to_string());
@@ -1117,6 +1126,30 @@ mod tests {
         let mut found = (0, Vec::new(), 0);
         audit_walk(&data, 0, &Scrubber::default(), &mut found);
         assert!(found.1.is_empty(), "{:?}", found.1);
+    }
+
+    // The private Node is nodejs.org's files, not what Clio wrote: a key-looking string inside
+    // its binary is not a leak (S-18); the same string in Clio's own files is.
+    #[test]
+    fn the_private_node_is_not_scanned_for_leaks() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        std::fs::create_dir_all(data.join("node/bin")).unwrap();
+        std::fs::write(
+            data.join("node/bin/node"),
+            "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )
+        .unwrap();
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        assert!(found.1.is_empty(), "{:?}", found.1);
+        std::fs::write(
+            data.join("notes.txt"),
+            "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        )
+        .unwrap();
+        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        assert_eq!(found.1.len(), 1, "{:?}", found.1);
     }
 
     // A trash with deleted conversations in it is private all through (S-23), even when the
