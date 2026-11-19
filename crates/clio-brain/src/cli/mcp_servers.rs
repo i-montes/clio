@@ -354,7 +354,9 @@ impl Port {
     }
 
     /// Installs, checks and probes the server the person approved (`p`, set aside by
-    /// `mcp_propose`), and registers it off: what the person is told. A failure says only at
+    /// `mcp_propose`; by the person or under their permission window), and registers it ON with
+    /// the tools its probe listed (read-only ones run without asking, the rest ask): what the
+    /// person is told. A failure says only at
     /// which step (Clio's words: the model hears them); npm's and the package's own words go to
     /// the server's log (`/mcp logs`), cleaned.
     pub fn install(&self, p: &Pending) -> Res<String> {
@@ -450,7 +452,9 @@ impl Port {
             tree,
             integrity: integrity.to_owned(),
             packages,
-            confirmed: false,
+            // The approval was of this server: its tools as the probe lists them are the ones
+            // a later change is measured against (a changed one asks again).
+            confirmed: true,
             tools: vec![],
         };
         // The probe: no secrets, no network, an empty home of its own (never the data of a
@@ -501,7 +505,7 @@ impl Port {
         )?;
         m::log_event(&root, &mf.name, "install", "ok", "");
         Ok(format!(
-            "the MCP server «{}» ({}@{}, {} package{} in all) is installed; it offers {} tool{}. It stays off until you confirm them: /mcp confirm {}",
+            "the MCP server «{}» ({}@{}, {} package{} in all) is installed and on; it offers {} tool{} ({} run without asking: the server says they only read; every other call asks): /mcp show {} lists them",
             mf.name,
             mf.package,
             mf.version,
@@ -509,6 +513,7 @@ impl Port {
             if st.packages == 1 { "" } else { "s" },
             st.tools.len(),
             if st.tools.len() == 1 { "" } else { "s" },
+            st.tools.iter().filter(|t| t.mode == Mode::Free).count(),
             mf.name
         ))
     }
@@ -911,12 +916,16 @@ pub fn confirm(d: &Dirs, name: &str, shown: &str) -> Res<String> {
 
 fn set_on(d: &Dirs, name: &str, on: bool) -> Res<String> {
     let root = root(d);
-    if on && !m::load_state(&root, name).is_some_and(|s| s.confirmed) {
-        return Err(format!(
-            "«{}»'s tools are not confirmed: /mcp confirm {} (or clio mcp confirm) shows them and turns it on",
-            sanitize::line(name),
-            sanitize::line(name)
-        ));
+    // One installed before approving turned it on: turning it on takes its tools as they are
+    // (a changed one still asks).
+    if on {
+        let _l = m::lock_root(&root)?;
+        let mut st = m::load_state(&root, name)
+            .ok_or_else(|| format!("there is no MCP server «{}»", sanitize::line(name)))?;
+        if !st.confirmed {
+            st.confirmed = true;
+            m::save_state(&root, &st)?;
+        }
     }
     let why = if on { "" } else { skills::OFF_BY_PERSON };
     skills::set_enabled_in(&root, Kind::Mcp, name, on, why)
@@ -1257,7 +1266,7 @@ pub fn proposal_rows(p: &Pending) -> Option<Vec<String>> {
     } else {
         "This is someone else's code: it will hold these credentials and can send them to the hosts above.".into()
     });
-    rows.push("Its tools are not known yet: approving downloads it, starts it once without network or secrets to list them, and it stays off until you confirm them.".into());
+    rows.push("Its tools are not known yet: approving downloads it, starts it once without network or secrets to list them, and turns it on: tools it marks read-only then run without asking, and every other call asks you (or runs under an open permission window).".into());
     Some(rows.into_iter().map(|r| sanitize::line(&r)).collect())
 }
 
@@ -1498,7 +1507,9 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
 
     fn approve(e: &Env, id: &str) -> Res<Pending> {
         let st = super::super::pending::state(e.d());
-        clio_toolhost::pending::approve_mcp(&st, id, super::super::now_ms(), |p| e.port.install(p))
+        clio_toolhost::pending::approve_mcp(&st, id, (super::super::now_ms(), None), |p| {
+            e.port.install(p)
+        })
     }
 
     /// The digest of the tool list the person is shown to confirm.
@@ -1518,9 +1529,9 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
     // S-70, with bwrap: a proposal asks npm (in its jail) for the facts and nothing else: nothing
     // is installed before the person approves. Approved, exactly `package@version` is installed
     // with no scripts, checked against the approved integrity, probed WITHOUT secrets or network
-    // (only `initialize` and `tools/list`), and registered OFF until its tools are confirmed.
+    // (only `initialize` and `tools/list`), and registered ON: read-only tools free, others ask.
     #[test]
-    fn nothing_is_installed_before_approval_and_a_probed_server_waits_for_its_tools() {
+    fn nothing_is_installed_before_approval_and_a_probed_server_is_on_once_approved() {
         let Some(e) = env() else { return };
         e.npm_conf(json!({"mode": "report"}));
         let h = e.host();
@@ -1557,7 +1568,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         );
         let said = approve(&e, &id).unwrap();
         assert!(
-            matches!(&said.state, clio_toolhost::pending::State::Done { output_tail, .. } if output_tail.contains("stays off")),
+            matches!(&said.state, clio_toolhost::pending::State::Done { output_tail, .. } if output_tail.contains("installed and on")),
             "{said:?}"
         );
         let argv = e.argv();
@@ -1576,7 +1587,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         let tree = e.root().join("servers/srv/1.0.0");
         assert!(tree.join("package-lock.json").is_file());
         let st = m::load_state(&e.root(), "srv").unwrap();
-        assert!(!st.confirmed && st.integrity == INTEGRITY, "{st:?}");
+        assert!(st.confirmed && st.integrity == INTEGRITY, "{st:?}");
         assert_eq!(st.tree, tree_digest(&tree).unwrap());
         assert_eq!(st.entry, "node_modules/@example/srv/server.js");
         // The probe had no secret and no network.
@@ -1588,15 +1599,11 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         let echo = st.tools.iter().find(|t| t.name == "echo").unwrap();
         let write = st.tools.iter().find(|t| t.name == "write_note").unwrap();
         assert!(echo.mode == Mode::Free && write.mode == Mode::Ask);
+        // Approving installs it AND turns it on: its read-only tools run freely, the others ask;
+        // `/mcp confirm` stays possible and changes nothing.
         let rec = skills::record(&e.root(), "srv").unwrap();
-        assert!(
-            !rec.enabled && rec.off.as_deref() == Some(skills::WAITING_TOOLS),
-            "{rec:?}"
-        );
-        assert!(!m::is_on(&e.root(), "srv"));
-        assert!(list_lines(e.d()).join("\n").contains(skills::WAITING_TOOLS));
-        // Not on before its tools are confirmed; confirmed, it is on.
-        assert!(set_on(e.d(), "srv", true).is_err());
+        assert!(rec.enabled && rec.off.is_none(), "{rec:?}");
+        assert!(m::is_on(&e.root(), "srv"));
         assert!(
             confirm(e.d(), "srv", &shown(&e, "srv"))
                 .unwrap()
@@ -1995,7 +2002,8 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
             d.contains(r#"args ["--zone","Europe/Madrid"]"#) && d.contains("setting Europe/Madrid"),
             "{d}"
         );
-        assert!(!m::load_state(&e.root(), "srv").unwrap().confirmed);
+        assert!(m::load_state(&e.root(), "srv").unwrap().confirmed);
+        assert!(m::is_on(&e.root(), "srv"));
     }
 
     // S-70, with bwrap: a package that bundles its dependencies (lockfile entries `inBundle`, with
