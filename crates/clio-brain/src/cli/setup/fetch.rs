@@ -7,6 +7,8 @@
 //! - clio-memory: its release [`MEMORY_VERSION`], whose `SHA256SUMS` is pinned here by its own
 //!   SHA-256; the binary is checked against it.
 //! - The memory's model: the files and the ONNX runtime clio-memory pins (`clio_memory::setup`).
+//! - Clio's Chromium (for the catalog's Playwright server): Playwright's archive of the revision
+//!   `mcp/catalog.json` names, its SHA-256 pinned there for each platform.
 //!
 //! A file that does not match replaces nothing. Downloads use `curl`, https only (TLS 1.2 or newer;
 //! plain http only in a debug build, for the tests' local server); a local path in place of a URL
@@ -128,6 +130,9 @@ pub struct Pins {
     pub node: Option<Archive>,
     pub memory: Option<MemoryPin>,
     pub model: Option<ModelPin>,
+    /// Chromium: `version` is its revision.
+    #[serde(default)]
+    pub browser: Option<Archive>,
 }
 
 impl Pins {
@@ -158,10 +163,20 @@ impl Pins {
             sums_sha256: MEMORY_SUMS_SHA256.into(),
             asset: format!("clio-memory-{t}"),
         });
+        let c = clio_toolhost::catalog::catalog().browser;
+        let browser = node_os.and_then(|os| {
+            let f = c.files.get(os)?;
+            Some(Archive {
+                url: f.url.clone(),
+                sha256: f.sha256.clone(),
+                version: c.revision.clone(),
+            })
+        });
         Self {
             node,
             memory,
             model: Some(model_pin()),
+            browser,
         }
     }
 
@@ -555,6 +570,150 @@ fn unpack(file: &Path, into: &Path) -> FRes<()> {
             name_of(&file.display().to_string())
         )))
     }
+}
+
+/// Chromium's program inside its folder.
+pub const CHROME: &str = "chrome-linux/chrome";
+const BROWSER_MARK: &str = ".clio-browser";
+
+/// Puts Chromium `a` in `<data>/browsers/chromium-<revision>`, unless it is there already:
+/// downloaded, checked, unpacked beside it with the system's `unzip`, made private, and only then
+/// moved in. Whether anything changed.
+pub fn install_browser(data: &Path, a: &Archive, on: &mut dyn FnMut(u64)) -> FRes<bool> {
+    let root = data.join("browsers");
+    let dir = root.join(format!("chromium-{}", a.version));
+    if std::fs::read_to_string(dir.join(BROWSER_MARK))
+        .ok()
+        .as_deref()
+        == Some(a.sha256.as_str())
+        && dir.join(CHROME).is_file()
+    {
+        return Ok(false);
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let unzip = clio_brain::pi::install::find_in_path("unzip", &path)
+        .ok_or_else(|| Fail::Other("unzip is needed to unpack Chromium".into()))?;
+    crate::cli::mkdir_private(&root)?;
+    let file = root.join(format!(".chromium-{}.download", a.version));
+    let staging = root.join(format!(".chromium-{}.new", a.version));
+    let _ = std::fs::remove_dir_all(&staging);
+    let r = get_verified(&a.url, &file, &a.sha256, on).and_then(|()| {
+        crate::cli::mkdir_private(&staging)?;
+        let ok = Command::new(unzip)
+            .arg("-q")
+            .arg(&file)
+            .arg("-d")
+            .arg(&staging)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok || !staging.join(CHROME).is_file() {
+            return Err(Fail::Other(format!("could not unpack {}", name_of(&a.url))));
+        }
+        std::fs::write(staging.join(BROWSER_MARK), &a.sha256)
+            .map_err(|e| crate::cli::io_err(&staging, &e))?;
+        clio_brain::pi::install::lock_down(&staging).map_err(|e| Fail::Other(e.to_string()))
+    });
+    let _ = std::fs::remove_file(&file);
+    if let Err(e) = r {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    swap_dir(&staging, &dir)?;
+    Ok(true)
+}
+
+/// The libraries `program` needs that this system does not have, as `ldd` names them.
+pub fn missing_libs(program: &Path) -> Vec<String> {
+    let Ok(out) = Command::new("ldd")
+        .arg(program)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains("not found"))
+        .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+        .collect()
+}
+
+/// The libraries Chromium links to (`readelf -d chrome`, the same for both processors) that are
+/// not part of the C library or always present, and the Debian and Ubuntu packages that bring
+/// each: before Ubuntu 24.04 and Debian 13, then after their 64-bit time change (`t64`).
+pub const CHROME_LIBS: [(&str, &str, &str); 24] = [
+    ("libglib-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
+    ("libgobject-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
+    ("libgio-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
+    ("libnspr4.so", "libnspr4", "libnspr4"),
+    ("libnss3.so", "libnss3", "libnss3"),
+    ("libnssutil3.so", "libnss3", "libnss3"),
+    ("libsmime3.so", "libnss3", "libnss3"),
+    ("libdbus-1.so.3", "libdbus-1-3", "libdbus-1-3"),
+    ("libatk-1.0.so.0", "libatk1.0-0", "libatk1.0-0t64"),
+    (
+        "libatk-bridge-2.0.so.0",
+        "libatk-bridge2.0-0",
+        "libatk-bridge2.0-0t64",
+    ),
+    ("libcups.so.2", "libcups2", "libcups2t64"),
+    ("libxcb.so.1", "libxcb1", "libxcb1"),
+    ("libxkbcommon.so.0", "libxkbcommon0", "libxkbcommon0"),
+    ("libatspi.so.0", "libatspi2.0-0", "libatspi2.0-0t64"),
+    ("libX11.so.6", "libx11-6", "libx11-6"),
+    ("libXcomposite.so.1", "libxcomposite1", "libxcomposite1"),
+    ("libXdamage.so.1", "libxdamage1", "libxdamage1"),
+    ("libXext.so.6", "libxext6", "libxext6"),
+    ("libXfixes.so.3", "libxfixes3", "libxfixes3"),
+    ("libXrandr.so.2", "libxrandr2", "libxrandr2"),
+    ("libgbm.so.1", "libgbm1", "libgbm1"),
+    ("libcairo.so.2", "libcairo2", "libcairo2"),
+    ("libpango-1.0.so.0", "libpango-1.0-0", "libpango-1.0-0"),
+    ("libasound.so.2", "libasound2", "libasound2t64"),
+];
+
+/// The packages that bring the libraries of `CHROME_LIBS` missing from `ldconfig`'s list
+/// (`known`: its `-p` output), named for this system (`os_release`'s text): `None` when some are
+/// missing and this is not a Debian or Ubuntu whose names are known.
+pub fn chrome_packages(known: &str, os_release: &str) -> Option<Vec<String>> {
+    let missing: Vec<&(&str, &str, &str)> = CHROME_LIBS
+        .iter()
+        .filter(|(so, ..)| {
+            !known
+                .lines()
+                .any(|l| l.trim_start().starts_with(&format!("{so} ")))
+        })
+        .collect();
+    if missing.is_empty() {
+        return Some(Vec::new());
+    }
+    let field = |k: &str| {
+        os_release.lines().find_map(|l| {
+            l.strip_prefix(&format!("{k}="))
+                .map(|v| v.trim_matches('"').to_owned())
+        })
+    };
+    let v = field("VERSION_ID").and_then(|v| {
+        let (a, b) = v.split_once('.').unwrap_or((&v, "0"));
+        Some((a.parse::<u32>().ok()?, b.parse::<u32>().unwrap_or(0)))
+    })?;
+    let t64 = match field("ID").as_deref() {
+        Some("ubuntu") => v >= (24, 4),
+        Some("debian") => v >= (13, 0),
+        _ => return None,
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (_, old, new) in missing {
+        let p = if t64 { new } else { old };
+        if !out.iter().any(|o| o == p) {
+            out.push((*p).to_owned());
+        }
+    }
+    Some(out)
 }
 
 /// The clio-memory installed in `bin`, by what `--version` says.

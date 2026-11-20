@@ -60,6 +60,8 @@ struct Port {
     views: Mutex<Vec<String>>,
     starts: Mutex<Vec<String>>,
     pids: Mutex<Vec<u32>>,
+    /// The tarball integrity npm's facts give.
+    integrity: Mutex<String>,
 }
 
 fn script() -> PathBuf {
@@ -78,7 +80,7 @@ impl McpPort for Port {
         // The shape `npm view <spec> <NPM_FIELDS> --json` really answers (npm 10).
         Ok(json!({
             "name": package, "version": version,
-            "dist.integrity": "sha512-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+            "dist.integrity": self.integrity.lock().unwrap().clone(),
             "dist.tarball": format!("https://registry.npmjs.org/{package}/-/x-{version}.tgz"),
             "_npmUser": "\u{1b}[31mpublisher\u{1b}[0m <p@example.com>",
             "maintainers": ["one <one@example.com>", "two <two@example.com>"],
@@ -163,6 +165,7 @@ fn env() -> Option<Env> {
         views: Mutex::default(),
         starts: Mutex::default(),
         pids: Mutex::default(),
+        integrity: Mutex::new("sha512-QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=".into()),
     });
     let mut c = Config::new(&home, &r.join("scratch"), &data.join("runs/r1"));
     c.jail = JailMode::Off;
@@ -397,6 +400,105 @@ fn mcp_propose_sets_aside_with_npm_facts_and_downloads_nothing() {
     assert!(
         !r.ok && r.content.contains("that name is the server @example/time"),
         "{r:?}"
+    );
+}
+
+// S-70: a catalog server is proposed by its name alone: Clio composes the manifest from its
+// catalog, the registry must give exactly the integrity the catalog pins, and nothing else may come
+// with the name (no package, host or argument of the model's).
+#[test]
+fn a_catalog_server_is_proposed_by_name_with_only_the_catalogs_values() {
+    let Some(e) = env() else { return };
+    let ask = json!({"catalog": "notion", "reason": "the person wants Notion"});
+    let r = call(&e, "s", "c1", "mcp_propose", ask.clone());
+    assert!(!r.ok && r.content.contains("catalog pins"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+    let entry = clio_toolhost::catalog::entry("notion").unwrap();
+    *e.port.integrity.lock().unwrap() = entry.integrity.clone();
+    let r = call(&e, "s", "c2", "mcp_propose", ask);
+    assert!(r.ok, "{r:?}");
+    let p = waiting(&e).pop().unwrap();
+    let m = mcp::check_stored("notion", pending::mcp_of(&p).unwrap().2, &[]).unwrap();
+    assert_eq!(m, clio_toolhost::catalog::manifest(&entry, &e.root));
+    assert_eq!(p.args["npm"]["integrity"], entry.integrity.as_str());
+    for (bad, why) in [
+        (
+            json!({"catalog": "notion", "package": "@evil/notion", "reason": "r"}),
+            "only reason",
+        ),
+        (
+            json!({"catalog": "notion", "network": ["evil.example.com"], "reason": "r"}),
+            "only reason",
+        ),
+        (
+            json!({"catalog": "nope", "reason": "r"}),
+            "not in Clio's catalog",
+        ),
+    ] {
+        let r = call(&e, "s", "c3", "mcp_propose", bad);
+        assert!(!r.ok && r.content.contains(why), "{why}: {r:?}");
+    }
+    assert_eq!(waiting(&e).len(), 1);
+}
+
+// S-70: `network: ["*"]` (any public site) is only for a server that holds nothing to take
+// there: no secret, no write, no read but Clio's own browser (which need not be there yet), and
+// alone; the manifest's digest covers it.
+#[test]
+fn any_public_site_is_only_for_a_server_with_nothing_to_take_there() {
+    let Some(e) = env() else { return };
+    let home = e.data.parent().unwrap().parent().unwrap().join("home");
+    std::fs::create_dir_all(home.join("notes")).unwrap();
+    let browser = clio_toolhost::catalog::browser_dir(&e.root);
+    assert!(!browser.exists());
+    let base = json!({
+        "name": "web",
+        "description": "A browser for the tests, it opens public pages.",
+        "package": "@example/web",
+        "version": "1.0.0",
+        "network": ["*"],
+        "reads": [browser.display().to_string()],
+        "reason": "the person wants a browser",
+    });
+    let notes = home.join("notes").display().to_string();
+    for (field, value) in [
+        (
+            "secrets",
+            json!([{"name": "k", "env": "K", "host": "api.example.com"}]),
+        ),
+        ("writes", json!([notes.clone()])),
+        ("reads", json!([notes])),
+        ("network", json!(["*", "api.example.com"])),
+    ] {
+        let mut bad = base.clone();
+        bad[field] = value;
+        let r = call(&e, "s", "c1", "mcp_propose", bad);
+        assert!(
+            !r.ok && r.content.contains("any public site"),
+            "{field}: {r:?}"
+        );
+    }
+    assert!(waiting(&e).is_empty());
+    let r = call(&e, "s", "c2", "mcp_propose", base);
+    assert!(r.ok, "{r:?}");
+    let p = waiting(&e).pop().unwrap();
+    let mut m = mcp::check_stored("web", pending::mcp_of(&p).unwrap().2, &[]).unwrap();
+    assert_eq!(m.network, ["*"]);
+    m.network.clear();
+    assert_ne!(
+        p.args["sha256"],
+        clio_toolhost::skills::digest(&mcp::compose(&m), &[]).as_str()
+    );
+    // Another revision's folder is no browser of Clio's: a read of Clio's data, refused.
+    let other = browser.with_file_name("chromium-1");
+    assert!(
+        mcp::read_refused(
+            &other.display().to_string(),
+            &home,
+            std::slice::from_ref(&e.data),
+            &e.root
+        )
+        .is_some()
     );
 }
 

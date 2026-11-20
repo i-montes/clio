@@ -83,7 +83,10 @@ impl Ui for FakeUi {
         self.rows.insert(i, st);
     }
     fn ask(&mut self, q: Ask) -> Option<Answer> {
-        let (Ask::Choice { title, .. } | Ask::Secret { title, .. } | Ask::Text { title, .. }) = q;
+        let (Ask::Choice { title, .. }
+        | Ask::Secret { title, .. }
+        | Ask::Text { title, .. }
+        | Ask::Checks { title, .. }) = q;
         self.asked.push(title);
         self.answers.pop_front()
     }
@@ -105,6 +108,7 @@ fn fake_sys(dir: &Path) -> Sys {
         user: Some("someone".into()),
         linux: true,
         fake: true,
+        os_release: dir.join("os-release"),
     }
 }
 
@@ -239,6 +243,21 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
                 ],
                 options: vec![t(M::SudoGo), t(M::SudoSkip)],
                 sel: 0,
+            }),
+        ),
+        (
+            "mcp",
+            view(Page::Checks {
+                title: t(M::McpTitle),
+                lines: vec![
+                    t(M::McpHint),
+                    String::new(),
+                    "Playwright: Un Chromium sin ventana que abre páginas web públicas, las lee y actúa en ellas.".into(),
+                    "Notion: El servidor de Notion: busca, lee y edita las páginas y bases de datos compartidas con su integración.".into(),
+                ],
+                options: vec!["Playwright (un navegador web)".into(), "Notion".into()],
+                checked: vec![false, true],
+                sel: 1,
             }),
         ),
         (
@@ -785,6 +804,7 @@ fn remove(
             node: None,
             memory: None,
             model: None,
+            browser: None,
         },
         opts,
         &mut ui,
@@ -842,8 +862,10 @@ fn a_timer_systemd_cannot_reach_is_removed_with_a_warning() {
 #[test]
 fn the_steps_of_each_choice() {
     assert_eq!(Action::Install.steps().first(), Some(&Step::Folders));
-    assert!(Action::Install.steps().contains(&Step::Mcp));
-    assert!(!Action::Install.shown().contains(&Step::Mcp));
+    // The MCP servers are a row of the install and of an update (which says what is newer).
+    for a in [Action::Install, Action::Repair, Action::Update] {
+        assert!(a.shown().contains(&Step::Mcp), "{a:?}");
+    }
     for a in [Action::Update, Action::RemoveKeep] {
         assert!(!a.steps().contains(&Step::RemoveData), "{a:?}");
     }
@@ -891,6 +913,7 @@ fn run_on<'a>(home: &Path, sys: Sys, ui: &'a mut FakeUi) -> super::steps::Run<'a
         node: None,
         memory: None,
         model: None,
+        browser: None,
     };
     super::run_with(&dirs(home), Lang::En, sys, pins, opts, ui)
 }
@@ -937,6 +960,8 @@ fn every_question_comes_before_the_work() {
             Answer::Secret(SecretValue::new(PASS.into())),
             Answer::Choice(3),
             Answer::Choice(0),
+            // Nothing ticked: Enter installs no server.
+            Answer::Checks(vec![false, false]),
             Answer::Choice(0),
         ]
         .into(),
@@ -946,6 +971,7 @@ fn every_question_comes_before_the_work() {
         let mut r = run_on(t.path(), sys, &mut ui);
         r.ask_all(&Action::Install.steps());
         assert!(r.blocked.is_none());
+        assert!(r.answers.mcp.is_empty() && r.answers.packages.is_empty());
     }
     assert!(ui.rows.is_empty(), "a step ran while asking: {:?}", ui.rows);
     let en = |m: M| m.get(Lang::En).to_owned();
@@ -955,6 +981,7 @@ fn every_question_comes_before_the_work() {
             en(M::VaultNewTitle),
             en(M::ModelTitle),
             en(M::JudgeTitle),
+            en(M::McpTitle),
             en(M::SudoTitle)
         ]
     );
@@ -1076,4 +1103,156 @@ fn the_apparmor_profile_is_written_only_when_the_jail_needs_it() {
     r.ask_all(&[Step::System]);
     assert_eq!(r.blocked, Some(M::LeftJailUserns));
     assert!(!sys_dir.join("calls.log").exists());
+}
+
+// ---- the MCP catalog ---------------------------------------------------------------------------
+
+/// A Chromium archive as Playwright publishes it (`chrome-linux/chrome` inside a zip), made with
+/// Python's `zipfile`; `None` (the test says it was skipped) without `python3` or `unzip`.
+fn chromium_zip(dir: &Path, revision: &str) -> Option<Archive> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let have = |p: &str| clio_brain::pi::install::find_in_path(p, &path).is_some();
+    if !have("python3") || !have("unzip") {
+        eprintln!("SKIPPED (no python3 or unzip here)");
+        return None;
+    }
+    let src = dir.join("src");
+    script(&src.join(fetch::CHROME), "echo chromium");
+    let file = dir.join("chromium-linux.zip");
+    let ok = std::process::Command::new("python3")
+        .args(["-I", "-m", "zipfile", "-c"])
+        .arg(&file)
+        .arg(src.join("chrome-linux"))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    Some(Archive {
+        url: file.display().to_string(),
+        sha256: sha(&std::fs::read(&file).unwrap()),
+        version: revision.into(),
+    })
+}
+
+// Clio's Chromium: its archive is verified before anything is unpacked, unpacked beside its place
+// with `unzip`, made private and moved in once; a wrong one leaves nothing.
+#[test]
+fn chromium_is_verified_unpacked_and_moved_in_once() {
+    let t = tempfile::tempdir().unwrap();
+    let Some(mut a) = chromium_zip(t.path(), "1181") else {
+        return;
+    };
+    let data = t.path().join("data");
+    let good = a.sha256.clone();
+    a.sha256 = sha(b"not it");
+    assert!(matches!(
+        fetch::install_browser(&data, &a, &mut |_| {}),
+        Err(Fail::Sum(_))
+    ));
+    assert_eq!(tree(&data).len(), 0, "{:?}", tree(&data).keys());
+    a.sha256 = good;
+    assert!(fetch::install_browser(&data, &a, &mut |_| {}).unwrap());
+    let chrome = data.join("browsers/chromium-1181").join(fetch::CHROME);
+    let out = std::process::Command::new(&chrome).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "chromium");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(data.join("browsers/chromium-1181"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o077, 0, "private");
+    assert!(!fetch::install_browser(&data, &a, &mut |_| {}).unwrap());
+    assert!(fetch::missing_libs(&chrome).is_empty());
+}
+
+// What Chromium lacks becomes the packages of this system's names (Ubuntu 24.04 and Debian 13 took
+// the `t64` names); where they are not known, nothing can be installed (`None`), unless nothing
+// is missing.
+#[test]
+fn chromiums_missing_libraries_become_this_systems_packages() {
+    let all: String = fetch::CHROME_LIBS
+        .iter()
+        .map(|(so, ..)| format!("\t{so} (libc6,AArch64) => /lib/{so}\n"))
+        .collect();
+    let some: String = all
+        .lines()
+        .filter(|l| !l.contains("libnss3.so ") && !l.contains("libasound.so.2 "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let os = |id: &str, v: &str| format!("NAME=x\nID={id}\nVERSION_ID=\"{v}\"\n");
+    assert_eq!(fetch::chrome_packages(&all, ""), Some(vec![]));
+    for (id, v, sound) in [
+        ("ubuntu", "24.04", "libasound2t64"),
+        ("ubuntu", "22.04", "libasound2"),
+        ("debian", "12", "libasound2"),
+        ("debian", "13", "libasound2t64"),
+    ] {
+        assert_eq!(
+            fetch::chrome_packages(&some, &os(id, v)),
+            Some(vec!["libnss3".to_owned(), sound.to_owned()]),
+            "{id} {v}"
+        );
+    }
+    assert_eq!(fetch::chrome_packages(&some, &os("fedora", "41")), None);
+    // Nothing known: every package, once each.
+    let every = fetch::chrome_packages("", &os("ubuntu", "24.04")).unwrap();
+    assert!(every.contains(&"libglib2.0-0t64".to_owned()));
+    assert_eq!(every.iter().filter(|p| *p == "libnss3").count(), 1);
+}
+
+// The MCP checklist comes with the other questions, before the sudo moment, nothing ticked; a
+// ticked Playwright puts what Chromium lacks (and `unzip`) into that one sudo moment; where those
+// packages are not known it is left out, and its row says why, without failing the install.
+#[test]
+fn the_mcp_checklist_comes_first_and_chromiums_needs_go_into_the_sudo_moment() {
+    let t = tempfile::tempdir().unwrap();
+    let sys_dir = t.path().join("sys");
+    let ok = t.path().join("ok");
+    std::fs::write(&ok, "").unwrap();
+    let sys = jail_sys(&sys_dir, &ok, false);
+    let known: String = fetch::CHROME_LIBS
+        .iter()
+        .filter(|(so, ..)| *so != "libnss3.so")
+        .map(|(so, ..)| format!("\t{so} (libc6) => /lib/{so}\n"))
+        .collect();
+    write(&sys_dir.join("ldconfig.out"), known.as_bytes());
+    script(
+        &sys_dir.join("ldconfig"),
+        "cat \"$(dirname \"$0\")/ldconfig.out\"",
+    );
+    write(
+        &sys_dir.join("os-release"),
+        b"ID=ubuntu\nVERSION_ID=\"24.04\"\n",
+    );
+    let mut ui = FakeUi {
+        answers: [Answer::Checks(vec![true, false]), Answer::Choice(0)].into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys.clone(), &mut ui);
+        r.ask_all(&[Step::Mcp, Step::System]);
+        assert_eq!(r.answers.mcp.len(), 1);
+        assert_eq!(r.answers.mcp[0].0, "playwright");
+    }
+    let en = |m: M| m.get(Lang::En).to_owned();
+    assert_eq!(ui.asked, [en(M::McpTitle), en(M::SudoTitle)]);
+    let calls = std::fs::read_to_string(sys_dir.join("calls.log")).unwrap();
+    assert!(
+        calls.contains("install -y -qq bubblewrap libnss3 unzip"),
+        "{calls}"
+    );
+    // A system whose package names are not known: Playwright is left out, said on its row.
+    write(&sys_dir.join("os-release"), b"ID=fedora\nVERSION_ID=41\n");
+    let mut ui = FakeUi {
+        answers: [Answer::Checks(vec![true, false])].into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys, &mut ui);
+        r.ask_all(&[Step::Mcp]);
+        assert!(r.answers.mcp.is_empty() && r.answers.packages.is_empty());
+        r.all(&[Step::Mcp]);
+        assert!(!r.failed);
+    }
+    assert_eq!(ui.rows[&0], St::Warn(en(M::NoteMcpNoLibs)));
 }

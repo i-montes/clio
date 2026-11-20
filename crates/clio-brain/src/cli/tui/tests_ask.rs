@@ -1359,7 +1359,7 @@ fn mcp_confirm_lists_every_tool_waits_in_line_and_keeps_the_timing_rule() {
         integrity: "sha512-x".into(),
         packages: 7,
         confirmed: false,
-        tools: clio_toolhost::mcp::first_modes(tools),
+        tools: clio_toolhost::mcp::first_modes(tools, &[]),
     };
     {
         let _l = clio_toolhost::mcp::lock_root(&root).unwrap();

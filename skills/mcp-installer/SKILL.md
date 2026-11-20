@@ -11,6 +11,22 @@ output, in a jail. Remote (HTTP) servers, OAuth, `uvx`, Docker and any other com
 supported yet: if the person wants one of those, say so plainly and propose nothing. MCP servers
 exist only in a chat on the person's own machine (host mode).
 
+## Clio's catalog first
+
+Clio ships a small catalog of servers that were installed and called for real in its jail, at an
+exact version, with the hosts, secrets, paths and limits that worked:
+
+- `playwright`: a headless Chromium (Clio's own) that opens public web pages, reads them and acts
+  on them. It reaches any public site, holds no secret and writes nothing; reading a page runs
+  without asking, navigating and every action ask.
+- `notion`: Notion's own server, with the person's integration token (`notion-token`, bound to
+  `mcp:api.notion.com`).
+
+When the person wants one of these, propose it with `mcp_propose {"catalog": "<name>", "reason":
+"..."}` and nothing else: Clio fills the rest with the catalog's values, and the person approves it
+in the same box. The person can also install one themselves with `clio mcp add <name>` (`clio mcp
+add` lists the catalog). For anything else, choose a package as below.
+
 ## Choosing the package
 
 - Prefer the vendor's official package (the service's own organisation on npm, or the
@@ -38,7 +54,9 @@ exist only in a chat on the person's own machine (host mode).
   in `secrets`, never here.
 - `network`: only the hosts it must reach (`api.github.com`, or `host:port` when not 443). Leave it
   out when it needs none: then it has no network at all. It reaches them only through Clio's
-  proxy, at public addresses; anything else fails.
+  proxy, at public addresses; anything else fails. `["*"]` alone means any public site (ports 443
+  and 80), only for a server with no secrets, no writes and no reads (a browser): the box says
+  so.
 - `secrets`: `[{"name": "gh-token", "env": "GITHUB_PERSONAL_ACCESS_TOKEN", "host":
   "api.github.com"}]`: the server gets the value in that variable, and nowhere else. Bind each
   secret to the one host it is for; the host must be in `network`, and the server could send it to

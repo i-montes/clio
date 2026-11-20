@@ -1,0 +1,92 @@
+{
+  "browser": {
+    "revision": "1181",
+    "files": {
+      "linux-x64": {
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1181/chromium-linux.zip",
+        "sha256": "34fc36ac22b07893ac952ef0ce22171224fe104a703a903a4b73812f0300ec27"
+      },
+      "linux-arm64": {
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1181/chromium-linux-arm64.zip",
+        "sha256": "5deca63506acc7429afbe2ec565c87229ac755a7c10191ee0681226764127106"
+      }
+    }
+  },
+  "servers": [
+    {
+      "name": "playwright",
+      "title": { "en": "Playwright (a web browser)", "es": "Playwright (un navegador web)" },
+      "description": {
+        "en": "A headless Chromium that opens public web pages, reads them and acts on them.",
+        "es": "Un Chromium sin ventana que abre páginas web públicas, las lee y actúa en ellas."
+      },
+      "package": "@playwright/mcp",
+      "version": "0.0.30",
+      "integrity": "sha512-ul1MnnGNXN520yqUoDZX1X0UD4E7o2PikdEWM3i7UFxeGgmY9sAHd+tyFioTdrawsyLoGHpvDH33oiTtVRydCg==",
+      "args": [
+        "--headless",
+        "--isolated",
+        "--browser",
+        "chromium",
+        "--executable-path",
+        "{browser}/chrome-linux/chrome",
+        "--no-sandbox",
+        "--caps",
+        "tabs,history,wait"
+      ],
+      "network": ["*"],
+      "reads": ["{browser}"],
+      "secrets": [],
+      "limits": { "cpu_percent": 50, "memory_mb": 1536, "seconds": 120 },
+      "modes": [
+        "browser_snapshot",
+        "browser_console_messages",
+        "browser_network_requests",
+        "browser_tab_list",
+        "browser_wait_for"
+      ],
+      "overrides": {"zod": "3.25.76"},
+      "needs": "browser"
+    },
+    {
+      "name": "notion",
+      "title": { "en": "Notion", "es": "Notion" },
+      "description": {
+        "en": "Notion's own server: search, read and edit the pages and databases shared with its integration.",
+        "es": "El servidor de Notion: busca, lee y edita las páginas y bases de datos compartidas con su integración."
+      },
+      "package": "@notionhq/notion-mcp-server",
+      "version": "2.6.1",
+      "integrity": "sha512-CJ83Z6o93d85RbQnJWYlKTdY2vplU02yvHCSIRSGcuQppzeV3roaiuj3yM28v85mOUr6aQgsUR9CrxxTvO62jQ==",
+      "network": ["api.notion.com"],
+      "secrets": [
+        {
+          "name": "notion-token",
+          "env": "NOTION_TOKEN",
+          "host": "api.notion.com",
+          "where": {
+            "en": "notion.so/profile/integrations: create an internal integration, copy its token (it starts with ntn_) and share your pages with it.",
+            "es": "notion.so/profile/integrations: crea una integración interna, copia su token (empieza por ntn_) y comparte tus páginas con ella."
+          }
+        }
+      ],
+      "limits": { "cpu_percent": 50, "memory_mb": 1536, "seconds": 120 },
+      "modes": [
+        "API-get-user",
+        "API-get-users",
+        "API-get-self",
+        "API-post-search",
+        "API-get-block-children",
+        "API-retrieve-a-block",
+        "API-retrieve-a-page",
+        "API-retrieve-a-page-property",
+        "API-retrieve-page-markdown",
+        "API-retrieve-a-comment",
+        "API-retrieve-a-database",
+        "API-retrieve-a-data-source",
+        "API-query-data-source",
+        "API-list-data-source-templates"
+      ]
+    }
+  ]
+}

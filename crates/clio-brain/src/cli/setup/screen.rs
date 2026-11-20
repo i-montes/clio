@@ -36,6 +36,14 @@ pub enum Page {
         title: String,
         lines: Vec<String>,
     },
+    /// A checklist: `checked` one per option, `sel` the one under the cursor.
+    Checks {
+        title: String,
+        lines: Vec<String>,
+        options: Vec<String>,
+        checked: Vec<bool>,
+        sel: usize,
+    },
     Plan {
         title: String,
         items: Vec<String>,
@@ -256,6 +264,23 @@ pub fn lines(v: &View, t: Theme, w: usize) -> Vec<Line<'static>> {
             out.push(Line::default());
             text(&mut out, lines, t.plain());
         }
+        Page::Checks {
+            title: tt,
+            lines,
+            options: o,
+            checked,
+            sel,
+        } => {
+            out.push(title(tt, t.bold()));
+            text(&mut out, lines, t.dim());
+            out.push(Line::default());
+            let marked: Vec<String> = o
+                .iter()
+                .zip(checked)
+                .map(|(o, c)| format!("[{}] {o}", if *c { "x" } else { " " }))
+                .collect();
+            out.extend(options(&marked, *sel, t, w));
+        }
         Page::Plan { title: tt, items } => {
             out.push(title(tt, t.bold()));
             out.push(Line::default());
@@ -362,6 +387,7 @@ pub fn keys(v: &View) -> &'static str {
         Page::Language { .. } => "↑↓ · Enter · Esc",
         Page::Choice { .. } => v.t(M::KeysChoose),
         Page::Info { .. } => v.t(M::KeysGo),
+        Page::Checks { .. } => v.t(M::KeysChecks),
         Page::Plan { .. } => v.t(M::PlanKeys),
         Page::Doing => v.t(M::KeysWait),
         Page::Secret { .. } | Page::Text { .. } => v.t(M::KeysField),
@@ -465,7 +491,8 @@ impl Tui {
                             let down = k.code == KeyCode::Down;
                             match &mut self.view.page {
                                 Page::Language { sel } => *sel = usize::from(down),
-                                Page::Choice { options, sel, .. } => {
+                                Page::Choice { options, sel, .. }
+                                | Page::Checks { options, sel, .. } => {
                                     *sel = if down {
                                         (*sel + 1).min(options.len().saturating_sub(1))
                                     } else {
@@ -508,6 +535,11 @@ impl Tui {
                         for c in typed {
                             v.push(c);
                         }
+                    }
+                }
+                Page::Checks { checked, sel, .. } if typed == [' '] => {
+                    if let Some(c) = checked.get_mut(*sel) {
+                        *c = !*c;
                     }
                 }
                 Page::Text { value, .. } => value.extend(typed),
@@ -611,11 +643,23 @@ impl Ui for Tui {
                 value,
                 error,
             },
+            Ask::Checks {
+                title,
+                lines,
+                options,
+            } => Page::Checks {
+                checked: vec![false; options.len()],
+                title,
+                lines,
+                options,
+                sel: 0,
+            },
         };
         let answer = match self.show(page)? {
             Page::Choice { sel, .. } => Answer::Choice(sel),
             Page::Secret { mut values, .. } => Answer::Secret(values.swap_remove(0)),
             Page::Text { value, .. } => Answer::Text(value.trim().to_owned()),
+            Page::Checks { checked, .. } => Answer::Checks(checked),
             _ => return None,
         };
         self.draw();
