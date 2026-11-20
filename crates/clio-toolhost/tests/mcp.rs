@@ -171,6 +171,12 @@ fn env() -> Option<Env> {
     c.jail = JailMode::Off;
     c.memory = Some(judge.clone() as Arc<dyn MemoryPort>);
     c.mcp = Some(port.clone() as Arc<dyn McpPort>);
+    // A chat: a person is there to be asked (MCP servers exist only in one).
+    c.secrets = Some(pending::SecretCfg {
+        state: data.join("host"),
+        run: "r1".into(),
+        person: r.join("vault.sock"),
+    });
     c.host = Some(HostCfg {
         home,
         state: data.join("host"),
@@ -1323,4 +1329,36 @@ fn a_host_without_its_mcp_side_starts_and_says_why() {
     }
     drop(child.stdin.take());
     let _ = child.wait();
+}
+
+// S-72: bypass off, a proposal waits for the person, as before; on, the answer says Clio
+// installs it by herself when the turn ends and that the model hears what came of it.
+#[test]
+fn mcp_propose_says_what_bypass_will_do() {
+    let Some(e) = env() else { return };
+    let r = call(&e, "s", "c1", "mcp_propose", propose_args());
+    let id = r
+        .content
+        .split_whitespace()
+        .nth(2)
+        .unwrap()
+        .trim_end_matches(':');
+    assert_eq!(
+        r.content,
+        format!(
+            "set aside {id}: the MCP server «github» (@example/github-mcp@1.2.3) waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end."
+        )
+    );
+    clio_toolhost::grant::bypass_on(&e.data.join("host")).unwrap();
+    let mut other = propose_args();
+    other["name"] = json!("github-two");
+    let r = call(&e, "s", "c2", "mcp_propose", other);
+    assert!(
+        r.ok && r.content.contains(
+            "is installed by Clio by herself when this turn ends, since the person's bypass is on. Nothing was downloaded yet."
+        ) && r.content.contains("in a turn she starts by herself")
+            && !r.content.contains("waits for the person"),
+        "{}",
+        r.content
+    );
 }

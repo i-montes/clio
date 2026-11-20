@@ -476,6 +476,14 @@ fn under_bypass_what_would_wait_runs_and_clios_own_guards_still_ask() {
     let (r, unit) = write_unit(&e, &h, "s", "backup.service");
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
     assert!(!unit.exists());
+    // The model is told why bypass leaves it to the person, from what the list found.
+    assert!(
+        r.content.ends_with(
+            "The person's bypass is on, and leaves this to them: it would start new code outside the jail."
+        ),
+        "{}",
+        r.content
+    );
     // Clio's own: keys, and a unit that names Clio.
     let keys = e.r.join("home/.ssh/authorized_keys");
     std::fs::create_dir_all(keys.parent().unwrap()).unwrap();
@@ -490,6 +498,12 @@ fn under_bypass_what_would_wait_runs_and_clios_own_guards_still_ask() {
         !r.ok && r.decision.rule == "host/aside" && r.content.contains("«control»"),
         "{r:?}"
     );
+    assert!(
+        r.content
+            .contains("leaves this to them: it touches Clio's own setup."),
+        "{}",
+        r.content
+    );
     assert!(!keys.exists());
     let (r, timer) = write_unit(&e, &h, "s", "clio-services.timer");
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
@@ -503,6 +517,13 @@ fn under_bypass_what_would_wait_runs_and_clios_own_guards_still_ask() {
         tainted: true,
     });
     assert!(!r.ok && r.content.contains("«memory»"), "{r:?}");
+    assert!(
+        r.content.contains(
+            "leaves this to them: it is a change to your blocks from a conversation that read outside text."
+        ),
+        "{}",
+        r.content
+    );
     let item = |end: &str| {
         pending::list(&e.state)
             .into_iter()
@@ -532,6 +553,19 @@ fn under_bypass_what_would_wait_runs_and_clios_own_guards_still_ask() {
         .unwrap();
     let r = write_backup(&e, &h, "s", "b.bak");
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
+    // Off, the answer is as it always was: no word of bypass.
+    let id = r
+        .content
+        .split_whitespace()
+        .nth(2)
+        .unwrap()
+        .trim_end_matches(':');
+    assert_eq!(
+        r.content,
+        format!(
+            "set aside {id}: «delete» needs the person's approval. Do not try it another way. Go on with the rest and say so at the end."
+        )
+    );
 }
 
 // S-72 S-05: the judge's first flag turns bypass off for every conversation (saying why, for the
@@ -562,6 +596,12 @@ fn a_flag_turns_bypass_off_and_a_suspect_session_never_acts_under_it() {
     grant::bypass_on(&e.state).unwrap();
     let r = write_backup(&e, &a, "sa", "a1.bak");
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
+    assert!(
+        r.content
+            .contains("leaves this to them: the judge flagged this conversation."),
+        "{}",
+        r.content
+    );
     let (r, unit) = write_unit(&e, &a, "sa", "x.service");
     assert!(!r.ok && !unit.exists(), "{r:?}");
     assert!(write_backup(&e, &b, "sb", "b3.bak").ok);
@@ -711,6 +751,13 @@ fn a_silent_judge_ends_bypass_for_that_conversation_only() {
     assert!(filter("c2").data["judge"].is_null(), "said once");
     let r = write_backup(&e, &a, "sa", "a1.bak");
     assert!(!r.ok && r.decision.rule == "host/aside", "{r:?}");
+    assert!(
+        r.content.contains(
+            "leaves this to them: this conversation read text the judge did not answer for."
+        ),
+        "{}",
+        r.content
+    );
     assert_eq!(content(&e, "a1.bak"), "old");
     assert!(grant::Kind::Bypass.current(&e.state).is_some());
     assert!(write_backup(&e, &b, "sb", "b1.bak").ok);

@@ -300,6 +300,8 @@ pub enum Bg {
     /// Host mode: what the turn set aside, one question each: (id, «class» and what, and the
     /// change itself when it is one to the person's blocks).
     ChatAsks(Vec<(String, String, Option<super::ask::BlockAsk>)>),
+    /// Why bypass leaves each of what waits to the person (id, why): before `ChatAsks`.
+    BypassKeeps(Vec<(String, String)>),
     /// What came of an answer to one of them, and whether the person said yes.
     ChatAnswered(Result<String, String>, bool),
     /// The secrets this turn asked the person for: (id, (name, destination, why)) each, and
@@ -1454,6 +1456,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             next_ask(app);
             vec![]
         }
+        Bg::BypassKeeps(keeps) => {
+            app.chat.approvals.keeps.extend(keeps);
+            vec![]
+        }
         Bg::ChatSecrets(asks, suspect) => {
             for (id, what) in asks {
                 if app.asking(&id) {
@@ -1592,9 +1598,10 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             super::approvals::grant_state(app, &session, ends, hours, (suspect, judge, bypass));
             vec![]
         }
-        // Not an answer of the person's: no turn of its own; it rides with the next message. The
-        // count of what waits comes with the check (`Bg::Approvals`): an act approved inline was
-        // never counted.
+        // An act approved inline, in the turn that asked for it (or one that could not be done):
+        // no turn of its own; it rides with the next message. What bypass or a window answered
+        // after a turn is `Bg::Acted`. The count of what waits comes with the check
+        // (`Bg::Approvals`): an act approved inline was never counted.
         Bg::Granted(r) => {
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),

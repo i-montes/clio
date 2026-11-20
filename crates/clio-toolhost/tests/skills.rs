@@ -807,7 +807,7 @@ fn add(e: &Env, session: &str, args: Value) -> Response {
 // skills, has the judge read every file and sets each one aside for the person (class `skill`,
 // tool `skill_add`): a flag is kept for the box, with where to read it at that commit, a plugin's
 // hooks and commands are named and not taken, and nothing is written to the skills folder. The
-// model reads none of their text, and never adds a folder.
+// model reads none of their text, never adds a folder, and is promised no later turn.
 #[test]
 fn skill_add_sets_each_skill_aside_judged_and_writes_nothing() {
     let e = env(true);
@@ -821,6 +821,11 @@ fn skill_add_sets_each_skill_aside_judged_and_writes_nothing() {
         json!({"source": repo, "reason": "the person asked"}),
     );
     assert!(r.ok, "{r:?}");
+    // No person's chat here (as in a `clio run`): nothing is promised for a later turn.
+    assert!(
+        !r.content.contains("turn") && !r.content.contains("by herself"),
+        "{r:?}"
+    );
     assert!(
         r.content.contains("«hello»") && r.content.contains("«evil»"),
         "{r:?}"

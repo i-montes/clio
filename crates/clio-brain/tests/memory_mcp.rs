@@ -68,7 +68,7 @@ fn initialize(id: u64, name: &str, version: &str) -> Value {
 }
 
 // S-25, S-61: another agent reads the person's memory as data, proposes into the quarantine of the
-// folder's project as from outside (five at most), and has no way to promote, archive, revert,
+// folder's project as from outside (as often as it needs), and has no way to promote, archive, revert,
 // pin or purge, nor to reach anything else the tool host knows.
 #[test]
 fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
@@ -106,7 +106,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
         call(17, "fs_read", json!({"path": "/etc/passwd"})),
         call(18, "memory_pin", json!({"id": 1})),
     ];
-    // What another agent brings counts as from outside: five proposals in all.
+    // What another agent brings counts as from outside, and is not capped.
     for i in 0..5 {
         msgs.push(call(
             20 + i,
@@ -187,7 +187,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
     let more = (20..25)
         .filter(|id| by_id(&answers, *id)["result"]["isError"] == json!(false))
         .count();
-    assert_eq!(more, 4, "the first one and four more: five in all");
+    assert_eq!(more, 5, "no cap: the first one and five more");
     // The saves are memory at once, the agent's, from outside, in the project, with the first
     // client's name as their session; the person's memory is as it was.
     let all: Value = serde_json::from_str(&e.clio(&["memory", "list", "--json"])).unwrap();
@@ -197,7 +197,7 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
         .iter()
         .filter(|r| r["actor"] == "agente")
         .collect();
-    assert_eq!(rows.len(), 5, "{all:#}");
+    assert_eq!(rows.len(), 6, "{all:#}");
     assert!(
         rows.iter().all(|r| r["run"] == "mcp:claude-code"
             && r["origin"] == "externo"
@@ -209,8 +209,8 @@ fn an_agent_over_mcp_reads_and_proposes_and_nothing_else() {
     assert_eq!(row["content"], "Qué: usa Postgres 16", "{row:#}");
     assert_eq!(
         all.as_array().unwrap().len(),
-        6,
-        "the person's one and five: {all:#}"
+        7,
+        "the person's one and six: {all:#}"
     );
     // Nothing of it is left among the runs nor in the runtime folder.
     let runs: Value = serde_json::from_str(&e.clio(&["runs", "--json"])).unwrap();
