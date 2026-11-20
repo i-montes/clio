@@ -14,8 +14,9 @@ use super::home::{Config, Dirs, lacks_bridge, names_builtin_adapter};
 use super::{Args, Res, io_err, usage, vault, write_private};
 
 const CLAUDE_WARNING: &str = "Clio uses your subscription through Claude Code (official). Paste a token from `claude setup-token`, or press Enter to sign in now.";
-const CLAUDE_COPY: &str =
-    "Copy the token shown above, paste it here and press Enter: the screen will be cleared.";
+const CLAUDE_BEFORE: &str = "Sign in in the browser. When Claude shows the token, copy it and press Ctrl-C, then paste it.\nTo leave without signing in: Ctrl-C, then Enter.";
+const CLAUDE_ASK: &str =
+    "Paste the token and press Enter (an empty line leaves without connecting).";
 
 pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let mut args = Args::new(args);
@@ -105,37 +106,16 @@ pub fn store_key(dirs: &Dirs, c: &Connector, value: &clio_vault::SecretValue) ->
 }
 
 /// Claude Code's own sign-in (`setup-token`, the bridge's bundled copy, with Pi's home so
-/// `~/.claude` is not touched), on the terminal; `copy` asks for the token it showed. The line
-/// pasted back is read with no echo, and the screen and its scrollback are cleared before
-/// anything else. A line that is not a subscription token is `None`.
-pub fn claude_sign_in(dirs: &Dirs, copy: &str) -> Option<clio_vault::SecretValue> {
+/// `~/.claude` is not touched), then the token it showed, pasted back. `before` says what to do
+/// (and how to leave), `ask` asks for the token. `None`: the sign-in could not start, was left
+/// (an empty line), or what was pasted is not a subscription token.
+pub fn claude_sign_in(dirs: &Dirs, before: &str, ask: &str) -> Option<clio_vault::SecretValue> {
     let claude = super::home::claude_code(dirs).ok()?;
     let prefix = by_name("claude")?.key_prefix;
-    let home = super::pi::paths(dirs).home_dir();
-    // Ctrl-C cancels the sign-in, not Clio: the installer still shows its last screen.
-    let held = signal_hook::flag::register(
-        signal_hook::consts::SIGINT,
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
-    .ok();
-    let ran = std::process::Command::new(&claude)
-        .arg("setup-token")
-        .env("HOME", &home)
-        .status()
-        .is_ok_and(|s| s.success());
-    let line = if ran {
-        println!("\n{copy}");
-        vault::read_secret("token").ok()
-    } else {
-        None
-    };
-    // The screen, then its scrollback: the token shown above never stays on the terminal.
-    print!("\x1b[H\x1b[2J\x1b[3J");
-    let _ = std::io::stdout().flush();
-    if let Some(id) = held {
-        signal_hook::low_level::unregister(id);
-    }
-    let mut line = line?;
+    let mut cmd = std::process::Command::new(&claude);
+    cmd.arg("setup-token")
+        .env("HOME", super::pi::paths(dirs).home_dir());
+    let mut line = sign_in_with(cmd, before, ask)?;
     let mut key = line.trim().to_owned();
     clio_vault::wipe(&mut line);
     if key.starts_with(prefix) {
@@ -146,6 +126,100 @@ pub fn claude_sign_in(dirs: &Dirs, copy: &str) -> Option<clio_vault::SecretValue
     }
 }
 
+/// Runs the sign-in `cmd` on the terminal with a way out Clio owns, whatever the child does with
+/// the terminal: Ctrl-C (or Clio being told to stop) ends it. Then the terminal is put back as it
+/// was, the screen and its scrollback are cleared (the token was on them), and the token is asked
+/// for with no echo; an empty line leaves. Only a child that could not start asks nothing.
+fn sign_in_with(mut cmd: std::process::Command, before: &str, ask: &str) -> Option<String> {
+    use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let stdin = std::io::stdin();
+    let saved = tcgetattr(&stdin).ok();
+    println!("{before}");
+    let got = Arc::new(AtomicUsize::new(0));
+    let register = |sigs: &[i32]| -> Vec<_> {
+        sigs.iter()
+            .filter_map(|&s| signal_hook::flag::register_usize(s, got.clone(), s as usize).ok())
+            .collect()
+    };
+    let unregister = |ids: Vec<signal_hook::SigId>| {
+        for id in ids {
+            signal_hook::low_level::unregister(id);
+        }
+    };
+    let (int, stop) = (register(&[SIGINT]), register(&[SIGTERM, SIGHUP]));
+    let Ok(mut child) = cmd.spawn() else {
+        unregister(int);
+        unregister(stop);
+        return None;
+    };
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        // Claude Code's raw mode clears ISIG, and then Ctrl-C makes no signal: set it again.
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if let Ok(mut t) = tcgetattr(&stdin)
+                    && !t.local_modes.contains(LocalModes::ISIG)
+                {
+                    t.local_modes.insert(LocalModes::ISIG);
+                    let _ = tcsetattr(&stdin, OptionalActions::Now, &t);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        end_on_signal(&mut child, &got);
+        done.store(true, Ordering::Relaxed);
+    });
+    if let Some(t) = &saved {
+        let _ = tcsetattr(&stdin, OptionalActions::Now, t);
+    }
+    // What a killed full-screen program leaves on: cursor hidden, bracketed paste, kitty keyboard
+    // flags, modifyOtherKeys, the mouse. Then the screen, then its scrollback.
+    print!(
+        "\x1b[?25h\x1b[?2004l\x1b[<u\x1b[>4;0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[H\x1b[2J\x1b[3J"
+    );
+    let _ = std::io::stdout().flush();
+    unregister(stop);
+    let sig = got.swap(0, Ordering::Relaxed);
+    if sig == SIGTERM as usize || sig == SIGHUP as usize {
+        unregister(int);
+        let _ = signal_hook::low_level::emulate_default_handler(sig as i32);
+        return None;
+    }
+    println!("{ask}");
+    // Ctrl-C is still caught while asking: Enter on an empty line is the way to leave.
+    let line = vault::read_secret("token").ok();
+    unregister(int);
+    line.filter(|l| !l.trim().is_empty())
+}
+
+/// Waits for `child`; once a signal is noted in `got`, ends it: SIGTERM, then SIGKILL after 2 s.
+fn end_on_signal(child: &mut std::process::Child, got: &std::sync::atomic::AtomicUsize) {
+    use std::time::{Duration, Instant};
+    let tick = Duration::from_millis(50);
+    while got.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(tick);
+    }
+    let _ = rustix::process::kill_process(
+        rustix::process::Pid::from_child(child),
+        rustix::process::Signal::TERM,
+    );
+    let until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < until {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(tick);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The key to store, and the old key file to offer deleting when it was the source.
 fn ask_key(dirs: &Dirs, c: &Connector) -> Res<(String, Option<std::path::PathBuf>)> {
     if c.name == "claude" {
@@ -153,7 +227,7 @@ fn ask_key(dirs: &Dirs, c: &Connector) -> Res<(String, Option<std::path::PathBuf
         let mut v = vault::read_secret("token")?.trim().to_owned();
         // Nothing pasted: the same sign-in the installer offers.
         if v.is_empty()
-            && let Some(k) = claude_sign_in(dirs, CLAUDE_COPY)
+            && let Some(k) = claude_sign_in(dirs, CLAUDE_BEFORE, CLAUDE_ASK)
         {
             v = k.expose().to_owned();
         }

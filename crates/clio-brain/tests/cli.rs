@@ -1522,6 +1522,25 @@ impl Env {
         );
     }
 
+    /// Replaces `fake_bridge`'s Claude Code with a shell script whose `setup-token` is `body`;
+    /// anything else it is asked fails.
+    fn fake_setup_token(&self, body: &str) {
+        let pi = self.home().join(".local/share/clio/pi");
+        for e in std::fs::read_dir(&pi).unwrap() {
+            let p = e
+                .unwrap()
+                .path()
+                .join("node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude");
+            if p.exists() {
+                std::fs::write(
+                    &p,
+                    format!("#!/bin/sh\n[ \"$1\" = setup-token ] || exit 1\n{body}\n"),
+                )
+                .unwrap();
+            }
+        }
+    }
+
     /// What the fake Claude Code of `fake_bridge` was given, if it ran.
     fn claude_seen(&self) -> Option<Value> {
         std::fs::read_to_string(self.tmp.path().join("script/claude-seen.json"))
@@ -1564,6 +1583,67 @@ fn connect_claude_refuses_a_token_that_is_not_oauth() {
     assert!(!o.status.success(), "{}", all_text(&o));
     assert!(!e.vault_list().contains("claude"));
     assert_eq!(e.config_bytes(), before);
+}
+
+// Nothing pasted: the sign-in runs. A Claude Code that ignores its input, Ctrl-C and SIGTERM and
+// never exits is ended by Clio on Ctrl-C (SIGTERM, then SIGKILL), and the token is still asked.
+#[test]
+fn connect_claude_sign_in_is_left_with_ctrl_c_and_the_token_is_still_asked() {
+    use std::io::Write;
+    let e = Env::new();
+    e.fake_bridge();
+    let started = PathBuf::from(e.path("script/started"));
+    e.fake_setup_token(&format!(
+        "trap '' INT TERM\ntouch {}\nwhile :; do sleep 1; done",
+        started.display()
+    ));
+    let _v = e.vault();
+    let mut c = e.cmd(&["connect", "claude"]);
+    c.env("CLIO_VAULT_BIN", vault_bin())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"\n").unwrap();
+    let t0 = std::time::Instant::now();
+    while !started.exists() {
+        assert!(t0.elapsed().as_secs() < 30, "the sign-in never started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Ctrl-C, to this test's own `clio` only.
+    let pid = child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    stdin.write_all(b"sk-ant-oat01-decoy-token\n").unwrap();
+    drop(stdin);
+    let o = child.wait_with_output().unwrap();
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains("To leave without signing in: Ctrl-C, then Enter.")
+            && out.contains("key for claude stored in the vault"),
+        "{out}"
+    );
+    assert!(e.vault_list().contains("claude"));
+}
+
+// A sign-in that ends by itself, even failing, still asks for the token.
+#[test]
+fn connect_claude_sign_in_that_fails_by_itself_still_asks_for_the_token() {
+    let e = Env::new();
+    e.fake_bridge();
+    e.fake_setup_token("exit 3");
+    let _v = e.vault();
+    let o = e.with_stdin(&["connect", "claude"], "\nsk-ant-oat01-decoy-token\n", &[]);
+    let out = all_text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("key for claude stored in the vault"), "{out}");
 }
 
 #[test]
