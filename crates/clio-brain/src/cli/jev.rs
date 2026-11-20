@@ -260,12 +260,26 @@ pub fn subagent_take(socket: &Path, session: &str, token: &str, call: &str) -> O
 }
 
 /// The children's answer to `call` (S-73): the tool host judges and wraps it for the model.
-/// `false`: the call was not waiting any more (its caller left).
+/// Tried a few times (the host may be busy); `false`: not delivered, or the call was not waiting
+/// any more (its caller left). Undelivered, the call ends by itself once the brain stops saying
+/// it is alive (`clio_toolhost::subagent::SILENCE`).
 pub fn subagent_done(socket: &Path, session: &str, token: &str, call: &str, done: &Value) -> bool {
     let mut args = done.clone();
     args["token"] = json!(token);
     args["call"] = json!(call);
     let req = json!({"id": "subagent_done", "tool": "subagent_done", "session": session, "call_id": "subagent_done", "args": args});
+    for _ in 0..3 {
+        match ask_host(socket, &req) {
+            Some(a) => return a["ok"] == true,
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+    false
+}
+
+/// The brain still runs `call`'s children (S-73): without this the tool host ends the call.
+pub fn subagent_alive(socket: &Path, session: &str, token: &str, call: &str) -> bool {
+    let req = json!({"id": "subagent_alive", "tool": "subagent_alive", "session": session, "call_id": "subagent_alive", "args": {"token": token, "call": call}});
     ask_host(socket, &req).is_some_and(|a| a["ok"] == true)
 }
 

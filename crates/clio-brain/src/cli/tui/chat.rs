@@ -2155,6 +2155,7 @@ mod tests {
                 refresh: None,
                 presentation,
                 notes: vec![],
+                subagents: vec![],
             };
             update(
                 app,
@@ -2823,6 +2824,7 @@ mod tests {
             refresh: None,
             presentation: true,
             notes: vec![],
+            subagents: vec![],
         };
         let (app, cmds) = update(
             app,

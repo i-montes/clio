@@ -36,6 +36,9 @@ pub const MAX_REPORT: usize = 50_000;
 const TAKE_WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 const HOUR_MS: i64 = 3_600_000;
+/// How often the brain tells the tool host it still runs a call's children (well within
+/// `clio_toolhost::subagent::SILENCE`).
+const ALIVE_EVERY: Duration = Duration::from_secs(5);
 
 /// One task of a call, checked.
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +135,27 @@ fn launched_since(run_dir: &Path, since_ms: i64) -> usize {
         .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
         .filter(|v| v["started_ms"].as_i64().unwrap_or(i64::MAX) >= since_ms)
         .count()
+}
+
+/// The children of the run at `run_dir`, oldest first, as their folders keep them (`subagent.json`):
+/// what `/subagents` lists when a chat opens the run again.
+pub fn listed(run_dir: &Path) -> Vec<Value> {
+    let mut out: Vec<Value> = std::fs::read_dir(run_dir.join("subagents"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("subagent.json")).ok())
+        .filter_map(|t| serde_json::from_str::<Value>(&t).ok())
+        // None runs now: one its folder says runs was cut (Clio stopped first).
+        .map(|mut v| {
+            if v["state"] == "running" {
+                v["state"] = json!("stopped");
+            }
+            v
+        })
+        .collect();
+    out.sort_by_key(|v: &Value| v["n"].as_u64().unwrap_or(0));
+    out
 }
 
 /// Where the session that calls stands, for its children.
@@ -238,18 +262,53 @@ fn budget(cfg: &Config) -> Budget {
     b
 }
 
-fn limit(stop: Stop) -> String {
-    let key = match stop {
-        Stop::Steps => " (subagent.max_steps)",
-        Stop::Time => " (subagent.max_seconds)",
-        Stop::Cost => " (subagent.max_cost_micro_usd)",
-        _ => "",
-    };
-    format!("{}{key}", stop.reason())
+/// Which limit ended a child, in fixed words (they go to the model), with the key that sets it.
+fn limit(stop: Stop) -> &'static str {
+    match stop {
+        Stop::Steps => "it reached its step limit (subagent.max_steps)",
+        Stop::Time => "it reached its time limit (subagent.max_seconds)",
+        Stop::Cost => "it reached its cost limit (subagent.max_cost_micro_usd)",
+        Stop::DayCost | Stop::DaySteps => "it reached the day's budget",
+        _ => "it reached a limit",
+    }
 }
 
-fn suspect_in(file: &Path) -> bool {
-    std::fs::read_to_string(file).is_ok_and(|t| t.contains("\"suspect\""))
+/// The judge withheld something the child read: its tool host kept it in `withheld/` (a child's
+/// folder is new, so any entry is its own), whether or not the conversation was flagged before.
+fn withheld_in(dir: &Path) -> bool {
+    std::fs::read_dir(dir.join("toolhost/withheld")).is_ok_and(|mut d| d.next().is_some())
+}
+
+/// The day's budget the children of a call spend from: always one kept in `day.json` (the one
+/// host mode keeps), even when the chat itself has none (copy mode). In host mode it is the
+/// chat's own, shared in this process.
+fn children_day(
+    host: bool,
+    parent: &Arc<Mutex<DayBudget>>,
+    file: &Path,
+    cfg: &Config,
+) -> Arc<Mutex<DayBudget>> {
+    if host {
+        parent.clone()
+    } else {
+        Arc::new(Mutex::new(DayBudget::kept(
+            file,
+            cfg.limits.day_cost_micro_usd,
+            cfg.limits.day_steps,
+        )))
+    }
+}
+
+/// How a child ended: its state, what the model is told of it (fixed words only: a provider's
+/// error never goes to the model), what the person is told, its report and what it spent.
+struct Ended {
+    state: &'static str,
+    said: String,
+    why: String,
+    text: String,
+    usage: Usage,
+    steps: u32,
+    flagged: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -259,6 +318,12 @@ impl<'a> Turn<'a> {
             ended: Mutex::default(),
             over: AtomicBool::new(false),
         }
+    }
+
+    /// Pi started the tool `call`: a provider may reuse an id, so an earlier call's end is not
+    /// this one's.
+    pub fn tool_started(&self, call: &str) {
+        super::local::locked(&self.ended).remove(call);
     }
 
     /// Pi ended the tool `call`: its children stop.
@@ -325,6 +390,7 @@ impl<'a> Turn<'a> {
                 return;
             }
         };
+        let day = children_day(c.host, &c.day, &c.dirs.data.join("host/day.json"), &cfg);
         let rows = Mutex::new(
             tasks
                 .iter()
@@ -341,6 +407,7 @@ impl<'a> Turn<'a> {
         let cancels: Vec<Cancel> = tasks.iter().map(|_| Cancel::new()).collect();
         let (next, left) = (AtomicUsize::new(0), AtomicUsize::new(tasks.len()));
         let reports = Mutex::new(vec![String::new(); tasks.len()]);
+        let said = Mutex::new(vec![String::new(); tasks.len()]);
         let flagged = AtomicBool::new(false);
         let workers = (cfg.subagent.max_parallel as usize).clamp(1, tasks.len());
         std::thread::scope(|sc| {
@@ -354,17 +421,24 @@ impl<'a> Turn<'a> {
                             f(&mut r[i]);
                             self.show(call, &r, None);
                         };
-                        let (report, flag) = self.child(&cfg, t, &cancels[i], &set);
-                        flagged.fetch_or(flag, Ordering::SeqCst);
-                        super::local::locked(&reports)[i] = report;
+                        let e = self.child(&cfg, &day, t, &cancels[i], &set);
+                        flagged.fetch_or(e.flagged, Ordering::SeqCst);
+                        super::local::locked(&reports)[i] = e.text;
+                        super::local::locked(&said)[i] = e.said;
                         left.fetch_sub(1, Ordering::SeqCst);
                     }
                 });
             }
-            // The call's end stops its children; the scope waits for every one of them.
+            // The call's end stops its children; the scope waits for every one of them. The tool
+            // host hears that the brain is still at it, or it ends the call.
+            let mut alive = Instant::now();
             while left.load(Ordering::SeqCst) > 0 {
                 if self.stopped(call) {
                     cancels.iter().for_each(Cancel::cancel);
+                }
+                if alive.elapsed() >= ALIVE_EVERY {
+                    jev::subagent_alive(c.socket, c.session, c.token, call);
+                    alive = Instant::now();
                 }
                 std::thread::sleep(POLL);
             }
@@ -372,13 +446,14 @@ impl<'a> Turn<'a> {
         let rows = rows.into_inner().unwrap_or_else(|e| e.into_inner());
         let end = summary(&rows, began.elapsed().as_secs());
         let mut note = end.clone();
-        for r in &rows {
+        let said = said.into_inner().unwrap_or_else(|e| e.into_inner());
+        for (r, w) in rows.iter().zip(&said) {
             note.push_str(&format!(
                 "\n- {} ({}, {}): {}",
                 r.name, r.mode, r.model, r.state
             ));
-            if !r.why.is_empty() {
-                note.push_str(&format!(": {}", r.why));
+            if !w.is_empty() {
+                note.push_str(&format!(": {w}"));
             }
         }
         let reports = reports.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -399,26 +474,39 @@ impl<'a> Turn<'a> {
         );
     }
 
-    /// One child, start to end: its report, and whether the judge flagged it.
-    fn child(&self, cfg: &Config, t: &Task, cancel: &Cancel, set: SetRow<'_>) -> (String, bool) {
+    /// One child, start to end.
+    fn child(
+        &self,
+        cfg: &Config,
+        day: &Arc<Mutex<DayBudget>>,
+        t: &Task,
+        cancel: &Cancel,
+        set: SetRow<'_>,
+    ) -> Ended {
         let c = &self.ctx;
-        let fail = |state: &'static str, why: String| {
+        let fail = |state: &'static str, said: &str, why: String| {
             set(&|r: &mut Row| {
                 r.state = state;
                 r.why.clone_from(&why);
                 r.ended_ms.get_or_insert(crate::cli::now_ms());
             });
+            Ended {
+                state,
+                said: said.into(),
+                why,
+                text: String::new(),
+                usage: Usage::default(),
+                steps: 0,
+                flagged: false,
+            }
         };
         if cancel.is_cancelled() {
-            fail("stopped", "the call was stopped before it started".into());
-            return (String::new(), false);
+            let w = "the call was stopped before it started";
+            return fail("stopped", w, w.into());
         }
         let (n, dir) = match new_folder(c.run_dir, "subagents") {
             Ok(x) => x,
-            Err(e) => {
-                fail("failed", e);
-                return (String::new(), false);
-            }
+            Err(e) => return fail("failed", "it did not start", e),
         };
         let started = crate::cli::now_ms();
         let keep = |row: &Row| {
@@ -443,34 +531,34 @@ impl<'a> Turn<'a> {
         let marked = std::fs::read_to_string(c.taint_file)
             .ok()
             .map(|t| t.contains("\"suspect\""));
-        let (state, why, text, usage, steps, flagged) =
-            self.run_child(cfg, t, n, &dir, marked, cancel);
-        let _ = crate::cli::write_private(&report_file, text::data(&text).as_bytes());
+        let e = self.run_child(cfg, day, t, n, &dir, marked, cancel);
+        let _ = crate::cli::write_private(&report_file, text::data(&e.text).as_bytes());
         // A flag in a child flags the conversation now: the window and bypass close.
-        if flagged {
+        if e.flagged {
             jev::flag_session(c.socket, c.session);
         }
         set(&|r: &mut Row| {
-            r.state = state;
-            r.why.clone_from(&why);
+            r.state = e.state;
+            r.why.clone_from(&e.why);
             r.ended_ms = Some(crate::cli::now_ms());
-            r.usage = usage;
-            r.steps = steps;
+            r.usage = e.usage;
+            r.steps = e.steps;
             keep(r);
         });
-        (text, flagged)
+        e
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     fn run_child(
         &self,
         cfg: &Config,
+        day: &Arc<Mutex<DayBudget>>,
         t: &Task,
         n: u32,
         dir: &Path,
         marked: Option<bool>,
         cancel: &Cancel,
-    ) -> (&'static str, String, String, Usage, u32, bool) {
+    ) -> Ended {
         let c = &self.ctx;
         let id = format!("{}.sub-{n}", c.run);
         let mut cc = cfg.clone();
@@ -487,22 +575,24 @@ impl<'a> Turn<'a> {
             },
             Kind::Child(t.mode),
         );
+        let mut e = Ended {
+            state: "failed",
+            said: String::new(),
+            why: String::new(),
+            text: String::new(),
+            usage: Usage::default(),
+            steps: 0,
+            flagged: false,
+        };
         let (toolhost, pi) = match started {
             Ok(x) => x,
-            Err(e) => {
-                return (
-                    "failed",
-                    format!("it did not start: {e}"),
-                    String::new(),
-                    Usage::default(),
-                    0,
-                    false,
-                );
+            Err(err) => {
+                e.said = "it did not start".into();
+                e.why = format!("it did not start: {err}");
+                return e;
             }
         };
-        let mut guard = RunGuard::new(Arc::new(SystemClock), &id, budget(cfg), c.day.clone());
-        let tainted = dir.join("toolhost/tainted.json");
-        let (mut steps, mut flagged) = (0u32, false);
+        let mut guard = RunGuard::new(Arc::new(SystemClock), &id, budget(cfg), day.clone());
         let ask = format!(
             "Your task, as the {} subagent «{}»:\n\n{}",
             if t.mode == Child::Write {
@@ -513,12 +603,19 @@ impl<'a> Turn<'a> {
             t.name,
             t.task
         );
+        // Its spending, message by message: a child killed past the grace keeps what it spent.
+        let (mut steps, mut used, mut flagged) = (0u32, Usage::default(), false);
         let ran = pi
             .client
-            .run_prompt_limited(&ask, cancel, &mut guard, &mut |e| match e {
+            .run_prompt_limited(&ask, cancel, &mut guard, &mut |ev| match ev {
                 Event::ToolStart { .. } => steps += 1,
-                // The judge flagged what it read: the child ends here.
-                Event::ToolEnd { .. } if marked != Some(true) && suspect_in(&tainted) => {
+                Event::MessageEnd(m) if m.role == "assistant" => {
+                    if let Some(u) = &m.usage {
+                        used.add(u);
+                    }
+                }
+                // The judge withheld what it read: the child ends here.
+                Event::ToolEnd { .. } if withheld_in(dir) => {
                     flagged = true;
                     cancel.cancel();
                 }
@@ -526,43 +623,55 @@ impl<'a> Turn<'a> {
             });
         drop(pi);
         toolhost.stop();
-        flagged |= marked != Some(true) && suspect_in(&tainted);
+        e.flagged = flagged || withheld_in(dir);
+        (e.steps, e.usage) = (steps, used);
         // What a writer changed is the run's: `clio undo` takes it back with the parent's.
-        let mut joined = String::new();
+        let mut joined = None;
         if c.host
             && t.mode == Child::Write
-            && let Err(e) = clio_toolhost::host::fold_journal(
+            && let Err(err) = clio_toolhost::host::fold_journal(
                 &dir.join("toolhost"),
                 &c.run_dir.join("toolhost"),
             )
         {
-            joined = format!("; its changes are not in this session's undo: {e}");
+            joined = Some(err);
         }
-        let (state, why, text, usage) = match ran {
-            Err(e) => ("failed", e.to_string(), String::new(), Usage::default()),
+        let (state, said, why) = match ran {
+            _ if e.flagged => (
+                "flagged",
+                "the judge flagged what it read: it was stopped and its report is withheld",
+                String::new(),
+            ),
+            Err(err) => ("failed", "it did not finish", err.to_string()),
             Ok(s) => {
-                let (state, why) = if flagged {
-                    (
-                        "flagged",
-                        "the judge flagged what it read: it was stopped and its report withheld"
-                            .to_owned(),
-                    )
-                } else if cancel.is_cancelled() || s.aborted {
-                    ("stopped", "it was stopped".to_owned())
+                let r = if cancel.is_cancelled() || s.aborted {
+                    ("stopped", "it was stopped", String::new())
                 } else if let Some(stop) = s.stopped {
-                    ("failed", format!("it reached its limit: {}", limit(stop)))
+                    ("failed", limit(stop), String::new())
                 } else if s.text.trim().is_empty() && !s.errors.is_empty() {
-                    (
-                        "failed",
-                        format!("its model failed: {}", s.errors.join("; ")),
-                    )
+                    ("failed", "its model failed", s.errors.join("; "))
                 } else {
-                    ("done", String::new())
+                    ("done", "", String::new())
                 };
-                (state, why, s.text, s.usage)
+                e.text = s.text;
+                r
             }
         };
-        (state, format!("{why}{joined}"), text, usage, steps, flagged)
+        e.state = state;
+        e.said = said.to_owned();
+        e.why = [said.to_owned(), why]
+            .into_iter()
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(": ");
+        if let Some(err) = joined {
+            e.said
+                .push_str("; its changes are not in this session's undo");
+            e.why.push_str(&format!(
+                "; its changes are not in this session's undo: {err}"
+            ));
+        }
+        e
     }
 }
 
@@ -654,6 +763,111 @@ mod tests {
         assert_eq!(capped("short"), "short");
     }
 
+    fn spend(dollars: f64) -> Event {
+        Event::MessageEnd(clio_brain::pi::rpc::MessageInfo {
+            role: "assistant".into(),
+            usage: Some(Usage {
+                cost: dollars,
+                ..Usage::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn step(n: u32) -> Event {
+        Event::ToolStart {
+            id: "c".into(),
+            name: "read".into(),
+            args: json!({ "path": n }),
+        }
+    }
+
+    // S-73: a child stops at its own step, time and cost caps (`subagent.*`), and each stop is
+    // told in fixed words that name the key.
+    #[test]
+    fn a_child_stops_at_its_own_step_time_and_cost_caps() {
+        let mut cfg = Config::default_with(vec![]);
+        cfg.subagent.max_steps = 2;
+        cfg.subagent.max_seconds = 10;
+        cfg.subagent.max_cost_micro_usd = 500_000;
+        let day = || Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
+        let guard = |clock: &Arc<clio_core::FixedClock>| {
+            RunGuard::new(clock.clone(), "c", budget(&cfg), day())
+        };
+
+        let clock = Arc::new(clio_core::FixedClock::new(0));
+        let mut g = guard(&clock);
+        assert_eq!(g.observe(&step(1)), None);
+        assert_eq!(g.observe(&step(2)), None);
+        let s = g.observe(&step(3)).unwrap();
+        assert_eq!(
+            (s, limit(s)),
+            (
+                Stop::Steps,
+                "it reached its step limit (subagent.max_steps)"
+            )
+        );
+
+        let mut g = guard(&clock);
+        clock.advance(9_000);
+        assert_eq!(g.tick(), None);
+        clock.advance(2_000);
+        let s = g.tick().unwrap();
+        assert_eq!(
+            (s, limit(s)),
+            (
+                Stop::Time,
+                "it reached its time limit (subagent.max_seconds)"
+            )
+        );
+
+        let mut g = guard(&clock);
+        assert_eq!(g.observe(&spend(0.3)), None);
+        let s = g.observe(&spend(0.3)).unwrap();
+        assert!(limit(s).contains("subagent.max_cost_micro_usd"), "{s:?}");
+    }
+
+    // S-73: in copy mode, where the chat keeps no day, the children still spend from the day
+    // kept in `day.json`: one spent past its cap stops a child; in host mode they share the
+    // chat's own.
+    #[test]
+    fn the_children_always_spend_from_a_kept_day() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("host/day.json");
+        let mut cfg = Config::default_with(vec![]);
+        cfg.limits.day_cost_micro_usd = 1_000_000;
+        let parent = Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
+        assert!(Arc::ptr_eq(
+            &children_day(true, &parent, &file, &cfg),
+            &parent
+        ));
+
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        };
+        let day = children_day(false, &parent, &file, &cfg);
+        assert!(!Arc::ptr_eq(&day, &parent));
+        let mut g = RunGuard::new(Arc::new(SystemClock), "a", budget(&cfg), day.clone());
+        assert_eq!(g.observe(&spend(0.4)), None);
+        drop(g);
+        // What the first child spent is kept, and the next one starts from it.
+        assert!(std::fs::read_to_string(&file).unwrap().contains("400000"));
+        let day = children_day(false, &parent, &file, &cfg);
+        assert_eq!(day.lock().unwrap().spent(now()), 400_000);
+        let mut g = RunGuard::new(Arc::new(SystemClock), "b", budget(&cfg), day);
+        assert_eq!(g.observe(&spend(0.4)), None);
+        let s = g.observe(&spend(0.4)).unwrap();
+        assert_eq!(
+            (s, limit(s)),
+            (Stop::DayCost, "it reached the day's budget")
+        );
+        // The chat's own (copy mode: none) is untouched.
+        assert_eq!(parent.lock().unwrap().spent(now()), 0);
+    }
+
     #[test]
     fn the_hour_counts_the_children_in_the_run_folder() {
         let d = tempfile::tempdir().unwrap();
@@ -662,10 +876,16 @@ mod tests {
             std::fs::create_dir_all(&f).unwrap();
             std::fs::write(
                 f.join("subagent.json"),
-                json!({"n": n, "started_ms": at}).to_string(),
+                json!({"n": n, "started_ms": at, "state": "running"}).to_string(),
             )
             .unwrap();
         }
         assert_eq!(launched_since(d.path(), 1_000_000), 2);
+        let n: Vec<u64> = listed(d.path())
+            .iter()
+            .map(|v| v["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(n, [1, 2, 3]);
+        assert_eq!(listed(d.path())[0]["state"], "stopped");
     }
 }

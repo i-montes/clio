@@ -210,6 +210,10 @@ pub trait Session: Send + Sync {
     }
     /// Cancels a compaction in flight (Pi's `abort`), beside the `command` that waits for it.
     fn abort_compaction(&self) {}
+    /// The subagents of this session's run so far, oldest first (S-73).
+    fn subagents(&self) -> Vec<Value> {
+        vec![]
+    }
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
     /// What the last turn changed (files written, commands run, as the action log records

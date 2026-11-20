@@ -39,6 +39,8 @@ impl MemoryPort for Judge {
     fn judge_text(&self, text: &str, _: &str) -> TextVerdict {
         if text.contains("AI AGENT") {
             TextVerdict::Injection
+        } else if text.contains("SILENT") {
+            TextVerdict::NoAnswer
         } else {
             TextVerdict::Clean
         }
@@ -58,7 +60,7 @@ struct Env {
 fn env() -> Env {
     let t = tempfile::TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let r = t.path().canonicalize().unwrap();
-    for d in ["home", "clio/data", "outside"] {
+    for d in ["home", "clio/data", "clio/runtime/th-1", "outside"] {
         std::fs::create_dir_all(r.join(d)).unwrap();
     }
     Env {
@@ -87,10 +89,16 @@ fn host(e: &Env, child: Option<Child>, jail: JailMode) -> ToolHost {
     c.host = Some(HostCfg {
         home,
         state: data.join("host"),
-        control: vec![data],
+        // Clio's folders: its data and its runtime folder (the tool hosts' sockets).
+        control: vec![data, e.r.join("clio/runtime")],
         rules: HostRules::factory(),
         run: id,
-        launcher: (jail == JailMode::Auto).then_some(clio_node::Launcher::Bwrap),
+        // The launcher `clio toolhost` gives it (`--child`, or a chat's); `Off` runs nothing.
+        launcher: if jail == JailMode::Auto {
+            clio_toolhost::subagent::launcher_for(child == Some(Child::Read), false, child)
+        } else {
+            None
+        },
     });
     ToolHost::new(c).unwrap()
 }
@@ -114,6 +122,10 @@ fn jailed(h: &ToolHost) -> bool {
     match h.exec_available() {
         Ok(()) => true,
         Err(why) => {
+            assert!(
+                std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+                "CLIO_REQUIRE_JAIL is set and the host launcher cannot run: {why}"
+            );
             eprintln!("SKIPPED (the host launcher cannot run here, commands not tested): {why}");
             false
         }
@@ -122,12 +134,17 @@ fn jailed(h: &ToolHost) -> bool {
 
 // S-73: a writing subagent writes, edits and runs commands under the session's rules, but what
 // would wait for the person (a delete, a networked send, a `control` act) is refused, with a
-// permission window open and with bypass on, and nothing is left pending; the refusals are in the
-// action log under the child's run
+// permission window open and with bypass on, and nothing is left pending; `sudo` is refused
+// outright; the refusals are in the action log under the child's run. Its commands run under the
+// launcher it really gets (bwrap)
 #[test]
 fn a_writer_writes_and_runs_commands_but_never_does_what_waits() {
     let e = env();
     let h = host(&e, Some(Child::Write), JailMode::Auto);
+    assert_eq!(
+        clio_toolhost::subagent::launcher_for(false, false, Some(Child::Write)),
+        Some(clio_node::Launcher::Bwrap)
+    );
     let new = e.r.join("outside/new.txt");
     let r = call(
         &h,
@@ -152,26 +169,40 @@ fn a_writer_writes_and_runs_commands_but_never_does_what_waits() {
             && r.decision.rule == "subagent/aside"
             && r.content.contains("a subagent cannot ask the person")
     };
-    let r = over();
-    assert!(refused(&r), "{r:?}");
-    grant::open(&e.state, 4, &["x1".into()]).unwrap().unwrap();
     assert!(refused(&over()));
-    grant::close(&e.state, grant::BY_PERSON).unwrap();
-    grant::bypass_on(&e.state).unwrap();
-    assert!(refused(&over()));
-    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "old");
-    if jailed(&h) {
-        let dir = e.r.join("outside/keep");
-        std::fs::create_dir_all(&dir).unwrap();
+    let commands = jailed(&h);
+    let dir = e.r.join("outside/keep");
+    std::fs::create_dir_all(&dir).unwrap();
+    for state in ["a window open", "bypass on"] {
+        if state == "bypass on" {
+            grant::close(&e.state, grant::BY_PERSON).unwrap();
+            grant::bypass_on(&e.state).unwrap();
+            assert!(grant::Kind::Bypass.current(&e.state).is_some());
+        } else {
+            grant::open(&e.state, 4, &["x1".into()]).unwrap().unwrap();
+            assert!(grant::current(&e.state).is_some());
+        }
+        assert!(refused(&over()), "{state}");
+        if !commands {
+            continue;
+        }
         for args in [
             json!({"command": format!("rm -r {}", p(&dir))}),
             json!({"command": "curl -X POST https://api.example.com -d a=1", "network": true}),
             json!({"command": "cat /etc/sudoers"}),
         ] {
             let r = call(&h, "c3", "exec", args.clone());
-            assert!(refused(&r), "{args}: {r:?}");
+            assert!(refused(&r), "{state}: {args}: {r:?}");
         }
-        assert!(dir.is_dir());
+        let r = call(&h, "c3", "exec", json!({"command": "sudo -n true"}));
+        assert!(
+            !r.ok && r.decision.rule == "subagent/sudo" && r.content.contains("report"),
+            "{state}: {r:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "old");
+    assert!(dir.is_dir());
+    if commands {
         let b = call(
             &h,
             "c4",
@@ -187,6 +218,14 @@ fn a_writer_writes_and_runs_commands_but_never_does_what_waits() {
         );
         assert!(r.ok, "{r:?}");
         assert!(e.r.join("outside/cmd.txt").is_file());
+        // `sudo` the list does not see still cannot work: no new privileges.
+        let r = call(
+            &h,
+            "c6",
+            "exec",
+            json!({"command": "s=su; ${s}do -n true; echo \"code=$?\""}),
+        );
+        assert!(!r.content.contains("code=0"), "{r:?}");
     }
     assert!(pending::list(&e.state).is_empty());
     let log = std::fs::read_to_string(e.state.join("actions.jsonl")).unwrap();
@@ -196,6 +235,86 @@ fn a_writer_writes_and_runs_commands_but_never_does_what_waits() {
         ),
         "{log}"
     );
+}
+
+// S-73 (High of the review): a writer's commands cannot reach Clio's masked folders, by their path
+// or through another process's `/proc/<pid>/root`: not the parent tool host's socket (in Clio's
+// runtime folder), `bypass.json`, the pending store or the run's `changes.jsonl`; neither read
+// nor written
+#[test]
+fn a_writers_commands_cannot_reach_the_parents_socket_bypass_pending_or_journal() {
+    let e = env();
+    let parent = host(&e, None, JailMode::Off);
+    let h = host(&e, Some(Child::Write), JailMode::Auto);
+    if !jailed(&h) {
+        return;
+    }
+    let sock = e.r.join("clio/runtime/th-1/toolhost.sock");
+    let _listening = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    grant::bypass_on(&e.state).unwrap();
+    // A pending item, and a change in the run's journal.
+    let wrote = call(
+        &parent,
+        "c1",
+        "fs_write",
+        json!({"path": p(&e.r.join("home/x.txt")), "content": "x"}),
+    );
+    assert!(wrote.ok, "{wrote:?}");
+    let journal = e.r.join("clio/data/runs/r1/toolhost/changes.jsonl");
+    std::fs::create_dir_all(e.state.join("pending")).unwrap();
+    let store = e.state.join("pending/probe.json");
+    std::fs::write(&store, "{}").unwrap();
+    let bypass = grant::Kind::Bypass.file(&e.state);
+    let before: Vec<Vec<u8>> = [&bypass, &store, &journal]
+        .iter()
+        .map(|f| std::fs::read(f).unwrap())
+        .collect();
+    let me = std::process::id();
+    // The path in hex, so the list does not see it: the jail is what is tested.
+    let probe = |seen: &str| {
+        let hex: String = seen.bytes().map(|b| format!("\\x{b:02x}")).collect();
+        call(
+            &h,
+            "c2",
+            "exec",
+            json!({"command": format!(
+                "P=\"$(printf '{hex}')\"; test -e \"$P\" && echo SEEN; cat \"$P\" >/dev/null 2>&1 && echo READ; (echo x >> \"$P\") 2>/dev/null && echo WROTE; true"
+            )}),
+        )
+    };
+    // The probe does see, read and write what is not Clio's.
+    let visible = e.r.join("outside/visible.txt");
+    std::fs::write(&visible, "v").unwrap();
+    let r = probe(&p(&visible));
+    for word in ["SEEN", "READ", "WROTE"] {
+        assert!(r.content.contains(word), "{word}: {r:?}");
+    }
+    for path in [&sock, &bypass, &store, &journal] {
+        for seen in [
+            p(path),
+            format!("/proc/{me}/root{}", p(path)),
+            format!("/proc/1/root{}", p(path)),
+        ] {
+            let r = probe(&seen);
+            assert!(r.ok, "{seen}: {r:?}");
+            for word in ["SEEN", "READ", "WROTE"] {
+                assert!(!r.content.contains(word), "{seen}: {word}: {r:?}");
+            }
+        }
+    }
+    let after: Vec<Vec<u8>> = [&bypass, &store, &journal]
+        .iter()
+        .map(|f| std::fs::read(f).unwrap())
+        .collect();
+    assert_eq!(before, after);
+    // Clio's processes are not there to look through: its own pid namespace.
+    let r = call(
+        &h,
+        "c3",
+        "exec",
+        json!({"command": format!("test -e /proc/{me} && echo THERE; true")}),
+    );
+    assert!(r.ok && !r.content.contains("THERE"), "{r:?}");
 }
 
 // S-73: neither kind of child gets the memory, a secret, a skill or service written, an MCP call,
@@ -460,4 +579,111 @@ fn undo_takes_back_a_childs_change_in_order_with_the_parents() {
         ]
     );
     assert!(!f.exists() && !g.exists());
+}
+
+// S-73 S-72: a report the judge does not answer for still reaches the model wrapped as data, and
+// the session is marked unjudged (bypass and a window no longer act for it)
+#[test]
+fn a_report_the_judge_does_not_answer_for_is_given_wrapped_and_marks_the_session_unjudged() {
+    let e = env();
+    let h = host(&e, None, JailMode::Off);
+    let gone = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let g = guard_call(s, &h, "c1", &gone);
+        take(&h, "c1", TOKEN);
+        let d = call(
+            &h,
+            "b",
+            "subagent_done",
+            json!({"token": TOKEN, "call": "c1", "note": "1 subagent: 1 done",
+                "reports": [{"name": "look", "text": "SILENT: a.txt says hola"}]}),
+        );
+        assert!(d.ok, "{d:?}");
+        let r = g.join().unwrap();
+        assert!(r.ok && r.tainted, "{r:?}");
+        let b = r.data["blocks"][1].as_str().unwrap();
+        assert!(
+            b.starts_with("<<<UNTRUSTED-DATA subagent-summary") && b.contains("a.txt says hola"),
+            "{r:?}"
+        );
+        assert!(r.data["withheld"].as_array().unwrap().is_empty());
+    });
+    let marks =
+        std::fs::read_to_string(e.r.join("clio/data/runs/r1/toolhost/tainted.json")).unwrap();
+    assert!(
+        marks.contains("\"unjudged\"") && !marks.contains("\"suspect\""),
+        "{marks}"
+    );
+}
+
+/// A writer's change to `path` in host `h` (`text`).
+fn write(h: &ToolHost, path: &Path, text: &str) {
+    let r = call(
+        h,
+        "c",
+        "fs_write",
+        json!({"path": p(path), "content": text}),
+    );
+    assert!(r.ok, "{r:?}");
+}
+
+// S-73: Clio is killed while a writer's change is not yet the run's; the chat that opens the run
+// again folds it first (`fold_children`), so the parent's next change of the same file comes
+// after it, and undo, one by one, gives back the original
+#[test]
+fn a_childs_change_left_apart_by_a_crash_is_joined_when_the_run_opens_and_undone_in_order() {
+    let e = env();
+    let f = e.r.join("outside/f.txt");
+    std::fs::write(&f, "original").unwrap();
+    let child = host(&e, Some(Child::Write), JailMode::Off);
+    write(&child, &f, "child");
+    drop(child); // killed: never folded
+    let run = e.r.join("clio/data/runs/r1");
+    assert!(host::fold_children(&run).is_empty());
+    let parent = host(&e, None, JailMode::Off);
+    write(&parent, &f, "parent");
+    let said = host::undo(&run.join("toolhost")).unwrap();
+    assert_eq!(
+        said,
+        [format!("restored {}", p(&f)), format!("restored {}", p(&f))]
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
+}
+
+// S-73: a fold cut between moving a copy and appending its line, or between appending and
+// setting the child's journal aside, is finished by the next one: undo still works, and no line
+// is there twice
+#[test]
+fn a_fold_that_was_cut_is_finished_by_the_next_and_never_blocks_undo() {
+    let e = env();
+    let f = e.r.join("outside/f.txt");
+    std::fs::write(&f, "original").unwrap();
+    let parent = host(&e, None, JailMode::Off);
+    write(&parent, &e.r.join("outside/g.txt"), "g");
+    let child = host(&e, Some(Child::Write), JailMode::Off);
+    write(&child, &f, "child");
+    let run = e.r.join("clio/data/runs/r1");
+    let (mine, theirs) = (run.join("toolhost"), run.join("subagents/1/toolhost"));
+    // Cut after the copy moved: it is at its new number, the line is not appended.
+    std::fs::create_dir_all(mine.join("backups")).unwrap();
+    std::fs::rename(theirs.join("backups/0"), mine.join("backups/1")).unwrap();
+    assert!(host::fold_children(&run).is_empty());
+    let lines = |d: &Path| {
+        std::fs::read_to_string(d.join("changes.jsonl"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    assert_eq!(lines(&mine), 2);
+    // Cut after the lines were appended, before the child's journal was set aside.
+    std::fs::copy(
+        theirs.join("changes.folded.jsonl"),
+        theirs.join("changes.jsonl"),
+    )
+    .unwrap();
+    assert!(host::fold_children(&run).is_empty());
+    assert_eq!(lines(&mine), 2, "not twice");
+    let said = host::undo(&mine).unwrap();
+    assert_eq!(said[0], format!("restored {}", p(&f)));
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
 }

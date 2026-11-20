@@ -276,6 +276,11 @@ impl SessionSource for LocalSource {
         if !changed {
             seal(d, &run_dir, session_file.as_deref());
         }
+        // A writing subagent Clio could not join to the run when it ended (killed first) is
+        // joined now, before the session changes anything again (S-73).
+        for e in clio_toolhost::host::fold_children(&run_dir) {
+            eprintln!("clio: {e}");
+        }
         let work = if host {
             d.home.clone()
         } else {
@@ -1371,6 +1376,7 @@ impl Session for ChatSession {
                     Event::ToolStart { id, name, args } => {
                         turn.calls.push((id.clone(), name.clone(), args.clone()));
                         if name == "subagent" && self.subagents {
+                            subs.tool_started(id);
                             let (subs, id) = (&subs, id.clone());
                             sc.spawn(move || subs.run_call(&id));
                         }
@@ -1409,6 +1415,10 @@ impl Session for ChatSession {
         }
         *locked(&self.turn) = turn;
         r
+    }
+
+    fn subagents(&self) -> Vec<serde_json::Value> {
+        super::subagent::listed(&self.run_dir)
     }
 
     fn last_work(&self) -> Option<super::TurnWork> {

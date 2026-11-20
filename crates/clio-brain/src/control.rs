@@ -221,6 +221,15 @@ impl<C: Clock> Controller<C> {
         self.halted
     }
 
+    pub fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    /// `ms` of the time so far do not count toward `max_ms` (time spent where other caps hold).
+    pub fn exclude_ms(&mut self, ms: i64) {
+        self.started_ms = self.started_ms.saturating_add(ms.max(0));
+    }
+
     /// Levels 0 and 1 skip contract and planner. Nothing else in this type looks at the level:
     /// budget and anti-loop apply to every level.
     pub fn needs_contract_and_planner(&self) -> bool {
@@ -285,6 +294,9 @@ impl<C: Clock> Controller<C> {
     pub fn settle(&mut self, est_cost_micro: u64, real_cost_micro: u64, day: &mut DayBudget) {
         // Saturating: the real cost comes from numbers the adapter or Pi report, and a sum that wraps
         // (release) or panics (debug) would let a huge cost slip under the cap.
+        // The day first rolls to today, or a cost settled before any step was checked would be
+        // added to an old day and wiped by the next check.
+        day.spent(self.clock.now_ms());
         self.state.cost_micro = self
             .state
             .cost_micro

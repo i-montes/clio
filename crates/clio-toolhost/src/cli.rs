@@ -148,11 +148,7 @@ pub fn run_with(
                 control: host_control,
                 rules,
                 run: host_run.ok_or("--host-run is required")?,
-                // A review's and a round's commands: only under bwrap (its own pid namespace and
-                // /tmp), never under the systemd launcher, which shares the person's: through
-                // another process's `/proc/<pid>/root` the machine would not be read-only.
-                launcher: (review || unattended || child == Some(crate::subagent::Child::Read))
-                    .then_some(clio_node::Launcher::Bwrap),
+                launcher: crate::subagent::launcher_for(review, unattended, child),
             })
         }
         None if host_state.is_some()

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clio_gateway::{Source, wrap_untrusted};
 use serde_json::{Map, Value, json};
@@ -40,6 +40,22 @@ impl Child {
     }
 }
 
+/// The host launcher of a review's, a round's and every child's commands: only bwrap, never the
+/// systemd launcher, which shares the person's process namespace and has `sudo`: through another
+/// process's `/proc/<pid>/root` a command would reach Clio's masked folders (the parent's tool
+/// host socket, bypass, the pending store, the run's journal). bwrap gives it a pid namespace of
+/// its own and no new privileges (S-67, S-71, S-73). `None`: the default (`detect`).
+pub fn launcher_for(
+    review: bool,
+    unattended: bool,
+    child: Option<Child>,
+) -> Option<clio_node::Launcher> {
+    (review || unattended || child.is_some()).then_some(clio_node::Launcher::Bwrap)
+}
+
+/// What a writing child is told when a command uses `sudo`.
+pub const CHILD_NO_SUDO: &str = "a subagent cannot use sudo: nothing was run; say in your report what needs it, for your parent to do";
+
 /// What a child is told instead of an action being set aside for the person.
 pub const CHILD_CANNOT_ASK: &str = "a subagent cannot ask the person: this was not run and nothing waits for them; say in your report what is left for your parent to do";
 /// What a reading child is told when a command asks for the network or `sudo`.
@@ -55,11 +71,18 @@ pub(crate) const WRITER_OPS: [&str; 12] = [
 const MAX_CALLS: usize = 16;
 /// How often a waiting call looks whether its caller left.
 const POLL: Duration = Duration::from_millis(100);
+/// A call the brain took and has not said anything of for this long ends (Clio is gone, or its
+/// answer could not be delivered): the brain says it is alive (`subagent_alive`) every few
+/// seconds while the children run.
+pub const SILENCE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 30 });
+/// What the model gets then.
+pub const LOST: &str = "Clio did not hand back the subagents' reports: the call ended without them";
 
 enum Call {
     /// The guard's arguments, until the brain takes them.
     Waiting(Value),
-    Taken,
+    /// Taken by the brain, which last said it is alive then.
+    Taken(Instant),
     /// The brain's answer.
     Done(Value),
 }
@@ -92,7 +115,7 @@ impl ToolHost {
         }
     }
 
-    /// `subagent`, `subagent_take` and `subagent_done` of a chat's tool host.
+    /// `subagent`, `subagent_take`, `subagent_alive` and `subagent_done` of a chat's tool host.
     pub(crate) fn subagent_op(
         &self,
         calls: &Calls,
@@ -115,10 +138,14 @@ impl ToolHost {
             return match (req.tool.as_str(), m.get(&k)) {
                 ("subagent_take", Some(Call::Waiting(a))) => {
                     let a = a.clone();
-                    m.insert(k, Call::Taken);
+                    m.insert(k, Call::Taken(Instant::now()));
                     Self::ok_answer(req, String::new(), a, tainted)
                 }
-                ("subagent_done", Some(Call::Taken)) => {
+                ("subagent_alive", Some(Call::Taken(_))) => {
+                    m.insert(k, Call::Taken(Instant::now()));
+                    Self::ok_answer(req, String::new(), Value::Null, tainted)
+                }
+                ("subagent_done", Some(Call::Taken(_))) => {
                     m.insert(k, Call::Done(Value::Object(args.clone())));
                     calls.changed.notify_all();
                     Self::ok_answer(req, String::new(), Value::Null, tainted)
@@ -144,6 +171,10 @@ impl ToolHost {
             if cancel() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
                 m.remove(&k);
                 return refuse("the call was stopped: its subagents are stopped too");
+            }
+            if matches!(m.get(&k), Some(Call::Taken(t)) if t.elapsed() > SILENCE) {
+                m.remove(&k);
+                return refuse(LOST);
             }
             m = calls
                 .changed
@@ -214,5 +245,74 @@ impl ToolHost {
             json!({ "blocks": blocks, "withheld": withheld }),
             self.is_tainted(&req.session),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::Config;
+
+    const TOKEN: &str = "the-brains-own-token-0123456789";
+
+    fn req(tool: &str, call: &str, args: Value) -> Request {
+        Request {
+            id: "i".into(),
+            tool: tool.into(),
+            args,
+            session: "s".into(),
+            call_id: call.into(),
+            tainted: false,
+        }
+    }
+
+    // S-73: a call the brain took ends with a fixed error once the brain says nothing for
+    // `SILENCE` (it is gone, or its answer could not be delivered); while it says it is alive,
+    // the call waits, and then gets its answer.
+    #[test]
+    fn a_call_the_brain_stopped_answering_ends_and_one_it_keeps_alive_waits() {
+        let t = tempfile::tempdir().unwrap();
+        for d in ["w", "s", "r"] {
+            std::fs::create_dir(t.path().join(d)).unwrap();
+        }
+        let mut c = Config::new(
+            &t.path().join("w"),
+            &t.path().join("s"),
+            &t.path().join("r"),
+        );
+        c.subagents = true;
+        c.said_token = Some(TOKEN.into());
+        let h = ToolHost::new(c).unwrap();
+        let tasks = json!({"tasks": [{"name": "a", "task": "x", "mode": "read"}]});
+        let brain = |tool: &str, call: &str| {
+            h.handle(req(
+                tool,
+                "b",
+                json!({"token": TOKEN, "call": call, "reports": [], "note": "done"}),
+            ))
+        };
+        std::thread::scope(|s| {
+            let g = s.spawn(|| h.handle(req("subagent", "c1", tasks.clone())));
+            while !brain("subagent_take", "c1").ok {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let r = g.join().unwrap();
+            assert!(!r.ok && r.content.contains(LOST), "{r:?}");
+            assert!(!brain("subagent_done", "c1").ok, "it went nowhere");
+        });
+        std::thread::scope(|s| {
+            let g = s.spawn(|| h.handle(req("subagent", "c2", tasks.clone())));
+            while !brain("subagent_take", "c2").ok {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            for _ in 0..6 {
+                std::thread::sleep(SILENCE / 3);
+                assert!(brain("subagent_alive", "c2").ok);
+            }
+            assert!(brain("subagent_done", "c2").ok);
+            let r = g.join().unwrap();
+            assert!(r.ok && r.content.starts_with("done"), "{r:?}");
+        });
     }
 }

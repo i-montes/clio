@@ -830,7 +830,7 @@ impl ToolHost {
             "mcp_call" if !closing() => return self.mcp_call(&req, &map),
             // A call that waits for its children holds no lock: the brain's marks and the
             // guard's filter are answered meanwhile (S-73).
-            "subagent" | "subagent_take" | "subagent_done" if !closing() => {
+            "subagent" | "subagent_take" | "subagent_alive" | "subagent_done" if !closing() => {
                 if let Some(calls) = &self.calls {
                     return self.subagent_op(calls, &req, &map, cancel);
                 }
@@ -1051,6 +1051,22 @@ impl ToolHost {
                 let rules = &h.cfg.rules;
                 network || rules.reaches_out(command) || rules.uses_sudo(command)
             };
+            // A writing child never uses `sudo` (S-73): what needs it is its parent's to do.
+            if self.writer()
+                && req.tool == "exec"
+                && h.cfg
+                    .rules
+                    .uses_sudo(map.get("command").and_then(Value::as_str).unwrap_or(""))
+            {
+                let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
+                return self.refuse_in_review(
+                    Some(at),
+                    &req,
+                    &req.args,
+                    "subagent/sudo",
+                    subagent::CHILD_NO_SUDO,
+                );
+            }
             // A review, which nobody watches, never does (S-67).
             if reaches && self.review {
                 let at = (h.cfg.state.as_path(), h.cfg.run.as_str());

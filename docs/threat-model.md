@@ -204,11 +204,12 @@ A review (`/review`, or the judge's after a turn that changed something) starts 
 A chat's model can hand tasks to child agents with `subagent` and wait for their reports. Each child is started like the reviewer (its own Pi, session, run folder `runs/<id>/subagents/<n>/` and tool host, its prompt `clio-subagent@1`, only its task as context), so it adds no way in or out that its parent lacks.
 
 - **Less, never more**: a reader's tool host is a review's (`--child read`); a writer's (`--child write`) adds `write` and `edit` where the session works, under the session's rules. What would wait for the person is refused in both, with or without a window or bypass; no memory, secret, `ask_person`, skill or service written, MCP, managing, background jobs or child of its own.
+- **Every child's commands run under bwrap**, never the systemd launcher, in host mode too: a pid namespace of their own (no `/proc/<pid>/root` into Clio's processes, so Clio's masked folders stay masked: the parent's tool host socket, `bypass.json`, the pending store, the run's journal), no new privileges, and `sudo` refused outright for a writer (what needs it goes back in its report). A writer's commands see the machine writable, its `/dev`, and no network (a networked command would wait for the person, so it is refused).
 - **Marks both ways**: it starts with its parent's marks; its report is outside text, judged and wrapped by the parent's tool host after the conversation is marked; a child the judge flags ends and flags the conversation.
-- **Bounded**: at most 8 tasks a call, one writer alone, `subagent.max_per_hour` a conversation, per-child caps of steps, time and cost, the session's day budget. `Esc` and the turn's end stop every child.
+- **Bounded**: `subagent.max_per_call` tasks a call, one writer alone, `subagent.max_per_hour` a conversation, per-child caps of steps, time and cost, the session's day budget. `Esc` and the turn's end stop every child.
 - **Undone with the run**: a writer's journal joins the run's, so `clio undo` covers it.
 
-**What it does not defend:** a reader's report steers the parent like any outside text the judge did not flag. A writer changes the person's files (host mode) with the session's own rules: what those let the session do without asking, they let the child do too.
+**What it does not defend:** a reader's report steers the parent like any outside text the judge did not flag. A writer changes the person's files (host mode) with the session's own rules: what those let the session do without asking, they let the child do too. A writer's bwrap shows `/run` as it is: the user's D-Bus (`/run/user/<uid>/bus`, and through it `systemctl --user`) and the other sockets the person's own programs listen on there (and in `/tmp`) can be reached by a command the list does not class; the list is not a wall, only Clio's own folders are masked.
 
 ### Skills: instructions that persist (S-68)
 
