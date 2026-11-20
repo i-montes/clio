@@ -47,7 +47,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use clio_core::{Clock, Level, SystemClock};
+use clio_core::{Level, SystemClock};
 use clio_gateway::{
     ActionRequest, ArgKind, ArgSpec, Budget, Decision, Egress, Gateway, Outcome, Rules,
     SessionInfo, Source, Telemetry, ToolDecl, wrap_untrusted,
@@ -167,7 +167,7 @@ pub(crate) const ROUND_REACHES: &str = "a round reaches nothing outside by itsel
 /// Why a round's change to a unit waits for the person.
 const ROUND_UNITS: &str = "a round changes no service";
 /// The tools a round never uses: each changes something, or needs the person.
-const ROUND_REFUSED: [&str; 8] = [
+const ROUND_REFUSED: [&str; 13] = [
     "fs_write",
     "fs_mkdir",
     "skill_write",
@@ -175,6 +175,13 @@ const ROUND_REFUSED: [&str; 8] = [
     "service_write",
     "mcp_propose",
     "memory_block_edit",
+    // A round may save memories; correcting, merging, forgetting, pinning and undoing change
+    // what is there, with nobody watching and no quota counting three of them.
+    "memory_update",
+    "memory_consolidate",
+    "memory_forget",
+    "memory_pin",
+    "memory_revert",
     "request_secret",
 ];
 
@@ -219,8 +226,6 @@ pub struct Config {
     pub host: Option<HostCfg>,
     /// Where `request_secret` keeps what it asks the person. `None`: nobody can be asked.
     pub secrets: Option<pending::SecretCfg>,
-    /// The time the memory's hourly saves and changes are counted by (S-47).
-    pub clock: Arc<dyn Clock>,
     /// A review (`--review`): nobody can be asked, so what would wait for the person is refused
     /// outright and nothing is stored as pending; no background commands either.
     pub review: bool,
@@ -256,7 +261,6 @@ impl Config {
             said_token: None,
             host: None,
             secrets: None,
-            clock: Arc::new(SystemClock),
             review: false,
             unattended: false,
             skills: None,
@@ -300,11 +304,10 @@ pub struct ToolHost {
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
     said_token: Option<String>,
-    /// Where the memory tools keep their budget and their log.
+    /// Where the memory tools keep their log.
     run_dir: PathBuf,
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,
-    clock: Arc<dyn Clock>,
     review: bool,
     unattended: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
@@ -503,7 +506,6 @@ impl ToolHost {
             run_dir: cfg.run_dir,
             host,
             secrets: cfg.secrets,
-            clock: cfg.clock,
             review: cfg.review,
             unattended: cfg.unattended,
             to_judge: Mutex::new(HashMap::new()),

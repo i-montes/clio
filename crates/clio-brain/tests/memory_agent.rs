@@ -13,7 +13,7 @@ use clio_brain::agent::{
     AgentConfig, AgentLoop, AgentOutcome, ContextReport, Event, MemoryInput, Msg, Observer,
 };
 use clio_brain::memory_link::{
-    CloseReport, EmbedModel, MAX_AGENT_PROPOSALS, MemoryLink, Recalled, RunFacts, clean_text,
+    CloseReport, EmbedModel, MemoryLink, Recalled, RunFacts, clean_text,
 };
 use clio_canaries::Canaries;
 use clio_core::{FixedClock, SystemClock};
@@ -404,7 +404,6 @@ fn every_actor_has_its_own_quota_and_a_flood_never_breaks_a_close() {
     let w = world();
     let s = scrubber();
     let mut rejected_total = 0;
-    let mut dropped_total = 0;
     for n in 0..6 {
         let lines: Vec<String> = (0..9)
             .map(|i| format!("RECORDAR: hecho inventado {n}-{i}"))
@@ -417,11 +416,7 @@ fn every_actor_has_its_own_quota_and_a_flood_never_breaks_a_close() {
             &s,
         );
         rejected_total += r.report.rejected.len();
-        dropped_total += r.report.dropped;
-        assert!(r.report.saved.len() <= 1 + MAX_AGENT_PROPOSALS);
     }
-    // Per run: five proposals at most, the other four are dropped before they cost quota.
-    assert_eq!(dropped_total, 6 * (9 - MAX_AGENT_PROPOSALS));
     // Nothing was refused yet: the agent's hour holds 500. Filled to the brim, the next is
     // refused, and saying so is a line, not an error.
     assert_eq!(rejected_total, 0);
