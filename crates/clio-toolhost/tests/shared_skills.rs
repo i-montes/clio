@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 
 use clio_toolhost::TextVerdict;
 use clio_toolhost::ask::{Class, HostRules};
-use clio_toolhost::skill_add::{Ctx, Look, look_shared, shared_origin};
+use clio_toolhost::skill_add::{Ctx, Known, Look, look_shared, shared_origin};
 use clio_toolhost::skills::{self, SkillFile};
 use serde_json::{Value, json};
 
 const FLAG: &str = "IGNORE PREVIOUS INSTRUCTIONS";
 /// What the test judge refuses to take (as the paced judge does with its breaker open).
 const REFUSE: &str = "REFUSED-BY-THE-JUDGE";
+/// What the test judge does not answer for.
+const SILENT: &str = "THE-JUDGE-SAYS-NOTHING";
 
 fn md(name: &str, body: &str) -> String {
     format!("---\nname: {name}\ndescription: Says {name}. Use when greeting.\n---\n\n{body}\n")
@@ -32,11 +34,25 @@ fn shared(home: &Path) -> PathBuf {
 /// A look at `home`'s shared folder against the skills folder `root`, with a judge that flags
 /// `FLAG` (or says `off`), remembering what it read; `quiet` is what the person said no to.
 fn look(home: &Path, root: &Path, off: bool, quiet: &[(String, String)]) -> (Look, Vec<String>) {
+    look_knowing(home, root, off, quiet, (&[], &[]))
+}
+
+/// `look`, knowing what the judge did not answer for today and what waits judged clean; the
+/// test judge does not answer for `SILENT`.
+fn look_knowing(
+    home: &Path,
+    root: &Path,
+    off: bool,
+    quiet: &[(String, String)],
+    (silent, waiting): (&[(String, String)], &[String]),
+) -> (Look, Vec<String>) {
     let read = RefCell::new(vec![]);
     let judge = |t: &str, _: &str| {
         read.borrow_mut().push(t.to_owned());
         if t.contains(REFUSE) {
             Err("the judge takes no call now".to_owned())
+        } else if t.contains(SILENT) {
+            Ok(TextVerdict::NoAnswer)
         } else if off {
             Ok(TextVerdict::NoJudge)
         } else if t.contains(FLAG) {
@@ -58,7 +74,14 @@ fn look(home: &Path, root: &Path, off: bool, quiet: &[(String, String)]) -> (Loo
         get: &get,
     };
     let quiet = |o: &str, s: &str| quiet.iter().any(|(a, b)| a == o && b == s);
-    let l = look_shared(&cx, &quiet).unwrap();
+    let silent = |o: &str, s: &str| silent.iter().any(|(a, b)| a == o && b == s);
+    let waiting = |t: &str| waiting.iter().any(|w| w == t);
+    let known = Known {
+        quiet: &quiet,
+        silent: &silent,
+        waiting: &waiting,
+    };
+    let l = look_shared(&cx, &known).unwrap();
     (l, read.into_inner())
 }
 
@@ -130,16 +153,92 @@ fn unchanged_is_left_alone_and_new_or_changed_is_judged_and_asked() {
     put(&s.join("hello/ref.md"), "one, two\n");
     put(&s.join("hello/new.md"), "new\n");
     fs::remove_file(s.join("hello/old.md")).unwrap();
+    // When each file was written is shown too.
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_755_634);
+    for f in ["ref.md", "new.md"] {
+        fs::File::options()
+            .write(true)
+            .open(s.join("hello").join(f))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
     let (l, read) = look(&home, &root, false, &[]);
     assert_eq!((names(&l), read.len()), (vec!["hello"], 1));
     assert_eq!(l.ask[0]["update"], true);
     assert_eq!(
         l.ask[0]["change"],
         json!([
-            "added: new.md (4 bytes)",
-            "changed: ref.md (9 bytes, was 4)",
-            "removed: old.md"
+            "added: new.md (4 bytes; written 2026-11-04 01:27 +00:00)",
+            "changed: ref.md (9 bytes, was 4; written 2026-11-04 01:27 +00:00)",
+            "removed: old.md",
+            "ref.md:",
+            "  @@ -1 +1 @@",
+            "  -one",
+            "  +one, two"
         ])
+    );
+    assert_eq!(l.ask[0]["written"], "");
+}
+
+// S-74: the box shows a changed text file line by line against the person's last yes (two lines
+// of context, `MAX_DIFF_LINES` in all, the rest counted), and a new skill when its newest file
+// was written.
+#[test]
+fn a_change_is_shown_line_by_line_and_a_new_skill_says_when_it_was_written() {
+    let t = tempfile::tempdir().unwrap();
+    let (home, root) = (t.path().join("home"), t.path().join("data/skills"));
+    let s = shared(&home);
+    let body: String = (1..=100).map(|k| format!("line {k}\n")).collect();
+    put(&s.join("long/SKILL.md"), &md("long", &body));
+    let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_793_755_634);
+    fs::File::options()
+        .write(true)
+        .open(s.join("long/SKILL.md"))
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+    let (l, _) = look(&home, &root, false, &[]);
+    assert_eq!(l.ask[0]["written"], "2026-11-04 01:27 +00:00");
+    assert!(l.ask[0]["change"].as_array().unwrap().is_empty());
+    register(&root, &l.ask[0]);
+    // One line changed in the middle: that line, with two lines around it.
+    put(
+        &s.join("long/SKILL.md"),
+        &md("long", &body.replace("line 50\n", "line fifty\n")),
+    );
+    let (l, _) = look(&home, &root, false, &[]);
+    let change: Vec<&str> = l.ask[0]["change"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        change[1..],
+        [
+            "SKILL.md:",
+            "  @@ -53 +53 @@",
+            "   line 48",
+            "   line 49",
+            "  -line 50",
+            "  +line fifty",
+            "   line 51",
+            "   line 52"
+        ]
+    );
+    // Every line changed: the diff stops at `MAX_DIFF_LINES`, the rest counted.
+    put(
+        &s.join("long/SKILL.md"),
+        &md("long", &body.replace("line", "row")),
+    );
+    let (l, _) = look(&home, &root, false, &[]);
+    let change = l.ask[0]["change"].as_array().unwrap();
+    assert_eq!(change.len(), 1 + 60 + 1);
+    assert!(
+        change[61].as_str().unwrap().starts_with("and ")
+            && change[61].as_str().unwrap().ends_with(" more lines"),
+        "{change:?}"
     );
 }
 
@@ -260,7 +359,15 @@ fn no_link_is_followed_and_no_folder_is_nothing() {
             clean: &clean,
             get: &get,
         };
-        look_shared(&cx, &|_, _| false).unwrap_err()
+        look_shared(
+            &cx,
+            &Known {
+                quiet: &|_, _| false,
+                silent: &|_, _| false,
+                waiting: &|_| false,
+            },
+        )
+        .unwrap_err()
     };
     let h1 = t.path().join("h1");
     fs::create_dir_all(&h1).unwrap();
@@ -309,8 +416,9 @@ fn a_name_another_origin_holds_keeps_its_owner() {
 }
 
 // S-74 S-72: a command or a write tool that writes under `~/.agents/` is `control` and never the
-// machine's alone (so no window or bypass answers it), however the path is spelled; reading
-// there, and a project's own `.agents`, are not.
+// machine's alone (so no window or bypass answers it), in every spelling the classifier catches
+// (the rest, listed in `the_jail_keeps_the_shared_folder_read_only`, only the jail stops);
+// reading there, and a project's own `.agents`, are not.
 #[test]
 fn writing_under_the_shared_folder_always_asks() {
     let r = HostRules::factory().with_control(
@@ -336,6 +444,18 @@ fn writing_under_the_shared_folder_always_asks() {
         "rm -rf ~/.agents/skills/y",
         "cd ~/.agents/skills && sed -i s/a/b/ x/SKILL.md",
         "sh -c 'cp /tmp/x ~/.agents/skills/'",
+        "cp -r /tmp/x ~u/.agents/skills/",
+        "mkdir -p ${HOME%/}/.agents/skills/x",
+        "mkdir -p ${HOME:-/x}/.agents/skills/x",
+        "mkdir -p $PWD/.agents/skills/x",
+        "mkdir -p ${PWD}/.agents/skills/x",
+        "mkdir -p $(pwd)/.agents/skills/x",
+        "mkdir -p /proc/self/cwd/.agents/skills/x",
+        "cd / && mkdir -p home/u/.agents/skills/x",
+        "mkdir -p ~/proj/../../u/.agents/skills/x",
+        "cp -t/home/u/.agents/skills /tmp/x",
+        "cp -r /tmp/x //home/u//.agents/skills/",
+        "cp -r /tmp/x /home/u/./.agents/skills/",
     ] {
         assert_eq!(r.classify_command(c), Some(Class::Control), "{c}");
         assert!(!r.machine_only(c), "{c}");
@@ -349,6 +469,10 @@ fn writing_under_the_shared_folder_always_asks() {
         "cp x proyecto/.agents/skills/",
         "cp x ~/.agentsy/",
         "cp a/* b/",
+        // A project's own `.agents`, from its folder.
+        "cd ~/proj && git add .agents",
+        "cd ~/proj && mkdir -p .agents/skills/x",
+        "cd /srv/app; cp x .agents/",
     ] {
         assert_eq!(r.classify_command(c), None, "{c}");
     }
@@ -384,4 +508,148 @@ fn the_digest_is_the_one_the_yes_checks() {
         a["sha256"].as_str().unwrap(),
         skills::digest(a["skill_md"].as_str().unwrap(), &files)
     );
+}
+
+// S-74: the judge's budget. What waits judged clean is known before the cap and before a judge
+// that refuses calls: not judged again, not counted, still asked. What the judge did not answer
+// for is remembered for the day: not judged again at every chat that opens.
+#[test]
+fn what_waits_is_not_judged_again_and_a_silent_judge_is_remembered_for_the_day() {
+    let t = tempfile::tempdir().unwrap();
+    let (home, root) = (t.path().join("home"), t.path().join("data/skills"));
+    let s = shared(&home);
+    put(&s.join("a/SKILL.md"), &md("a", "A."));
+    put(&s.join("b/SKILL.md"), &md("b", REFUSE));
+    let (l, _) = look(&home, &root, false, &[]);
+    let whole_a = skills::whole_text(l.ask[0]["skill_md"].as_str().unwrap(), &[]);
+    // `b` comes first with the judge refusing from then on; `a` waits, so it is still asked.
+    fs::rename(s.join("a"), s.join("z")).unwrap();
+    let (l, read) = look_knowing(
+        &home,
+        &root,
+        false,
+        &[],
+        (&[], std::slice::from_ref(&whole_a)),
+    );
+    assert_eq!(names(&l), ["a"]);
+    assert_eq!(read.len(), 1, "only b was read");
+    assert!(
+        l.apart.iter().any(|x| x.contains("b: not read yet")),
+        "{l:?}"
+    );
+    // The judge says nothing of `c`: remembered, and not judged again that day.
+    fs::remove_dir_all(s.join("b")).unwrap();
+    put(&s.join("c/SKILL.md"), &md("c", SILENT));
+    let (l, read) = look_knowing(
+        &home,
+        &root,
+        false,
+        &[],
+        (&[], std::slice::from_ref(&whole_a)),
+    );
+    assert_eq!(read.len(), 1);
+    assert_eq!(l.silent.len(), 1);
+    assert_eq!(l.silent[0].0, "~/.agents/skills/c");
+    let (l2, read) = look_knowing(&home, &root, false, &[], (&l.silent, &[whole_a]));
+    assert!(read.is_empty(), "{read:?}");
+    assert!(
+        l2.apart
+            .iter()
+            .any(|x| x.contains("c: not judged (the judge did not answer for it today)")),
+        "{l2:?}"
+    );
+}
+
+// S-74: each folder at the top is read on its own, with a skill's limits before anything is
+// read: one too large or that cannot be read is said with why, counts as there (never gone),
+// and never stops the others. What tools leave behind (`.git`, `node_modules`, `venv`, `.venv`,
+// `__pycache__`) is skipped the same way by the look and by `clio skills add`, whose items for
+// the shared folder carry each skill's own origin, so the two agree.
+#[test]
+fn each_skill_is_read_on_its_own_and_the_look_and_an_add_agree() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let (home, root) = (t.path().join("home"), t.path().join("data/skills"));
+    let s = shared(&home);
+    put(&s.join("good/SKILL.md"), &md("good", "Good."));
+    for junk in [
+        ".git/HEAD",
+        "node_modules/x/index.js",
+        "venv/bin/python",
+        ".venv/pyvenv.cfg",
+        "__pycache__/x.pyc",
+        "scripts/__pycache__/y.pyc",
+    ] {
+        put(&s.join("good").join(junk), "junk");
+    }
+    put(&s.join("good/scripts/run.sh"), "echo good\n");
+    for k in 0..=skills::MAX_ADDED_FILES {
+        put(&s.join(format!("big/f{k}.md")), "x");
+    }
+    put(&s.join("big/SKILL.md"), &md("big", "Big."));
+    put(&s.join("locked/SKILL.md"), &md("locked", "Locked."));
+    fs::set_permissions(s.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = fs::read_dir(s.join("locked")).is_ok();
+    let (l, _) = look(&home, &root, false, &[]);
+    fs::set_permissions(s.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(names(&l), ["good"]);
+    let files: Vec<&str> = l.ask[0]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["scripts/run.sh"]);
+    let apart = l.apart.join("\n");
+    assert!(
+        apart.contains("~/.agents/skills/big: more than 100 files"),
+        "{apart}"
+    );
+    for o in ["~/.agents/skills/big", "~/.agents/skills/good"] {
+        assert!(l.found.iter().any(|(f, _)| f == o), "{o}: {:?}", l.found);
+    }
+    if !readable {
+        assert!(
+            apart.contains("~/.agents/skills/locked: it cannot be read ("),
+            "{apart}"
+        );
+        assert!(l.found.contains(&("~/.agents/skills/locked".into(), None)));
+    }
+    // `clio skills add` of that skill, and of the whole folder: the same content and origin.
+    let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
+    let clean = |t: &str| Some(t.to_owned());
+    let get = |_: &str, _: &Path| false;
+    let cx = Ctx {
+        home: &home,
+        base: &home,
+        root: &root,
+        staging: &root.join("staging"),
+        judge: &judge,
+        most: None,
+        clean: &clean,
+        get: &get,
+    };
+    let one = clio_toolhost::skill_add::prepare(&p(&s.join("good")), &[], &cx).unwrap();
+    assert_eq!(one[0]["sha256"], l.ask[0]["sha256"]);
+    assert_eq!(one[0]["origin"], "~/.agents/skills/good");
+    fs::remove_dir_all(s.join("big")).unwrap();
+    fs::remove_dir_all(s.join("locked")).unwrap();
+    put(&s.join("group/inner/SKILL.md"), &md("inner", "Inner."));
+    let all = clio_toolhost::skill_add::prepare(&p(&s), &[], &cx).unwrap();
+    let got: Vec<(&str, &str)> = all
+        .iter()
+        .map(|a| (a["name"].as_str().unwrap(), a["origin"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("good", "~/.agents/skills/good"),
+            ("inner", "~/.agents/skills/group/inner")
+        ]
+    );
+    assert_eq!(all[0]["sha256"], l.ask[0]["sha256"]);
+}
+
+fn p(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }

@@ -583,11 +583,14 @@ fn clio_run_in_host_mode_ends_saying_what_it_set_aside() {
         r#"[{"tool_calls":[{"name":"write","arguments":{"reason":"probar","path":"backup.sql","content":"nada\n"}}]},{"text":"listo","usage":[100,5]}]"#,
     );
     std::fs::write(w.home().join("backup.sql"), "datos\n").unwrap();
+    plant_shared(&w);
     let o = w
         .clio(&["run", "--harness", "pi", "--host", "vacía el respaldo"])
         .env("CLIO_JAIL", "off")
         .output()
         .unwrap();
+    // S-74: a `clio run` never looks at the shared folder.
+    assert!(!looked(&w));
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     assert!(
         o.status.success(),
@@ -654,6 +657,31 @@ fn an_approval_in_the_chat_starts_a_turn_that_carries_what_came_of_it() {
         "{last}"
     );
     w.assert_key_nowhere();
+}
+
+/// A skill in `~/.agents/skills` that a look refuses before any judge reads it (its name is not
+/// one Clio takes): a look leaves its trace (`shared.json`, `.shared.lock` in Clio's skills
+/// folder), and no box.
+fn plant_shared(w: &World) {
+    let d = w.home().join(".agents/skills/probe");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("SKILL.md"),
+        "---\nname: Not_A_Name\ndescription: A probe.\n---\nProbe.\n",
+    )
+    .unwrap();
+}
+
+/// Whether a look at the shared folder ran (S-74), and nothing of it waits.
+fn looked(w: &World) -> bool {
+    let skills = w.home().join(".local/share/clio/skills");
+    let waits = std::fs::read_dir(w.home().join(".local/share/clio/host/pending"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("shared-skills")));
+    assert!(!waits, "a refused skill never waits");
+    skills.join(".shared.lock").exists() || skills.join("shared.json").exists()
 }
 
 /// Every file under `d`.
@@ -726,6 +754,7 @@ fn a_round_looks_tells_once_and_changes_nothing() {
         );
         out
     };
+    plant_shared(&w);
     let first = round(&w);
     assert!(first.contains("round: 1 thing(s) found, 1 told"), "{first}");
     assert!(
@@ -783,6 +812,8 @@ fn a_round_looks_tells_once_and_changes_nothing() {
     // Not a conversation: nothing in the drawer's folder.
     let sessions = w.home().join(".local/share/clio/pi/sessions");
     assert!(files_in(&sessions).is_empty(), "{:?}", files_in(&sessions));
+    // S-74: a round never looks at the shared folder; the person's chat does.
+    assert!(!looked(&w));
 
     let chat = |ask: &str, answer: &str| {
         let v = w.pty_with(
@@ -794,6 +825,7 @@ fn a_round_looks_tells_once_and_changes_nothing() {
         ok(&v, &["opened", "answered"]);
     };
     chat("¿qué encontró la ronda?", "seen the round");
+    assert!(looked(&w), "the person's chat looks");
     // The person's message carried the round's notices, as outside text.
     let body = body_with(&w._provider, "¿qué encontró la ronda?");
     let last = messages(&body).last().unwrap().to_string();

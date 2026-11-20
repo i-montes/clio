@@ -345,32 +345,62 @@ fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
 }
 
 /// The home's `~/.agents` (S-74: the shared skills folder is in it), as a command may name it:
-/// absolute, `~/`, `$HOME/`, `${HOME}/`, `./` or bare (a command runs in the home), after a `..`,
-/// glued to a short option, or by a glob a shell would expand to it (`names_by_glob`).
+/// absolute, `~/`, `~user/`, `$HOME/`, `${HOME…}/`, after a `..` or the home's own name (`cd / &&
+/// … home/u/.agents`), glued to a short option, or by a glob a shell would expand to it
+/// (`names_by_glob`); and, while the command stays in the home where it runs, bare, `./`,
+/// `$PWD/`, `$(pwd)/` or `/proc/self/cwd/`. A word match: what it misses, the jail stops (the
+/// folder is read-only to every command the person did not approve for it).
 #[derive(Debug, Clone)]
 struct Agents {
+    home: Vec<PathBuf>,
     dirs: Vec<PathBuf>,
     /// The same, by component, for `names_by_glob`.
     paths: Vec<Vec<String>>,
-    exact: Regex,
+    /// Wherever the command is.
+    rooted: Regex,
+    /// From the home.
+    here: Regex,
 }
 
 impl Agents {
     fn new(home: &Path) -> Self {
-        let mut dirs = vec![home.join(".agents")];
-        if let Ok(c) = home.canonicalize() {
-            dirs.push(c.join(".agents"));
-        }
-        dirs.dedup();
-        let any = spellings(home, &dirs).join("|");
+        let mut homes = vec![home.to_path_buf()];
+        homes.extend(home.canonicalize().ok());
+        homes.dedup();
+        let dirs: Vec<PathBuf> = homes.iter().map(|h| h.join(".agents")).collect();
+        let abs: Vec<String> = dirs
+            .iter()
+            .map(|d| regex::escape(&d.to_string_lossy()))
+            .collect();
+        let names: Vec<String> = homes
+            .iter()
+            .filter_map(|h| h.file_name())
+            .map(|n| regex::escape(&n.to_string_lossy()))
+            .collect();
+        let pre = r"(^|[^\w.~/$-]|(^|\s)-[A-Za-z0-9]+)";
+        let end = r"($|[^\w.-])";
+        let rooted = format!(
+            r"{pre}({abs}|(~/|\$HOME/|\$\{{HOME[^}}]*\}}/|~({names})/)\.agents){end}|(^|[^\w.-])({names})/\.agents{end}|\.\./\.agents{end}",
+            abs = abs.join("|"),
+            names = names.join("|"),
+        );
+        let here = format!(
+            r"{pre}(\./|\$PWD/|\$\{{PWD\}}/|\$\(pwd\)/|`pwd`/|/proc/(self|[0-9]+)/cwd/)?\.agents{end}"
+        );
         Self {
             paths: dirs.iter().map(|d| components(d)).collect(),
-            exact: Regex::new(&format!(
-                r"(^|[^\w.~/$-]|\.\./|(^|\s)-[A-Za-z0-9]+)({any})($|[^\w.-])"
-            ))
-            .expect("escaped paths"),
+            rooted: Regex::new(&rooted).expect("escaped paths"),
+            here: Regex::new(&here).expect("a fixed pattern"),
+            home: homes,
             dirs,
         }
+    }
+
+    /// `word` names the home (`~`, `$HOME`, `${HOME}` or its path): a `cd` there stays in it.
+    fn is_home(&self, word: &str) -> bool {
+        let w = bare(word);
+        let w = w.trim_end_matches('/');
+        matches!(w, "~" | "$HOME" | "${HOME}") || self.home.iter().any(|h| Path::new(w) == h)
     }
 }
 
@@ -629,12 +659,20 @@ impl HostRules {
     }
 
     /// `text` names `~/.agents` (S-74), as written, without quotes and backslashes, or by a glob.
-    fn names_agents(&self, text: &str) -> bool {
+    pub fn names_agents(&self, text: &str) -> bool {
         self.agents.as_ref().is_some_and(|a| {
             let text = squash(text);
-            [text.as_str(), bare(&text).as_str()]
-                .iter()
-                .any(|t| a.exact.is_match(t) || self.names_by_glob_of(&a.paths, t))
+            // A bare `.agents` is the home's only while the command stays there (where it runs).
+            let moved = simple_commands(&text).iter().any(|w| {
+                matches!(w[0].as_str(), "cd" | "pushd")
+                    && w.get(1)
+                        .is_some_and(|d| !d.starts_with('-') && !a.is_home(d))
+            });
+            [text.as_str(), bare(&text).as_str()].iter().any(|t| {
+                a.rooted.is_match(t)
+                    || (!moved && a.here.is_match(t))
+                    || self.names_by_glob_of(&a.paths, t)
+            })
         })
     }
 

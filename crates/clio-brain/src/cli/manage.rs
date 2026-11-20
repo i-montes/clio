@@ -136,7 +136,7 @@ fn carry_out_with(d: &Dirs, p: &Pending, window: bool, run: RunFn<'_>) -> Res<St
     }
     if window {
         let shipped = kind == Kind::Skill && skills::is_shipped(name);
-        if action == "on" && rec.off.as_deref() == Some(m::OFF_BY_PERSON) {
+        if action == "on" && rec.off.as_deref().is_some_and(m::off_by_person) {
             return Err(m::PERSON_OFF.into());
         }
         if matches!(action, "remove" | "undo") && shipped {
@@ -579,6 +579,13 @@ mod tests {
         skills::set_enabled_in(&root, Kind::Service, "disk", false, skills::OFF_BY_PERSON).unwrap();
         let r = ask(&h, "service_manage", "disk", "on");
         assert!(r.content.contains(m::PERSON_OFF), "{r:?}");
+        // S-74: gone from the shared folder is the person's doing too, in the tool host and here.
+        skills::set_enabled_in(&root, Kind::Service, "disk", false, skills::GONE).unwrap();
+        let on = aside(&h, &d, "service_manage", "disk", "on");
+        assert_eq!(on.reason.as_deref(), Some(m::PERSON_OFF));
+        let mut bare = on.clone();
+        bare.reason = None;
+        assert!(carry_out(&d, &bare, true).is_err());
         // A session flagged meanwhile: nothing it asked runs by itself.
         skills::set_enabled_in(&root, Kind::Service, "disk", true, "").unwrap();
         ask(&h, "service_manage", "disk", "off");

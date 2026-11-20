@@ -1210,3 +1210,115 @@ fn an_answered_skill_from_outside_keeps_no_text() {
     assert!(p.args.get("skill_md").is_none() && p.args.get("files").is_none());
     assert_eq!(p.args["name"], "hello");
 }
+
+// S-74: the jail is the wall around `~/.agents`, not the classifier. A host-mode session makes
+// `~/.agents/skills` (empty, 0700) when it starts, and every command's jail shows `~/.agents`
+// read-only: each family of spelling fails to write there, whether the classifier asks for it
+// (then it waits) or not (then it runs, and the jail stops it): a plain path, `cp -r … ~/`,
+// `tar -C ~`, a path relative to the home's parent, `$PWD`, `/proc/self/cwd`, a runner with `-c`,
+// a script. Only a command the person approved as `control` for that folder writes there.
+#[test]
+fn the_jail_keeps_the_shared_folder_read_only() {
+    let e = env_with(true, true, None);
+    if let Err(why) = e.host.exec_available() {
+        assert!(
+            std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+            "CLIO_REQUIRE_JAIL is set and the jail is not available: {why}"
+        );
+        eprintln!("SKIPPED (the host launcher cannot run here): {why}");
+        return;
+    }
+    let agents = e.home.join(".agents");
+    let skills_dir = agents.join("skills");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(&skills_dir).unwrap();
+        assert!(m.is_dir() && m.permissions().mode() & 0o777 == 0o700);
+    }
+    let outside = e.home.parent().unwrap().join("outside");
+    let src = outside.join("s");
+    std::fs::create_dir_all(src.join(".agents/skills/planted")).unwrap();
+    std::fs::write(src.join(".agents/skills/planted/SKILL.md"), "x\n").unwrap();
+    let tar = outside.join("s.tar");
+    assert!(
+        std::process::Command::new("tar")
+            .arg("-C")
+            .arg(&src)
+            .arg("-cf")
+            .arg(&tar)
+            .arg(".agents")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (h, s, t) = (p(&e.home), p(&src), p(&tar));
+    let base = e.home.file_name().unwrap().to_string_lossy().into_owned();
+    let families = [
+        format!("mkdir -p {h}/.agents/skills/planted"),
+        format!("cp -r {s}/.agents {h}/"),
+        format!("tar -C {h} -xf {t}"),
+        format!("cd {h}/.. && mkdir -p {base}/.agents/skills/planted"),
+        "mkdir -p $PWD/.agents/skills/planted".to_owned(),
+        "mkdir -p /proc/self/cwd/.agents/skills/planted".to_owned(),
+        "python3 -c 'import os; os.makedirs(os.path.expanduser(\"~/.agen\" + \"ts/skills/planted\"))'"
+            .to_owned(),
+        "sh -c 'mkdir -p ~/.agen\"ts\"/skills/planted'".to_owned(),
+    ];
+    let script = e.home.join("f.sh");
+    for f in &families {
+        // As typed: asked (the classifier caught it) or run (and the jail stopped it).
+        let r = call(&e, "s", "exec", json!({"command": f}));
+        assert!(
+            matches!(r.decision.outcome.as_str(), "ask" | "allow"),
+            "{f}: {r:?}"
+        );
+        // In a script, which the classifier never reads: it runs, and the jail stops it.
+        std::fs::write(&script, format!("{f}\n")).unwrap();
+        let r = call(
+            &e,
+            "s",
+            "exec",
+            json!({"command": format!("sh {}", p(&script))}),
+        );
+        assert_eq!(r.decision.outcome, "allow", "{f}: {r:?}");
+        assert!(
+            std::fs::read_dir(&skills_dir).unwrap().next().is_none(),
+            "{f} wrote under ~/.agents: {r:?}"
+        );
+    }
+    assert_eq!(std::fs::read_dir(&agents).unwrap().count(), 1);
+    // The same commands do run: elsewhere in the home they write.
+    std::fs::write(&script, format!("mkdir -p {h}/.other/x\n")).unwrap();
+    call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": format!("sh {}", p(&script))}),
+    );
+    assert!(e.home.join(".other/x").is_dir());
+    // The person's own yes to a command for that folder: it writes there.
+    let r = call(
+        &e,
+        "s",
+        "exec",
+        json!({"command": format!("mkdir -p {h}/.agents/skills/mine")}),
+    );
+    assert_eq!(r.decision.outcome, "ask", "{r:?}");
+    let id = clio_toolhost::pending::list(&e.data.join("host"))
+        .into_iter()
+        .find(|x| {
+            x.args["command"]
+                .as_str()
+                .is_some_and(|c| c.ends_with("/mine"))
+        })
+        .unwrap()
+        .id;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    e.host
+        .approve_by(&id, i64::try_from(now).unwrap(), None)
+        .unwrap();
+    assert!(skills_dir.join("mine").is_dir());
+}

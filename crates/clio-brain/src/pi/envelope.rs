@@ -136,7 +136,7 @@ pub fn stamp_now() -> String {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
-        utc_stamp(secs)
+        clio_core::utc_stamp(secs)
     })
 }
 
@@ -180,26 +180,6 @@ fn local_stamp(s: &str) -> Option<String> {
         && (b[17] == b'+' || b[17] == b'-')
         && digits(18..22);
     ok.then(|| format!("{}:{}", &s[..20], &s[20..]))
-}
-
-/// Seconds since the epoch as `2026-11-03 23:42 +00:00` (proleptic Gregorian, days-from-civil).
-fn utc_stamp(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02} +00:00",
-        rem / 3_600,
-        rem % 3_600 / 60
-    )
 }
 
 #[cfg(test)]
@@ -313,10 +293,13 @@ mod tests {
 
     #[test]
     fn the_utc_fallback_matches_known_instants() {
-        assert_eq!(utc_stamp(0), "1970-01-01 00:00 +00:00");
-        assert_eq!(utc_stamp(951_782_400), "2000-02-29 00:00 +00:00");
-        assert_eq!(utc_stamp(1_793_755_634), "2026-11-04 01:27 +00:00");
-        assert_eq!(utc_stamp(-1), "1969-12-31 23:59 +00:00");
+        assert_eq!(clio_core::utc_stamp(0), "1970-01-01 00:00 +00:00");
+        assert_eq!(clio_core::utc_stamp(951_782_400), "2000-02-29 00:00 +00:00");
+        assert_eq!(
+            clio_core::utc_stamp(1_793_755_634),
+            "2026-11-04 01:27 +00:00"
+        );
+        assert_eq!(clio_core::utc_stamp(-1), "1969-12-31 23:59 +00:00");
     }
 
     #[test]

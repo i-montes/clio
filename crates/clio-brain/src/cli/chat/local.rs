@@ -677,7 +677,7 @@ impl HostSide {
                 && (crate::cli::round::is_round(&self.dirs, &p.run)
                     // Once the look that sets them aside ended: all in one box (S-74).
                     || (p.run == crate::cli::skills::SHARED_RUN
-                        && !crate::cli::skills::looking())))
+                        && !crate::cli::skills::looking(&self.dirs))))
     }
 
     /// Bypass acts for this conversation now: a person's chat (nothing checks what waits in a
@@ -2286,8 +2286,8 @@ mod tests {
     }
 
     // S-74: only a person's chat looks at the shared folder (beside it, once it is open) and gets
-    // its box: a `clio run` and a round never look (a review and a subagent never open through `LocalSource`, and nothing
-    // else calls the look), its items are asked in a person's chat and nowhere else, and bypass
+    // its box: a `clio run` and a round never look (`tests/pi_chat.rs` checks it end to end), its
+    // items are asked in a person's chat and nowhere else, never while a look runs, and bypass
     // never answers one.
     #[test]
     fn only_a_persons_chat_looks_at_the_shared_folder_and_bypass_never_answers_it() {
@@ -2306,10 +2306,12 @@ mod tests {
             .unwrap();
         assert!(h.mine(&p, "s1"));
         // While the look that sets them aside runs, none is asked: its box holds them all.
-        crate::cli::skills::LOOKING.store(true, std::sync::atomic::Ordering::SeqCst);
-        let held = !h.mine(&p, "s1");
-        crate::cli::skills::LOOKING.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(held);
+        let lock = crate::cli::skills::look_lock(&crate::cli::skills::root(&d), false)
+            .unwrap()
+            .unwrap();
+        assert!(!h.mine(&p, "s1"));
+        drop(lock);
+        assert!(h.mine(&p, "s1"));
         pending::bypass_on(&d, false).unwrap();
         let e = h
             .grant("s1", false, &p.id, |_| -> Result<String, String> {
@@ -2321,30 +2323,6 @@ mod tests {
         // A `clio run`'s side does not ask it.
         h.rounds = false;
         assert!(!h.mine(&p, "s1"));
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut callers = vec![];
-        let mut todo = vec![src.clone()];
-        while let Some(dir) = todo.pop() {
-            for e in std::fs::read_dir(&dir).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    todo.push(p);
-                    continue;
-                }
-                let rel = p.strip_prefix(&src).unwrap().display().to_string();
-                let text = std::fs::read_to_string(&p).unwrap_or_default();
-                let code = text.split("\nmod tests {").next().unwrap_or("");
-                if !rel.contains("tests")
-                    && code
-                        .lines()
-                        .any(|l| l.contains("shared_open(") && !l.contains("fn shared_open("))
-                {
-                    callers.push(rel);
-                }
-            }
-        }
-        // The chat's runtime, beside a session that `looks_at_shared`.
-        assert_eq!(callers, ["cli/tui/mod.rs"]);
     }
 
     /// A conversation's host side on its own folders (run `r1`), the judge on.

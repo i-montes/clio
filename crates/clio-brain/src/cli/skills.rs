@@ -647,15 +647,30 @@ pub(crate) fn set_enabled_in(
     on: bool,
     why: &str,
 ) -> Res<String> {
+    set_enabled_when(root, kind, name, (on, why), &|_| true).map(Option::unwrap_or_default)
+}
+
+/// `set_enabled_in` only if `when` holds of its record, read under the lock (`None`: it did not,
+/// and nothing changed).
+fn set_enabled_when(
+    root: &Path,
+    kind: Kind,
+    name: &str,
+    (on, why): (bool, &str),
+    when: &dyn Fn(&Record) -> bool,
+) -> Res<Option<String>> {
     let _l = lock_in(root, kind)?;
     // A shipped skill, removed: `on` installs it again, as this binary has it.
     if kind == Kind::Skill && on && is_shipped(name) && record(root, name).is_none() {
         let n = install_shipped(root, name, shipped_files(name))?;
-        return Ok(format!(
+        return Ok(Some(format!(
             "«{name}» is installed again as Clio ships it (version {n}): from the next session"
-        ));
+        )));
     }
     let mut r = known_kind(root, kind, name)?;
+    if !when(&r) {
+        return Ok(None);
+    }
     r.enabled = on;
     r.off = (!on).then(|| why.to_owned());
     if on {
@@ -669,7 +684,7 @@ pub(crate) fn set_enabled_in(
         }
     }
     save(root, &r)?;
-    Ok(format!(
+    Ok(Some(format!(
         "«{name}» is {}{}",
         if on { "on" } else { "off" },
         if kind == Kind::Skill {
@@ -677,7 +692,7 @@ pub(crate) fn set_enabled_in(
         } else {
             ""
         }
-    ))
+    )))
 }
 
 /// Back to the version before the current one, exactly as it was registered.
@@ -917,6 +932,13 @@ pub fn register_found(root: &Path, a: &Value) -> Res<String> {
         s("origin"),
         a["commit"].as_str(),
     )?;
+    // A yes to a skill of the shared folder (S-74): what was said of it before is forgotten.
+    if s("origin").starts_with(&clio_toolhost::skill_add::shared_origin("")) {
+        let _ = remember(root, |r| {
+            r.quiet.remove(s("origin"));
+            r.silent.remove(s("origin"));
+        });
+    }
     Ok(format!(
         "the skill «{}» is added (version {n}): available from the next session",
         s("name")
@@ -981,35 +1003,52 @@ type Look<'a> = (Judge<'a>, &'a dyn Fn(&str) -> Option<String>);
 /// asks it (`HostSide::mine`), and nothing else does.
 pub const SHARED_RUN: &str = "shared-skills";
 /// Why a skill of the shared folder is off: it is gone from there.
-pub const GONE: &str = "gone from ~/.agents/skills";
+pub const GONE: &str = clio_toolhost::manage::OFF_GONE;
 
-/// What of the shared folder the person said no to, or was told why it is not asked: by origin,
-/// what was there then (`seen`). That is not asked or said again until it changes.
-fn quiet_file(root: &Path) -> PathBuf {
-    root.join("shared.json")
+/// What Clio remembers of the shared folder (S-74), in `skills/shared.json`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Remembered {
+    /// What the person said no to, or was told why it is not asked: by origin, what was there
+    /// then (`seen`). Not asked or said again until it changes, or until a yes to that skill.
+    #[serde(default)]
+    quiet: std::collections::BTreeMap<String, String>,
+    /// What the judge did not answer for: by origin, what was there and the day (since the
+    /// epoch). Not judged again that day.
+    #[serde(default)]
+    silent: std::collections::BTreeMap<String, (String, i64)>,
 }
 
-fn quiet(root: &Path) -> std::collections::BTreeMap<String, String> {
-    fs::read_to_string(quiet_file(root))
+fn remembered(root: &Path) -> Remembered {
+    fs::read_to_string(root.join("shared.json"))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
+}
+
+/// `change` made to what is remembered, under the skills folder's lock.
+fn remember(root: &Path, change: impl FnOnce(&mut Remembered)) -> Res<()> {
+    let _l = lock(root)?;
+    let mut r = remembered(root);
+    change(&mut r);
+    let p = root.join("shared.json");
+    let tmp = p.with_extension("json.tmp");
+    write_private(
+        &tmp,
+        &serde_json::to_vec_pretty(&r).map_err(|e| e.to_string())?,
+    )?;
+    fs::rename(&tmp, &p).map_err(|e| io_err(&p, &e))
 }
 
 fn keep_quiet(root: &Path, add: &[(String, String)]) -> Res<()> {
     if add.is_empty() {
         return Ok(());
     }
-    let _l = lock(root)?;
-    let mut q = quiet(root);
-    q.extend(add.iter().cloned());
-    let p = quiet_file(root);
-    let tmp = p.with_extension("json.tmp");
-    write_private(
-        &tmp,
-        &serde_json::to_vec_pretty(&q).map_err(|e| e.to_string())?,
-    )?;
-    fs::rename(&tmp, &p).map_err(|e| io_err(&p, &e))
+    remember(root, |r| r.quiet.extend(add.iter().cloned()))
+}
+
+/// Today, in days since the epoch.
+fn today() -> i64 {
+    now_ms().div_euclid(86_400_000)
 }
 
 /// The person said no to `p`: one of the shared folder's (S-74) is not asked again for what was
@@ -1022,14 +1061,52 @@ pub fn said_no(d: &Dirs, p: &clio_toolhost::pending::Pending) -> Res<()> {
     keep_quiet(&root(d), &[(s("origin"), s("seen"))])
 }
 
+/// The shared folder's look, one at a time across every `clio` (S-74): `None` when another holds
+/// it (`wait`: wait for it instead).
+pub(crate) fn look_lock(root: &Path, wait: bool) -> Res<Option<fs::File>> {
+    use rustix::fs::FlockOperation as Op;
+    mkdir_private(root)?;
+    let p = root.join(".shared.lock");
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&p)
+        .map_err(|e| io_err(&p, &e))?;
+    let op = if wait {
+        Op::LockExclusive
+    } else {
+        Op::NonBlockingLockExclusive
+    };
+    match rustix::fs::flock(&f, op) {
+        Ok(()) => Ok(Some(f)),
+        Err(e) if e == rustix::io::Errno::WOULDBLOCK => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
+}
+
+/// A look at the shared folder runs now, in this `clio` or another: what it sets aside is not
+/// asked before it ends, so its box holds all of them.
+pub fn looking(d: &Dirs) -> bool {
+    matches!(look_lock(&root(d), false), Ok(None))
+}
+
 /// The shared folder looked at (S-74) with `judge` and `clean` (`ignore`: what the person said
-/// no to is asked again). A copy gone from the folder is turned off, one back unchanged is on
-/// again, what is told apart is remembered; the notes for the person and what is left to ask
-/// (`None`: the folder could not be read, so nothing of it changed).
-fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Option<Vec<Value>>) {
+/// no to is asked again; `waiting`: a text judged clean that waits already). A copy gone from the
+/// folder is turned off, one back unchanged is on again (each decided under the lock), what is
+/// told apart and what the judge did not answer for are remembered; the notes for the person and
+/// what is left to ask (`None`: the folder could not be read, so nothing of it changed).
+fn shared_look(
+    d: &Dirs,
+    (judge, clean): Look,
+    ignore: bool,
+    waiting: &dyn Fn(&str) -> bool,
+) -> (Vec<String>, Option<Vec<Value>>) {
     use clio_toolhost::skill_add::{self as sa, Ctx};
     let root = root(d);
-    let q = quiet(&root);
+    let mem = remembered(&root);
+    let day = today();
     let cx = Ctx {
         home: &d.home,
         base: &d.home,
@@ -1040,9 +1117,16 @@ fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Op
         clean,
         get: &|_, _| false,
     };
-    let look = match sa::look_shared(&cx, &|o, seen| {
-        !ignore && q.get(o).is_some_and(|x| x == seen)
-    }) {
+    let known = sa::Known {
+        quiet: &|o, seen| !ignore && mem.quiet.get(o).is_some_and(|x| x == seen),
+        silent: &|o, seen| {
+            mem.silent
+                .get(o)
+                .is_some_and(|(x, on)| x == seen && *on == day)
+        },
+        waiting,
+    };
+    let look = match sa::look_shared(&cx, &known) {
         Ok(l) => l,
         Err(e) => {
             return (
@@ -1065,31 +1149,63 @@ fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Op
             continue;
         };
         let here = look.found.iter().find(|(o, _)| *o == origin);
-        let note = match here {
-            None if r.enabled => set_enabled(&root, &r.name, false, GONE).map(|_| {
-                format!(
-                    "the skill «{}» is gone from ~/.agents/skills: Clio turned her copy off (from the next session); /skills on {} turns it back on",
-                    r.name, r.name
-                )
-            }),
-            Some((_, Some(now)))
-                if !r.enabled
-                    && r.off.as_deref() == Some(GONE)
-                    && sa::last_yes(&root, &r.name, &origin).is_some_and(|(_, d)| d == *now) =>
-            {
-                set_enabled(&root, &r.name, true, "").map(|_| {
+        // Under a folder that could not be read: there, as far as anyone knows.
+        let unread = look
+            .found
+            .iter()
+            .any(|(o, d)| d.is_none() && origin.starts_with(&format!("{o}/")));
+        let back =
+            |now: &String| sa::last_yes(&root, &r.name, &origin).is_some_and(|(_, d)| d == *now);
+        let changed = match here {
+            None if r.enabled && !unread => set_enabled_when(
+                &root,
+                Kind::Skill,
+                &r.name,
+                (false, GONE),
+                &|now| now.enabled,
+            )
+            .map(|done| {
+                done.map(|_| {
                     format!(
-                        "the skill «{}» is back in ~/.agents/skills as you added it: it is on again (from the next session)",
-                        r.name
+                        "the skill «{}» is gone from ~/.agents/skills: Clio turned her copy off (from the next session); /skills on {} turns it back on",
+                        r.name, r.name
                     )
+                })
+            }),
+            Some((_, Some(now))) if !r.enabled && r.off.as_deref() == Some(GONE) && back(now) => {
+                set_enabled_when(&root, Kind::Skill, &r.name, (true, ""), &|now| {
+                    !now.enabled && now.off.as_deref() == Some(GONE)
+                })
+                .map(|done| {
+                    done.map(|_| {
+                        format!(
+                            "the skill «{}» is back in ~/.agents/skills as you added it: it is on again (from the next session)",
+                            r.name
+                        )
+                    })
                 })
             }
             _ => continue,
         };
-        notes.push(note.unwrap_or_else(|e| format!("shared skills: {e}")));
+        match changed {
+            Ok(Some(n)) => notes.push(n),
+            Ok(None) => {}
+            Err(e) => notes.push(format!("shared skills: {e}")),
+        }
     }
-    if let Err(e) = keep_quiet(&root, &look.told) {
-        notes.push(format!("shared skills: {e}"));
+    if !look.told.is_empty() || !look.silent.is_empty() {
+        let r = remember(&root, |m| {
+            m.quiet.extend(look.told.iter().cloned());
+            m.silent.retain(|_, (_, on)| *on == day);
+            m.silent.extend(
+                look.silent
+                    .iter()
+                    .map(|(o, s)| (o.clone(), (s.clone(), day))),
+            );
+        });
+        if let Err(e) = r {
+            notes.push(format!("shared skills: {e}"));
+        }
     }
     notes.extend(
         look.apart
@@ -1099,35 +1215,18 @@ fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Op
     (notes, Some(look.ask))
 }
 
-/// A look at the shared folder for a chat runs (`shared_open`): what it sets aside is not asked
-/// before it ends, so its box holds all of them.
-pub(crate) static LOOKING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub fn looking() -> bool {
-    LOOKING.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 /// When a person's chat opens (S-74), beside it (the chat does not wait for it): the shared
 /// folder looked at with the paced judge (what it sets aside waits for any person's chat, so it
-/// goes on when this one closes; it ends with the process), what is new or changed set aside for the chat's box (what waited for what is no longer there
-/// is dropped), and the notes to show. Nothing when `skills.shared` is off, or while another
-/// look runs.
+/// goes on when this one closes; it ends with the process), what is new or changed set aside for
+/// the chat's box (what waited for what is no longer there is dropped), and the notes to show.
+/// Nothing when `skills.shared` is off, or while another look runs.
 pub fn shared_open(d: &Dirs) -> Vec<String> {
-    use std::sync::atomic::Ordering;
     let Ok(cfg) = super::home::Config::load(d) else {
         return vec![];
     };
-    if !cfg.skills.shared || LOOKING.swap(true, Ordering::SeqCst) {
+    if !cfg.skills.shared {
         return vec![];
     }
-    struct Done;
-    impl Drop for Done {
-        fn drop(&mut self) {
-            LOOKING.store(false, Ordering::SeqCst);
-        }
-    }
-    let _done = Done;
     let (port, clean) = outside(d, &cfg);
     let judge = |t: &str, from: &str| {
         if !port.judge_on() {
@@ -1139,12 +1238,17 @@ pub fn shared_open(d: &Dirs) -> Vec<String> {
 }
 
 fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
+    let _held = match look_lock(&root(d), false) {
+        Ok(Some(f)) => f,
+        Ok(None) => return vec![],
+        Err(e) => return vec![format!("shared skills: {e}")],
+    };
     let st = super::pending::state(d);
     let waiting: Vec<clio_toolhost::pending::Pending> = super::pending::waiting(d)
         .into_iter()
         .filter(|p| p.run == SHARED_RUN)
         .collect();
-    // What waits was judged already: its text is not judged again.
+    // What waits was judged already: it is not judged again, nor counted.
     let texts: Vec<String> = waiting
         .iter()
         .filter_map(|p| {
@@ -1159,14 +1263,7 @@ fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
             Some(th::whole_text(md, &files))
         })
         .collect();
-    let judge = |t: &str, from: &str| {
-        if texts.iter().any(|w| w == t) {
-            Ok(clio_toolhost::TextVerdict::Clean)
-        } else {
-            (io.0)(t, from)
-        }
-    };
-    let (mut notes, ask) = shared_look(d, (&judge, io.1), false);
+    let (mut notes, ask) = shared_look(d, io, false, &|t| texts.iter().any(|w| w == t));
     // The folder could not be read: what waits keeps waiting.
     let Some(ask) = ask else {
         return notes;
@@ -1178,6 +1275,12 @@ fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
         }
     }
     for a in ask {
+        let same = |p: &clio_toolhost::pending::Pending| {
+            a["origin"] == p.args["origin"] && a["sha256"] == p.args["sha256"]
+        };
+        if waiting.iter().any(same) {
+            continue;
+        }
         let name = a["name"].as_str().unwrap_or("").to_owned();
         if let Err(e) = clio_toolhost::pending::set_aside_added(&st, SHARED_RUN, SHARED_RUN, a) {
             notes.push(super::tui::sanitize::line(&format!(
@@ -1225,8 +1328,10 @@ fn sync_with(
     if !tty && !yes {
         return Err("clio skills sync asks you at a terminal, and standard input is not one: nothing was added (run it at a terminal, or give --yes to add them without asking)".into());
     }
+    // One look at a time: a chat's waits for this one, and this one for a chat's.
+    let _held = look_lock(&root(d), true)?;
     println!("reading ~/.agents/skills…");
-    let (notes, ask) = shared_look(d, io, true);
+    let (notes, ask) = shared_look(d, io, true, &|_| false);
     let ask = ask.unwrap_or_default();
     for n in &notes {
         println!("{n}");
@@ -2051,9 +2156,14 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let (_, waiting, _) = open_chat(&d);
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].args["update"], true);
-        assert_eq!(
-            waiting[0].args["change"],
-            serde_json::json!(["added: more.md (5 bytes)"])
+        let change = waiting[0].args["change"].as_array().unwrap();
+        assert_eq!(change.len(), 1);
+        assert!(
+            change[0]
+                .as_str()
+                .unwrap()
+                .starts_with("added: more.md (5 bytes; written 20"),
+            "{change:?}"
         );
         // Changed again before an answer: the stale item goes, the new one waits.
         put(&s.join("hi/more.md"), "more and more\n");
@@ -2138,6 +2248,51 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             "{notes:?}"
         );
         assert!(open_chat(&d).0.is_empty());
+    }
+
+    // S-74: a skill the person turned off stays off when it leaves the folder and comes back
+    // unchanged (only Clio's own "gone" is undone by itself), and a skill that cannot be read is
+    // there as far as anyone knows: said with its reason, never turned off as gone.
+    #[test]
+    fn a_skill_off_by_hand_stays_off_and_one_unread_is_not_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let s = d.home.join(".agents/skills");
+        put(&s.join("hi/SKILL.md"), &shared_md("hi", "Say hi."));
+        put(&s.join("yo/SKILL.md"), &shared_md("yo", "Say yo."));
+        let (_, waiting, _) = open_chat(&d);
+        assert_eq!(waiting.len(), 2);
+        for w in &waiting {
+            super::super::pending::approve(&d, &w.id).unwrap();
+        }
+        set_enabled(&root(&d), "hi", false, OFF_BY_PERSON).unwrap();
+        let kept = t.path().join("kept");
+        fs::rename(s.join("hi"), &kept).unwrap();
+        assert!(open_chat(&d).0.is_empty(), "already off: nothing to say");
+        fs::rename(&kept, s.join("hi")).unwrap();
+        let (notes, waiting, _) = open_chat(&d);
+        assert!(
+            notes.is_empty() && waiting.is_empty(),
+            "{notes:?} {waiting:?}"
+        );
+        let r = record(&root(&d), "hi").unwrap();
+        assert_eq!((r.enabled, r.off.as_deref()), (false, Some(OFF_BY_PERSON)));
+        // Unreadable: told with its reason, still on.
+        fs::set_permissions(s.join("yo"), fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(s.join("yo")).is_ok();
+        let (notes, ..) = open_chat(&d);
+        fs::set_permissions(s.join("yo"), fs::Permissions::from_mode(0o700)).unwrap();
+        if !readable {
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.contains("yo") && n.contains("cannot be read")),
+                "{notes:?}"
+            );
+            assert!(!notes.iter().any(|n| n.contains("gone")), "{notes:?}");
+        }
+        assert!(record(&root(&d), "yo").unwrap().enabled);
     }
 
     // S-74: `clio skills sync` asks once, at a terminal, for everything new or changed (what the

@@ -46,6 +46,14 @@ pub const SHIPPED: &str = "a skill Clio ships: only the person removes it or tak
 pub const SERVICE_UNDO: &str = "an older version of a service may reach other hosts, secrets and paths: only the person takes it back";
 /// A record's `off` when the person turned it off (`/skills off`, `/services off`, `/mcp off`).
 pub const OFF_BY_PERSON: &str = "turned off by the person";
+/// A record's `off` when its skill is gone from the shared folder (S-74): the person's doing too.
+pub const OFF_GONE: &str = "gone from ~/.agents/skills";
+
+/// Only the person turns back on what is off for `off`: they turned it off, or took it out of
+/// the shared folder (S-74).
+pub fn off_by_person(off: &str) -> bool {
+    off == OFF_BY_PERSON || off == OFF_GONE
+}
 /// A record's `off` when Clio turned it off (`*_manage off`).
 pub const OFF_BY_CLIO: &str = "turned off by Clio";
 /// The skills Clio ships (`crates/clio-brain/src/cli/skills.rs`).
@@ -329,7 +337,7 @@ impl ToolHost {
         let shipped = k.class == Class::Skill && SHIPPED_SKILLS.contains(&name);
         let reason = if suspect {
             Some(SUSPECT_REASON)
-        } else if action == "on" && off_why == OFF_BY_PERSON {
+        } else if action == "on" && off_by_person(off_why) {
             Some(PERSON_OFF)
         } else if matches!(action, "remove" | "undo") && shipped {
             Some(SHIPPED)
