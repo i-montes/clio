@@ -63,7 +63,7 @@ fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
         "the guard reports the catalog at the start of the session"
     );
     // Host mode adds the background command tools, the services' (S-69), the MCP servers' (S-70)
-    // and the three that manage what Clio created to it.
+    // the three that manage what Clio created and the one that adds the skills the person wants.
     let host = use_when_of(&src, "export const HOST_USE_WHEN");
     assert_eq!(
         host.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
@@ -77,7 +77,8 @@ fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
             "mcp_call",
             "service_manage",
             "skill_manage",
-            "mcp_manage"
+            "mcp_manage",
+            "skill_add"
         ]
     );
     let catalog: Vec<_> = use_when(&src)
@@ -87,5 +88,5 @@ fn the_catalog_of_the_guard_is_one_jev_can_be_asked_about() {
         .collect();
     let hints = parse_catalog(&json!(catalog)).unwrap();
     let questions = tool_questions(&hints).unwrap();
-    assert_eq!(questions.len(), tool_names(&src).len() + 10);
+    assert_eq!(questions.len(), tool_names(&src).len() + 11);
 }

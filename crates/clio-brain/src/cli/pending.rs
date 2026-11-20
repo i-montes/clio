@@ -360,6 +360,14 @@ pub fn what(p: &Pending) -> String {
     if let Some((name, description, ..)) = pending::service_of(p) {
         return format!("register the service «{name}»: {description}");
     }
+    if p.tool == clio_toolhost::skill_add::TOOL {
+        return format!(
+            "add the skill «{}» from {}: {}",
+            p.args["name"].as_str().unwrap_or(""),
+            p.args["origin"].as_str().unwrap_or(""),
+            p.args["description"].as_str().unwrap_or("")
+        );
+    }
     if let Some((name, description, _, files)) = pending::skill_of(p) {
         let n = files.len();
         return format!(
@@ -668,6 +676,10 @@ pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> 
 fn register_skill(dirs: &Dirs, p: &Pending) -> Res<String> {
     let (name, description, md, files) =
         pending::skill_of(p).ok_or_else(|| format!("{} is not a skill", p.id))?;
+    // One from outside: as found there, with its origin (only the person's own yes reaches here).
+    if p.tool == clio_toolhost::skill_add::TOOL {
+        return super::skills::register_found(&super::skills::root(dirs), &p.args);
+    }
     let files: Vec<clio_toolhost::skills::SkillFile> = files
         .into_iter()
         .map(|(path, content)| clio_toolhost::skills::SkillFile {
@@ -747,6 +759,8 @@ fn approve_cmd_with(
         Some("download this package, list its tools (no network, no secrets) and turn it on?")
     } else if pending::service_of(&p).is_some() {
         Some("register this service exactly as shown above? it then runs on its schedule")
+    } else if p.tool == clio_toolhost::skill_add::TOOL {
+        Some("add this skill as shown above?")
     } else {
         pending::skill_of(&p)
             .is_some()
@@ -811,9 +825,14 @@ pub fn reject_cmd(dirs: &Dirs, id: &str) -> Res<()> {
     }
     if let Some((name, ..)) = pending::skill_of(&p) {
         println!(
-            "rejected {}: the skill «{}» is not registered",
+            "rejected {}: the skill «{}» is not {}",
             p.id,
-            sanitize::line(name)
+            sanitize::line(name),
+            if p.tool == clio_toolhost::skill_add::TOOL {
+                "added"
+            } else {
+                "registered"
+            }
         );
         return Ok(());
     }

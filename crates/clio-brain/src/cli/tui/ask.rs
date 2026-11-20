@@ -339,11 +339,152 @@ fn grant_rows(manifest: &str) -> Option<Vec<String>> {
     ])
 }
 
+/// A size for a person: bytes, or KiB.
+fn size(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else {
+        format!("{:.1} KiB", n as f64 / 1024.0)
+    }
+}
+
+/// A skill the person adds from outside (`skill_add`'s item, `a`), as its box and `clio skills
+/// add` show it: what it is, where from (origin, ref, commit, folder), what the judge said in
+/// plain words, every file with its size and whether it is a script, what was left out, and what
+/// of a plugin is not installed. Every list whole.
+pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
+    let s = |k: &str| {
+        sanitize::line(a[k].as_str().unwrap_or(""))
+            .trim()
+            .to_owned()
+    };
+    let mut rows = vec![(
+        Part::Head,
+        format!(
+            "Add {} «{}» from {}?",
+            if a["update"].as_bool() == Some(true) {
+                "a new version of the skill"
+            } else {
+                "the skill"
+            },
+            s("name"),
+            s("origin")
+        ),
+    )];
+    rows.push((Part::Label, format!("what it is for: {}", s("description"))));
+    let mut from = s("origin");
+    if !s("ref").is_empty() && s("ref") != "HEAD" {
+        from += &format!("@{}", s("ref"));
+    }
+    if !s("commit").is_empty() {
+        from += &format!(" at commit {}", s("commit"));
+    }
+    if !s("from").is_empty() {
+        from += &format!(", folder {}", s("from"));
+    }
+    rows.push((Part::Label, format!("from: {from}")));
+    if !s("why").is_empty() {
+        rows.push((Part::Label, format!("Clio's reason: {}", s("why"))));
+    }
+    rows.push(match a["judge"].as_str().unwrap_or("") {
+        "clean" => (
+            Part::Label,
+            "the judge read every file: nothing in it tries to give Clio orders".into(),
+        ),
+        "flagged" => (
+            Part::Warn,
+            "the judge found text in it that tries to give Clio orders: Clio would read it as her own. No is the default; add it only if you know why that text is there.".into(),
+        ),
+        word => (
+            Part::Warn,
+            format!(
+                "not judged ({}): nobody read this text for hidden orders. No is the default; add it only if you trust where it comes from.",
+                if word == "off" {
+                    "the judge is off"
+                } else {
+                    "the judge did not answer"
+                }
+            ),
+        ),
+    });
+    let files: Vec<(String, String)> = std::iter::once((
+        "SKILL.md".to_owned(),
+        a["skill_md"].as_str().unwrap_or("").to_owned(),
+    ))
+    .chain(a["files"].as_array().into_iter().flatten().map(|f| {
+        (
+            f["path"].as_str().unwrap_or("").to_owned(),
+            f["content"].as_str().unwrap_or("").to_owned(),
+        )
+    }))
+    .collect();
+    let total: usize = files.iter().map(|(_, c)| c.len()).sum();
+    rows.push((
+        Part::Label,
+        format!("{} files, {}:", files.len(), size(total)),
+    ));
+    for (path, content) in &files {
+        let script = content.starts_with("#!")
+            || [
+                ".sh", ".py", ".js", ".mjs", ".ts", ".rb", ".pl", ".ps1", ".bash",
+            ]
+            .iter()
+            .any(|e| path.ends_with(e));
+        rows.push((
+            Part::Text,
+            format!(
+                "{}  {}{}",
+                sanitize::line(path).trim(),
+                size(content.len()),
+                if script {
+                    "  script: runs only if Clio runs it"
+                } else {
+                    ""
+                }
+            ),
+        ));
+    }
+    let list = |k: &str| -> Vec<String> {
+        a[k].as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(|v| sanitize::line(v).trim().to_owned())
+            .collect()
+    };
+    let skipped = list("skipped");
+    if !skipped.is_empty() {
+        rows.push((Part::Label, "not taken:".into()));
+        rows.extend(skipped.into_iter().map(|f| (Part::Text, f)));
+    }
+    let left = list("left");
+    if !left.is_empty() {
+        rows.push((
+            Part::Label,
+            format!(
+                "not installed: the plugin's {} (Clio takes only its skills)",
+                left.join(", ")
+            ),
+        ));
+    }
+    rows
+}
+
 impl BlockAsk {
     pub fn new(p: &clio_toolhost::pending::Pending, suspect: bool) -> Option<Self> {
         let clean = |s: &str| sanitize::line(s).trim().to_owned();
         if p.tool == "mcp_call" {
             return Some(Self::mcp_call(p, suspect));
+        }
+        // A skill from outside: what it is, where from and what the judge said, every list whole.
+        if p.tool == clio_toolhost::skill_add::TOOL {
+            let mut b = Self::rows(
+                p.args["name"].as_str().unwrap_or(""),
+                added_rows(&p.args),
+                " yes, add it",
+            );
+            b.suspect = suspect;
+            return Some(b);
         }
         // What the model asked of what it created: the act in plain words and Clio's reason.
         if let Some((does, why)) = clio_toolhost::manage::what(p) {

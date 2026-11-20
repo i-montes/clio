@@ -142,6 +142,8 @@ pub fn covers(p: &Pending) -> bool {
     let manage = crate::manage::is_manage(p);
     match p.class {
         Class::Delete | Class::Spend => true,
+        // A skill from outside is text Clio will read as her own: never a window's.
+        Class::Skill if p.tool == crate::skill_add::TOOL => false,
         Class::Skill => !manage || p.reason.is_none(),
         Class::Service | Class::Mcp => manage && p.reason.is_none(),
         Class::Send => p
@@ -161,7 +163,7 @@ pub fn may_answer(w: &Window, p: &Pending) -> bool {
 /// May bypass answer `p` by itself: what a window answers and what a window never does (`control`
 /// on the machine, a new service or MCP server or a new version, `on` of what the person turned
 /// off, `remove` or `undo` of a shipped skill, a service's `undo`, a changed MCP tool, what waited
-/// from before). Never what would change Clio's own guards or run new code outside the jail (a
+/// from before). Never a skill from outside (`skill_add`), what would change Clio's own guards or run new code outside the jail (a
 /// `control` the list did not mark `ask::MACHINE` when it classified it), a secret, a change to
 /// the person's blocks (only a marked session's waits), a suspect session's act or a round's
 /// reach out: those always ask.
@@ -169,6 +171,7 @@ pub fn bypass_answers(p: &Pending) -> bool {
     match p.class {
         Class::Control => p.reason.as_deref() == Some(crate::ask::MACHINE),
         Class::Secret | Class::Memory => false,
+        Class::Skill if p.tool == crate::skill_add::TOOL => false,
         _ => !p
             .reason
             .as_deref()

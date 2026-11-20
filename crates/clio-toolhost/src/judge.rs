@@ -6,13 +6,16 @@
 //! the model and marks the session `suspect`; no answer leaves it as without a judge.
 
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use crate::host::{now_ms, private_dir};
-use crate::{DecisionOut, MAX_RAW_BYTES, Request, Response, TextVerdict, ToolHost, lock};
+use crate::{
+    DecisionOut, MAX_RAW_BYTES, MemoryPort, Request, Response, TextVerdict, ToolHost, lock,
+};
 
 /// How long a tool result waits for the judge: past this it goes on as if there were none.
 pub(crate) const JUDGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +76,48 @@ pub(crate) fn windows(text: &str) -> Vec<&str> {
         }
         start = floor(text, end - OVERLAP);
     }
+}
+
+/// What the judge of `port` says of the whole `text` (read from `source`): every window, asked
+/// `MAX_WINDOWS` at once (one judge's time each batch, `JUDGE_TIMEOUT`), the next batch only while
+/// all so far are clean. One window flagged is an injection, one unanswered leaves it unjudged,
+/// and a port with no judge says so (`NoJudge`).
+pub fn verdict(port: &Arc<dyn MemoryPort>, text: &str, source: &str) -> TextVerdict {
+    for batch in windows(text).chunks(MAX_WINDOWS) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for part in batch {
+            let (tx, port, part, source) = (
+                tx.clone(),
+                Arc::clone(port),
+                (*part).to_owned(),
+                source.to_owned(),
+            );
+            std::thread::spawn(move || {
+                let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    port.judge_text(&part, &source)
+                }));
+                let _ = tx.send(v.unwrap_or(TextVerdict::NoAnswer));
+            });
+        }
+        let until = std::time::Instant::now() + JUDGE_TIMEOUT;
+        let verdicts: Vec<TextVerdict> = (0..batch.len())
+            .map(|_| {
+                rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(TextVerdict::NoAnswer)
+            })
+            .collect();
+        if let Some(v) = [
+            TextVerdict::Injection,
+            TextVerdict::NoAnswer,
+            TextVerdict::NoJudge,
+        ]
+        .into_iter()
+        .find(|v| verdicts.contains(v))
+        {
+            return v;
+        }
+    }
+    TextVerdict::Clean
 }
 
 /// The source as the model and the person are told it: one line, cut.
@@ -258,43 +303,15 @@ impl ToolHost {
     /// What the judge says of the whole `text` (read from `source`), in windows asked all at
     /// once: one window flagged is an injection, one unanswered leaves it all unjudged.
     pub(crate) fn verdict_of(&self, text: &str, source: &str) -> TextVerdict {
-        let Some(port) = self.memory.clone() else {
-            return TextVerdict::NoJudge;
-        };
-        let parts = windows(text);
-        // shortcut: past MAX_WINDOWS (about 350 KiB, far more than Pi or job_output hand over)
-        // the text counts as unjudged, like a judge that did not answer; split the call if it
-        // ever gets there.
-        let verdicts: Vec<TextVerdict> = if parts.len() > MAX_WINDOWS {
-            vec![TextVerdict::NoAnswer]
-        } else {
-            // All at once: the whole text takes one judge's time, within the guard's wait.
-            std::thread::scope(|s| {
-                let asked: Vec<_> = parts
-                    .iter()
-                    .map(|part| {
-                        let (part, source, port) =
-                            ((*part).to_owned(), source.to_owned(), port.clone());
-                        s.spawn(move || {
-                            self.ask_port_for(
-                                &port,
-                                move |p| Ok(p.judge_text(&part, &source)),
-                                JUDGE_TIMEOUT,
-                            )
-                            .unwrap_or(TextVerdict::NoAnswer)
-                        })
-                    })
-                    .collect();
-                asked
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or(TextVerdict::NoAnswer))
-                    .collect()
-            })
-        };
-        [TextVerdict::Injection, TextVerdict::NoAnswer]
-            .into_iter()
-            .find(|v| verdicts.contains(v))
-            .unwrap_or(TextVerdict::Clean)
+        match &self.memory {
+            // As it always was here: a port whose judge is off counts as clean (the callers that
+            // need a judge ask for one first).
+            Some(port) => match verdict(port, text, source) {
+                TextVerdict::NoJudge => TextVerdict::Clean,
+                v => v,
+            },
+            None => TextVerdict::NoJudge,
+        }
     }
 
     pub(crate) fn withhold(

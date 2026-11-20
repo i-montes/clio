@@ -284,6 +284,140 @@ pub fn check_stored(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(
     Ok(())
 }
 
+/// A skill the person adds from outside (`skill_add`, `clio skills add`), SKILL.md included: at
+/// most this many files and bytes. `skill_write`'s limits are the ones above.
+pub const MAX_ADDED_FILES: usize = 100;
+pub const MAX_ADDED_BYTES: usize = 1 << 20;
+
+/// `name` and `description` of a SKILL.md's front matter (the YAML between its first two `---`
+/// lines): top-level keys only, each a plain, quoted or block (`>`, `|`) scalar, as plain text.
+pub fn front_matter(md: &str) -> (Option<String>, Option<String>) {
+    let mut lines = md.lines();
+    if lines.next() != Some("---") {
+        return (None, None);
+    }
+    let yaml: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
+    (scalar(&yaml, "name"), scalar(&yaml, "description"))
+}
+
+fn scalar(yaml: &[&str], key: &str) -> Option<String> {
+    let i = yaml
+        .iter()
+        .position(|l| l.strip_prefix(key).is_some_and(|r| r.starts_with(':')))?;
+    let first = yaml[i][key.len() + 1..].trim();
+    // What follows it and belongs to it: indented lines, and empty ones between them.
+    let more: Vec<&str> = yaml[i + 1..]
+        .iter()
+        .take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t']))
+        .map(|l| l.trim())
+        .collect();
+    let v = if first.starts_with(['>', '|']) {
+        let fold = first.starts_with('>');
+        let mut out = String::new();
+        for l in &more {
+            if l.is_empty() {
+                out.push('\n');
+            } else {
+                if fold && !out.is_empty() && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push_str(l);
+                if !fold {
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    } else {
+        let joined = std::iter::once(first)
+            .chain(more.iter().copied())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if joined.starts_with('"') {
+            serde_json::from_str::<String>(&joined).ok()?
+        } else if let Some(inner) = joined.strip_prefix('\'').and_then(|j| j.strip_suffix('\'')) {
+            inner.replace("''", "'")
+        } else {
+            joined.split(" #").next().unwrap_or("").to_owned()
+        }
+    };
+    let v = v.trim().to_owned();
+    (!v.is_empty()).then_some(v)
+}
+
+/// A name made Clio's: lowercase letters and digits, anything else one `-` between them, at most
+/// 64 (Pi's rules). Empty when nothing of it is a letter or a digit.
+pub fn clio_name(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let cut: String = out.chars().take(64).collect();
+    cut.trim_end_matches('-').to_owned()
+}
+
+/// A skill the person adds, as found in its source (SKILL.md as written there, not composed):
+/// Clio's name, a description in its front matter, its paths, `MAX_ADDED_FILES` and
+/// `MAX_ADDED_BYTES`, and no character the box would not show as written. Checked when it is
+/// found and again by whoever registers it.
+pub fn check_added(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("{:?} is not a skill name", one_line(name)));
+    }
+    let d = front_matter(skill_md).1.unwrap_or_default();
+    if d.chars().count() > MAX_DESCRIPTION || d.is_empty() {
+        return Err(format!(
+            "SKILL.md: its front matter needs a description (at most {MAX_DESCRIPTION} characters)"
+        ));
+    }
+    if files.len() + 1 > MAX_ADDED_FILES {
+        return Err(format!(
+            "{} files: a skill takes at most {MAX_ADDED_FILES}",
+            files.len() + 1
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = skill_md.len();
+    for f in files {
+        valid_path(&f.path)?;
+        if !seen.insert(f.path.as_str()) {
+            return Err(format!("file {:?} is given twice", one_line(&f.path)));
+        }
+        total += f.content.len();
+    }
+    if total > MAX_ADDED_BYTES {
+        let big = files
+            .iter()
+            .max_by_key(|f| f.content.len())
+            .map_or_else(String::new, |f| {
+                format!(
+                    " (the largest, {}, {} bytes)",
+                    one_line(&f.path),
+                    f.content.len()
+                )
+            });
+        return Err(format!(
+            "{total} bytes{big}: a skill takes at most {MAX_ADDED_BYTES} bytes in all"
+        ));
+    }
+    for (what, t) in std::iter::once(("SKILL.md", skill_md))
+        .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
+    {
+        if t.chars().any(hidden) {
+            return Err(format!(
+                "{}: it has a control, invisible or tab character the box would not show as written",
+                one_line(what)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// What the judge reads of a draft: SKILL.md and every file, whole, in one text.
 pub fn whole_text(skill_md: &str, files: &[SkillFile]) -> String {
     let mut t = skill_md.to_owned();
@@ -371,7 +505,13 @@ pub(crate) fn files_of(args: &Map<String, Value>) -> Result<Vec<SkillFile>, Stri
 }
 
 impl ToolHost {
-    fn skill_answer(&self, req: &Request, ok: bool, rule: &str, content: String) -> Response {
+    pub(crate) fn skill_answer(
+        &self,
+        req: &Request,
+        ok: bool,
+        rule: &str,
+        content: String,
+    ) -> Response {
         Response {
             id: req.id.clone(),
             ok,
@@ -646,7 +786,8 @@ impl ToolHost {
                     return refuse("not a file of the skill");
                 }
                 let text = match fs::read(&p) {
-                    Ok(b) if b.len() <= MAX_TOTAL => String::from_utf8_lossy(&b).into_owned(),
+                    // A skill the person added may be larger than one Clio wrote.
+                    Ok(b) if b.len() <= MAX_ADDED_BYTES => String::from_utf8_lossy(&b).into_owned(),
                     Ok(_) => return refuse("too large"),
                     Err(e) => return refuse(&e.to_string()),
                 };
@@ -795,6 +936,45 @@ mod tests {
         // A description with YAML in it stays one quoted string.
         let md = compose("x", "a: b # c \"q\"", "b", "v");
         assert!(md.contains("description: \"a: b # c \\\"q\\\"\"\n"));
+    }
+
+    // The front matter of skills as other harnesses write them: plain, quoted, folded.
+    #[test]
+    fn the_front_matter_is_read_as_its_harnesses_write_it() {
+        let fm = |y: &str| front_matter(&format!("---\n{y}\n---\nbody\n"));
+        assert_eq!(
+            fm("name: tdd\ndescription: Use when testing. Really # not this"),
+            (Some("tdd".into()), Some("Use when testing. Really".into()))
+        );
+        assert_eq!(
+            fm("name: \"a b\"\ndescription: \"Say \\\"hi\\\" - now\"").1,
+            Some("Say \"hi\" - now".into())
+        );
+        assert_eq!(
+            fm("description: >\n  Lazy mode: the\n  smallest change.\nlicense: MIT").1,
+            Some("Lazy mode: the smallest change.".into())
+        );
+        assert_eq!(
+            fm("description: |\n  one\n  two\n").1,
+            Some("one\ntwo".into())
+        );
+        assert_eq!(fm("description: 'it''s'").1, Some("it's".into()));
+        assert_eq!(fm("names: x\ndescription:").0, None);
+        assert_eq!(fm("descriptions: x").1, None);
+        assert_eq!(
+            front_matter("no front matter\ndescription: x"),
+            (None, None)
+        );
+        // Clio's own SKILL.md (a JSON string) reads the same way.
+        let md = compose("x", "a: b # c \"q\"", "b", "v");
+        assert_eq!(front_matter(&md).1.as_deref(), Some("a: b # c \"q\""));
+        assert_eq!(
+            clio_name("Test Driven_Development!"),
+            "test-driven-development"
+        );
+        assert_eq!(clio_name("--ünï--"), "n");
+        assert_eq!(clio_name(&"a".repeat(70)), "a".repeat(64));
+        assert_eq!(clio_name("..."), "");
     }
 
     #[test]

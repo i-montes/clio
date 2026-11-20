@@ -563,3 +563,39 @@ fn the_judge_cases_are_active_and_refused() {
     assert!(report.ok(), "{}", report.line());
     eprintln!("{}", report.line());
 }
+
+// S-68: `verdict` (a skill from outside) says when nobody judged: a port whose judge is off
+// answers `NoJudge`, which is never clean, and a long text is asked in every window.
+#[test]
+fn the_whole_verdict_says_when_nobody_judged() {
+    let port = |verdict| -> Arc<dyn MemoryPort> {
+        Arc::new(Judge {
+            verdict,
+            slow: Duration::ZERO,
+            asked: Mutex::default(),
+            flag_if: None,
+        })
+    };
+    for v in [
+        TextVerdict::NoJudge,
+        TextVerdict::NoAnswer,
+        TextVerdict::Injection,
+        TextVerdict::Clean,
+    ] {
+        assert_eq!(clio_toolhost::verdict(&port(v), "some text", "s"), v);
+    }
+    // Far past one batch of windows: every window is asked, the last one flagged.
+    let j = Arc::new(Judge {
+        verdict: TextVerdict::Clean,
+        slow: Duration::ZERO,
+        asked: Mutex::default(),
+        flag_if: Some("FLAG"),
+    });
+    let text = format!("{}FLAG", "a line of text\n".repeat(60_000));
+    let port: Arc<dyn MemoryPort> = j.clone();
+    assert_eq!(
+        clio_toolhost::verdict(&port, &text, "s"),
+        TextVerdict::Injection
+    );
+    assert!(j.asked.lock().unwrap().len() > 16);
+}

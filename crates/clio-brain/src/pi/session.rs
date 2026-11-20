@@ -47,8 +47,8 @@ pub const GUARD_TOOLS: [&str; 24] = [
     "skill_report",
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools,
-/// the services' (S-69) and the MCP servers' (S-70).
-pub const HOST_GUARD_TOOLS: [&str; 10] = [
+/// the services' (S-69), the MCP servers' (S-70) and adding the skills the person wants (S-68).
+pub const HOST_GUARD_TOOLS: [&str; 11] = [
     "job_output",
     "job_stop",
     "service_write",
@@ -59,19 +59,20 @@ pub const HOST_GUARD_TOOLS: [&str; 10] = [
     "service_manage",
     "skill_manage",
     "mcp_manage",
+    "skill_add",
 ];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@28";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@28.md");
+pub const PROMPT_NAME: &str = "clio-agent@29";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@29.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@12";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@12.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@13";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@13.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -558,8 +559,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 28\n"));
-        assert!(HOST_PROMPT.starts_with("version: 12\n"));
+        assert!(PROMPT.starts_with("version: 29\n"));
+        assert!(HOST_PROMPT.starts_with("version: 13\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -726,9 +727,13 @@ mod tests {
             .unwrap()
         };
         for (new, was, lines) in [
-            (PROMPT, old("clio-agent@27.md"), &[0, 13, 23][..]),
             (
-                HOST_PROMPT,
+                old("clio-agent@28.md"),
+                old("clio-agent@27.md"),
+                &[0, 13, 23][..],
+            ),
+            (
+                old("clio-host@12.md"),
                 old("clio-host@11.md"),
                 &[0, 14, 22, 23, 33, 44, 48, 52, 53][..],
             ),
@@ -748,5 +753,42 @@ mod tests {
             assert!(p.contains("nor to turn bypass on (that is theirs alone)"));
         }
         assert!(crate::pi::envelope::BYPASS_ON.starts_with("approvals: bypass on"));
+    }
+
+    // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,
+    // the map of another harness's tools to Clio's, and nothing else changed.
+    #[test]
+    fn the_new_prompts_only_add_the_tool_map() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was, v) in [
+            (PROMPT, old("clio-agent@28.md"), 28),
+            (HOST_PROMPT, old("clio-host@12.md"), 12),
+        ] {
+            let mut n: Vec<&str> = new.lines().collect();
+            let w: Vec<&str> = was.lines().collect();
+            assert_eq!(n[0], format!("version: {}", v + 1));
+            let at = n
+                .iter()
+                .position(|l| l.starts_with("- A skill written for another harness"))
+                .unwrap();
+            let map = n.remove(at);
+            assert!(w[at - 1].ends_with("read that SKILL.md with `read` and follow it."));
+            assert_eq!(n[1..], w[1..], "only the map was added");
+            for t in [
+                "A Task or Agent tool is `subagent`",
+                "a todo tool is `todo_write`",
+                "a Skill tool means reading that skill's SKILL.md with `read`",
+                "Read, Write, Edit, Bash, Grep and Glob are `read`, `write`, `edit`, `bash` and `find`",
+                "`plugin:name` is the skill `name`",
+            ] {
+                assert!(map.contains(t), "{t}");
+            }
+        }
     }
 }

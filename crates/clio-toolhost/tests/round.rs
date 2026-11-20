@@ -139,6 +139,7 @@ fn a_round_only_reads_and_what_reaches_out_waits() {
             json!({"name": "time", "action": "on", "reason": "r"}),
         ),
         ("skill_write", json!({"name": "x"})),
+        ("skill_add", json!({"source": "a/b", "reason": "r"})),
         ("skill_report", json!({"name": "x", "ok": false})),
         ("service_write", json!({"name": "x"})),
         ("mcp_propose", json!({"package": "x"})),
