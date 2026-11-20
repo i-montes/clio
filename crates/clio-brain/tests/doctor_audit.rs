@@ -179,6 +179,43 @@ fn doctor_finds_a_value_of_the_vault_in_what_clio_wrote_and_never_prints_it() {
     );
 }
 
+// S-18: the vault scans what Clio wrote, leaving out only Chromium and npm's store, a server's
+// or a service's own data folder and the copies, each at its place from the data root: the same
+// names deeper (a skill's files) are read.
+#[test]
+fn the_vault_scan_leaves_out_only_the_places_at_the_data_root() {
+    let e = Env::new();
+    let data = e.tmp.path().join("home/.local/share/clio");
+    let read = [
+        "skills/s/browsers/x",
+        "skills/s/node/x",
+        "mcp/servers/n/x",
+        "mcp/npm-cache/_cacache/index-v5/x",
+    ];
+    let left = [
+        "browsers/x",
+        "mcp/data/n/x",
+        "mcp/npm-cache/_cacache/content-v2/x",
+        "services/state/s/x",
+        "node/x",
+        "runs/r1/sandbox/x",
+    ];
+    for f in read.iter().chain(&left) {
+        put(&data, f, &format!("v={VAULT_VALUE}\n"));
+    }
+    serve_vault(&e, true);
+    let (_, out) = doctor(&e);
+    let line = vault_line(&out);
+    assert!(line.starts_with("FAIL"), "{out}");
+    let said = |f: &str| line.contains(&format!(" {f} (")) || line.contains(&format!(": {f} ("));
+    for f in read {
+        assert!(said(f), "{f} was not scanned: {line}");
+    }
+    for f in left {
+        assert!(!said(f), "{f} was scanned: {line}");
+    }
+}
+
 // S-18
 #[test]
 fn doctor_says_the_vault_is_clean_when_none_of_its_values_was_written() {
@@ -222,5 +259,62 @@ fn doctor_does_not_complain_when_there_is_no_vault() {
     assert!(
         vault_line(&out).starts_with("PASS") && vault_line(&out).contains("there is none"),
         "{out}"
+    );
+}
+
+// Each check's line comes out when that check is made, not all at the end: read through a pipe
+// while the machine check (the last one) is held, the lines before it are already there.
+#[test]
+fn doctor_prints_each_check_as_it_is_made() {
+    use std::io::BufRead;
+    let e = Env::new();
+    let go = e.tmp.path().join("go");
+    let script = e.tmp.path().join("script/held.sh");
+    // Held until the test says go (or a minute, so a broken doctor fails instead of hanging).
+    std::fs::write(
+        &script,
+        format!(
+            "i=0; while [ ! -e '{}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done\necho 'PASS the machine was held'\n",
+            go.display()
+        ),
+    )
+    .unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_clio"))
+        .arg("doctor")
+        .env("HOME", e.tmp.path().join("home"))
+        .env("XDG_RUNTIME_DIR", e.tmp.path().join("run"))
+        .env("CLIO_SKIP_PI_INSTALL", "1")
+        .env("CLIO_HOST_CHECK", &script)
+        .env_remove("OPENCODE_API_KEY")
+        .current_dir(e.tmp.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut before = Vec::new();
+    for l in lines.by_ref() {
+        let l = l.unwrap();
+        let last = l.contains("Pi jail");
+        before.push(l);
+        if last {
+            break;
+        }
+    }
+    // The machine check has not ended, and the lines before it were printed.
+    assert!(child.try_wait().unwrap().is_none(), "{before:?}");
+    assert!(
+        before.iter().any(|l| l.contains("files checked")),
+        "{before:?}"
+    );
+    // A pipe gets plain lines only: nothing that says what is being checked.
+    assert!(before.iter().all(|l| !l.contains("checking")), "{before:?}");
+    std::fs::write(&go, "").unwrap();
+    let after: Vec<String> = lines.map(Result::unwrap).collect();
+    assert!(child.wait().unwrap().code().is_some());
+    assert!(
+        after.iter().any(|l| l.contains("the machine was held"))
+            && after.last().unwrap().starts_with("doctor:"),
+        "{after:?}"
     );
 }

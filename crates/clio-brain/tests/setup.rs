@@ -481,6 +481,21 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
     let out = all(&o);
     assert!(o.status.success(), "{out}");
     assert!(out.contains("Node 22.23.5 → 22.24.0"), "{out}");
+    // Each step as it runs: its name when it starts, its result when it ends, in order.
+    let at = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s}: {out}"));
+    let mut last = 0;
+    for step in [
+        "clio and clio-vault",
+        "Private Node 22",
+        "clio-memory and its model",
+        "Services timer",
+        "Final check",
+    ] {
+        let (start, end) = (at(&format!("...  {step}\n")), at(&format!("  {step} · ")));
+        assert!(last <= start && start < end, "{step}: {out}");
+        assert_eq!(out.matches(&format!("...  {step}\n")).count(), 1, "{out}");
+        last = end;
+    }
     assert!(
         f.calls()
             .contains("systemctl --user restart clio-services.timer"),
@@ -495,6 +510,17 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
         "{out}"
     );
     assert_eq!(tree(&f.home(), &skip), before);
+    // What the new binary runs after an update replaced it shows its steps the same way.
+    let o = f.clio(&["update", "--reexec"]);
+    let out = all(&o);
+    assert!(
+        o.status.success()
+            && out.contains("...  Private Node 22\n")
+            && out.contains("Final check · "),
+        "{out}"
+    );
+    // The old binary already showed the binaries step.
+    assert!(!out.contains("clio and clio-vault"), "{out}");
     let o = f.clio(&["update", "--check"]);
     assert!(all(&o).contains("already up to date"), "{}", all(&o));
     f.release("9.9.9", &[]);

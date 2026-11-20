@@ -55,22 +55,23 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     opts.update = true;
     opts.reexec = reexec;
     opts.release_required = true;
-    // No questions here: the vault and the model are the wizard's (`clio setup`).
+    // No questions here: the vault and the model are the wizard's (`clio setup`). The new binary
+    // an update started does not show the binaries again: the old one did.
     let steps: Vec<_> = Action::Update
         .steps()
         .into_iter()
         .filter(|s| !matches!(s, Step::Vault | Step::Model))
+        .filter(|s| !(reexec && *s == Step::Binaries))
         .collect();
-    let mut ui = Plain {
+    let mut ui = Plain::new(
         lang,
-        rows: Action::Update
+        Action::Update
             .shown()
             .iter()
             .filter(|s| steps.contains(s))
             .map(|s| s.label().get(lang).to_owned())
             .collect(),
-        quiet: true,
-    };
+    );
     let mut r =
         super::setup::run_with(dirs, lang, Sys::from_env(), Pins::from_env(), opts, &mut ui);
     r.all(&steps);
@@ -83,12 +84,6 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     }
     if r.changes.is_empty() && !r.failed {
         println!("{}", say(&M::UpdateNone.fill(lang, &[here])));
-    }
-    if let Some(d) = &r.doctor {
-        println!(
-            "{}",
-            say(&format!("{} · {d}", Step::Doctor.label().get(lang)))
-        );
     }
     let failed = r.failed;
     if !failed {

@@ -54,18 +54,84 @@ impl Report {
 /// kept with a removed one (`skills::remove_in`). What the program wrote, not Clio: its own mode
 /// is checked, what is inside is the program's (Chromium makes its caches 755). Only at those
 /// places from the data root: the same names deeper (a skill's files, a project copy) are Clio's.
-fn jailed_data(data: &Path, p: &Path) -> bool {
-    let Ok(rel) = p.strip_prefix(data) else {
-        return false;
+const JAILED_DATA: &[&[&str]] = &[
+    &["mcp", "data", "*"],
+    &["mcp", "removed", "*", "data"],
+    &["services", "state", "*"],
+    &["services", "removed", "*", "state"],
+];
+
+/// Folders that hold the person's own files or what others wrote, not what Clio or the model
+/// wrote: the copy of a project, the agent's scratch and the originals `apply` saved (in a run
+/// and in a deleted conversation's run), the private Node the installer unpacked (nodejs.org's
+/// files, checked against the SHA-256 the binary pins), and what npm installed for Pi or an MCP
+/// server, live or removed (each package checked against its lockfile's integrity when
+/// installed; a server's tree is hashed again before each start). From the data folder's root
+/// only: the same names in a skill or anywhere else are read. `*` is any name, `#` a version
+/// folder or an install's staging one (Pi's own `agent`, `sessions` and `home` are not).
+const NOT_CLIO_OUTPUT: &[&[&str]] = &[
+    &["node"],
+    &["runs", "*", "sandbox"],
+    &["runs", "*", "scratch"],
+    &["runs", "*", "backup"],
+    &["trash", "sessions", "*", "run", "sandbox"],
+    &["trash", "sessions", "*", "run", "scratch"],
+    &["trash", "sessions", "*", "run", "backup"],
+    &["pi", "#", "node_modules"],
+    &["mcp", "servers", "*", "#", "node_modules"],
+    &["mcp", "removed", "*", "servers", "#", "node_modules"],
+];
+
+/// Trees that others wrote and that are checked another way: Chromium (`browsers`: the archive
+/// whose SHA-256 the catalog pins, unpacked once, made private, shown read-only to the server
+/// that reads it) and npm's store of the registry's files (`content-v2`: each file named by its
+/// own SHA-512, which npm checks on every read). npm's index and logs beside it are still read.
+const NOT_READ: &[&[&str]] = &[
+    &["browsers"],
+    &["mcp", "npm-cache", "_cacache", "content-v2"],
+];
+
+/// `p`'s names from the data root, if it is under it.
+fn names<'a>(data: &Path, p: &'a Path) -> Option<Vec<&'a str>> {
+    let rel = p.strip_prefix(data).ok()?;
+    Some(rel.iter().map(|s| s.to_str().unwrap_or("")).collect())
+}
+
+/// Whether the names `c` are those of `pat`, all of it (`whole`) or only its start.
+fn fits(pat: &[&str], c: &[&str], whole: bool) -> bool {
+    let one = |p: &str, n: &str| match p {
+        "*" => true,
+        "#" => n.starts_with(|ch: char| ch.is_ascii_digit() || ch == '.'),
+        _ => p == n,
     };
-    let c: Vec<&str> = rel.iter().map(|s| s.to_str().unwrap_or("")).collect();
-    matches!(
-        c[..],
-        ["mcp", "data", _]
-            | ["mcp", "removed", _, "data"]
-            | ["services", "state", _]
-            | ["services", "removed", _, "state"]
-    )
+    (if whole {
+        c.len() == pat.len()
+    } else {
+        c.len() < pat.len()
+    }) && pat.iter().zip(c).all(|(p, n)| one(p, n))
+}
+
+fn jailed_data(data: &Path, p: &Path) -> bool {
+    names(data, p).is_some_and(|c| JAILED_DATA.iter().any(|pat| fits(pat, &c, true)))
+}
+
+/// A folder of `data` whose files are not read for key shapes (S-18), by the doctor nor by the
+/// vault; their modes are still checked (S-23).
+fn unread(data: &Path, p: &Path) -> bool {
+    names(data, p).is_some_and(|c| {
+        [JAILED_DATA, NOT_CLIO_OUTPUT, NOT_READ]
+            .iter()
+            .any(|l| l.iter().any(|pat| fits(pat, &c, true)))
+    })
+}
+
+/// Holds an [`unread`] folder somewhere below.
+fn holds_unread(data: &Path, p: &Path) -> bool {
+    names(data, p).is_some_and(|c| {
+        [JAILED_DATA, NOT_CLIO_OUTPUT, NOT_READ]
+            .iter()
+            .any(|l| l.iter().any(|pat| fits(pat, &c, false)))
+    })
 }
 
 /// Every file and folder under `dir`: folders must be 0700, files and sockets without access for
@@ -165,10 +231,6 @@ fn public_listeners() -> Vec<String> {
     out
 }
 
-/// Folders inside the data folder that hold the person's own files, not what Clio wrote: the
-/// copy of a project, the originals `apply` saved, what npm installed for Pi, and the private Node
-/// the installer unpacked (`node`, nodejs.org's own files).
-const NOT_CLIO_OUTPUT: [&str; 5] = ["sandbox", "scratch", "backup", "node_modules", "node"];
 /// A file bigger than this is not read.
 const AUDIT_MAX_BYTES: u64 = 32 << 20;
 
@@ -186,11 +248,7 @@ fn audit_walk(
         let p = e.path();
         let Ok(t) = e.file_type() else { continue };
         if t.is_dir() {
-            let skip = e
-                .file_name()
-                .to_str()
-                .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
-            if !skip && depth < 8 && !jailed_data(data, &p) {
+            if depth < 8 && !unread(data, &p) {
                 audit_walk(data, &p, depth + 1, f, out);
             }
         } else if t.is_file() {
@@ -628,34 +686,37 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
         );
         return;
     }
-    let scan = Request::ScanDir {
-        path: dirs.data.display().to_string(),
-        skip: NOT_CLIO_OUTPUT.map(String::from).to_vec(),
-    };
-    let hits = match client.call(&scan) {
-        Ok(r) if r.ok => r.data.unwrap_or_default(),
-        Ok(r) => {
-            let why = r.error.unwrap_or_default();
-            o.say(
-                Level::Warn,
-                format!("vault: it could not check what Clio wrote ({why})"),
-                None,
-            );
-            return;
-        }
-        Err(e) => {
-            o.say(
-                Level::Warn,
-                format!("vault: it could not check what Clio wrote ({e})"),
-                None,
-            );
-            return;
-        }
-    };
+    // One scan per place with nothing unread in it, each with its own time: a server of any
+    // version walks all of what it is asked to (an older one knows no path to skip).
+    let mut roots = Vec::new();
+    vault_roots(&dirs.data, &dirs.data, &mut roots);
+    let mut hits = Vec::new();
+    for root in roots {
+        let scan = Request::ScanDir {
+            path: root.display().to_string(),
+            skip: Vec::new(),
+        };
+        let why = match client.call(&scan) {
+            Ok(r) if r.ok => {
+                hits.extend(
+                    r.data
+                        .and_then(|d| d.as_array().cloned())
+                        .unwrap_or_default(),
+                );
+                continue;
+            }
+            Ok(r) => r.error.unwrap_or_default(),
+            Err(e) => e.to_string(),
+        };
+        o.say(
+            Level::Warn,
+            format!("vault: it could not check what Clio wrote ({why})"),
+            None,
+        );
+        return;
+    }
     let mut found: Vec<String> = hits
-        .as_array()
-        .into_iter()
-        .flatten()
+        .iter()
         .filter_map(|h| {
             let file = Path::new(h["file"].as_str()?);
             let rel = file
@@ -690,6 +751,27 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
             ),
             Some("Inside ~/.local/share/clio. Delete the run or the file and rotate that secret (`clio vault`): someone may have seen it.".into()),
         );
+    }
+}
+
+/// The places under `dir` the vault scans whole: each file and folder, but an [`unread`] folder is
+/// left out and one that holds one is gone into.
+fn vault_roots(data: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.filter_map(Result::ok) {
+        let (p, Ok(t)) = (e.path(), e.file_type()) else {
+            continue;
+        };
+        if t.is_dir() && unread(data, &p) {
+            continue;
+        }
+        if t.is_dir() && holds_unread(data, &p) {
+            vault_roots(data, &p, out);
+        } else if t.is_dir() || t.is_file() {
+            out.push(p);
+        }
     }
 }
 
@@ -839,7 +921,38 @@ pub fn collect(dirs: &Dirs) -> Report {
 /// [`collect`]; without `host_self_test` host mode's console is not tried (that self-test runs
 /// commands, with `sudo` where there is passwordless `sudo`): what the installer shows.
 pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
+    collect_live(dirs, host_self_test, &mut |_| {})
+}
+
+/// What [`collect_live`] tells as it goes: the part it starts, and each check once it is made.
+pub enum Live<'a> {
+    Doing(&'static str),
+    Done(&'a Check),
+}
+
+/// Hands the checks made since the last call to `f`, then what comes next.
+struct Tell<'a> {
+    shown: usize,
+    f: &'a mut dyn FnMut(Live<'_>),
+}
+
+impl Tell<'_> {
+    fn next(&mut self, o: &Report, doing: Option<&'static str>) {
+        for c in &o.checks[self.shown..] {
+            (self.f)(Live::Done(c));
+        }
+        self.shown = o.checks.len();
+        if let Some(d) = doing {
+            (self.f)(Live::Doing(d));
+        }
+    }
+}
+
+/// [`collect_with`], telling `f` each part as it starts and each check as soon as it is made.
+pub fn collect_live(dirs: &Dirs, host_self_test: bool, f: &mut dyn FnMut(Live<'_>)) -> Report {
     let mut o = Report::default();
+    let mut t = Tell { shown: 0, f };
+    t.next(&o, Some("the private folders and the modes inside them"));
     let mut folders = vec![dirs.config.clone(), dirs.data.clone()];
     folders.extend(dirs.runtime.clone());
     for d in &folders {
@@ -869,15 +982,20 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
             Some("Log in through a normal session (XDG_RUNTIME_DIR), or remove the temporary clio-<uid> folder that is not yours.".into()),
         );
     }
+    t.next(&o, Some("what Clio wrote, for anything shaped like a key"));
     data_audit(&mut o, &dirs.data);
+    t.next(&o, Some("the timers"));
     if let Some(w) = super::services::timer_warning(dirs) {
         o.say(Level::Warn, w, Some("clio services enable".into()));
     }
     if let Some(w) = super::round::timer_warning(dirs) {
         o.say(Level::Warn, w, Some("clio services enable".into()));
     }
+    t.next(&o, Some("the memory"));
     memory_report(&mut o, dirs);
+    t.next(&o, Some("the vault's values in what Clio wrote"));
     vault_audit(&mut o, dirs);
+    t.next(&o, Some("the configuration and the model's key"));
     match Config::load(dirs) {
         Ok(c) => {
             o.say(
@@ -921,6 +1039,7 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
         Err(e) => o.say(Level::Warn, e, Some("Run `clio init`.".into())),
     }
     old_key_file(&mut o, dirs);
+    t.next(&o, Some("the sockets and what listens"));
     if let Some(rt) = &dirs.runtime
         && let Ok(rd) = std::fs::read_dir(rt)
     {
@@ -960,19 +1079,25 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
             Some("Stop that process: Clio must not listen on a public address.".into()),
         );
     }
+    t.next(&o, Some("Node and Pi"));
     for (level, msg, hint) in super::pi::checks(dirs) {
         o.say(level, msg, hint);
     }
+    t.next(&o, Some("the jail's self-test"));
     jail_lines(&mut o);
+    t.next(&o, Some("Pi's jail"));
     pi_jail_line(&mut o, dirs);
     if host_self_test {
+        t.next(&o, Some("host mode's console"));
         host_mode_lines(&mut o, dirs);
     }
     // Outside the repository the script is not there, and that is no problem: nothing is said.
     if let Some(script) = find_host_check() {
+        t.next(&o, Some("the machine"));
         o.host_script = Some(script.display().to_string());
         host_lines(&mut o, &script);
     }
+    t.next(&o, None);
     o
 }
 
@@ -984,11 +1109,25 @@ fn level_code(l: Level) -> &'static str {
     }
 }
 
+/// A check as the plain command prints it: its line, and the hint under a WARN or a FAIL.
+fn check_lines(st: Style, c: &Check) -> String {
+    let mut s = format!("{}  {}\n", st.mark(c.level), sanitize::line(&c.msg));
+    if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
+        s += &format!(
+            "{}{} {}\n",
+            " ".repeat(st.mark_width() + 2),
+            st.dim(st.arrow()),
+            st.dim(&sanitize::line(h))
+        );
+    }
+    s
+}
+
 /// The plain command. Returns true when nothing failed (WARN is the person's call).
 pub fn doctor(dirs: &Dirs, json: bool) -> bool {
     let st = Style::stdout();
-    let r = collect(dirs);
     if json {
+        let r = collect(dirs);
         let checks: Vec<_> = r
             .checks
             .iter()
@@ -1006,17 +1145,30 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         return r.ok();
     }
-    for c in &r.checks {
-        println!("{}  {}", st.mark(c.level), sanitize::line(&c.msg));
-        if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
-            println!(
-                "{}{} {}",
-                " ".repeat(st.mark_width() + 2),
-                st.dim(st.arrow()),
-                st.dim(&sanitize::line(h))
-            );
+    // Each line as its check is made; on a terminal, what is being checked meanwhile, on a line
+    // the result replaces.
+    let mut shown = 0;
+    let r = collect_live(dirs, true, &mut |l| {
+        use std::io::Write;
+        if shown > 0 {
+            print!("\r{}\r", " ".repeat(std::mem::take(&mut shown)));
         }
-    }
+        match l {
+            Live::Doing(what) if st.tty => {
+                // One row: a wrapped line would not be replaced.
+                let line = super::ui::clip(
+                    st,
+                    &format!("{} checking {what}", st.ellipsis()),
+                    super::ui::columns().saturating_sub(1),
+                );
+                shown = line.chars().count();
+                print!("{}", st.dim(&line));
+            }
+            Live::Doing(_) => {}
+            Live::Done(c) => print!("{}", check_lines(st, c)),
+        }
+        let _ = std::io::stdout().flush();
+    });
     println!();
     println!(
         "{}",
@@ -1227,6 +1379,103 @@ mod tests {
         .unwrap();
         audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
         assert_eq!(found.1.len(), 1, "{:?}", found.1);
+    }
+
+    // Chromium and npm's store of the registry's files are not read for key shapes, only there
+    // from the data root; npm's index beside the store and the same names elsewhere still are,
+    // and the modes inside the skipped trees are still checked (S-23).
+    #[test]
+    fn chromium_and_npms_content_store_are_not_read_but_their_modes_are_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let key = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let skipped = [
+            "browsers/chromium-1255/resources.pak",
+            "mcp/npm-cache/_cacache/content-v2/sha512/aa/bb",
+        ];
+        let read = [
+            "mcp/npm-cache/_cacache/index-v5/aa/bb",
+            "skills/live/s/browsers/notes.md",
+            "runs/r/mcp/npm-cache/_cacache/content-v2/x",
+        ];
+        for f in skipped.iter().chain(&read) {
+            let p = data.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, key).unwrap();
+        }
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
+        found.1.sort();
+        let mut want: Vec<PathBuf> = read.iter().map(|f| data.join(f)).collect();
+        want.sort();
+        assert_eq!(found.1, want);
+        let open = data.join("browsers/chromium-1255/resources.pak");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut o = Report::default();
+        check_tree(&mut o, &data, &data, 0);
+        assert!(
+            o.checks
+                .iter()
+                .any(|c| c.msg == format!("{} has mode 644, it must be 600 (S-23)", open.display())),
+            "{:?}",
+            o.checks.iter().map(|c| &c.msg).collect::<Vec<_>>()
+        );
+    }
+
+    // The copies, the private Node and what npm installed are left out only at their places from
+    // the data root: a skill (or Pi's own folders) with the same names is read, for key shapes
+    // and by the vault alike.
+    #[test]
+    fn the_names_of_what_is_not_clio_output_are_left_out_only_at_their_places() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let left = [
+            "node/bin/x",
+            "runs/r1/sandbox/x",
+            "runs/r1/scratch/x",
+            "runs/r1/backup/x",
+            "trash/sessions/1-r1/run/sandbox/x",
+            "pi/1.4.0/node_modules/x",
+            "pi/.install-7/node_modules/x",
+            "mcp/servers/n/1.0.0/node_modules/x",
+            "mcp/removed/n-1/servers/1.0.0/node_modules/x",
+        ];
+        let read = [
+            "skills/live/s/node/x",
+            "skills/live/s/scratch/x",
+            "skills/live/s/backup/x",
+            "skills/live/s/node_modules/x",
+            "runs/r1/session.jsonl",
+            "pi/agent/node_modules/x",
+            "mcp/servers/n/1.0.0/package.json",
+        ];
+        for f in left.iter().chain(&read) {
+            let p = data.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        }
+        let mut want: Vec<PathBuf> = read.iter().map(|f| data.join(f)).collect();
+        want.sort();
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
+        found.1.sort();
+        assert_eq!(found.1, want);
+        // The vault is asked about whole places with nothing left out inside.
+        let mut roots = Vec::new();
+        vault_roots(&data, &data, &mut roots);
+        for f in left {
+            assert!(
+                !roots.iter().any(|r| data.join(f).starts_with(r)),
+                "{f}: {roots:?}"
+            );
+        }
+        for f in read {
+            assert!(
+                roots.iter().any(|r| data.join(f).starts_with(r)),
+                "{f}: {roots:?}"
+            );
+        }
     }
 
     // A trash with deleted conversations in it is private all through (S-23), even when the
