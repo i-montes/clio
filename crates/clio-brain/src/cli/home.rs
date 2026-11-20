@@ -251,6 +251,22 @@ pub struct Config {
     pub round: RoundCfg,
     #[serde(default)]
     pub subagent: SubagentCfg,
+    #[serde(default)]
+    pub skills: SkillsCfg,
+}
+
+/// Skills (S-68, S-74).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsCfg {
+    /// A person's chat looks at `~/.agents/skills` when it opens (S-74).
+    #[serde(default = "yes")]
+    pub shared: bool,
+}
+
+impl Default for SkillsCfg {
+    fn default() -> Self {
+        Self { shared: true }
+    }
 }
 
 /// The round: Clio looks by herself at what she was asked to watch (`round.rs`).
@@ -594,6 +610,7 @@ impl Config {
             approvals: ApprovalsCfg::default(),
             round: RoundCfg::default(),
             subagent: SubagentCfg::default(),
+            skills: SkillsCfg::default(),
         }
     }
 

@@ -286,6 +286,9 @@ pub enum Bg {
     SessionDeleted(Result<String, String>, Vec<Row>),
     /// `/undo` ran: what it said, one line each. The box shows them; the chat keeps one note.
     SessionUndone(Result<Vec<String>, String>),
+    /// The look at the shared skills folder beside the chat ended (S-74): its notes; what it set
+    /// aside is asked once the chat is idle.
+    SharedLooked(Vec<String>),
     ChatOpened {
         seq: u64,
         result: Result<Box<ChatInfo>, String>,
@@ -1606,6 +1609,13 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
         // no turn of its own; it rides with the next message. What bypass or a window answered
         // after a turn is `Bg::Acted`. The count of what waits comes with the check
         // (`Bg::Approvals`): an act approved inline was never counted.
+        Bg::SharedLooked(notes) => {
+            app.chat
+                .items
+                .extend(notes.into_iter().map(super::chat::Item::Note));
+            app.chat.approvals.check = true;
+            vec![]
+        }
         Bg::Granted(r) => {
             app.chat.items.push(match r {
                 Ok(m) => super::chat::Item::Note(m),

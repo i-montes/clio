@@ -214,6 +214,10 @@ pub trait Session: Send + Sync {
     fn subagents(&self) -> Vec<Value> {
         vec![]
     }
+    /// A person's chat: the shared skills folder is looked at beside it once it is open (S-74).
+    fn looks_at_shared(&self) -> bool {
+        false
+    }
     /// Stops everything that belongs to the session now. Safe to repeat.
     fn shutdown(&self);
     /// What the last turn changed (files written, commands run, as the action log records

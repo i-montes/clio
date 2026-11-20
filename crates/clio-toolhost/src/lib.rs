@@ -1093,14 +1093,19 @@ impl ToolHost {
                     .get("command")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                "fs_write" => real.as_deref().map(|r| r.to_string_lossy().into_owned()),
+                "fs_write" | "fs_mkdir" => {
+                    real.as_deref().map(|r| r.to_string_lossy().into_owned())
+                }
                 _ => None,
             };
             let class = match req.tool.as_str() {
                 "exec" => what
                     .as_deref()
                     .and_then(|c| h.cfg.rules.classify_command(c)),
-                "fs_write" => real.as_deref().and_then(|r| h.cfg.rules.classify_write(r)),
+                // A folder made is a write too (S-74: under `~/.agents` it asks).
+                "fs_write" | "fs_mkdir" => {
+                    real.as_deref().and_then(|r| h.cfg.rules.classify_write(r))
+                }
                 _ => None,
             };
             if let Some(class) = class {

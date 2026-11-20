@@ -499,6 +499,24 @@ mod tests {
         assert_eq!(checks(&cmds), 1);
     }
 
+    // S-74: the look at the shared skills folder ends beside the chat: its notes are shown, and
+    // what it set aside is asked once the chat is idle, never in the middle of a turn.
+    #[test]
+    fn the_shared_folders_box_comes_when_its_look_ends_and_the_chat_is_idle() {
+        let mut a = idle();
+        a.chat.approvals.last_ms = Some(a.now_ms);
+        a.chat.start_turn(a.now_ms);
+        let note = "not asked: ~/.agents/skills/x: not judged (the judge is off)".to_owned();
+        let (mut a, cmds) = feed(a, vec![Input::Bg(Bg::SharedLooked(vec![note.clone()]))]);
+        assert!(!cmds.iter().any(|c| matches!(c, Cmd::CheckApprovals { .. })));
+        assert!(a.chat.items.contains(&super::super::chat::Item::Note(note)));
+        a.chat.running = false;
+        let (_, cmds) = feed(a, vec![key(KeyCode::Down)]);
+        assert!(cmds.contains(&Cmd::CheckApprovals {
+            session: "sid".into()
+        }));
+    }
+
     // What waits is checked when the chat is idle, never in the middle of a turn; the end of an
     // open window asks for a check by itself (the summary, and what waits again).
     #[test]

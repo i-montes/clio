@@ -215,7 +215,11 @@ impl ToolHost {
             masks: h.cfg.control.clone(),
             read_only: self.review || self.unattended,
             sockets: self.unattended,
-            shows: [self.windows(), crate::host::programs(&h.cfg.home)].concat(),
+            shows: [
+                self.windows(),
+                crate::host::read_only_paths(&h.cfg.home, false),
+            ]
+            .concat(),
         };
         let out = Arc::new(Mutex::new(Out {
             file,

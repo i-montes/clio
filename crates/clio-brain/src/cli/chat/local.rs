@@ -107,6 +107,12 @@ impl LocalSource {
         self
     }
 
+    /// Only a person's chat looks at `~/.agents/skills` (S-74): never a `clio run` or a round
+    /// (a review and a subagent do not open through here).
+    fn looks_at_shared(&self) -> bool {
+        self.presentation && !self.round
+    }
+
     /// The only folder a session of Clio may work in: the copy of its run.
     fn copy_of(&self, id: &str) -> PathBuf {
         self.dirs.runs.join(id).join("sandbox")
@@ -496,6 +502,7 @@ impl SessionSource for LocalSource {
             round_news: Mutex::new(round_news),
             round: self.round,
             subagents: self.presentation && !self.round,
+            shared: self.looks_at_shared(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -632,6 +639,8 @@ struct ChatSession {
     round: bool,
     /// A chat: its model has `subagent` (S-73).
     subagents: bool,
+    /// A person's chat: the shared skills folder is looked at beside it (S-74).
+    shared: bool,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -664,7 +673,11 @@ impl HostSide {
     /// Item `p` is asked in this session: set aside by it (`session`), or, in a chat, by a round.
     fn mine(&self, p: &Pending, session: &str) -> bool {
         (p.run == self.run && p.session == session)
-            || (self.rounds && crate::cli::round::is_round(&self.dirs, &p.run))
+            || (self.rounds
+                && (crate::cli::round::is_round(&self.dirs, &p.run)
+                    // Once the look that sets them aside ended: all in one box (S-74).
+                    || (p.run == crate::cli::skills::SHARED_RUN
+                        && !crate::cli::skills::looking(&self.dirs))))
     }
 
     /// Bypass acts for this conversation now: a person's chat (nothing checks what waits in a
@@ -1478,6 +1491,10 @@ impl Session for ChatSession {
         super::subagent::listed(&self.run_dir)
     }
 
+    fn looks_at_shared(&self) -> bool {
+        self.shared
+    }
+
     fn last_work(&self) -> Option<super::TurnWork> {
         let turn = locked(&self.turn).clone();
         let state = self.dirs.data.join("host");
@@ -2026,8 +2043,17 @@ impl ChatSession {
                 clio_toolhost::pending::block_of(p)
                     .map(|b| format!("nothing was written to «{}»", b.name))
                     .or_else(|| {
-                        clio_toolhost::pending::skill_of(p)
-                            .map(|s| format!("the skill «{}» is not registered", s.0))
+                        clio_toolhost::pending::skill_of(p).map(|s| {
+                            if p.run == crate::cli::skills::SHARED_RUN {
+                                format!(
+                                    "the skill «{}» is not added, and a chat does not ask again for it as it is now (`clio skills add {}` adds it)",
+                                    s.0,
+                                    p.args["origin"].as_str().unwrap_or("")
+                                )
+                            } else {
+                                format!("the skill «{}» is not registered", s.0)
+                            }
+                        })
                     })
                     .or_else(|| {
                         clio_toolhost::pending::service_of(p)
@@ -2257,6 +2283,46 @@ mod tests {
             .with_mode(Some(Mode::Host));
         assert!(!run.round && !run.presentation);
         assert!(LocalSource::new(d).round().round);
+    }
+
+    // S-74: only a person's chat looks at the shared folder (beside it, once it is open) and gets
+    // its box: a `clio run` and a round never look (`tests/pi_chat.rs` checks it end to end), its
+    // items are asked in a person's chat and nowhere else, never while a look runs, and bypass
+    // never answers one.
+    #[test]
+    fn only_a_persons_chat_looks_at_the_shared_folder_and_bypass_never_answers_it() {
+        let t = tempfile::tempdir().unwrap();
+        let mut h = host_side(t.path());
+        let d = h.dirs.clone();
+        assert!(LocalSource::new(d.clone()).looks_at_shared());
+        assert!(!LocalSource::new(d.clone()).one_shot().looks_at_shared());
+        assert!(!LocalSource::new(d.clone()).round().looks_at_shared());
+        let md = "---\nname: hi\ndescription: Says hi.\n---\nHi.\n";
+        let a = json!({"name": "hi", "description": "Says hi.", "skill_md": md, "files": [],
+            "sha256": clio_toolhost::skills::digest(md, &[]), "origin": "~/.agents/skills/hi",
+            "judge": "clean", "seen": "x"});
+        let shared = crate::cli::skills::SHARED_RUN;
+        let p = clio_toolhost::pending::set_aside_added(&pending::state(&d), shared, shared, a)
+            .unwrap();
+        assert!(h.mine(&p, "s1"));
+        // While the look that sets them aside runs, none is asked: its box holds them all.
+        let lock = crate::cli::skills::look_lock(&crate::cli::skills::root(&d), false)
+            .unwrap()
+            .unwrap();
+        assert!(!h.mine(&p, "s1"));
+        drop(lock);
+        assert!(h.mine(&p, "s1"));
+        pending::bypass_on(&d, false).unwrap();
+        let e = h
+            .grant("s1", false, &p.id, |_| -> Result<String, String> {
+                panic!("bypass never answers it")
+            })
+            .unwrap_err();
+        assert!(e.contains("only your yes adds it"), "{e}");
+        assert!(!grant::covers(&p) && !grant::bypass_answers(&p));
+        // A `clio run`'s side does not ask it.
+        h.rounds = false;
+        assert!(!h.mine(&p, "s1"));
     }
 
     /// A conversation's host side on its own folders (run `r1`), the judge on.

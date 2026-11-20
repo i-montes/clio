@@ -384,6 +384,24 @@ pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
         from += &format!(", folder {}", s("from"));
     }
     rows.push((Part::Label, format!("from: {from}")));
+    // One of the shared folder's (S-74): what changed since the person's last yes to it.
+    let change: Vec<String> = a["change"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|v| sanitize::line(v).trim_end().to_owned())
+        .collect();
+    if !change.is_empty() {
+        rows.push((Part::Label, "changed since your last yes:".into()));
+        rows.extend(change.into_iter().map(|c| (Part::Text, c)));
+    }
+    if !s("written").is_empty() {
+        rows.push((
+            Part::Label,
+            format!("its newest file was written {}", s("written")),
+        ));
+    }
     // The yes is to that repository at that commit: where to read exactly what it installs.
     if !s("url").is_empty() {
         rows.push((

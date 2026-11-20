@@ -159,13 +159,13 @@ fn components(p: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Does the shell glob `glob` (one component: `*`, `?`, `[…]`) match `name`? A glob it cannot
+/// Does the shell glob `glob` (one component: `*`, `?`, `[…]`, `{a,b}`) match `name`? A glob it cannot
 /// read is taken to match; as in the shell, only a `.` matches a leading one.
 fn glob_matches(glob: &str, name: &str) -> bool {
     if name.starts_with('.') && !glob.starts_with('.') {
         return false;
     }
-    let mut re = String::from("^");
+    let (mut re, mut depth) = (String::from("^"), 0usize);
     let mut chars = glob.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -187,6 +187,16 @@ fn glob_matches(glob: &str, name: &str) -> bool {
                     re.push(c);
                 }
                 re.push(']');
+            }
+            // `{a,b}`: either (S-74: `~/.{agents,x}`).
+            '{' => {
+                depth += 1;
+                re.push_str("(?:");
+            }
+            ',' if depth > 0 => re.push('|'),
+            '}' if depth > 0 => {
+                depth -= 1;
+                re.push(')');
             }
             c => re.push_str(&regex::escape(&c.to_string())),
         }
@@ -278,7 +288,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add|skills sync)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -332,6 +342,66 @@ fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
         }
     }
     out
+}
+
+/// The home's `~/.agents` (S-74: the shared skills folder is in it), as a command may name it:
+/// absolute, `~/`, `~user/`, `$HOME/`, `${HOME…}/`, after a `..` or the home's own name (`cd / &&
+/// … home/u/.agents`), glued to a short option, or by a glob a shell would expand to it
+/// (`names_by_glob`); and, while the command stays in the home where it runs, bare, `./`,
+/// `$PWD/`, `$(pwd)/` or `/proc/self/cwd/`. A word match: what it misses, the jail stops (the
+/// folder is read-only to every command the person did not approve for it).
+#[derive(Debug, Clone)]
+struct Agents {
+    home: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+    /// The same, by component, for `names_by_glob`.
+    paths: Vec<Vec<String>>,
+    /// Wherever the command is.
+    rooted: Regex,
+    /// From the home.
+    here: Regex,
+}
+
+impl Agents {
+    fn new(home: &Path) -> Self {
+        let mut homes = vec![home.to_path_buf()];
+        homes.extend(home.canonicalize().ok());
+        homes.dedup();
+        let dirs: Vec<PathBuf> = homes.iter().map(|h| h.join(".agents")).collect();
+        let abs: Vec<String> = dirs
+            .iter()
+            .map(|d| regex::escape(&d.to_string_lossy()))
+            .collect();
+        let names: Vec<String> = homes
+            .iter()
+            .filter_map(|h| h.file_name())
+            .map(|n| regex::escape(&n.to_string_lossy()))
+            .collect();
+        let pre = r"(^|[^\w.~/$-]|(^|\s)-[A-Za-z0-9]+)";
+        let end = r"($|[^\w.-])";
+        let rooted = format!(
+            r"{pre}({abs}|(~/|\$HOME/|\$\{{HOME[^}}]*\}}/|~({names})/)\.agents){end}|(^|[^\w.-])({names})/\.agents{end}|\.\./\.agents{end}",
+            abs = abs.join("|"),
+            names = names.join("|"),
+        );
+        let here = format!(
+            r"{pre}(\./|\$PWD/|\$\{{PWD\}}/|\$\(pwd\)/|`pwd`/|/proc/(self|[0-9]+)/cwd/)?\.agents{end}"
+        );
+        Self {
+            paths: dirs.iter().map(|d| components(d)).collect(),
+            rooted: Regex::new(&rooted).expect("escaped paths"),
+            here: Regex::new(&here).expect("a fixed pattern"),
+            home: homes,
+            dirs,
+        }
+    }
+
+    /// `word` names the home (`~`, `$HOME`, `${HOME}` or its path): a `cd` there stays in it.
+    fn is_home(&self, word: &str) -> bool {
+        let w = bare(word);
+        let w = w.trim_end_matches('/');
+        matches!(w, "~" | "$HOME" | "${HOME}") || self.home.iter().any(|h| Path::new(w) == h)
+    }
 }
 
 /// Absolute folders match by prefix; a bare name matches a folder of that name anywhere.
@@ -473,6 +543,8 @@ pub struct HostRules {
     /// Clio's own paths, by component, and the home they may be spelled under (`names_by_glob`).
     control_paths: Vec<Vec<String>>,
     home: PathBuf,
+    /// The shared skills folder's parent, `~/.agents` (S-74): what writes under it is `control`.
+    agents: Option<Agents>,
     backup: Regex,
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
@@ -510,6 +582,7 @@ impl HostRules {
             window_any: None,
             control_paths: Vec::new(),
             home: PathBuf::new(),
+            agents: None,
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
@@ -530,12 +603,18 @@ impl HostRules {
         });
         self.control_paths = control.iter().map(|p| components(p)).collect();
         self.home = home.to_path_buf();
+        self.agents = Some(Agents::new(home));
         self
     }
 
     /// `text` names one of Clio's paths through a glob (`~/.config/cl?o/x`, `/home/u/.loc*/share/
     /// c[l]io`): a word whose components, as globs, match every component of that path.
     fn names_by_glob(&self, text: &str) -> bool {
+        self.names_by_glob_of(&self.control_paths, text)
+    }
+
+    /// `text` names one of `paths` (by component) through a glob, as `names_by_glob`.
+    fn names_by_glob_of(&self, paths: &[Vec<String>], text: &str) -> bool {
         static WORD: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r#"[^\s;&|()<>'"`]+"#).expect("a fixed pattern"));
         let home = components(&self.home);
@@ -548,7 +627,7 @@ impl HostRules {
                     None => return false,
                 }
             }
-            if !w.contains(['*', '?', '[']) {
+            if !w.contains(['*', '?', '[', '{']) {
                 return false;
             }
             let (absolute, rest) = if let Some(r) = ["~/", "$HOME/", "${HOME}/"]
@@ -565,7 +644,7 @@ impl HostRules {
             } else {
                 (w.starts_with('/'), components(Path::new(w)))
             };
-            self.control_paths.iter().any(|c| {
+            paths.iter().any(|c| {
                 let c: &[String] = if absolute {
                     c
                 } else {
@@ -575,6 +654,24 @@ impl HostRules {
                     }
                 };
                 rest.len() >= c.len() && c.iter().zip(&rest).all(|(name, g)| glob_matches(g, name))
+            })
+        })
+    }
+
+    /// `text` names `~/.agents` (S-74), as written, without quotes and backslashes, or by a glob.
+    pub fn names_agents(&self, text: &str) -> bool {
+        self.agents.as_ref().is_some_and(|a| {
+            let text = squash(text);
+            // A bare `.agents` is the home's only while the command stays there (where it runs).
+            let moved = simple_commands(&text).iter().any(|w| {
+                matches!(w[0].as_str(), "cd" | "pushd")
+                    && w.get(1)
+                        .is_some_and(|d| !d.starts_with('-') && !a.is_home(d))
+            });
+            [text.as_str(), bare(&text).as_str()].iter().any(|t| {
+                a.rooted.is_match(t)
+                    || (!moved && a.here.is_match(t))
+                    || self.names_by_glob_of(&a.paths, t)
             })
         })
     }
@@ -591,6 +688,7 @@ impl HostRules {
         let text = &squash(text);
         !starts_outside(text)
             && !self.names_by_glob(text)
+            && !self.names_agents(text)
             && ![text, bare(text).as_str()].iter().any(|t| {
                 self.control.as_ref().is_some_and(|r| r.is_match(t))
                     || t.to_lowercase().contains("clio")
@@ -831,6 +929,15 @@ impl HostRules {
         {
             return Some(Control);
         }
+        // The shared skills folder (S-74), named by anything but a reader or `cd`.
+        if self.names_agents(&seen)
+            && (command.contains('>')
+                || simple_commands(command)
+                    .iter()
+                    .any(|w| w[0] != "cd" && !READERS.contains(&w[0].as_str())))
+        {
+            return Some(Control);
+        }
         // A start-up file, a unit folder or Clio's programs, named by anything but a reader.
         if LAUNCH_PATHS.is_match(command)
             && (command.contains('>')
@@ -858,6 +965,10 @@ impl HostRules {
         if p.starts_with("/etc/sudoers")
             || p.contains("authorized_keys")
             || LAUNCH_PATHS.is_match(&p)
+            || self
+                .agents
+                .as_ref()
+                .is_some_and(|a| a.dirs.iter().any(|d| path.starts_with(d)))
         {
             Some(Control)
         } else if path.exists()
@@ -1543,6 +1654,17 @@ mod tests {
             "cat /home/u/.local/sh*/c[l]io/host/bypass.json",
             "cp -t/home/u/.config/clio /tmp/x",
             "sort -o/home/u/.config/clio/x /tmp/x",
+            // The shared skills folder (S-74): a write there, however it is spelled.
+            "cp -r /tmp/x //home/u/.agents/skills/",
+            "cp -r /tmp/x /home/u/./.agents//skills/",
+            "cp -t/home/u/.agents/skills /tmp/x",
+            "sort -o~/.agents/skills/x/SKILL.md /tmp/x",
+            "cp -r /tmp/x ~/.age*/skills/",
+            "cp -r /tmp/x /home/u/.ag?nts/skills/",
+            "mkdir -p $HOME/.[a]gents/skills/x",
+            "mkdir -p ~/.{agents,x}/skills/x",
+            "S=~/.agents/skills; cp -r /tmp/x $S/",
+            "echo x > '/home/u/.agents/skills/x/SKILL.md'",
         ] {
             let bad = at(bad);
             assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
@@ -1558,6 +1680,9 @@ mod tests {
             "cd <L>/demo && bash scripts/run.sh 2>&1",
             "S=<L>; sed -n 1,40p $S/demo/SKILL.md",
             "ls */* ~/proj/*.rs",
+            // Reading the shared folder stays free (S-74).
+            "cat //home/u/.agents/skills/x/SKILL.md",
+            "ls ~/.age*/skills",
         ] {
             let ok = at(ok);
             assert_eq!(r.classify_command(&ok), None, "{ok}");

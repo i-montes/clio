@@ -53,6 +53,28 @@ pub(crate) fn programs(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// What a command's jail shows read-only besides the windows: Clio's programs and, unless the
+/// person approved this very command as `control` for it (`open_agents`), `~/.agents`, where
+/// other agents read their skills (S-74): no spelling of a path writes there unasked.
+pub(crate) fn read_only_paths(home: &Path, open_agents: bool) -> Vec<PathBuf> {
+    let mut p = programs(home);
+    if !open_agents {
+        p.push(home.join(".agents"));
+    }
+    p
+}
+
+/// `~/.agents/skills`, empty and private, when it does not exist: a host-mode session starts
+/// with it, so the jail's read-only `~/.agents` is there and no command makes it first (S-74).
+/// An empty one changes nothing for the agents that read it.
+pub(crate) fn ensure_agents(home: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    let _ = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home.join(".agents/skills"));
+}
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,6 +107,7 @@ pub(crate) fn real(p: &Path) -> Option<PathBuf> {
 
 impl Host {
     pub(crate) fn new(mut cfg: HostCfg, scratch: &Path, exec: bool) -> (Self, Result<(), String>) {
+        ensure_agents(&cfg.home);
         // Both spellings: a folder made later is still caught by the one given.
         let mut control = cfg.control.clone();
         control.extend(cfg.control.iter().filter_map(|c| c.canonicalize().ok()));
@@ -466,13 +489,16 @@ impl ToolHost {
             Some(r) => r.to_string_lossy().into_owned(),
             None => command.to_owned(),
         });
+        // The person's own yes to this command, `control` for `~/.agents`: it may write there.
+        let open_agents =
+            rule == "host/approved" && tool == "exec" && h.cfg.rules.names_agents(command);
         if logged && let Err(e) = h.log(&req.session, tool, &what, network, "run", rule, None) {
             return Err(format!(
                 "[toolhost] {tool} was not run: the action log cannot be written ({e})"
             ));
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            self.host_effect(h, tool, &args, real, action_id, cancel)
+            self.host_effect(h, tool, &args, real, (action_id, open_agents), cancel)
         }))
         .unwrap_or_else(|_| Err("the tool panicked".into()));
         let (ok, content, data, external) = match ran {
@@ -519,7 +545,7 @@ impl ToolHost {
         tool: &str,
         args: &Map<String, Value>,
         real: Option<&Path>,
-        action_id: String,
+        (action_id, open_agents): (String, bool),
         cancel: &dyn Fn() -> bool,
     ) -> Result<Value, String> {
         if tool == "exec" {
@@ -544,7 +570,7 @@ impl ToolHost {
                 masks: h.cfg.control.clone(),
                 read_only: self.review || self.unattended,
                 sockets: self.unattended,
-                shows: [self.windows(), programs(&h.cfg.home)].concat(),
+                shows: [self.windows(), read_only_paths(&h.cfg.home, open_agents)].concat(),
             };
             let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));

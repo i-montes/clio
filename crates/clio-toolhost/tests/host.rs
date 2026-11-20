@@ -160,7 +160,11 @@ fn absolute_paths_read_and_write_in_host_mode_and_not_without() {
     );
     assert_eq!(std::fs::read_to_string(e.home.join("b.txt")).unwrap(), "x");
     let l = call(&e, "s", "fs_list", json!({"path": "."}));
-    assert!(l.ok && l.data["entries"] == json!(["b.txt"]), "{l:?}");
+    // `.agents`: a host-mode tool host makes the shared skills folder (S-74).
+    assert!(
+        l.ok && l.data["entries"] == json!([".agents", "b.txt"]),
+        "{l:?}"
+    );
 
     // The same calls without host mode: the working copy only.
     let mut c = cfg(&e.r);
