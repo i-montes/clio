@@ -153,6 +153,8 @@ struct Inner {
     compacted: AtomicBool,
     /// A review's findings go with the next message: it carries this request (`REVIEW_ASK`).
     reviewed: Mutex<Option<&'static str>>,
+    /// The person's bypass is on for this session: each message's envelope says so.
+    bypass: AtomicBool,
     /// What this session has been shown: ids (never twice) and characters (up to a budget).
     shown: Mutex<(HashSet<i64>, usize)>,
 }
@@ -191,6 +193,7 @@ impl PrePrompt {
             summaries: AtomicBool::new(false),
             compacted: AtomicBool::new(false),
             reviewed: Mutex::new(None),
+            bypass: AtomicBool::new(false),
             shown: Mutex::new((HashSet::new(), 0)),
         }))
     }
@@ -226,6 +229,12 @@ impl PrePrompt {
         }
     }
 
+    /// Whether the person's bypass is on for this session, as the brain read it before a message:
+    /// the envelope says so (`envelope::BYPASS_ON`).
+    pub fn set_bypass(&self, on: bool) {
+        self.0.bypass.store(on, Ordering::SeqCst);
+    }
+
     /// A review's findings go with the next message: `ask` asks the model to answer them (once).
     pub fn reviewed(&self, ask: &'static str) {
         *self
@@ -248,6 +257,7 @@ impl PrePrompt {
                     outside: &[],
                     tools: &[],
                     ask: Some(CLOSING_ASK),
+                    bypass: false,
                 },
                 "",
             )
@@ -266,6 +276,7 @@ impl PrePrompt {
         let (tx, rx) = channel();
         let (inner, text, at) = (self.0.clone(), person_text.to_owned(), stamp.to_owned());
         let asked = ask.clone();
+        let bypass = self.0.bypass.load(Ordering::SeqCst);
         std::thread::spawn(move || {
             let _ = tx.send(inner.prepare(&text, &at, asked.as_deref()));
         });
@@ -279,6 +290,7 @@ impl PrePrompt {
                     outside: &[],
                     tools: &[],
                     ask: ask.as_deref(),
+                    bypass,
                 },
                 person_text,
             ),
@@ -428,6 +440,7 @@ impl Inner {
                 outside: &outside,
                 tools: &out.tools,
                 ask,
+                bypass: self.bypass.load(Ordering::SeqCst),
             },
             person_text,
         );

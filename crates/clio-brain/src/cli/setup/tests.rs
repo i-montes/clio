@@ -122,7 +122,7 @@ fn states(lang: Lang, home: &Path) -> Vec<(&'static str, View)> {
     let empty = home.join("empty");
     let installed = home.join("installed");
     write(&dirs(&installed).config_file(), b"{}");
-    write(&dirs(&installed).data.join("version"), b"0.2.1");
+    write(&dirs(&installed).data.join("version"), b"0.3.0");
     let sys = fake_sys(&home.join("sys"));
     let view = |page: Page| {
         let mut v = View::new(Some(lang));
@@ -767,7 +767,7 @@ fn installed(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         (".local/share/clio/node/bin/node", b"node"),
         (".local/share/clio/pi/0.70.0/package.json", b"{}"),
         (".local/share/clio/pi/.install-42/x", b"half"),
-        (".local/share/clio/version", b"0.2.1"),
+        (".local/share/clio/version", b"0.3.0"),
         (".local/share/clio/update.json", b"{}"),
     ] {
         write(&home.join(rel), bytes);
@@ -898,7 +898,7 @@ fn an_install_without_its_version_offers_repair_first() {
         _ => panic!("not the existing-install page"),
     };
     assert_eq!(sel(&d), 1);
-    write(&d.data.join("version"), b"0.2.1");
+    write(&d.data.join("version"), b"0.3.0");
     assert_eq!(sel(&d), 0);
 }
 

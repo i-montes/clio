@@ -354,12 +354,13 @@ pub fn approve_manage(
     approve_made(state, id, (now_ms, granted), p.class, act)
 }
 
-/// The action log's rule for an approval: the person's own (`rule`), or a permission window's.
+/// The action log's rule for an approval: the person's own (`rule`), bypass's or a permission
+/// window's.
 fn approved_rule<'a>(granted: Option<&str>, rule: &'a str) -> &'a str {
-    if granted.is_some() {
-        "grant/approved"
-    } else {
-        rule
+    match granted {
+        Some(g) if g.starts_with(crate::grant::BYPASS_ID) => "bypass/approved",
+        Some(_) => "grant/approved",
+        None => rule,
     }
 }
 
@@ -823,7 +824,7 @@ impl ToolHost {
                     Err(None) => (aside_text(&p), "host/aside"),
                     Err(Some(why)) => (
                         format!(
-                            "{} (It could not run under the person's permission window: {why}.)",
+                            "{} (It could not run under the person's permission: {why}.)",
                             aside_text(&p)
                         ),
                         "host/aside",
@@ -854,13 +855,13 @@ impl ToolHost {
         }
     }
 
-    /// A permission window is open (`grant`): what was just set aside (`p`, for call `req`) is
-    /// approved by it at once when the window may answer it (`grant::may_answer`: never control,
-    /// a secret, a block change, a service or an MCP server), through the same path as the
-    /// person's yes, recorded in the window's record before it runs, and its real result goes
-    /// back as the call's own. Never in a `suspect` session, never in a review, never with the
-    /// judge off (an open window then closes). `Err(None)`: it waits; `Err(Some(why))`: the
-    /// window could not do it, and it waits.
+    /// Bypass is on, or a permission window is open (`grant`): what was just set aside (`p`, for
+    /// call `req`) is approved by it at once when it may answer it (`grant::answering`: never
+    /// what changes Clio's own guards, a secret or a block change; a window, besides, never
+    /// control, a service or an MCP server), through the same path as the person's yes, recorded
+    /// in its record before it runs, and its real result goes back as the call's own. Never in a
+    /// `suspect` session, never in a review or a round, never with the judge off (it then
+    /// closes). `Err(None)`: it waits; `Err(Some(why))`: it could not do it, and it waits.
     fn granted(
         &self,
         state: &Path,
@@ -868,26 +869,19 @@ impl ToolHost {
         p: &Pending,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
-        if !crate::grant::covers(p)
-            || self.review
-            || self.unattended
-            || self.is_suspect(&req.session)
-        {
+        if self.review || self.unattended || self.is_suspect(&req.session) {
             return Err(None);
         }
-        let w = crate::grant::current(state).ok_or(None)?;
+        let w = crate::grant::answering(state, p).ok_or(None)?;
+        let kind = crate::grant::Kind::of(&w);
         if !self.memory.as_ref().is_some_and(|m| m.judge_on()) {
-            if let Err(e) = crate::grant::close(state, crate::grant::JUDGE_OFF) {
-                eprintln!("clio-toolhost: the permission window could not be closed: {e}");
+            if let Err(e) = kind.close(state, crate::grant::JUDGE_OFF) {
+                eprintln!("clio-toolhost: the {kind:?} could not be closed: {e}");
             }
             return Err(None);
         }
-        if !crate::grant::may_answer(&w, p) {
-            return Err(None);
-        }
-        let w = crate::grant::begin(state, p, &p.what).ok_or(None)?;
+        let w = kind.begin(state, p, &p.what).ok_or(None)?;
         let now = now_ms();
-        let left = crate::grant::left_text(w.ends_ms - now);
         let (ok, content, data, external) = self
             .approve_as(&p.id, now, Some(&w.id), Some((req, cancel)))
             .map(|(_, ran)| ran)
@@ -897,11 +891,16 @@ impl ToolHost {
             })?;
         let code = data.get("exit_code").and_then(Value::as_i64);
         crate::grant::done(state, &w, &p.id, &crate::grant::outcome(ok, code));
+        let rule = approved_rule(Some(&w.id), "");
         if p.tool == "mcp_call" {
-            return Ok(self.mcp_outside(req, ok, "grant/approved", &content, &p.what));
+            return Ok(self.mcp_outside(req, ok, rule, &content, &p.what));
         }
-        let reason =
-            format!("approved under the person's permission window ({left} left), so it ran");
+        let reason = if w.bypass {
+            "approved under the person's bypass (their standing yes), so it ran".to_owned()
+        } else {
+            let left = crate::grant::left_text(w.ends_ms - now);
+            format!("approved under the person's permission window ({left} left), so it ran")
+        };
         Ok(Response {
             id: req.id.clone(),
             ok,
@@ -909,7 +908,7 @@ impl ToolHost {
             data,
             decision: DecisionOut {
                 outcome: "allow".into(),
-                rule: "grant/approved".into(),
+                rule: rule.into(),
                 reason,
             },
             tainted: self.is_tainted(&req.session),

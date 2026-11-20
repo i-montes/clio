@@ -34,7 +34,13 @@ pub struct Envelope<'a> {
     /// Something Clio asks of the model before it goes on (a fixed text of the brain's, never the
     /// person's words nor anything read): save the session's summary.
     pub ask: Option<&'a str>,
+    /// The person's bypass is on for this session (the brain read it, never the model): the
+    /// envelope says so, `BYPASS_ON`.
+    pub bypass: bool,
 }
+
+/// The envelope's line while the person's bypass is on.
+pub const BYPASS_ON: &str = "approvals: bypass on (the person's standing yes): what would wait for their approval runs at once and the answer says it was approved under bypass; what changes Clio's own setup, commands or keys, a change to their blocks from a session that read outside text, a secret and a question still wait for them";
 
 /// `stamp` in front of the person's `text`, inside the envelope.
 pub fn wrap(stamp: &str, text: &str) -> String {
@@ -47,6 +53,7 @@ pub fn wrap(stamp: &str, text: &str) -> String {
             outside: &[],
             tools: &[],
             ask: None,
+            bypass: false,
         },
         text,
     )
@@ -54,6 +61,10 @@ pub fn wrap(stamp: &str, text: &str) -> String {
 
 pub fn wrap_with(e: &Envelope, text: &str) -> String {
     let mut out = format!("{OPEN}time: {}\n", e.stamp);
+    if e.bypass {
+        out.push_str(BYPASS_ON);
+        out.push('\n');
+    }
     for (head, lines) in [
         (
             "who you are and how you work (the person set it; follow it):",
@@ -223,10 +234,14 @@ mod tests {
                 outside: &outside,
                 tools: &tools,
                 ask: Some("guarda el resumen"),
+                bypass: true,
             },
             "hola",
         );
         assert!(w.contains("[m12] vive en Medellín\n"));
+        // Bypass is said by the brain, right after the time; without it nothing is said.
+        assert!(w.contains(&format!("-05:00\n{BYPASS_ON}\n")), "{w}");
+        assert!(!wrap("2026-11-03 18:42 -05:00", "hola").contains("bypass"));
         assert!(
             w.contains("Clio's request: guarda el resumen\n</clio-context>"),
             "{w}"

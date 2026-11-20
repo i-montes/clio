@@ -22,6 +22,7 @@ What Clio protects, and from what. The rules that close it (S-xx), with their te
 - A compromised host (the PC or a VPS).
 - Providers that see the data.
 - The model's own mistakes, without malice.
+- The person turned approvals off (bypass, S-72): the judge is the only brake left, and a fooled model can do, without asking, anything on the machine that does not need Clio's own folders: delete, send, spend, install.
 
 ### The worst: the lethal trifecta
 
@@ -161,6 +162,20 @@ What still limits what does run:
 - **The window's length.** It ends at its time whether `clio` runs or not; it never outlives the boot it opened in, and never lasts longer than its length by the wall clock or by the time since boot (a clock set back and a reboot do not stretch it); a yes while one is open does not extend it; `/grant off` or `clio grant off` close it at once.
 
 What it does **not** limit: what a deletion destroyed or what was sent is not undone by the summary. The person who opens a window accepts that, for its hours, the judge and the jails are the line for deletes, spending, sending, `ask` MCP calls and skills, not their own eyes.
+
+### Bypass: the person's standing yes (S-72)
+
+`/bypass on` in the chat, and only its box (the approval timing; no command, tool, MCP call, config key or file turns it on), makes Clio approve by herself everything that would ask the person, with no end, until the person turns it off or the judge flags an injection. It is kept as a window is (`<data>/host/bypass.json`, its record `<data>/host/bypass/<id>.jsonl`, written only by the person's `clio`, refused to the file tools; a missing or damaged file is off), and it outlives restarts. Every act is recorded before it runs and its outcome after, in fixed words. While it is on no window opens.
+
+It answers what a window answers and what a window never does: `control` on the machine (the service manager, units, schedulers, `sudo`, users), a new service or MCP server or a new version, `on` of what the person turned off, `remove` or `undo` of a shipped skill, a service's `undo`, a changed MCP tool, and what waited from before. It **never** answers:
+
+- **what would change Clio's own guards**: the list marks a `control` act as the machine's alone (`ask::MACHINE`) when it classifies it, only if it names none of Clio's paths, nothing called `clio` (her commands and units, a `clio …` that `systemd-run` or a scheduler would run) and no keys (`.ssh`); every other `control`, a mixed one included, asks;
+- **a change to the person's blocks** (only a marked session's waits), **a secret**, **a question**;
+- **anything in a session the judge marked `suspect`**, and **a round's item** (its tool host is unattended; the chat never answers it).
+
+What still limits it: **the judge** (its first flag turns bypass off for every conversation, with a notice at the next chat open; with the judge off it is not turned on, and an act that finds it off turns it off), the jails, the record and the log, undo and the 24 h expiry.
+
+What it does **not** limit, plainly: under bypass a fooled model may delete, send, spend and install on the machine, and run things outside the launcher through the service manager or a scheduler. The guard on Clio's own folders is a word list, not a wall: a command that reaches them without naming them (a variable, an encoding, a script written first and run by `systemd-run` or `crontab`) runs unasked, and from there it could rewrite `bypass.json`, turn the judge off in Clio's config, or keep a job running. The person who turns bypass on accepts that the judge and the jails are the only line.
 
 ### The reviewer: a second jailed agent (S-67)
 

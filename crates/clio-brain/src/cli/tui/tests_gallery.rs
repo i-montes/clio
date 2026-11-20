@@ -448,6 +448,7 @@ pub(super) fn states() -> Vec<(&'static str, App)> {
                 hours: 4,
                 suspect: false,
                 judge: true,
+                bypass: false,
             }),
             Input::Bg(Bg::Approvals {
                 session: "sid".into(),

@@ -61,6 +61,12 @@ impl fmt::Display for Class {
     }
 }
 
+/// Why a `control` act on the machine alone waits (its service manager, units, schedulers, `sudo`,
+/// its users): set where the item is classified (`HostRules::machine_only`), and the only
+/// `control` bypass may answer (`grant::bypass_answers`).
+pub const MACHINE: &str =
+    "it acts on the machine (its service manager, units, schedulers, sudo or users), not on Clio";
+
 /// A name that looks like a backup. `{B}` in a factory pattern stands for it.
 const BACKUP: &str = r"(?i:backup|respaldo|snapshot|\.bak\b|\.dump\b|\.sql\b)";
 
@@ -101,7 +107,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -328,6 +334,24 @@ impl HostRules {
             Regex::new(&format!(r"(^|[^\w.~/$-])({any})($|[^\w.-])")).expect("escaped paths")
         });
         self
+    }
+
+    /// A `control` command (or the path of a write) that acts on the machine alone, not on Clio's
+    /// own guards: it names none of Clio's paths, nothing called `clio` (her commands, units and
+    /// programs, a `clio …` a scheduler or `systemd-run` would run) and no keys (`.ssh`). One that
+    /// mixes both is not. Quotes and backslashes are dropped first (`c'l'io` is `clio`); it is a
+    /// word match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
+    pub fn machine_only(&self, text: &str) -> bool {
+        let bare: String = text
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect();
+        ![text, bare.as_str()].iter().any(|t| {
+            self.control.as_ref().is_some_and(|r| r.is_match(t))
+                || t.to_lowercase().contains("clio")
+                || t.contains("authorized_keys")
+                || t.contains(".ssh")
+        })
     }
 
     /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
@@ -815,6 +839,56 @@ mod tests {
                 PathBuf::from("/home/u/.local/share/clio"),
             ],
         )
+    }
+
+    // S-72: of what is `control`, the list marks as the machine's alone (which bypass may answer)
+    // only what names none of Clio's paths (wherever they are), nothing called `clio` (her
+    // commands, units, a `clio …` a scheduler or `systemd-run` would run), and no keys; one that
+    // mixes both, or hides `clio` in quotes, is Clio's and always asks. `clio bypass` is control.
+    #[test]
+    fn control_on_the_machine_is_told_apart_from_clios_own_guards() {
+        let r = HostRules::factory().with_control(
+            Path::new("/home/u"),
+            &[PathBuf::from("/srv/assistant/data")],
+        );
+        for (c, machine) in [
+            ("systemctl reboot", true),
+            ("sudo shutdown -h now", true),
+            ("systemd-run --user touch /tmp/x", true),
+            ("crontab -r", true),
+            ("echo '0 3 * * * /usr/bin/backup' | crontab -", true),
+            ("visudo -c", true),
+            ("useradd deploy", true),
+            ("busctl list", true),
+            ("clio bypass on", false),
+            ("clio bypass off", false),
+            ("clio approve a1", false),
+            ("systemd-run --user clio approve a1", false),
+            ("echo '* * * * * clio approve a1' | crontab -", false),
+            ("crontab -r; clio grant off", false),
+            ("systemctl --user restart clio-services.timer", false),
+            ("systemctl --user stop clio-memory", false),
+            ("systemd-run --user c'l'io approve a1", false),
+            ("systemd-run --user cl\\io approve a1", false),
+            (
+                "systemd-run --user rm /srv/assistant/data/host/bypass.json",
+                false,
+            ),
+            ("crontab -l > ~/.ssh/authorized_keys", false),
+            ("useradd -m x && cp k /home/x/.ssh/authorized_keys", false),
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+            assert_eq!(r.machine_only(c), machine, "{c}");
+        }
+        for (path, machine) in [
+            ("/home/u/.config/systemd/user/backup.service", true),
+            ("/etc/sudoers.d/deploy", true),
+            ("/home/u/.config/systemd/user/clio-services.timer", false),
+            ("/home/u/.ssh/authorized_keys", false),
+        ] {
+            assert_eq!(r.classify_write(Path::new(path)), Some(Control), "{path}");
+            assert_eq!(r.machine_only(path), machine, "{path}");
+        }
     }
 
     #[test]

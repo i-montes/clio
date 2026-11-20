@@ -1407,3 +1407,105 @@ fn mcp_confirm_lists_every_tool_waits_in_line_and_keeps_the_timing_rule() {
     );
     assert_eq!(cmds, vec![Cmd::Mcp(format!("confirm srv {digest} --yes"))]);
 }
+
+// S-72: `/bypass on` only asks the runtime for its box; the box says what bypass means and keeps
+// the approval timing: nothing answers it in its first second, a paste or a click never does,
+// `y` arms it only once its end was shown, then Enter turns bypass on (`Cmd::BypassOn`, the
+// only way); `n` leaves it off. The status line says `bypass on` once the runtime reads it on.
+#[test]
+fn bypass_on_is_its_box_under_the_approval_timing() {
+    let t = tempfile::tempdir().unwrap();
+    let d = crate::cli::home::Dirs {
+        config: t.path().join("config"),
+        data: t.path().join("data"),
+        runs: t.path().join("data/runs"),
+        runtime: None,
+        home: t.path().join("home"),
+    };
+    let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
+    cfg.jev.enabled = true;
+    std::fs::create_dir_all(&d.config).unwrap();
+    std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+    let ask = || {
+        Input::Bg(Bg::Confirm(Ok(Box::new(
+            crate::cli::pending::bypass_ask(&d).unwrap(),
+        ))))
+    };
+    let mut a = chat();
+    a.chat.running = false;
+    let mut typed: Vec<Input> = "/bypass on".chars().map(ch).collect();
+    typed.push(key(KeyCode::Enter));
+    let (a, cmds) = feed(a, typed);
+    let cmds: Vec<Cmd> = cmds
+        .into_iter()
+        .filter(|c| *c != Cmd::LoadCommands)
+        .collect();
+    assert_eq!(
+        cmds,
+        vec![Cmd::Bypass {
+            arg: "on".into(),
+            session: "sid".into()
+        }]
+    );
+    let (a, _) = feed(a, vec![ask()]);
+    assert_eq!(a.confirm.as_ref().unwrap().action, Action::Bypass);
+    let click = Input::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    });
+    let (a, cmds) = feed(
+        a,
+        vec![
+            ch('y'),
+            key(KeyCode::Enter),
+            Input::Paste("y\n".into()),
+            click,
+        ],
+    );
+    assert!(cmds.is_empty(), "{cmds:?}");
+    let (a, cmds) = feed(a, vec![Input::Tick(3_000), Input::Paste("y\r".into())]);
+    assert!(
+        cmds.is_empty() && !a.confirm.as_ref().unwrap().armed,
+        "{cmds:?}"
+    );
+    let (a, seen, t) = read_to_the_end(a, 80, 24, 4_000);
+    let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+    for want in [
+        "Turn bypass on?",
+        crate::cli::pending::BYPASS_BOX,
+        "What still asks you",
+        "yes, turn bypass on",
+    ] {
+        assert!(words.contains(want), "{want}\n{seen}");
+    }
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Tick(t + 2_000), ch('y'), key(KeyCode::Enter)],
+    );
+    assert_eq!(
+        cmds,
+        vec![Cmd::BypassOn {
+            session: "sid".into()
+        }]
+    );
+    // `n`: nothing turns on.
+    let (a, _) = feed(a, vec![ask()]);
+    let (a, cmds) = feed(a, vec![Input::Tick(t + 9_000), ch('n')]);
+    assert!(cmds.is_empty() && a.confirm.is_none(), "{cmds:?}");
+    // The runtime read it on: the status line says so.
+    assert!(!screen_text(&a, 120, 20).contains("bypass on"));
+    let (a, _) = feed(
+        a,
+        vec![Input::Bg(Bg::Grant {
+            session: "sid".into(),
+            ends: None,
+            hours: 4,
+            suspect: false,
+            judge: true,
+            bypass: true,
+        })],
+    );
+    assert!(screen_text(&a, 120, 20).contains("bypass on"));
+}

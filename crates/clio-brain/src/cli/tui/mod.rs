@@ -550,6 +550,7 @@ fn send_grant(d: &Dirs, session: &str, s: &dyn Session, tx: &Sender<Input>) {
         hours: super::pending::grant_hours(d),
         suspect: s.suspect(),
         judge: super::pending::judge_on(d),
+        bypass: super::pending::bypass_now(d).is_some(),
     }));
 }
 
@@ -1299,6 +1300,7 @@ impl Ctx {
                         // Done as the chat opens: its notes; the model hears them with the next
                         // message.
                         info.notes.extend(manage_news(&opened.session, &slot, tx));
+                        info.notes.extend(super::pending::bypass_notes(d));
                         if !drafts.is_empty() {
                             let _ = tx.send(Input::Bg(Bg::SkillNews(drafts, vec![])));
                         }
@@ -1390,6 +1392,47 @@ impl Ctx {
                             send_grant(d, &id, s.as_ref(), tx);
                         }
                         Ok::<_, String>(text)
+                    },
+                    |r| Bg::GrantSaid(r.and_then(|x| x)),
+                );
+            }
+            Cmd::Bypass { arg, session: id } => {
+                let session = self.current_chat();
+                if arg == "on" {
+                    self.spawn(
+                        move |d, _| super::pending::bypass_ask(d),
+                        |r| Bg::Confirm(r.and_then(|x| x).map(Box::new)),
+                    );
+                    return;
+                }
+                self.spawn(
+                    move |d, tx| {
+                        let lines = if arg == "off" {
+                            super::pending::bypass_off(d)?
+                        } else {
+                            super::pending::bypass_list(d, 30)
+                        };
+                        if let Some(s) = &session {
+                            send_grant(d, &id, s.as_ref(), tx);
+                        }
+                        Ok::<_, String>(lines.join("\n"))
+                    },
+                    |r| Bg::GrantSaid(r.and_then(|x| x)),
+                );
+            }
+            // The person's yes in the `/bypass on` box: the only way bypass turns on.
+            Cmd::BypassOn { session: id } => {
+                let session = self.current_chat();
+                self.spawn(
+                    move |d, tx| {
+                        super::pending::bypass_on(d)?;
+                        if let Some(s) = &session {
+                            send_grant(d, &id, s.as_ref(), tx);
+                        }
+                        Ok::<_, String>(format!(
+                            "bypass is on: Clio approves by herself what would ask you, with no end, until /bypass off. {}",
+                            super::pending::BYPASS_KEEPS
+                        ))
                     },
                     |r| Bg::GrantSaid(r.and_then(|x| x)),
                 );
@@ -1699,13 +1742,15 @@ impl Ctx {
                                 session: session.clone(),
                             }));
                         }
-                        // Under an open window (the judge on, the session not suspect) what was
-                        // set aside after it opened and the window may answer is approved by it,
-                        // through the same path as the person's yes; the rest keeps its box.
+                        // Under bypass or an open window (the judge on, the session not suspect)
+                        // what it may answer is approved by it, through the same path as the
+                        // person's yes; the rest, and a round's items, keep their box.
                         let suspect = s.suspect();
-                        if !suspect && let Some(w) = super::pending::window_now(d) {
+                        if !suspect {
                             for p in s.waiting() {
-                                if clio_toolhost::grant::may_answer(&w, &p) {
+                                if !super::round::is_round(d, &p.run)
+                                    && super::pending::answering(d, &p).is_some()
+                                {
                                     // An act on what Clio created goes on by itself (`Acted`).
                                     let _ = tx.send(Input::Bg(match s.grant(&p.id) {
                                         Ok(n) if clio_toolhost::manage::is_manage(&p) => {

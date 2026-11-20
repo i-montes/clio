@@ -19,6 +19,13 @@
 //! `<state>/grants/<id>.jsonl`, whose first line is the window itself. A missing or damaged file
 //! is no window; a window never outlives the boot it opened in, and never lasts longer than its
 //! length by the wall clock or by the time since boot.
+//!
+//! Bypass (`2026-11-20-bypass-design.md`) is the person's standing yes, kept the same way in
+//! `<state>/bypass.json` and recorded in `<state>/bypass/<id>.jsonl` (`Kind::Bypass`): a window
+//! with no end that outlives restarts, turned on only by the chat's box (`bypass_on`), off by the
+//! person or the judge. It answers what a window does and more (`bypass_answers`), never what
+//! would change Clio's own guards, a change to the person's blocks, a secret or a suspect
+//! session's act. While it is on no window opens.
 
 use std::fs;
 use std::io::Write;
@@ -40,6 +47,17 @@ pub const BY_PERSON: &str = "closed by you";
 pub const JUDGE_OFF: &str = "the judge is off";
 /// The outcome recorded for an act that could not run (never its error's words: outside text).
 pub const NOT_RUN: &str = "failed: it could not run";
+/// What bypass's ids start with: an item approved under it says so (`Pending::granted`).
+pub const BYPASS_ID: &str = "bypass-";
+/// Who turned bypass on: the chat's box, the only way it turns on.
+pub const BY_BOX: &str = "the chat's /bypass on box";
+
+/// Which of the two a file holds: a permission window or bypass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Window,
+    Bypass,
+}
 
 /// How long a summary is still owed for a window that ended: older ones are only listed.
 const OWED_MS: i64 = 7 * 24 * 3600 * 1000;
@@ -61,6 +79,9 @@ pub struct Window {
     pub closed_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// Bypass, not a window: it has no end and outlives restarts (`Kind::Bypass`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass: bool,
 }
 
 impl Window {
@@ -136,6 +157,33 @@ pub fn may_answer(w: &Window, p: &Pending) -> bool {
     covers(p) && p.created_ms >= w.opened_ms
 }
 
+/// May bypass answer `p` by itself: what a window answers and what a window never does (`control`
+/// on the machine, a new service or MCP server or a new version, `on` of what the person turned
+/// off, `remove` or `undo` of a shipped skill, a service's `undo`, a changed MCP tool, what waited
+/// from before). Never what would change Clio's own guards (a `control` the list did not mark
+/// `ask::MACHINE` when it classified it), a secret, a change to the person's blocks (only a marked
+/// session's waits), a suspect session's act or a round's reach out: those always ask.
+pub fn bypass_answers(p: &Pending) -> bool {
+    match p.class {
+        Class::Control => p.reason.as_deref() == Some(crate::ask::MACHINE),
+        Class::Secret | Class::Memory => false,
+        _ => !p
+            .reason
+            .as_deref()
+            .is_some_and(|r| r == crate::SUSPECT_REASON || r == crate::ROUND_REACHES),
+    }
+}
+
+/// What answers `p` by itself now: bypass when it is on and may (it answers all a window does),
+/// else the open window when it may. The one test the tool host and the chat apply; the judge,
+/// a suspect session, a review and a round are theirs to check first.
+pub fn answering(state: &Path, p: &Pending) -> Option<Window> {
+    Kind::Bypass
+        .current(state)
+        .filter(|_| bypass_answers(p))
+        .or_else(|| current(state).filter(|w| may_answer(w, p)))
+}
+
 /// What came of an act, in fixed words: never its output, which may be outside text.
 pub fn outcome(ok: bool, exit: Option<i64>) -> String {
     match exit {
@@ -147,63 +195,195 @@ pub fn outcome(ok: bool, exit: Option<i64>) -> String {
 }
 
 pub fn file(state: &Path) -> PathBuf {
-    state.join("grant.json")
-}
-
-fn dir(state: &Path) -> PathBuf {
-    state.join("grants")
-}
-
-fn record_file(state: &Path, id: &str) -> PathBuf {
-    dir(state).join(format!("{id}.jsonl"))
+    Kind::Window.file(state)
 }
 
 /// The last window as written, open or not; `None` for a missing or damaged file.
 pub fn read(state: &Path) -> Option<Window> {
-    serde_json::from_str(&fs::read_to_string(file(state)).ok()?).ok()
+    Kind::Window.read(state)
 }
 
 /// The window open now, if any.
 pub fn current(state: &Path) -> Option<Window> {
-    read(state).filter(Window::open_now)
+    Kind::Window.current(state)
 }
 
-fn write(state: &Path, w: &Window) -> Result<(), String> {
-    let e = |x: std::io::Error| format!("{}: {x}", file(state).display());
-    private_dir(state).map_err(e)?;
-    let text = serde_json::to_string_pretty(w).map_err(|x| x.to_string())?;
-    let tmp = state.join("grant.json.tmp");
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
-        .and_then(|()| fs::rename(&tmp, file(state)))
-        .map_err(e)
-}
+impl Kind {
+    /// Which `w` is.
+    pub fn of(w: &Window) -> Self {
+        if w.bypass { Self::Bypass } else { Self::Window }
+    }
 
-fn append(state: &Path, id: &str, line: &Value) -> Result<(), String> {
-    let path = record_file(state, id);
-    let e = |x: std::io::Error| format!("{}: {x}", path.display());
-    private_dir(&dir(state)).map_err(e)?;
-    let mut text = line.to_string();
-    text.push('\n');
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&path)
-        .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
-        .map_err(e)
+    pub fn file(self, state: &Path) -> PathBuf {
+        state.join(match self {
+            Self::Window => "grant.json",
+            Self::Bypass => "bypass.json",
+        })
+    }
+
+    fn dir(self, state: &Path) -> PathBuf {
+        state.join(match self {
+            Self::Window => "grants",
+            Self::Bypass => "bypass",
+        })
+    }
+
+    fn record_file(self, state: &Path, id: &str) -> PathBuf {
+        self.dir(state).join(format!("{id}.jsonl"))
+    }
+
+    /// The last one as written, on or not; `None` for a missing or damaged file, or one that
+    /// holds the other kind.
+    pub fn read(self, state: &Path) -> Option<Window> {
+        let w: Window = serde_json::from_str(&fs::read_to_string(self.file(state)).ok()?).ok()?;
+        (Self::of(&w) == self).then_some(w)
+    }
+
+    /// The one open (on) now, if any.
+    pub fn current(self, state: &Path) -> Option<Window> {
+        self.read(state).filter(Window::open_now)
+    }
+
+    fn write(self, state: &Path, w: &Window) -> Result<(), String> {
+        let file = self.file(state);
+        let e = |x: std::io::Error| format!("{}: {x}", file.display());
+        private_dir(state).map_err(e)?;
+        let text = serde_json::to_string_pretty(w).map_err(|x| x.to_string())?;
+        let tmp = file.with_extension("json.tmp");
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
+            .and_then(|()| fs::rename(&tmp, &file))
+            .map_err(e)
+    }
+
+    fn append(self, state: &Path, id: &str, line: &Value) -> Result<(), String> {
+        let path = self.record_file(state, id);
+        let e = |x: std::io::Error| format!("{}: {x}", path.display());
+        private_dir(&self.dir(state)).map_err(e)?;
+        let mut text = line.to_string();
+        text.push('\n');
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|()| f.sync_all()))
+            .map_err(e)
+    }
+
+    /// Writes `w` new: its record first (one with no record of its own never opens), then its
+    /// file.
+    fn start(self, state: &Path, w: &Window) -> Result<(), String> {
+        self.append(state, &w.id, &json!({ "window": w }))?;
+        self.write(state, w)
+    }
+
+    /// Closes the open one now, saying why: the person (`/grant off`, `/bypass off`) or the
+    /// judge (a session marked `suspect`, or found off). Nothing open: nothing changes.
+    pub fn close(self, state: &Path, why: &str) -> Result<Option<Window>, String> {
+        let Some(mut w) = self.current(state) else {
+            return Ok(None);
+        };
+        let now = now_ms();
+        w.closed_ms = Some(now);
+        w.why = Some(why.to_owned());
+        self.write(state, &w)?;
+        self.append(state, &w.id, &json!({ "at": now, "closed": why }))?;
+        Ok(Some(w))
+    }
+
+    /// An act it answers is about to run: when it is still open now, the act is recorded (when,
+    /// the item, its class, what it does, the session) before anything runs, and it is returned;
+    /// else (closed, ended, the record not writable) `None`, and the item waits for the person.
+    pub fn begin(self, state: &Path, p: &Pending, what: &str) -> Option<Window> {
+        let w = self.current(state)?;
+        let line = json!({
+            "at": now_ms(),
+            "pending": p.id,
+            "class": p.class.to_string(),
+            "what": what,
+            "session": p.session,
+            "run": p.run,
+        });
+        self.append(state, &w.id, &line).ok()?;
+        Some(w)
+    }
+
+    /// Id `id` as its record has it, and its acts in order.
+    pub fn record(self, state: &Path, id: &str) -> Option<(Window, Vec<Act>)> {
+        let text = fs::read_to_string(self.record_file(state, id)).ok()?;
+        let mut lines = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok());
+        let mut w: Window = serde_json::from_value(lines.next()?.get("window")?.clone()).ok()?;
+        let mut acts: Vec<Act> = Vec::new();
+        let s = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_owned();
+        for v in lines {
+            if let Some(why) = v["closed"].as_str() {
+                w.closed_ms = v["at"].as_i64();
+                w.why = Some(why.to_owned());
+            } else if let Some(o) = v["outcome"].as_str() {
+                if let Some(a) = acts
+                    .iter_mut()
+                    .rev()
+                    .find(|a| a.pending == s(&v, "pending"))
+                {
+                    a.outcome = Some(o.to_owned());
+                }
+            } else {
+                acts.push(Act {
+                    at: v["at"].as_i64().unwrap_or(0),
+                    pending: s(&v, "pending"),
+                    class: s(&v, "class"),
+                    what: s(&v, "what"),
+                    session: s(&v, "session"),
+                    run: s(&v, "run"),
+                    outcome: None,
+                });
+            }
+        }
+        Some((w, acts))
+    }
+
+    /// Every one recorded, newest first.
+    pub fn all(self, state: &Path) -> Vec<(Window, Vec<Act>)> {
+        let mut all: Vec<(Window, Vec<Act>)> = fs::read_dir(self.dir(state))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                self.record(state, name.strip_suffix(".jsonl")?)
+            })
+            .collect();
+        all.sort_by_key(|(w, _)| std::cmp::Reverse(w.opened_ms));
+        all
+    }
+
+    /// `<id>.<what>` is taken now, once: the first to claim it (any conversation, any process)
+    /// does what it marks.
+    fn claim(self, state: &Path, id: &str, what: &str) -> bool {
+        private_dir(&self.dir(state)).is_ok()
+            && fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(self.dir(state).join(format!("{id}.{what}")))
+                .is_ok()
+    }
 }
 
 /// The person said yes to `by`: a window of `hours` opens. Only the person's `clio` calls this,
 /// for a yes typed in an approval box or `clio approve` (see `crates/clio-brain/src/cli/pending.rs`,
-/// `person_said_yes`). `hours` 0, or a window already open (it is not stretched): none.
+/// `person_said_yes`). `hours` 0, a window already open (it is not stretched), or bypass on:
+/// none.
 pub fn open(state: &Path, hours: u64, by: &[String]) -> Result<Option<Window>, String> {
-    if hours == 0 || current(state).is_some() {
+    if hours == 0 || current(state).is_some() || Kind::Bypass.current(state).is_some() {
         return Ok(None);
     }
     let now = now_ms();
@@ -217,50 +397,94 @@ pub fn open(state: &Path, hours: u64, by: &[String]) -> Result<Option<Window>, S
         by: by.to_vec(),
         closed_ms: None,
         why: None,
+        bypass: false,
     };
-    // The record first: a window with no record of its own never opens.
-    append(state, &w.id, &json!({ "window": w }))?;
-    write(state, &w)?;
+    Kind::Window.start(state, &w)?;
     Ok(Some(w))
 }
 
-/// Closes the open window now, saying why: the person (`/grant off`) or the judge (a session
-/// marked `suspect`). Nothing open: nothing changes.
-pub fn close(state: &Path, why: &str) -> Result<Option<Window>, String> {
-    let Some(mut w) = current(state) else {
-        return Ok(None);
-    };
+/// The person said yes in the chat's `/bypass on` box: bypass turns on, with no end, until the
+/// person or the judge turns it off. Only that box calls this (see
+/// `crates/clio-brain/src/cli/pending.rs`, `bypass_on`), with the judge on; on already: as it is.
+pub fn bypass_on(state: &Path) -> Result<Window, String> {
+    if let Some(w) = Kind::Bypass.current(state) {
+        return Ok(w);
+    }
     let now = now_ms();
-    w.closed_ms = Some(now);
-    w.why = Some(why.to_owned());
-    write(state, &w)?;
-    append(state, &w.id, &json!({ "at": now, "closed": why }))?;
-    Ok(Some(w))
+    let w = Window {
+        id: format!("{BYPASS_ID}{now}"),
+        opened_ms: now,
+        ends_ms: i64::MAX,
+        mono_ms: None,
+        boot: None,
+        by: vec![BY_BOX.into()],
+        closed_ms: None,
+        why: None,
+        bypass: true,
+    };
+    Kind::Bypass.start(state, &w)?;
+    Ok(w)
 }
 
-/// An act of the window is about to run: when the window is still open now, it is recorded
-/// (when, the item, its class, what it does, the session) before anything runs, and the window
-/// is returned; else (closed, ended, the record not writable) `None`, and the item waits for the
-/// person as it would without a window.
-pub fn begin(state: &Path, p: &Pending, what: &str) -> Option<Window> {
-    let w = current(state)?;
-    let line = json!({
-        "at": now_ms(),
-        "pending": p.id,
-        "class": p.class.to_string(),
-        "what": what,
-        "session": p.session,
-        "run": p.run,
+/// What bypass `id` approved that the person has not looked at yet: after the last act they saw
+/// (`bypass_seen`).
+pub fn bypass_unseen(state: &Path, id: &str) -> Vec<Act> {
+    let seen = fs::read_to_string(Kind::Bypass.dir(state).join(format!("{id}.seen")))
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(i64::MIN);
+    Kind::Bypass
+        .record(state, id)
+        .map(|(_, acts)| acts.into_iter().filter(|a| a.at > seen).collect())
+        .unwrap_or_default()
+}
+
+/// The person was shown `acts` of bypass `id` (`/bypass`, `/bypass off`, `clio bypass`): the
+/// next count starts after them.
+pub fn bypass_seen(state: &Path, id: &str, acts: &[Act]) {
+    let Some(last) = acts.iter().map(|a| a.at).max() else {
+        return;
+    };
+    let path = Kind::Bypass.dir(state).join(format!("{id}.seen"));
+    let r = private_dir(&Kind::Bypass.dir(state)).and_then(|()| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(last.to_string().as_bytes()))
     });
-    append(state, &w.id, &line).ok()?;
-    Some(w)
+    if let Err(e) = r {
+        eprintln!("clio: {}: {e}", path.display());
+    }
+}
+
+/// Bypass the judge turned off (it flagged an injection, or was found off) whose notice was not
+/// given yet: claimed now, once, for the next chat that opens.
+pub fn bypass_off_notice(state: &Path) -> Option<Window> {
+    let w = Kind::Bypass.read(state)?;
+    (w.closed_ms.is_some()
+        && w.why.as_deref() != Some(BY_PERSON)
+        && Kind::Bypass.claim(state, &w.id, "told"))
+    .then_some(w)
+}
+
+/// Closes the open window now, saying why (`Kind::close`).
+pub fn close(state: &Path, why: &str) -> Result<Option<Window>, String> {
+    Kind::Window.close(state, why)
+}
+
+/// An act of the window is about to run (`Kind::begin`).
+pub fn begin(state: &Path, p: &Pending, what: &str) -> Option<Window> {
+    Kind::Window.begin(state, p, what)
 }
 
 /// What came of an act `begin` recorded: `outcome`'s words or `NOT_RUN`.
 pub fn done(state: &Path, w: &Window, id: &str, outcome: &str) {
     let line = json!({ "at": now_ms(), "pending": id, "outcome": first_line(outcome, 300) });
-    if let Err(e) = append(state, &w.id, &line) {
-        eprintln!("clio: the permission window's record lost a line: {e}");
+    if let Err(e) = Kind::of(w).append(state, &w.id, &line) {
+        eprintln!("clio: the record of {} lost a line: {e}", w.id);
     }
 }
 
@@ -289,53 +513,12 @@ pub struct Act {
 
 /// Window `id` as its record has it, and its acts in order.
 pub fn record(state: &Path, id: &str) -> Option<(Window, Vec<Act>)> {
-    let text = fs::read_to_string(record_file(state, id)).ok()?;
-    let mut lines = text
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok());
-    let mut w: Window = serde_json::from_value(lines.next()?.get("window")?.clone()).ok()?;
-    let mut acts: Vec<Act> = Vec::new();
-    let s = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_owned();
-    for v in lines {
-        if let Some(why) = v["closed"].as_str() {
-            w.closed_ms = v["at"].as_i64();
-            w.why = Some(why.to_owned());
-        } else if let Some(o) = v["outcome"].as_str() {
-            if let Some(a) = acts
-                .iter_mut()
-                .rev()
-                .find(|a| a.pending == s(&v, "pending"))
-            {
-                a.outcome = Some(o.to_owned());
-            }
-        } else {
-            acts.push(Act {
-                at: v["at"].as_i64().unwrap_or(0),
-                pending: s(&v, "pending"),
-                class: s(&v, "class"),
-                what: s(&v, "what"),
-                session: s(&v, "session"),
-                run: s(&v, "run"),
-                outcome: None,
-            });
-        }
-    }
-    Some((w, acts))
+    Kind::Window.record(state, id)
 }
 
 /// Every window recorded, newest first.
 pub fn windows(state: &Path) -> Vec<(Window, Vec<Act>)> {
-    let mut all: Vec<(Window, Vec<Act>)> = fs::read_dir(dir(state))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            record(state, name.strip_suffix(".jsonl")?)
-        })
-        .collect();
-    all.sort_by_key(|(w, _)| std::cmp::Reverse(w.opened_ms));
-    all
+    Kind::Window.all(state)
 }
 
 /// A window that ended (at its time or closed) in the last week, with acts, whose summary was not
@@ -348,25 +531,22 @@ pub fn summary_due(state: &Path) -> Option<(Window, Vec<Act>)> {
         (closed_since || !w.open_now())
             && !acts.is_empty()
             && now.saturating_sub(w.end()) < OWED_MS
-            && !dir(state).join(format!("{}.told", w.id)).exists()
+            && !Kind::Window
+                .dir(state)
+                .join(format!("{}.told", w.id))
+                .exists()
     })
 }
 
 /// The summary of window `id` is given now, once: the first to claim it (any conversation, any
 /// process) gives it, just before it sends it; `release_summary` when the send failed.
 pub fn claim_summary(state: &Path, id: &str) -> bool {
-    private_dir(&dir(state)).is_ok()
-        && fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(dir(state).join(format!("{id}.told")))
-            .is_ok()
+    Kind::Window.claim(state, id, "told")
 }
 
 /// The summary of window `id` could not be given after all: it is owed again.
 pub fn release_summary(state: &Path, id: &str) {
-    let _ = fs::remove_file(dir(state).join(format!("{id}.told")));
+    let _ = fs::remove_file(Kind::Window.dir(state).join(format!("{id}.told")));
 }
 
 /// `3 h 12 min`, `25 min`, `less than a minute`.
@@ -414,6 +594,7 @@ mod tests {
             by: vec!["a1".into()],
             closed_ms: None,
             why: None,
+            bypass: false,
         }
     }
 
@@ -548,5 +729,115 @@ mod tests {
         open(st, 4, &["a1".into()]).unwrap().unwrap();
         close(st, "closed by you").unwrap();
         assert!(summary_due(st).is_none());
+    }
+    // S-72: bypass answers each class a window does and what a window never does (control on the
+    // machine, a service, an MCP server, `on` of what the person turned off, a changed tool, what
+    // waited from before), and never what would change Clio's own guards (control without the
+    // list's machine mark), a secret, a block change, a suspect session's act or a round's.
+    #[test]
+    fn bypass_answers_more_than_a_window_and_never_clios_own_guards() {
+        let mut p = crate::pending::tests_item("s");
+        p.created_ms = 0;
+        for (class, yes) in [
+            (Class::Delete, true),
+            (Class::Spend, true),
+            (Class::Send, true),
+            (Class::Skill, true),
+            (Class::Service, true),
+            (Class::Mcp, true),
+            (Class::Control, false),
+            (Class::Secret, false),
+            (Class::Memory, false),
+        ] {
+            p.class = class;
+            assert_eq!(bypass_answers(&p), yes, "{class}");
+        }
+        p.class = Class::Control;
+        p.reason = Some(crate::ask::MACHINE.into());
+        assert!(bypass_answers(&p), "control on the machine");
+        assert!(!covers(&p), "never under a window");
+        p.reason = Some("a round changes no service".into());
+        assert!(!bypass_answers(&p));
+        p.class = Class::Send;
+        for (why, yes) in [
+            (crate::mcp::ASK_TOOL, true),
+            ("the tool changed since the person confirmed it", true),
+            (crate::manage::PERSON_OFF, true),
+            (crate::SUSPECT_REASON, false),
+            (crate::ROUND_REACHES, false),
+        ] {
+            p.reason = Some(why.into());
+            assert_eq!(bypass_answers(&p), yes, "{why}");
+        }
+        p.class = Class::Memory;
+        p.reason = None;
+        assert!(!bypass_answers(&p), "a marked session's block change");
+    }
+
+    // S-72: a missing or damaged bypass file, or one that holds a window, is off; only
+    // `bypass_on` turns it on, with no end, on any boot and any clock since boot (a restart does
+    // not turn it off); while it is on no window opens and it answers before one; `close` turns
+    // it off; the record has what it approved; the person's look is remembered; the judge's
+    // notice is given once, the person's own off has none.
+    #[test]
+    fn bypass_is_kept_like_a_window_has_no_end_and_closes() {
+        let t = tempfile::tempdir().unwrap();
+        let st = t.path();
+        assert!(Kind::Bypass.current(st).is_none());
+        fs::write(Kind::Bypass.file(st), "{not json").unwrap();
+        assert!(Kind::Bypass.current(st).is_none(), "damaged");
+        let w = open(st, 4, &["a1".into()]).unwrap().unwrap();
+        fs::copy(file(st), Kind::Bypass.file(st)).unwrap();
+        assert!(
+            Kind::Bypass.current(st).is_none(),
+            "a window's file is no bypass"
+        );
+        close(st, BY_PERSON).unwrap();
+        let b = bypass_on(st).unwrap();
+        assert!(b.bypass && b.id.starts_with(BYPASS_ID) && b.by == [BY_BOX]);
+        assert_eq!(bypass_on(st).unwrap(), b, "on already: as it is");
+        assert!(b.open_at(now_ms() + 400 * 24 * H, Some(5), Some("another boot")));
+        assert_eq!(Kind::Bypass.current(st).unwrap(), b);
+        let mode = fs::metadata(Kind::Bypass.file(st)).unwrap().permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o600
+        );
+        assert!(
+            open(st, 4, &["a2".into()]).unwrap().is_none(),
+            "no window opens"
+        );
+        assert!(current(st).is_none() && w.closed_ms.is_none());
+        let mut p = crate::pending::tests_item("s1");
+        p.id = "c3".into();
+        p.created_ms = 0;
+        assert_eq!(
+            answering(st, &p).unwrap().id,
+            b.id,
+            "what waited from before too"
+        );
+        p.class = Class::Control;
+        assert!(answering(st, &p).is_none(), "Clio's own guards");
+        p.class = Class::Delete;
+        let x = Kind::Bypass.begin(st, &p, "rm -r /srv/old").unwrap();
+        done(st, &x, "c3", "done (exit 0)");
+        assert_eq!(bypass_unseen(st, &b.id).len(), 1);
+        let (_, acts) = Kind::Bypass.record(st, &b.id).unwrap();
+        assert_eq!(acts[0].outcome.as_deref(), Some("done (exit 0)"));
+        assert!(record(st, &b.id).is_none(), "not in the windows' record");
+        bypass_seen(st, &b.id, &acts);
+        assert!(bypass_unseen(st, &b.id).is_empty());
+        assert!(bypass_off_notice(st).is_none(), "on: no notice");
+        Kind::Bypass.close(st, FLAGGED).unwrap().unwrap();
+        assert!(Kind::Bypass.current(st).is_none() && answering(st, &p).is_none());
+        assert!(Kind::Bypass.begin(st, &p, "rm").is_none(), "off: it waits");
+        assert_eq!(bypass_off_notice(st).unwrap().why.as_deref(), Some(FLAGGED));
+        assert!(bypass_off_notice(st).is_none(), "once");
+        let b2 = bypass_on(st).unwrap();
+        assert_ne!(b2.id, b.id);
+        Kind::Bypass.close(st, BY_PERSON).unwrap().unwrap();
+        assert!(bypass_off_notice(st).is_none(), "the person turned it off");
+        assert_eq!(Kind::Bypass.all(st).len(), 2);
+        assert!(summary_due(st).is_none(), "bypass owes no window summary");
     }
 }

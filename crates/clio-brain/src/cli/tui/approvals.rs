@@ -5,7 +5,9 @@
 //! skill), with a summary when they end. Under an open window what was set aside after it opened
 //! and it may answer is approved by it (`Session::grant`); control, a secret, a block change, a
 //! service or an MCP server always asks, as in a `suspect` session or with the judge off. When
-//! the window ends Clio starts one turn to sum up what she did under it.
+//! the window ends Clio starts one turn to sum up what she did under it. Under bypass (`/bypass
+//! on`, its own box) what it may answer is approved by it the same way, and the box holds only
+//! what it never answers; the status line says `bypass on`.
 
 use super::app::{Action, App, Cmd, Confirm, Screen, chat_waits};
 use super::ask::{BlockAsk, Part};
@@ -39,6 +41,8 @@ pub struct Approvals {
     pub suspect: bool,
     /// The judge is off (`jev.enabled`): no window opens.
     pub judge_off: bool,
+    /// Bypass is on: the status line says so, and a box holds only what it never answers.
+    pub bypass: bool,
     /// A permission window ended and its record waits in the session: one turn sums it up.
     pub summary: bool,
 }
@@ -131,13 +135,13 @@ pub fn checked(app: &mut App, session: &str, waiting: usize) {
 
 /// The permission window as the runtime read it: when it ends (wall clock, ms: put on this
 /// chat's clock here, which counts from its start), the hours a yes is worth, whether this
-/// session is `suspect` and whether the judge is on.
+/// session is `suspect`, whether the judge is on and whether bypass is.
 pub fn grant_state(
     app: &mut App,
     session: &str,
     ends: Option<i64>,
     hours: u64,
-    (suspect, judge): (bool, bool),
+    (suspect, judge, bypass): (bool, bool, bool),
 ) {
     if session != app.chat.session_id {
         return;
@@ -148,6 +152,7 @@ pub fn grant_state(
     a.hours = Some(hours);
     a.suspect = suspect;
     a.judge_off = !judge;
+    a.bypass = bypass;
 }
 
 /// What a yes in the box does, in plain words: its first row, and the key hint's words (`base`:
@@ -212,7 +217,14 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         _ => " yes to all".to_owned(),
     };
     let hours = app.chat.approvals.hours.unwrap_or(4);
-    let (head, yes) = yes_says(hours, (suspect, app.chat.approvals.judge_off), &base);
+    let (head, yes) = if app.chat.approvals.bypass {
+        (
+            "Yes approves all of this. Bypass is on, and these always ask you.".to_owned(),
+            base.clone(),
+        )
+    } else {
+        yes_says(hours, (suspect, app.chat.approvals.judge_off), &base)
+    };
     let mut rows = vec![(Part::Head, head)];
     let mut ids: Vec<String> = Vec::new();
     for (i, (id, what, block)) in items.into_iter().enumerate() {
@@ -296,6 +308,7 @@ pub fn outcomes(stored: &str) -> (&str, Vec<String>) {
             Some(last)
                 if !(part.starts_with("the person ")
                     || part.starts_with("the permission window ")
+                    || part.starts_with("bypass approved ")
                     || part.starts_with("Clio did ")
                     || part.starts_with("Clio could not ")
                     || part.starts_with("secret ")) =>
@@ -738,6 +751,7 @@ mod tests {
             hours: 4,
             suspect: false,
             judge: true,
+            bypass: false,
         })
     }
 

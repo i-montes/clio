@@ -62,16 +62,16 @@ pub const HOST_GUARD_TOOLS: [&str; 10] = [
 ];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@27";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@27.md");
+pub const PROMPT_NAME: &str = "clio-agent@28";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@28.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@11";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@11.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@12";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@12.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -558,8 +558,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 27\n"));
-        assert!(HOST_PROMPT.starts_with("version: 11\n"));
+        assert!(PROMPT.starts_with("version: 28\n"));
+        assert!(HOST_PROMPT.starts_with("version: 12\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -688,8 +688,8 @@ mod tests {
             r#"- An MCP server is someone else's program from npm that gives you more tools. Only local servers: an npm package at an exact version, started with node; no remote (HTTP) server, no OAuth. Propose one with `mcp_propose` only when the person asks for one; read the `mcp-installer` skill first. Once the person approves it (a permission window never does: it always waits for them), Clio installs it, lists its tools and turns it on. `mcp_manage` turns a server off (no permission needed), on or away (with the person's permission, as for services); a tool's mode stays the person's."#,
         ];
         for (new, was, changed) in [
-            (PROMPT, old("clio-agent@26.md"), agent),
-            (HOST_PROMPT, old("clio-host@10.md"), host),
+            (old("clio-agent@27.md"), old("clio-agent@26.md"), agent),
+            (old("clio-host@11.md"), old("clio-host@10.md"), host),
         ] {
             let (n, w): (Vec<&str>, Vec<&str>) = (new.lines().collect(), was.lines().collect());
             assert_eq!(n.len(), w.len());
@@ -711,5 +711,38 @@ mod tests {
                 assert!(!new.contains(bad), "{bad}");
             }
         }
+    }
+    // S-72: `clio-agent@28` and `clio-host@12` are `@27` and `@11` with only the approval
+    // sentences changed: with bypass on Clio does not wait (she acts and says what she did), and
+    // what bypass never answers (a secret, a block change, Clio's own setup) still waits.
+    #[test]
+    fn the_bypass_prompts_only_change_the_approval_sentences() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was, lines) in [
+            (PROMPT, old("clio-agent@27.md"), &[0, 13, 23][..]),
+            (
+                HOST_PROMPT,
+                old("clio-host@11.md"),
+                &[0, 14, 22, 23, 33, 44, 48, 52, 53][..],
+            ),
+        ] {
+            let (n, w): (Vec<&str>, Vec<&str>) = (new.lines().collect(), was.lines().collect());
+            assert_eq!(n.len(), w.len());
+            let diff: Vec<usize> = (0..n.len()).filter(|&i| n[i] != w[i]).collect();
+            assert_eq!(diff, lines);
+            for &i in &diff[1..] {
+                assert!(n[i].contains("bypass"), "{}", n[i]);
+            }
+            assert!(!new.contains("clio approve") && !new.contains("/bypass"));
+        }
+        assert!(HOST_PROMPT.contains("approvals: bypass on"));
+        assert!(HOST_PROMPT.contains("never say you are waiting for it"));
+        assert!(crate::pi::envelope::BYPASS_ON.starts_with("approvals: bypass on"));
     }
 }

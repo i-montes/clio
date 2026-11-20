@@ -1360,6 +1360,12 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(r, t.dim()));
     }
+    if app.chat.approvals.bypass {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled("bypass on", t.warn()));
+    }
     if let Some(w) = super::approvals::status(app) {
         if spans.len() > 1 {
             spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));

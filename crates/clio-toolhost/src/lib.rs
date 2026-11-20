@@ -163,7 +163,7 @@ pub const REVIEW_NO_NETWORK: &str = "a review has no network and no sudo: what n
 /// What a round (`--unattended`) is told when it tries to change something (S-71).
 pub const ROUND_ONLY_READS: &str = "a round only reads: propose it in your notice";
 /// Why what a round would send out waits for the person.
-const ROUND_REACHES: &str = "a round reaches nothing outside by itself";
+pub(crate) const ROUND_REACHES: &str = "a round reaches nothing outside by itself";
 /// Why a round's change to a unit waits for the person.
 const ROUND_UNITS: &str = "a round changes no service";
 /// The tools a round never uses: each changes something, or needs the person.
@@ -616,13 +616,16 @@ impl ToolHost {
             .or_else(|| self.secrets.as_ref().map(|c| c.state.as_path()))
     }
 
-    /// The judge flagged an injection: the permission window closes now, for every conversation
-    /// (they all read the same file), and Clio asks again for everything.
+    /// The judge flagged an injection: the permission window and bypass close now, for every
+    /// conversation (they all read the same files), and Clio asks again for everything.
     pub(crate) fn close_window_flagged(&self) {
-        if let Some(st) = self.grant_state()
-            && let Err(e) = grant::close(st, grant::FLAGGED)
-        {
-            eprintln!("clio-toolhost: the permission window could not be closed: {e}");
+        let Some(st) = self.grant_state() else {
+            return;
+        };
+        for kind in [grant::Kind::Window, grant::Kind::Bypass] {
+            if let Err(e) = kind.close(st, grant::FLAGGED) {
+                eprintln!("clio-toolhost: the {kind:?} could not be closed: {e}");
+            }
         }
     }
 
@@ -996,16 +999,27 @@ impl ToolHost {
                 );
             }
             // The list, not the model, says what waits for the person.
-            let class = match req.tool.as_str() {
+            let what = match req.tool.as_str() {
                 "exec" => map
                     .get("command")
                     .and_then(Value::as_str)
+                    .map(str::to_owned),
+                "fs_write" => real.as_deref().map(|r| r.to_string_lossy().into_owned()),
+                _ => None,
+            };
+            let class = match req.tool.as_str() {
+                "exec" => what
+                    .as_deref()
                     .and_then(|c| h.cfg.rules.classify_command(c)),
                 "fs_write" => real.as_deref().and_then(|r| h.cfg.rules.classify_write(r)),
                 _ => None,
             };
             if let Some(class) = class {
-                return self.aside(h, &req, class, None, cancel);
+                // Marked now, as it is classified: a `control` on the machine alone, which bypass
+                // may answer; one that touches Clio's own guards carries no mark and always asks.
+                let machine = class == ask::Class::Control
+                    && what.as_deref().is_some_and(|w| h.cfg.rules.machine_only(w));
+                return self.aside(h, &req, class, machine.then_some(ask::MACHINE), cancel);
             }
             // A session that read text the judge flagged asks before it reaches out, whatever
             // the command: what it read may be what wants out.

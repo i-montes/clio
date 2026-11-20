@@ -149,6 +149,15 @@ pub enum Cmd {
         arg: String,
         session: String,
     },
+    /// `/bypass` (`""`: its state and what it approved), `/bypass on` (its box) or `/bypass off`.
+    Bypass {
+        arg: String,
+        session: String,
+    },
+    /// The person said yes in the `/bypass on` box: bypass turns on.
+    BypassOn {
+        session: String,
+    },
     /// The person's answer to one of Pi's dialogs (a question of `ask_person`); `None` skips it.
     ChatUi {
         id: String,
@@ -322,6 +331,8 @@ pub enum Bg {
         hours: u64,
         suspect: bool,
         judge: bool,
+        /// Bypass is on.
+        bypass: bool,
     },
     /// What the permission window approved: a quiet note (or why it could not).
     Granted(Result<String, String>),
@@ -439,6 +450,8 @@ pub enum Action {
     /// `/mcp confirm`: `Confirm::id` is the server's name, `Confirm::names` its tools as it
     /// described them. `y` confirms them and turns it on.
     ConfirmMcp,
+    /// `/bypass on`: the only way bypass turns on (`pending::bypass_ask`).
+    Bypass,
 }
 
 /// A question that needs a `y`.
@@ -472,7 +485,7 @@ impl Action {
     /// Under the approval timing rule: a quiet second, `y` arms it (only once a long box's end was
     /// shown), Enter runs it.
     pub fn timed(self) -> bool {
-        matches!(self, Self::Approve | Self::ConfirmMcp)
+        matches!(self, Self::Approve | Self::ConfirmMcp | Self::Bypass)
     }
 }
 
@@ -1039,6 +1052,7 @@ fn answer(app: &mut App, k: &KeyEvent, quiet: bool) -> Vec<Cmd> {
         Action::RemoveMcp => vec![Cmd::Mcp(format!("remove {} --yes", c.id))],
         // With the digest of the list shown: refused if it changed meanwhile.
         Action::ConfirmMcp => vec![Cmd::Mcp(format!("confirm {} {} --yes", c.id, c.workspace))],
+        Action::Bypass => vec![Cmd::BypassOn { session: c.session }],
         Action::Approve if c.more.is_empty() => {
             app.answering += 1;
             vec![Cmd::ChatAnswer { id: c.id, yes }]
@@ -1573,8 +1587,9 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
             hours,
             suspect,
             judge,
+            bypass,
         } => {
-            super::approvals::grant_state(app, &session, ends, hours, (suspect, judge));
+            super::approvals::grant_state(app, &session, ends, hours, (suspect, judge, bypass));
             vec![]
         }
         // Not an answer of the person's: no turn of its own; it rides with the next message. The
@@ -2118,6 +2133,7 @@ fn confirm_dialog(f: &mut Frame, area: Rect, app: &App, c: &Confirm) {
             "Confirm the tools of the MCP server «{}» and turn it on? These descriptions are its own text:",
             clean(&c.id)
         ),
+        Action::Bypass => "Turn bypass on?".to_owned(),
     };
     let mut lines = vec![Line::from(Span::styled(verb, t.bold())), Line::from("")];
     // A set-aside action (`«delete» …`): its class in the warning color, the command under it.
