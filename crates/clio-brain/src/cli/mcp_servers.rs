@@ -389,22 +389,24 @@ impl Port {
             )
         };
         // Clio's Chromium, when it reads it: in place before anything else is.
-        if mf.reads.contains(
-            &clio_toolhost::catalog::browser_dir(&root)
-                .display()
-                .to_string(),
-        ) {
+        if reads_browser(&mf, &root) {
             ensure_browser(&self.dirs, &mut |_| {})
                 .map_err(|e| failed("Clio's browser (Chromium)", &e))?;
         }
         let catalog = clio_toolhost::catalog::of(&mf, &root);
+        // A catalog entry installs exactly the tree that was verified: its lockfile, `npm ci`.
+        let lock = catalog.as_ref().and_then(|e| e.lock());
+        let lock_digest = lock
+            .map(|l| clio_toolhost::skills::digest(l, &[]))
+            .unwrap_or_default();
         let to = tree_dir(&root, &mf.name, &mf.version);
         // The same version again (other hosts, secrets, paths or settings): its installed tree
-        // is reused if it is still exactly what was installed.
+        // is reused if it is still exactly what was installed, from the same lockfile.
         let reused = m::load_state(&root, &mf.name).filter(|s| {
             s.package == mf.package
                 && s.version == mf.version
                 && s.integrity == integrity
+                && s.lock == lock_digest
                 && tree_digest(&to).as_deref() == Ok(s.tree.as_str())
         });
         let parent = root.join("servers").join(&mf.name);
@@ -416,29 +418,43 @@ impl Port {
             None => {
                 mkdir_private(&stage)?;
                 let done = (|| -> Result<(String, String, usize), String> {
-                    // A catalog entry's exact versions of what its own ranges no longer fit.
-                    let pkg = serde_json::json!({"private": true, "overrides": catalog
-                        .as_ref().map(|e| e.overrides.clone()).unwrap_or_default()});
+                    let spec = format!("{}@{}", mf.package, mf.version);
+                    let pkg = match lock {
+                        Some(_) => serde_json::json!({"private": true,
+                            "dependencies": {&mf.package: &mf.version}}),
+                        None => serde_json::json!({"private": true}),
+                    };
                     write_private(&stage.join("package.json"), pkg.to_string().as_bytes())
                         .map_err(|e| failed("preparing the install", &e))?;
-                    let spec = format!("{}@{}", mf.package, mf.version);
+                    if let Some(l) = lock {
+                        write_private(&stage.join("package-lock.json"), l.as_bytes())
+                            .map_err(|e| failed("preparing the install", &e))?;
+                    }
+                    let flags = ["--ignore-scripts", "--no-audit", "--no-fund"];
+                    let args: Vec<&str> = match lock {
+                        Some(_) => std::iter::once("ci")
+                            .chain(flags)
+                            .chain(["--loglevel=error"])
+                            .collect(),
+                        None => std::iter::once("install")
+                            .chain(flags)
+                            .chain(["--save-exact", "--loglevel=error", spec.as_str()])
+                            .collect(),
+                    };
+                    let step = if lock.is_some() {
+                        "npm ci"
+                    } else {
+                        "npm install"
+                    };
                     self.npm(
-                        &[
-                            "install",
-                            "--ignore-scripts",
-                            "--no-audit",
-                            "--no-fund",
-                            "--save-exact",
-                            "--loglevel=error",
-                            &spec,
-                        ],
+                        &args,
                         Some(&stage),
                         std::slice::from_ref(&stage),
                         INSTALL_SECS,
                         true,
                     )
-                    .map_err(|e| failed("npm install", &e))?;
-                    let packages = check_lock(&stage, &mf.package, &mf.version, integrity)
+                    .map_err(|e| failed(step, &e))?;
+                    let packages = check_lock(&stage, &mf.package, &mf.version, integrity, lock)
                         .map_err(|e| failed("the lockfile check", &e))?;
                     let entry = entry_of(&stage, &mf.package)
                         .map_err(|e| failed("finding its entry point", &e))?;
@@ -459,6 +475,7 @@ impl Port {
             tree,
             integrity: integrity.to_owned(),
             packages,
+            lock: lock_digest,
             // The approval was of this server: its tools as the probe lists them are the ones
             // a later change is measured against (a changed one asks again).
             confirmed: true,
@@ -528,24 +545,109 @@ impl Port {
     }
 }
 
+/// `mf` reads Clio's Chromium of the catalog's revision.
+pub fn reads_browser(mf: &Manifest, root: &Path) -> bool {
+    let b = clio_toolhost::catalog::browser_dir(root);
+    mf.reads.iter().any(|r| Path::new(r) == b)
+}
+
+/// The Chromium folder of Clio's that `mf` reads, of whatever revision.
+pub fn browser_read(d: &Dirs, mf: &Manifest) -> Option<PathBuf> {
+    let browsers = d.data.join("browsers");
+    mf.reads.iter().map(PathBuf::from).find(|r| {
+        r.parent() == Some(browsers.as_path())
+            && r.file_name()
+                .is_some_and(|f| f.to_string_lossy().starts_with("chromium-"))
+    })
+}
+
+/// Removes every Chromium of Clio's that no installed server reads.
+pub fn prune_browsers(d: &Dirs) {
+    let root = root(d);
+    let kept: Vec<PathBuf> = m::names(&root)
+        .iter()
+        .filter_map(|n| m::current_manifest(&root, n))
+        .filter_map(|mf| browser_read(d, &mf))
+        .collect();
+    let Ok(all) = fs::read_dir(d.data.join("browsers")) else {
+        return;
+    };
+    for p in all.flatten().map(|e| e.path()) {
+        let name = p
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.starts_with("chromium-") && !kept.contains(&p) {
+            let _ = fs::remove_dir_all(&p);
+        }
+    }
+}
+
+/// Why Chromium cannot start: what it lacks, in words for the person.
+fn libs_missing(missing: &[String]) -> String {
+    format!(
+        "Chromium needs system libraries this machine does not have ({}): `clio setup` (Repair) installs them",
+        missing.join(", ")
+    )
+}
+
 /// Clio's Chromium of the catalog's revision in place (`on`: bytes so far), and able to start:
-/// every library it needs is on this system.
+/// every library it needs is on this system. Not downloaded when `ldconfig` already says some
+/// are missing.
 pub fn ensure_browser(d: &Dirs, on: &mut dyn FnMut(u64)) -> Res<()> {
     use super::setup::{fetch, steps, text::Lang};
     let pin = fetch::Pins::from_env()
         .browser
         .ok_or("Clio pins no Chromium for this system")?;
-    fetch::install_browser(&d.data, &pin, on).map_err(|e| steps::said(Lang::En, &e).0)?;
     let chrome = clio_toolhost::catalog::browser_dir(&root(d)).join(fetch::CHROME);
+    if !chrome.is_file() {
+        let known = std::process::Command::new("/sbin/ldconfig")
+            .arg("-p")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // An `ldconfig` that lists nothing tells nothing: `ldd` checks after the download.
+        let gone = fetch::missing_sonames(&known);
+        if !known.is_empty() && !gone.is_empty() {
+            return Err(libs_missing(
+                &gone.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            ));
+        }
+    }
+    fetch::install_browser(&d.data, &pin, on).map_err(|e| steps::said(Lang::En, &e).0)?;
+    browser_ready(d)
+}
+
+/// Before a server that drives Chromium starts: its folder is there and `ldd` finds every library.
+pub fn browser_ready(d: &Dirs) -> Res<()> {
+    use super::setup::fetch;
+    let chrome = clio_toolhost::catalog::browser_dir(&root(d)).join(fetch::CHROME);
+    if !chrome.is_file() {
+        return Err(format!(
+            "Clio's Chromium is not at {}: `clio update` (or `clio mcp add playwright`) downloads it",
+            chrome.display()
+        ));
+    }
     let missing = fetch::missing_libs(&chrome);
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "Chromium needs system libraries this machine does not have ({}): `clio setup` (Repair) installs them",
-            missing.join(", ")
-        ))
+        Err(libs_missing(&missing))
     }
+}
+
+/// What to tell when a server that reaches any site starts with a browser verified more than
+/// `catalog::BROWSER_FRESH_DAYS` before `today` (days since 1970-01-01).
+fn browser_old(mf: &Manifest, root: &Path, today: i64) -> Option<String> {
+    let e = clio_toolhost::catalog::of(mf, root)?;
+    (e.age_days(today)? > clio_toolhost::catalog::BROWSER_FRESH_DAYS).then(|| {
+        format!(
+            "its browser was verified on {}, more than 12 weeks ago, and misses the security fixes since: `clio update` brings the newer one",
+            e.verified
+        )
+    })
 }
 
 /// A server's hosts, as the person reads them.
@@ -568,13 +670,29 @@ fn probe_limit(seconds: u64) -> Duration {
 /// package a tarball from the registry with an integrity (no git, no link, no file, no URL); one
 /// bundled in its parent's tarball (`inBundle`) has neither and is covered by its parent's. How
 /// many packages it holds.
-fn check_lock(stage: &Path, package: &str, version: &str, integrity: &str) -> Res<usize> {
+fn check_lock(
+    stage: &Path,
+    package: &str,
+    version: &str,
+    integrity: &str,
+    shipped: Option<&str>,
+) -> Res<usize> {
     let p = stage.join("package-lock.json");
     let lock: Value = serde_json::from_str(&fs::read_to_string(&p).map_err(|e| io_err(&p, &e))?)
         .map_err(|e| format!("package-lock.json: {e}"))?;
     let pkgs = lock["packages"]
         .as_object()
         .ok_or("package-lock.json has no packages")?;
+    // A catalog entry's tree is exactly the one Clio ships.
+    if let Some(want) = shipped
+        && serde_json::from_str::<Value>(want)
+            .ok()
+            .as_ref()
+            .map(|w| &w["packages"])
+            != Some(&lock["packages"])
+    {
+        return Err("the installed tree is not the one Clio's catalog ships: not installed".into());
+    }
     let me = &pkgs
         .get(&format!("node_modules/{package}"))
         .ok_or_else(|| format!("npm did not install {package}"))?;
@@ -751,6 +869,17 @@ impl McpPort for Port {
             return Err("its installed files changed after it was approved: it was turned off and not started".into());
         }
         let data = data_dir(&root, name);
+        if reads_browser(&mf, &root) {
+            browser_ready(&self.dirs)
+                .inspect_err(|e| m::log_event(&root, name, "start", "refused", e))?;
+        }
+        if mf.network.iter().any(|h| h == m::ANY_HOST) {
+            // Nothing a page left in its home is there at the next start.
+            let _ = fs::remove_dir_all(&data);
+            if let Some(why) = browser_old(&mf, &root, super::now_ms() / 86_400_000) {
+                super::services::notice_once(&root, name, &why);
+            }
+        }
         self.spawn(&mf, &st, &tree_dir(&root, name, &st.version), &data, false)
     }
 }
@@ -1273,7 +1402,8 @@ pub fn store_secret(
     s: &clio_toolhost::catalog::Secret,
     value: &clio_vault::SecretValue,
 ) -> Res<()> {
-    super::vault::put(d, &s.name, &format!("mcp:{}", s.host), value)
+    // Never replaces a secret of that name (`put` would drop its other destinations).
+    super::vault::store_requested(d, &s.name, &format!("mcp:{}", s.host), value)
 }
 
 /// After the person's yes: installs set-aside item `id` (none: it is installed already), and turns
@@ -1342,17 +1472,19 @@ fn add_cmd(d: &Dirs, name: &str, yes: bool) -> Res<()> {
         }
         println!("{}", sanitize::line(&sec.where_.en));
         let v = super::vault::read_secret(&format!("{} (not shown; empty: later)", sec.name))?;
-        if !v.is_empty() {
-            store_secret(d, sec, &clio_vault::SecretValue::new(v))?;
+        if !v.is_empty()
+            && let Err(why) = store_secret(d, sec, &clio_vault::SecretValue::new(v))
+        {
+            println!("{}", sanitize::line(&why));
         }
     }
     if id.is_some()
-        && e.needs_browser()
+        && e.browser
         && !clio_toolhost::catalog::browser_dir(&root(d))
             .join(super::setup::fetch::CHROME)
             .is_file()
     {
-        println!("Clio's Chromium is downloaded first (about 180 MB)");
+        println!("Clio's Chromium is downloaded first (about 210 MB)");
     }
     println!(
         "{}",
@@ -1462,11 +1594,11 @@ pub fn proposal_rows(p: &Pending) -> Option<Vec<String>> {
         ));
     }
     // Where the hosts are: a server that can go anywhere is said so.
-    rows.push(if mf.network.iter().any(|h| h == m::ANY_HOST) {
-        "It can reach any public site (never this machine or its networks).".into()
+    if mf.network.iter().any(|h| h == m::ANY_HOST) {
+        rows.push("It can reach any public site over https (never this machine or its networks). Its own data folder is emptied before every start: nothing a page leaves there is kept.".into());
     } else {
-        format!("hosts: {}", hosts_text(&mf.network))
-    });
+        rows.push(format!("hosts: {}", hosts_text(&mf.network)));
+    }
     for sec in &mf.secrets {
         let reach: Vec<&str> = mf
             .network
@@ -1498,7 +1630,10 @@ pub fn proposal_rows(p: &Pending) -> Option<Vec<String>> {
         mf.limits.cpu_percent, mf.limits.memory_mb, mf.limits.seconds
     ));
     // Exactly a catalog entry: the tools its catalog lists as only reading run without asking.
-    if let Some(e) = clio_toolhost::catalog::of_shown(&mf)
+    if let Some(e) = p.args["catalog"]
+        .as_str()
+        .filter(|c| *c == mf.name)
+        .and_then(clio_toolhost::catalog::entry)
         && !e.modes.is_empty()
     {
         rows.push(format!(
@@ -2438,6 +2573,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
             tree: "t".into(),
             integrity: INTEGRITY.into(),
             packages: 3,
+            lock: String::new(),
             confirmed: false,
             tools: m::first_modes(seen, &[]),
         };
@@ -2627,10 +2763,72 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         eprintln!("--- {tool} answered (failed: {failed}):\n{out}");
     }
 
+    // S-70: a Chromium no installed server reads is removed (an update moved the catalog on);
+    // a server of the catalog that reaches any site is said to have an old browser 12 weeks
+    // after its entry was verified, never before; a server reading another revision is named.
+    #[test]
+    fn old_browsers_go_and_an_old_one_is_said() {
+        let t = tmp();
+        let r = t.path();
+        let d = Dirs {
+            config: r.join("config"),
+            runs: r.join("data/runs"),
+            data: r.join("data"),
+            runtime: None,
+            home: r.join("home"),
+        };
+        let root = root(&d);
+        let e = clio_toolhost::catalog::entry("playwright").unwrap();
+        let mf = clio_toolhost::catalog::manifest(&e, &root);
+        let v = root.join("versions/playwright/1");
+        fs::create_dir_all(&v).unwrap();
+        fs::write(v.join(m::MANIFEST), m::compose(&mf)).unwrap();
+        fs::create_dir_all(root.join("records")).unwrap();
+        fs::write(
+            root.join("records/playwright.json"),
+            json!({"name": "playwright", "description": mf.description, "enabled": true,
+                "current": 1, "versions": [{"n": 1, "sha256": "x", "at_ms": 1, "by": "person",
+                "verdict": "approved"}]})
+            .to_string(),
+        )
+        .unwrap();
+        let now = clio_toolhost::catalog::browser_dir(&root);
+        let old = d.data.join("browsers/chromium-1");
+        for b in [&now, &old] {
+            fs::create_dir_all(b.join("x")).unwrap();
+        }
+        assert_eq!(browser_read(&d, &mf), Some(now.clone()));
+        prune_browsers(&d);
+        assert!(now.is_dir() && !old.exists());
+        let day = e.age_days(0).map(|a| -a).unwrap();
+        assert!(browser_old(&mf, &root, day + 84).is_none());
+        let said = browser_old(&mf, &root, day + 85).unwrap();
+        assert!(said.contains("clio update"), "{said}");
+    }
+
+    // S-70: a catalog server's installed lockfile must be exactly the one Clio ships: one
+    // package more, less or other is not installed.
+    #[test]
+    fn a_catalog_tree_is_exactly_the_shipped_lockfile() {
+        let t = tmp();
+        let e = clio_toolhost::catalog::entry("playwright").unwrap();
+        let shipped = e.lock().unwrap();
+        fs::write(t.path().join("package-lock.json"), shipped).unwrap();
+        let ok = |s: Option<&str>| check_lock(t.path(), &e.package, &e.version, &e.integrity, s);
+        assert_eq!(ok(Some(shipped)).unwrap(), 3);
+        let mut other: Value = serde_json::from_str(shipped).unwrap();
+        other["packages"]["node_modules/playwright-core"]["version"] = json!("1.66.0");
+        let other = other.to_string();
+        let err = ok(Some(&other)).unwrap_err();
+        assert!(err.contains("not the one Clio's catalog ships"), "{err}");
+        // An ordinary proposal: only the registry rule.
+        assert!(ok(None).is_ok());
+    }
+
     /// An MCP proposal of `mf` as the store keeps it.
-    fn pending_of(mf: &Manifest) -> Pending {
+    fn pending_of(mf: &Manifest, catalog: Option<&str>) -> Pending {
         serde_json::from_value(json!({"id": "p1", "class": "mcp", "tool": "mcp_propose",
-            "args": {"name": mf.name, "description": mf.description,
+            "args": {"name": mf.name, "description": mf.description, "catalog": catalog,
                 "skill_md": serde_json::to_string(mf).unwrap(), "files": [], "update": false,
                 "npm": {"integrity": INTEGRITY}},
             "hash": "", "what": "", "run": "r1", "session": "s1", "created_ms": 0,
@@ -2645,15 +2843,16 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
     fn the_box_says_any_site_and_the_catalogs_free_tools() {
         let root = Path::new("/home/someone/.local/share/clio/mcp");
         let e = clio_toolhost::catalog::entry("playwright").unwrap();
-        let mut mf = clio_toolhost::catalog::manifest(&e, root);
-        let rows = proposal_rows(&pending_of(&mf)).unwrap().join("\n");
+        let mf = clio_toolhost::catalog::manifest(&e, root);
+        let rows = proposal_rows(&pending_of(&mf, Some("playwright")))
+            .unwrap()
+            .join("\n");
         assert!(rows.contains("It can reach any public site"), "{rows}");
         assert!(
             rows.contains("these tools only read and run without asking: browser_snapshot"),
             "{rows}"
         );
-        mf.args.push("--caps=pdf".into());
-        let rows = proposal_rows(&pending_of(&mf)).unwrap().join("\n");
+        let rows = proposal_rows(&pending_of(&mf, None)).unwrap().join("\n");
         assert!(!rows.contains("from Clio's catalog"), "{rows}");
         let schema = json!({"type": "object", "properties": {"url": {}, "wait": {}},
             "required": ["url"]});

@@ -1117,12 +1117,15 @@ fn chromium_zip(dir: &Path, revision: &str) -> Option<Archive> {
         return None;
     }
     let src = dir.join("src");
-    script(&src.join(fetch::CHROME), "echo chromium");
+    script(
+        &src.join("chrome-linux64").join(fetch::CHROME),
+        "echo chromium",
+    );
     let file = dir.join("chromium-linux.zip");
     let ok = std::process::Command::new("python3")
         .args(["-I", "-m", "zipfile", "-c"])
         .arg(&file)
-        .arg(src.join("chrome-linux"))
+        .arg(src.join("chrome-linux64"))
         .status()
         .unwrap()
         .success();
@@ -1139,7 +1142,7 @@ fn chromium_zip(dir: &Path, revision: &str) -> Option<Archive> {
 #[test]
 fn chromium_is_verified_unpacked_and_moved_in_once() {
     let t = tempfile::tempdir().unwrap();
-    let Some(mut a) = chromium_zip(t.path(), "1181") else {
+    let Some(mut a) = chromium_zip(t.path(), "1255") else {
         return;
     };
     let data = t.path().join("data");
@@ -1152,11 +1155,11 @@ fn chromium_is_verified_unpacked_and_moved_in_once() {
     assert_eq!(tree(&data).len(), 0, "{:?}", tree(&data).keys());
     a.sha256 = good;
     assert!(fetch::install_browser(&data, &a, &mut |_| {}).unwrap());
-    let chrome = data.join("browsers/chromium-1181").join(fetch::CHROME);
+    let chrome = data.join("browsers/chromium-1255").join(fetch::CHROME);
     let out = std::process::Command::new(&chrome).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "chromium");
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(data.join("browsers/chromium-1181"))
+    let mode = std::fs::metadata(data.join("browsers/chromium-1255"))
         .unwrap()
         .permissions()
         .mode();
@@ -1170,6 +1173,39 @@ fn chromium_is_verified_unpacked_and_moved_in_once() {
 // is missing.
 #[test]
 fn chromiums_missing_libraries_become_this_systems_packages() {
+    // `readelf -d chrome` of the pinned build (the same on both processors), but the C library's
+    // own and `libgcc_s`: every one must be in the table, or a missing one is never installed.
+    const NEEDED: [&str; 26] = [
+        "libX11.so.6",
+        "libXcomposite.so.1",
+        "libXdamage.so.1",
+        "libXext.so.6",
+        "libXfixes.so.3",
+        "libXrandr.so.2",
+        "libasound.so.2",
+        "libatk-1.0.so.0",
+        "libatk-bridge-2.0.so.0",
+        "libatspi.so.0",
+        "libcairo.so.2",
+        "libcups.so.2",
+        "libdbus-1.so.3",
+        "libexpat.so.1",
+        "libgbm.so.1",
+        "libgio-2.0.so.0",
+        "libglib-2.0.so.0",
+        "libgobject-2.0.so.0",
+        "libnspr4.so",
+        "libnss3.so",
+        "libnssutil3.so",
+        "libpango-1.0.so.0",
+        "libsmime3.so",
+        "libudev.so.1",
+        "libxcb.so.1",
+        "libxkbcommon.so.0",
+    ];
+    let mut table: Vec<&str> = fetch::CHROME_LIBS.iter().map(|(so, ..)| *so).collect();
+    table.sort_unstable();
+    assert_eq!(table, NEEDED);
     let all: String = fetch::CHROME_LIBS
         .iter()
         .map(|(so, ..)| format!("\t{so} (libc6,AArch64) => /lib/{so}\n"))
@@ -1237,10 +1273,30 @@ fn the_mcp_checklist_comes_first_and_chromiums_needs_go_into_the_sudo_moment() {
     let en = |m: M| m.get(Lang::En).to_owned();
     assert_eq!(ui.asked, [en(M::McpTitle), en(M::SudoTitle)]);
     let calls = std::fs::read_to_string(sys_dir.join("calls.log")).unwrap();
-    assert!(
-        calls.contains("install -y -qq bubblewrap libnss3 unzip"),
-        "{calls}"
+    // The browser's packages are their own install, after the jail's.
+    let jail = calls.find("install -y -qq bubblewrap\n");
+    let browser = calls.find("install -y -qq libnss3 unzip\n");
+    assert!(jail.is_some() && browser > jail, "{calls}");
+    // Their install fails: Playwright is left out, said on its row, and nothing else stops.
+    let apt = std::fs::read_to_string(sys_dir.join("apt-get")).unwrap();
+    script(
+        &sys_dir.join("apt-get"),
+        &apt.replacen('\n', "\ncase \"$*\" in *libnss3*) exit 1;; esac\n", 1)
+            .replacen("#!/bin/sh\n", "", 1),
     );
+    let mut ui = FakeUi {
+        answers: [Answer::Checks(vec![true, false]), Answer::Choice(0)].into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys.clone(), &mut ui);
+        r.ask_all(&[Step::Mcp, Step::System]);
+        assert!(r.answers.mcp.is_empty(), "{:?}", r.answers.mcp);
+        assert!(r.blocked.is_none());
+        r.all(&[Step::Mcp]);
+        assert!(!r.failed);
+    }
+    assert_eq!(ui.rows[&0], St::Warn(en(M::NoteMcpLibsFailed)));
     // A system whose package names are not known: Playwright is left out, said on its row.
     write(&sys_dir.join("os-release"), b"ID=fedora\nVERSION_ID=41\n");
     let mut ui = FakeUi {

@@ -2043,6 +2043,7 @@ fn mcp_installed(w: &World, name: &str) {
         tree: "t".into(),
         integrity: "sha512-x".into(),
         packages: 1,
+        lock: String::new(),
         confirmed: true,
         tools: vec![clio_toolhost::mcp::Tool {
             name: "get_time".into(),

@@ -178,6 +178,9 @@ pub struct State {
     /// How many packages npm installed in all (the package and every dependency).
     #[serde(default)]
     pub packages: usize,
+    /// The digest of the catalog's lockfile it was installed from (`npm ci`), or empty.
+    #[serde(default)]
+    pub lock: String,
     /// The person confirmed the tool list: only then can it be turned on.
     pub confirmed: bool,
     pub tools: Vec<Tool>,
@@ -304,17 +307,8 @@ pub fn check(m: &Manifest) -> Result<(), String> {
             "limits: memory_mb at least {MIN_MEMORY_MB} (Node needs it)"
         ));
     }
+    // `"*"`'s own rule is `any_host_refused`, with the paths (`check_paths`).
     let any = m.network.iter().any(|h| h == ANY_HOST);
-    if any && m.network.len() > 1 {
-        return Err(format!(
-            "network: {ANY_HOST:?} stands alone (any public site)"
-        ));
-    }
-    if any && (!m.secrets.is_empty() || !m.writes.is_empty()) {
-        return Err(format!(
-            "network: a server that reaches any public site ({ANY_HOST:?}) holds no secret and writes nothing: name its hosts instead"
-        ));
-    }
     services::check_grants(
         if any { &[] } else { &m.network },
         &m.secrets,
@@ -386,7 +380,7 @@ pub fn any_host_refused(
             || reads.iter().any(|r| Path::new(r) != browser)))
         .then(|| {
             format!(
-                "a server that reaches any public site ({ANY_HOST:?}) holds no secret, writes nothing and reads nothing but Clio's browser"
+                "a server that reaches any public site ({ANY_HOST:?}) stands alone in network, holds no secret, writes nothing and reads nothing but Clio's browser: name its hosts instead"
             )
         })
 }
@@ -457,7 +451,8 @@ pub fn proposal(
     let facts = port
         .npm_view(&m.name, &m.package, &m.version)
         .and_then(|v| npm_facts(&v, &m.package, &m.version, clean))?;
-    if let Some(e) = crate::catalog::of(m, &root)
+    let catalog = crate::catalog::of(m, &root);
+    if let Some(e) = &catalog
         && facts["integrity"] != e.integrity.as_str()
     {
         return Err(format!(
@@ -467,6 +462,8 @@ pub fn proposal(
     }
     let manifest = compose(m);
     Ok(json!({
+        // Exactly a catalog entry (the box names the tools it frees).
+        "catalog": catalog.map(|e| e.name),
         "name": m.name,
         "description": m.description,
         "skill_md": manifest,

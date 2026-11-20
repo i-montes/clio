@@ -410,13 +410,28 @@ pub fn store_requested(dirs: &Dirs, name: &str, dest: &str, value: &SecretValue)
     if !list.ok {
         return Err("the vault is locked: unlock it (clio vault start) and answer again".into());
     }
-    if list
+    if let Some(m) = list
         .data
         .and_then(|d| d.as_array().cloned())
-        .is_some_and(|a| a.iter().any(|m| m["name"] == name))
+        .and_then(|a| a.into_iter().find(|m| m["name"] == name))
     {
+        let to: Vec<String> = m["destinations"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|d| {
+                        format!(
+                            "{}:{}",
+                            d["tool"].as_str().unwrap_or("?"),
+                            d["domain"].as_str().unwrap_or("?")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         return Err(format!(
-            "a secret named {name} already exists: nothing was stored"
+            "a secret named {name} already exists (for {}): nothing was stored",
+            to.join(", ")
         ));
     }
     c.put(name, value, Kind::ApiKey, vec![d])

@@ -1,9 +1,10 @@
 //! Clio's catalog of MCP servers (`mcp/catalog.json`, shipped in the binary as the skills are):
 //! servers that were installed and called for real in Clio's jail at the exact version listed.
 //! An entry holds the manifest's own fields with the values that were verified, the tools that
-//! only read (`modes`: they start `free`), and what it needs besides (`needs: browser`: Clio's own
-//! Chromium, pinned here by revision and SHA-256). `clio mcp add <name>`, the installer and
-//! `mcp_propose {catalog}` compose the same manifest from it, checked as any other.
+//! only read (`modes`: they start `free`), the day it was verified, whether it needs Clio's own
+//! Chromium (pinned here by revision and SHA-256), and its whole npm tree (`mcp/locks/<name>.json`,
+//! installed with `npm ci`). `clio mcp add <name>`, the installer and `mcp_propose {catalog}`
+//! compose the same manifest from it, checked as any other.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,16 @@ use crate::mcp::Manifest;
 use crate::services::{Limits, SecretUse};
 
 pub const CATALOG: &str = include_str!("../../../mcp/catalog.json");
+/// Each entry's lockfile: the exact tree that was verified.
+const LOCKS: &[(&str, &str)] = &[
+    (
+        "playwright",
+        include_str!("../../../mcp/locks/playwright.json"),
+    ),
+    ("notion", include_str!("../../../mcp/locks/notion.json")),
+];
+/// A browser older than this is said to be old when its server starts.
+pub const BROWSER_FRESH_DAYS: i64 = 12 * 7;
 /// Where an entry's `args` and `reads` name Clio's Chromium folder.
 const BROWSER: &str = "{browser}";
 
@@ -42,6 +53,8 @@ pub struct Entry {
     pub name: String,
     pub title: Text,
     pub description: Text,
+    /// The day it was installed and called in Clio's jail (`YYYY-MM-DD`).
+    pub verified: String,
     pub package: String,
     pub version: String,
     /// The tarball's integrity: the registry must give exactly this.
@@ -60,19 +73,32 @@ pub struct Entry {
     /// The tools that only read: they start `free`.
     #[serde(default)]
     pub modes: Vec<String>,
-    /// Exact versions npm must install for packages deep in its tree (npm's `overrides`): what
-    /// the package's own ranges now resolve to breaks it.
+    /// It drives Clio's own Chromium.
     #[serde(default)]
-    pub overrides: BTreeMap<String, String>,
-    /// `browser`: Clio's own Chromium.
-    #[serde(default)]
-    pub needs: Option<String>,
+    pub browser: bool,
 }
 
 impl Entry {
-    pub fn needs_browser(&self) -> bool {
-        self.needs.as_deref() == Some("browser")
+    /// The lockfile shipped for it.
+    pub fn lock(&self) -> Option<&'static str> {
+        LOCKS.iter().find(|(n, _)| *n == self.name).map(|(_, l)| *l)
     }
+
+    /// Days since it was verified, on `today_days` (days since 1970-01-01).
+    pub fn age_days(&self, today_days: i64) -> Option<i64> {
+        let mut p = self.verified.splitn(3, '-').map(str::parse::<i64>);
+        let (y, m, d) = (p.next()?.ok()?, p.next()?.ok()?, p.next()?.ok()?);
+        Some(today_days - days_from_civil(y, m, d))
+    }
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
 }
 
 /// One platform's Chromium archive.
@@ -165,22 +191,6 @@ pub fn of(m: &Manifest, root: &Path) -> Option<Entry> {
     entry(&m.name).filter(|e| manifest(e, root) == *m)
 }
 
-/// `of`, where `<data>/mcp` is not at hand (the approval box): a manifest that reads Clio's
-/// browser says where it is; one that does not needs no folder.
-pub fn of_shown(m: &Manifest) -> Option<Entry> {
-    let root = m
-        .reads
-        .iter()
-        .map(Path::new)
-        .find(|r| {
-            r.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("chromium-"))
-        })
-        .and_then(|r| Some(r.parent()?.parent()?.join("mcp")))
-        .unwrap_or_default();
-    of(m, &root)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -200,12 +210,22 @@ mod tests {
             assert!(seen.insert(e.name.clone()), "{} twice", e.name);
             let m = manifest(e, root);
             crate::mcp::check(&m).unwrap_or_else(|why| panic!("{}: {why}", e.name));
+            let home = Path::new("/home/someone");
+            crate::mcp::check_paths(&m, home, &[home.join(".local/share/clio")], root)
+                .unwrap_or_else(|why| panic!("{}: {why}", e.name));
+            // Its lockfile is the tree of exactly this package and version.
+            let lock: serde_json::Value = serde_json::from_str(e.lock().unwrap()).unwrap();
+            let top = &lock["packages"][format!("node_modules/{}", e.package)];
+            assert_eq!(top["version"], e.version.as_str(), "{}", e.name);
+            assert_eq!(top["integrity"], e.integrity.as_str(), "{}", e.name);
+            assert_eq!(
+                lock["packages"][""]["dependencies"][&e.package],
+                e.version.as_str()
+            );
+            assert!(e.age_days(0).is_some_and(|d| d < 0), "{}", e.name);
             assert!(crate::mcp::exact_version(&e.version), "{}", e.name);
             assert!(e.integrity.starts_with("sha512-") && e.integrity.len() > 80);
             assert!(e.modes.iter().all(|t| !t.is_empty()), "{}", e.name);
-            for (p, v) in &e.overrides {
-                assert!(crate::mcp::exact_version(v), "{}: {p}@{v}", e.name);
-            }
             for t in [&e.title, &e.description] {
                 assert!(!t.en.is_empty() && !t.es.is_empty(), "{}", e.name);
             }
@@ -215,15 +235,18 @@ mod tests {
             // A placeholder left over would reach the server as text.
             assert!(!crate::mcp::compose(&m).contains(BROWSER), "{}", e.name);
             assert_eq!(of(&m, root).map(|x| x.name), Some(e.name.clone()));
-            assert_eq!(of_shown(&m).map(|x| x.name), Some(e.name.clone()));
-            if e.needs_browser() {
+            if e.browser {
                 assert!(m.reads.contains(&browser_dir(root).display().to_string()));
             }
         }
         assert!(c.browser.revision.bytes().all(|b| b.is_ascii_digit()));
         for p in ["linux-x64", "linux-arm64"] {
             let f = &c.browser.files[p];
-            assert!(f.url.starts_with("https://") && f.url.contains(&c.browser.revision));
+            assert!(
+                f.url.starts_with("https://cdn.playwright.dev/"),
+                "{}",
+                f.url
+            );
             assert!(f.sha256.len() == 64 && f.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
         }
         // A catalog's modes free the tools it names; every other tool asks unless the server
@@ -249,6 +272,12 @@ mod tests {
         .collect();
         use crate::mcp::Mode::{Ask, Free};
         assert_eq!(modes, [(Free, false), (Ask, false), (Free, false)]);
+        // 2026-11-19 is day 20776; 12 weeks later is old.
+        let mut e = c.servers[0].clone();
+        e.verified = "2026-11-19".into();
+        assert_eq!(e.age_days(20_776 + 84), Some(84));
+        e.verified = "19-11-2026x".into();
+        assert_eq!(e.age_days(0), None);
         assert_eq!(
             browser_dir(root),
             Path::new("/home/someone/.local/share/clio/browsers")
