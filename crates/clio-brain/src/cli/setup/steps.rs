@@ -159,8 +159,6 @@ pub struct Run<'a> {
     pub changes: Vec<String>,
     /// The binaries were replaced: the rest must run under the new ones.
     pub replaced: bool,
-    /// The doctor's line.
-    pub doctor: Option<String>,
 }
 
 impl Run<'_> {
@@ -1224,7 +1222,6 @@ impl Run<'_> {
         } else {
             M::NoteDoctorOk
         });
-        self.doctor = Some(line.clone());
         if bad {
             Out::Warn(line)
         } else {

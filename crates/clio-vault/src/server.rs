@@ -131,11 +131,14 @@ fn scan_dir(vault: &Vault, dir: &Path, skip: &[String]) -> std::io::Result<Vec<V
         // Symlinks, sockets and the like are skipped: no loops, no blocking reads.
         let kind = std::fs::symlink_metadata(&p)?.file_type();
         if kind.is_dir() {
-            // A folder named in `skip` is not entered, wherever it is (the root itself is always).
+            // A folder named in `skip` is not entered, wherever it is (the root itself is always);
+            // an absolute path in it, only that folder.
             let skipped = p != dir
-                && p.file_name()
+                && (p
+                    .file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| skip.iter().any(|s| s == n));
+                    .is_some_and(|n| skip.iter().any(|s| s == n))
+                    || skip.iter().any(|s| Path::new(s) == p));
             if skipped {
                 continue;
             }
