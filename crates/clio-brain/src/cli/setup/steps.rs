@@ -290,9 +290,11 @@ impl Run<'_> {
             .position(|s| *s == Step::Model);
         let mut token = None;
         if !self.failed && self.blocked.is_none() && !self.replaced {
-            let (dirs, copy) = (self.dirs.clone(), self.t(M::ClaudeCopy));
+            let dirs = self.dirs.clone();
+            let before = format!("{}\n{}", self.t(M::ClaudeBefore), self.t(M::ClaudeLeave));
+            let ask = self.t(M::ClaudeCopy);
             self.ui.outside(&mut || {
-                token = crate::cli::connect::claude_sign_in(&dirs, &copy);
+                token = crate::cli::connect::claude_sign_in(&dirs, &before, &ask);
             });
         }
         let stored = token.is_some_and(|k| {

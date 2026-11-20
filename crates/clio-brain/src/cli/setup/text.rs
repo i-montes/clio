@@ -185,7 +185,9 @@ table! {
     ClaudeHowTitle: "¿Cómo conectas tu suscripción?", "How do you connect your subscription?";
     ClaudeSignIn: "Iniciar sesión cuando termine la instalación", "Sign in when the install finishes";
     ClaudePaste: "Pegar un token", "Paste a token";
-    ClaudeCopy: "Copia el token que aparece arriba, pégalo aquí y pulsa Enter: la pantalla se borrará.", "Copy the token shown above, paste it here and press Enter: the screen will be cleared.";
+    ClaudeBefore: "Inicia sesión en el navegador. Cuando Claude muestre el token, cópialo y pulsa Ctrl-C; luego pégalo.", "Sign in in the browser. When Claude shows the token, copy it and press Ctrl-C, then paste it.";
+    ClaudeLeave: "Para salir sin iniciar sesión: Ctrl-C y luego Enter.", "To leave without signing in: Ctrl-C, then Enter.";
+    ClaudeCopy: "Pega el token y pulsa Enter (una línea vacía sale sin conectar).", "Paste the token and press Enter (an empty line leaves without connecting).";
     KeyClaudeHint: "Empieza por sk-ant-oat. Sale de «claude setup-token», en cualquier equipo con Claude Code. Esc: más tarde.", "It starts with sk-ant-oat. It comes from `claude setup-token`, on any machine with Claude Code. Esc: later.";
     KeyApiHint: "Empieza por sk-ant-api. Está en console.anthropic.com → API keys.", "It starts with sk-ant-api. It is in console.anthropic.com → API keys.";
     KeyOpencodeHint: "Está en opencode.ai, en tu cuenta → API keys.", "It is in opencode.ai, your account → API keys.";
