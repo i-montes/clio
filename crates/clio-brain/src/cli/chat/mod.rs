@@ -165,16 +165,17 @@ pub trait Session: Send + Sync {
     fn answer(&self, id: &str, _yes: bool) -> Result<String, String> {
         Err(format!("{id} is not of this session"))
     }
-    /// Under an open permission window: approves item `id` of this session as the window, through
-    /// the same path as the person's yes, recorded in the window's record before it runs, if the
-    /// window may answer it (`grant::may_answer`: set aside after it opened, and never control, a
-    /// secret, a block change, a service or an MCP server). Never in a `suspect` session, never
-    /// with the judge off. What the chat says.
+    /// Under bypass or an open permission window: approves item `id` of this session as it,
+    /// through the same path as the person's yes, recorded in its record before it runs, if it
+    /// may answer it (`grant::answering`: bypass never Clio's own guards, a secret or a block
+    /// change; a window only what was set aside after it opened, and never control, a service or
+    /// an MCP server either). Never in a `suspect` session or for a round, never with the judge
+    /// off. What the chat says.
     fn grant(&self, id: &str) -> Result<String, String> {
         Err(format!("{id} is not of this session"))
     }
-    /// What the permission window approved in this session that the chat has not said yet, one
-    /// quiet note each.
+    /// What the permission window or bypass approved in this session that the chat has not said
+    /// yet, one quiet note each.
     fn granted_news(&self) -> Vec<String> {
         Vec::new()
     }

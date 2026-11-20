@@ -33,7 +33,8 @@ const MAX_WAITING: usize = 256;
 const MAX_SOURCE_CHARS: usize = 200;
 /// The reason a networked command of a suspect session waits for the person.
 pub const SUSPECT_REASON: &str = "the session read text the judge flagged";
-/// The mark a round's session gets when its judge did not answer (`tainted.json`, S-71).
+/// The mark a session gets when its judge did not answer (`tainted.json`): a round ends (S-71), a
+/// chat acts under no window or bypass from then on (S-72).
 pub const UNJUDGED: &str = "unjudged";
 
 /// Where a call read outside text from, for the judge and the notice.
@@ -132,6 +133,16 @@ impl ToolHost {
         );
     }
 
+    /// The judge did not answer for text `session` read: in this host, or in an earlier one of
+    /// the same conversation (its run folder keeps the mark).
+    pub(crate) fn is_unjudged(&self, session: &str) -> bool {
+        lock(&self.sessions)
+            .get(session)
+            .is_some_and(|t| t.sources.contains(&UNJUDGED))
+            || std::fs::read_to_string(self.run_dir.join("tainted.json"))
+                .is_ok_and(|t| t.contains(&format!("\"{UNJUDGED}\"")))
+    }
+
     pub(crate) fn is_suspect(&self, session: &str) -> bool {
         lock(&self.sessions)
             .get(session)
@@ -224,8 +235,11 @@ impl ToolHost {
                 self.mark(&req.session, UNJUDGED);
                 json!({ "judge": "unanswered", "withheld": { "tool": w.tool, "source": w.source, "bytes": text.len() } })
             }
-            TextVerdict::NoJudge | TextVerdict::Clean => Value::Null,
-            TextVerdict::NoAnswer => {
+            TextVerdict::Clean => Value::Null,
+            // A chat reads it, marked as data; from now on its items ask the person, whatever
+            // bypass or a window would answer (S-72). Said once.
+            TextVerdict::NoJudge | TextVerdict::NoAnswer => {
+                self.mark(&req.session, UNJUDGED);
                 let first = {
                     let mut s = lock(&self.sessions);
                     let t = s.entry(req.session.clone()).or_default();

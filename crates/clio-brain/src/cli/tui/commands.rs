@@ -32,6 +32,7 @@ pub enum Run {
     Usage,
     Pending,
     Grant,
+    Bypass,
     Actions,
     Undo,
     Review,
@@ -150,6 +151,14 @@ pub const COMMANDS: &[Command] = &[
         "the permission window: how long is left; off closes it now",
         false,
         Run::Grant,
+    ),
+    c(
+        "bypass",
+        &[],
+        "[on | off]",
+        "bypass: Clio approves by herself, with no end; on asks you, off turns it off",
+        false,
+        Run::Bypass,
     ),
     c(
         "actions",
@@ -632,6 +641,19 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             }],
             _ => {
                 app.flash = Some("/grant shows the permission window; /grant off closes it".into());
+                vec![]
+            }
+        },
+        Run::Bypass => match args {
+            "" | "on" | "off" => vec![Cmd::Bypass {
+                arg: args.to_owned(),
+                session: id,
+            }],
+            _ => {
+                app.flash = Some(
+                    "/bypass shows it and what it approved; /bypass on asks you; /bypass off turns it off"
+                        .into(),
+                );
                 vec![]
             }
         },

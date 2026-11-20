@@ -64,7 +64,7 @@ impl Fx {
             sums.push_str(&format!("{s}  {asset}\n"));
         }
         std::fs::write(r.join("SHA256SUMS"), sums).unwrap();
-        std::fs::write(r.join("VERSION"), "0.2.2\n").unwrap();
+        std::fs::write(r.join("VERSION"), "0.3.0\n").unwrap();
     }
     /// `curl … | sh`: the script on standard input, in a session with no terminal.
     fn run(&self, script: &str, path_first: Option<&Path>) -> Output {

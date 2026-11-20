@@ -92,10 +92,16 @@ fn call(e: &Env, tool: &str, args: Value) -> Response {
     })
 }
 
+/// The jail runs here; without it a test that needs it is skipped, and fails under
+/// `CLIO_REQUIRE_JAIL`.
 fn exec_ok(e: &Env) -> bool {
     match e.host.exec_available() {
         Ok(()) => true,
         Err(why) => {
+            assert!(
+                std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+                "CLIO_REQUIRE_JAIL is set and the jail is not available: {why}"
+            );
             eprintln!("SKIPPED (the host launcher cannot run here, exec was not tested): {why}");
             false
         }
@@ -220,6 +226,32 @@ fn a_round_under_an_open_window_acts_on_nothing_and_opens_none() {
     let (now, acts) = grant::record(&e.state, &w.id).unwrap();
     assert!(acts.is_empty(), "{acts:?}");
     assert_eq!(now.ends_ms, w.ends_ms, "not extended");
+}
+
+// S-71 S-72: bypass does not cover a round either: with it on and the judge on, what a round
+// sets aside (its reach out and its unit changes too) waits for the person, nothing is recorded
+// under bypass, and it stays on.
+#[test]
+fn a_round_under_bypass_acts_on_nothing() {
+    let e = env(true);
+    if !exec_ok(&e) {
+        return;
+    }
+    let b = grant::bypass_on(&e.state).unwrap();
+    for (c, network) in [
+        ("rm -r /srv/site.bak", false),
+        ("curl -s https://example.com", true),
+        ("systemctl --user restart backup.service", false),
+    ] {
+        let o = call(&e, "exec", json!({"command": c, "network": network}));
+        assert!(!o.ok && o.decision.rule == "host/aside", "{c}: {o:?}");
+    }
+    let waiting = pending::list(&e.state);
+    assert_eq!(waiting.len(), 3, "{waiting:?}");
+    assert!(waiting.iter().all(|p| matches!(p.state, State::Waiting)));
+    let (_, acts) = grant::Kind::Bypass.record(&e.state, &b.id).unwrap();
+    assert!(acts.is_empty(), "{acts:?}");
+    assert!(grant::Kind::Bypass.current(&e.state).is_some());
 }
 
 // S-71: a round reads only judged text: when its judge does not answer, the text is withheld

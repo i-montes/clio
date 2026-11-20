@@ -47,6 +47,40 @@ pub struct HostJail {
     scope: Option<PathBuf>,
 }
 
+/// A terminal multiplexer's socket folders: tmux's (`/tmp/tmux-<uid>`, and the one `$TMUX`
+/// names), screen's (`/run/screen/S-<user>`, and `$SCREENDIR`, where `$STY`'s socket is). Only
+/// folders of theirs by name: a strange `$TMUX` never hides `/` or a home.
+fn multiplexer_dirs(
+    uid: u32,
+    user: &str,
+    tmux: Option<&str>,
+    screendir: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut v = vec![
+        PathBuf::from(format!("/tmp/tmux-{uid}")),
+        PathBuf::from(format!("/run/screen/S-{user}")),
+    ];
+    let named = |p: &Path, f: &dyn Fn(&str) -> bool| {
+        p.is_absolute() && p.file_name().and_then(|n| n.to_str()).is_some_and(f)
+    };
+    if let Some(dir) = tmux
+        .and_then(|t| t.split(',').next())
+        .and_then(|s| Path::new(s).parent())
+        .filter(|d| named(d, &|n| n.starts_with("tmux-")))
+    {
+        v.push(dir.to_path_buf());
+    }
+    if let Some(dir) = screendir
+        .map(Path::new)
+        .filter(|d| named(d, &|n| n.starts_with("S-") || n == ".screen"))
+    {
+        v.push(dir.to_path_buf());
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// The most processes a service's run may have at once.
 pub const SERVICE_TASKS: u32 = 256;
 
@@ -64,8 +98,9 @@ pub struct HostJob {
     pub max_output: usize,
     /// Clio's folders: shown empty and read-only. Absolute; one that does not exist is skipped.
     pub masks: Vec<PathBuf>,
-    /// Folders inside a mask shown as they are, read-only (Clio's registered skills): a command
-    /// can read and run what is there and change none of it. One that does not exist is skipped.
+    /// Paths shown as they are, read-only: inside a mask, a window into it (Clio's registered
+    /// skills); outside one, what a command may run but not change (Clio's programs in
+    /// `~/.local/bin`). One that does not exist is skipped.
     pub shows: Vec<PathBuf>,
     /// A review's command: everything read-only, a `/tmp` and `/dev` of its own, `/run` hidden,
     /// no new privileges (no `sudo`) and, with `Bwrap`, no Unix socket of its own (a seccomp
@@ -376,6 +411,19 @@ impl HostJail {
         if job.read_only && !job.sockets {
             asked.push(PathBuf::from("/run"));
         }
+        // A terminal multiplexer's sockets (its server runs outside the jail and types into the
+        // person's terminal), where the command shares the host's `/tmp` and `/run`.
+        let private_tmp = job.read_only || svc.is_some();
+        asked.extend(
+            multiplexer_dirs(
+                self.uid,
+                &self.user,
+                std::env::var("TMUX").ok().as_deref(),
+                std::env::var("SCREENDIR").ok().as_deref(),
+            )
+            .into_iter()
+            .filter(|p| !(private_tmp && p.starts_with("/tmp")) && p.symlink_metadata().is_ok()),
+        );
         let mut masks = canon(&asked, "mask")?;
         // A mask inside another is hidden by it already (Clio's data inside a masked home).
         masks.sort();
@@ -499,6 +547,9 @@ impl HostJail {
                 for w in writable.iter().filter(|w| !inside(w)) {
                     a.extend(["--bind".into(), w.clone(), w.clone()]);
                 }
+                for w in shows.iter().filter(|w| !inside(w)) {
+                    a.extend(["--ro-bind".into(), w.clone(), w.clone()]);
+                }
                 for (k, v) in env {
                     a.extend(["--setenv".into(), k, v]);
                 }
@@ -583,6 +634,9 @@ impl HostJail {
                     .filter(|w| masks.iter().any(|m| Path::new(w).starts_with(m)))
                 {
                     a.extend(["-p".into(), format!("BindReadOnlyPaths={w}")]);
+                }
+                for w in shows.iter().filter(|w| !inside(w)) {
+                    a.extend(["-p".into(), format!("ReadOnlyPaths={w}")]);
                 }
                 for (k, v) in env {
                     a.extend(["-E".into(), format!("{k}={v}")]);
@@ -862,6 +916,42 @@ mod tests {
         assert_eq!(p.len(), 10 * 8);
         let k = |i: usize| u32::from_ne_bytes(p[i * 8 + 4..i * 8 + 8].try_into().unwrap());
         assert_eq!((k(8), k(9)), (0x7fff_0000, 0x0005_000d));
+    }
+
+    #[test]
+    fn a_multiplexers_sockets_are_found_by_name_only() {
+        use super::multiplexer_dirs;
+        use std::path::PathBuf;
+        let d = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+        assert_eq!(
+            multiplexer_dirs(1000, "u", None, None),
+            d(&["/run/screen/S-u", "/tmp/tmux-1000"])
+        );
+        assert_eq!(
+            multiplexer_dirs(
+                1000,
+                "u",
+                Some("/var/tmp/tmux-1000/default,4242,0"),
+                Some("/home/u/.screen")
+            ),
+            d(&[
+                "/home/u/.screen",
+                "/run/screen/S-u",
+                "/tmp/tmux-1000",
+                "/var/tmp/tmux-1000"
+            ])
+        );
+        // Never `/`, a home or a relative path, whatever the variables say.
+        for (t, s) in [
+            (Some("/sock,1,0"), Some("/")),
+            (Some("/home/u/sock,1,0"), Some("/home/u")),
+            (Some("tmux-1/default,1,0"), Some("S-u")),
+        ] {
+            assert_eq!(
+                multiplexer_dirs(1000, "u", t, s),
+                d(&["/run/screen/S-u", "/tmp/tmux-1000"])
+            );
+        }
     }
 
     #[test]

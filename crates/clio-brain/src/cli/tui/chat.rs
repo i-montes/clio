@@ -465,7 +465,7 @@ impl Chat {
         if silent && !self.judge_said {
             self.judge_said = true;
             self.items.push(Item::Note(
-                "the judge did not answer: outside text reached the model unjudged, marked as data"
+                "the judge did not answer: outside text reached the model unjudged, marked as data; from now on nothing in this conversation runs under bypass or a permission window, it asks you"
                     .into(),
             ));
         }
@@ -1359,6 +1359,12 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
             t.accent_line(),
         ));
         spans.push(Span::styled(r, t.dim()));
+    }
+    if app.chat.approvals.bypass {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled("bypass on", t.warn()));
     }
     if let Some(w) = super::approvals::status(app) {
         if spans.len() > 1 {

@@ -378,8 +378,8 @@ pub trait MemoryPort: Send + Sync {
     fn judge_text(&self, _text: &str, _source: &str) -> TextVerdict {
         TextVerdict::NoJudge
     }
-    /// The person turned a judge on for this service (Jev): without one no permission window
-    /// acts (`grant`), and an open one closes.
+    /// The person turned a judge on for this service (Jev): without one no permission window or
+    /// bypass acts (`grant`), and an open one closes.
     fn judge_on(&self) -> bool {
         false
     }

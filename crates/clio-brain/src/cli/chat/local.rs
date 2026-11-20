@@ -655,8 +655,9 @@ impl HostSide {
     }
 
     /// `Session::grant` (`suspect`: the session's mark; `answer`: the person's path of a yes, as
-    /// the window): the window open now (the judge on), an item of `session` it may answer
-    /// (`grant::may_answer`), recorded before it runs and its outcome after, in fixed words.
+    /// bypass or the window): bypass or the window on now (the judge on), an item of `session` it
+    /// may answer (`grant::answering`), recorded before it runs and its outcome after, in fixed
+    /// words.
     fn grant(
         &self,
         session: &str,
@@ -668,28 +669,39 @@ impl HostSide {
             .into_iter()
             .find(|p| p.id == id && self.mine(p, session))
             .ok_or_else(|| format!("{id} is not of this session"))?;
-        // A session the judge flagged never acts under a window: it asks.
+        // A session the judge flagged never acts under a window or bypass: it asks.
         if suspect || pending::suspect_run(&self.dirs, &p.run) {
             return Err(format!(
                 "{id}: this session read content that tried to give orders, so it waits for you"
             ));
         }
-        // Nor does a round, which nobody watched (S-71): only the person's yes in the box.
+        // Nor one whose judge did not answer for what it read (S-72): it asks from then on.
+        if pending::unjudged_run(&self.dirs, &p.run) {
+            return Err(format!(
+                "{id}: the judge did not answer for what this session read, so it waits for you"
+            ));
+        }
+        // Nor does a round, which nobody watched (S-71, S-72): only the person's yes in the box.
         if crate::cli::round::is_round(&self.dirs, &p.run) {
             return Err(format!("{id}: a round's item always asks you"));
         }
-        // The judge off closes the window; what it may not answer, or what waited from before it
-        // opened, keeps its box.
-        let w = pending::window_now(&self.dirs)
-            .ok_or_else(|| format!("{id}: no permission window is open, so it waits for you"))?;
-        if !grant::may_answer(&w, &p) {
-            return Err(format!("{id}: this one always asks you"));
-        }
+        // The judge off closes the window and bypass; what they may not answer, or what waited
+        // from before a window opened, keeps its box.
+        let Some(w) = pending::answering(&self.dirs, &p) else {
+            let on = pending::window_now(&self.dirs).is_some()
+                || pending::bypass_now(&self.dirs).is_some();
+            return Err(if on {
+                format!("{id}: this one always asks you")
+            } else {
+                format!("{id}: no permission window is open, so it waits for you")
+            });
+        };
         let st = pending::state(&self.dirs);
         let what = format!("{} {}", pending::label(&p), pending::what(&p));
-        // Recorded before anything runs; a window that closed meanwhile leaves it waiting.
-        let w = grant::begin(&st, &p, &pending::what(&p))
-            .ok_or_else(|| format!("{id}: the permission window is closed, so it waits for you"))?;
+        // Recorded before anything runs; one that closed meanwhile leaves it waiting.
+        let w = grant::Kind::of(&w)
+            .begin(&st, &p, &pending::what(&p))
+            .ok_or_else(|| format!("{id}: it was turned off meanwhile, so it waits for you"))?;
         locked(&self.told).insert(id.to_owned());
         let r = answer(&w);
         // Fixed words, never what it printed (outside text).
@@ -705,7 +717,12 @@ impl HostSide {
             Err(_) => grant::NOT_RUN.to_owned(),
         };
         grant::done(&st, &w, id, &outcome);
-        let left = grant::left_text(w.ends_ms - crate::cli::now_ms());
+        let by = if w.bypass {
+            "approved under bypass".to_owned()
+        } else {
+            let left = grant::left_text(w.ends_ms - crate::cli::now_ms());
+            format!("approved under your permission ({left} left)")
+        };
         r.map(|n| {
             // The outcome starts with the act itself (`pending::outcome`): said once.
             let outcome = n.strip_prefix(&format!("approved {id}: ")).unwrap_or(&n);
@@ -714,43 +731,46 @@ impl HostSide {
                 .unwrap_or(outcome)
                 .trim_start();
             if outcome.is_empty() {
-                format!("approved under your permission ({left} left): {what}")
+                format!("{by}: {what}")
             } else {
-                format!("approved under your permission ({left} left): {what}\n{outcome}")
+                format!("{by}: {what}\n{outcome}")
             }
         })
     }
 
-    /// `Session::granted_news`: what the last window approved in `session` that was not said.
+    /// `Session::granted_news`: what the last window and the last bypass approved in `session`
+    /// that was not said.
     fn granted_news(&self, session: &str) -> Vec<String> {
         let st = pending::state(&self.dirs);
-        let Some(w) = grant::read(&st) else {
-            return Vec::new();
-        };
-        let Some((_, acts)) = grant::record(&st, &w.id) else {
-            return Vec::new();
-        };
         let now = crate::cli::now_ms();
-        let left = if w.open_now() {
-            format!("{} left", grant::left_text(w.ends_ms - now))
-        } else {
-            "the window has ended".into()
-        };
         let mut told = locked(&self.told);
-        // A free act's own note was in the chat already.
-        acts.into_iter()
-            .filter(|a| {
-                a.session == session
-                    && !a.pending.starts_with(crate::cli::manage::FREE_ACT)
-                    && told.insert(a.pending.clone())
-            })
-            .map(|a| {
-                format!(
-                    "approved under your permission ({left}): «{}» {}",
-                    a.class, a.what
-                )
-            })
-            .collect()
+        let mut out = Vec::new();
+        for kind in [grant::Kind::Window, grant::Kind::Bypass] {
+            let Some((w, acts)) = kind.read(&st).and_then(|w| kind.record(&st, &w.id)) else {
+                continue;
+            };
+            let by = match kind {
+                grant::Kind::Bypass => "approved under bypass".to_owned(),
+                grant::Kind::Window if w.open_now() => format!(
+                    "approved under your permission ({} left)",
+                    grant::left_text(w.ends_ms - now)
+                ),
+                grant::Kind::Window => {
+                    "approved under your permission (the window has ended)".into()
+                }
+            };
+            // A free act's own note was in the chat already.
+            out.extend(
+                acts.into_iter()
+                    .filter(|a| {
+                        a.session == session
+                            && !a.pending.starts_with(crate::cli::manage::FREE_ACT)
+                            && told.insert(a.pending.clone())
+                    })
+                    .map(|a| format!("{by}: «{}» {}", a.class, a.what)),
+            );
+        }
+        out
     }
 
     /// What this session set aside that the person approved elsewhere (`clio approve`, another
@@ -1312,6 +1332,13 @@ impl Session for ChatSession {
             }
             on_event(e);
         };
+        // Whether bypass acts for this session goes in front of the message, read by the brain.
+        self.pre.set_bypass(self.host.as_ref().is_some_and(|h| {
+            !self.suspect()
+                && !self.round
+                && !pending::unjudged_run(&h.dirs, &h.run)
+                && pending::bypass_now(&h.dirs).is_some()
+        }));
         let r = run_assessed_with(
             &self.pi.client,
             &self.assessor,
@@ -1846,10 +1873,10 @@ impl ChatSession {
         granted: Option<&grant::Window>,
     ) -> Result<String, String> {
         let by = granted.map(|w| w.id.as_str());
-        let who = if by.is_some() {
-            "the permission window"
-        } else {
-            "the person"
+        let who = match granted {
+            Some(w) if w.bypass => "bypass",
+            Some(_) => "the permission window",
+            None => "the person",
         };
         // One already put to the person, or one of this session still waiting (`/pending`).
         let h = self
@@ -2098,6 +2125,20 @@ mod tests {
         assert_eq!(held(SkillNext::Register, None), SkillNext::Register);
     }
 
+    // S-72: a `clio run` is the person's own request, so bypass covers it: its source is not a
+    // round, so its tool host is not `--unattended` (`unattended: self.round`) and bypass answers
+    // there as in a chat. A round is not covered: nobody asked for that session.
+    #[test]
+    fn a_clio_run_is_the_persons_and_bypass_covers_it() {
+        let t = tempfile::tempdir().unwrap();
+        let d = host_side(t.path()).dirs;
+        let run = LocalSource::new(d.clone())
+            .one_shot()
+            .with_mode(Some(Mode::Host));
+        assert!(!run.round && !run.presentation);
+        assert!(LocalSource::new(d).round().round);
+    }
+
     /// A conversation's host side on its own folders (run `r1`), the judge on.
     fn host_side(root: &Path) -> HostSide {
         let data = root.join("data");
@@ -2243,6 +2284,110 @@ mod tests {
         };
         assert!(later.outside_news("s1").is_empty());
         assert_eq!(again.outside_news("s1").len(), 1);
+    }
+
+    // S-72: the chat's bypass answers what waited from before it was turned on, control on the
+    // machine, and records each with a fixed outcome; never Clio's own guards (control without
+    // the machine's mark), a block change, a secret, a suspect session's item, one of a session
+    // whose judge did not answer, or a round's; `granted_news`
+    // says what the tool host did under it; the judge off turns it off at the next act.
+    #[test]
+    fn the_chats_bypass_answers_what_waits_but_never_clios_own_guards() {
+        let t = tempfile::tempdir().unwrap();
+        let h = host_side(t.path());
+        let st = pending::state(&h.dirs);
+        let now = crate::cli::now_ms();
+        let item = |id: &str, class: &str, reason: Option<&str>, run: &str| {
+            let v = json!({"id": id, "class": class, "tool": "exec",
+                "args": {"command": format!("systemctl reboot # {id}")}, "hash": "", "what": "",
+                "run": run, "session": "s1", "created_ms": now - 60_000,
+                "expires_ms": now + 3_600_000, "state": "waiting", "reason": reason});
+            std::fs::write(st.join(format!("pending/{id}.json")), v.to_string()).unwrap();
+        };
+        item("old1", "delete", None, "r1");
+        item("mch1", "control", Some(clio_toolhost::ask::MACHINE), "r1");
+        item("own1", "control", None, "r1");
+        item("mem1", "memory", None, "r1");
+        item("sec1", "secret", None, "r1");
+        let err = h
+            .grant("s1", false, "old1", |_| ran(&h, "old1", 0))
+            .unwrap_err();
+        assert!(err.contains("no permission window"), "off: {err}");
+        let b = grant::bypass_on(&st).unwrap();
+        let said = h
+            .grant("s1", false, "old1", |_| ran(&h, "old1", 0))
+            .unwrap();
+        assert!(said.starts_with("approved under bypass: "), "{said}");
+        assert!(!said.contains("left"), "{said}");
+        assert!(h.grant("s1", false, "mch1", |_| ran(&h, "mch1", 0)).is_ok());
+        for id in ["own1", "mem1", "sec1"] {
+            let err = h.grant("s1", false, id, |_| ran(&h, id, 0)).unwrap_err();
+            assert!(err.contains("always asks you"), "{id}: {err}");
+        }
+        item("new1", "delete", None, "r1");
+        assert!(
+            h.grant("s1", true, "new1", |_| ran(&h, "new1", 0)).is_err(),
+            "suspect"
+        );
+        let round = runs::prepare_host(&h.dirs, crate::cli::round::INSTRUCTION).unwrap();
+        item("rnd1", "delete", None, &round);
+        let err = h
+            .grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0))
+            .unwrap_err();
+        assert!(err.contains("a round's item"), "{err}");
+        let (_, acts) = grant::Kind::Bypass.record(&st, &b.id).unwrap();
+        let done: Vec<(&str, Option<&str>)> = acts
+            .iter()
+            .map(|a| (a.pending.as_str(), a.outcome.as_deref()))
+            .collect();
+        assert_eq!(
+            done,
+            [
+                ("old1", Some("done (exit 0)")),
+                ("mch1", Some("done (exit 0)"))
+            ]
+        );
+        assert!(!acts.iter().any(|a| a.what.contains("IGNORE")));
+        // Said by `grant` already: no news of it. An act of the tool host inline: once.
+        assert!(h.granted_news("s1").is_empty());
+        let mut inline = waits(&h, "inl1", "delete", "s1", now);
+        inline.what = "rm -r /srv/inl1.bak".into();
+        grant::Kind::Bypass
+            .begin(&st, &inline, &inline.what)
+            .unwrap();
+        let news = h.granted_news("s1");
+        assert_eq!(
+            news,
+            ["approved under bypass: «delete» rm -r /srv/inl1.bak"]
+        );
+        // The judge did not answer for what this conversation read: its items ask from then on,
+        // and bypass stays on for the others.
+        let marks = h.dirs.runs.join("r1/toolhost");
+        std::fs::create_dir_all(&marks).unwrap();
+        std::fs::write(
+            marks.join("tainted.json"),
+            json!({"sources": ["web", clio_toolhost::UNJUDGED]}).to_string(),
+        )
+        .unwrap();
+        item("unj1", "delete", None, "r1");
+        let err = h
+            .grant("s1", false, "unj1", |_| ran(&h, "unj1", 0))
+            .unwrap_err();
+        assert!(err.contains("judge did not answer"), "{err}");
+        assert!(pending::bypass_now(&h.dirs).is_some());
+        // The judge turned off: bypass turns off at the next act, which waits.
+        let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
+        cfg.jev.enabled = false;
+        std::fs::write(h.dirs.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        std::fs::remove_file(marks.join("tainted.json")).unwrap();
+        assert!(
+            h.grant("s1", false, "new1", |_| ran(&h, "new1", 0))
+                .is_err()
+        );
+        assert_eq!(
+            grant::Kind::Bypass.read(&st).unwrap().why.as_deref(),
+            Some(grant::JUDGE_OFF)
+        );
     }
 
     // S-36: the chat's window answers only an item of this conversation set aside after it

@@ -35,6 +35,8 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
                                               a yes also lets Clio act without asking for approvals.grant_hours
   clio grant [off]                            the permission window: how long is left and what it approved;
                                               off closes it now
+  clio bypass [off]                           bypass: whether it is on and what Clio approved by herself
+                                              under it; off turns it off (only the chat's /bypass on turns it on)
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
   clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
@@ -142,6 +144,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
             | "approve"
             | "reject"
             | "grant"
+            | "bypass"
             | "actions"
             | "skills"
             | "services"
@@ -283,6 +286,15 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
                 _ => return Err("usage: clio grant [off]".into()),
             };
             pending::grant_cmd(&dirs, off)?;
+        }
+        "bypass" => {
+            let rest = args.rest()?;
+            let arg = match rest.as_slice() {
+                [] => None,
+                [a] => Some(a.as_str()),
+                _ => return Err("usage: clio bypass [off]".into()),
+            };
+            pending::bypass_cmd(&dirs, arg)?;
         }
         "actions" => {
             let (json, run) = (args.flag("--json"), args.value("--run")?);

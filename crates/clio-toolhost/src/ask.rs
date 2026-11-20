@@ -10,6 +10,8 @@
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +63,55 @@ impl fmt::Display for Class {
     }
 }
 
+/// Why a `control` act on the machine alone waits (turning it off, its users, `sudoers`, a pattern
+/// of the person's): set where the item is classified (`HostRules::machine_only`), and the only
+/// `control` bypass may answer (`grant::bypass_answers`).
+pub const MACHINE: &str = "it acts on the machine (turning it off, its users or sudo), not on Clio, and starts nothing outside the jail";
+
+/// What makes code run outside the launcher, later or elsewhere: the service manager and D-Bus
+/// (a transient unit, `StartUnit`), the schedulers and a terminal multiplexer's server. A
+/// `control` that names one is never `MACHINE` (`HostRules::machine_only`).
+static LAUNCHERS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(^|[^\w.-])(systemd-run|busctl|gdbus|dbus-send|crontab|at|batch|tmux|screen)($|[^\w.-])",
+    )
+    .expect("a fixed pattern")
+});
+
+/// What the person's own service manager or shell reads and runs at its start, or what runs as
+/// Clio: the unit folders (theirs and the system's), `environment.d`, the shell start-up files
+/// and Clio's programs in `~/.local/bin`. A command that writes one is `control` and never
+/// `MACHINE`; the write tools' paths too (`classify_write`).
+static LAUNCH_PATHS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"/systemd($|/|[^\w.-])|environment\.d\b|(^|[^\w.-])\.(bashrc|bash_profile|bash_login|profile|zshrc|zprofile|zshenv)($|[^\w.-])|\.local/bin/clio(-vault|-memory)?($|[^\w.-])",
+    )
+    .expect("a fixed pattern")
+});
+
+/// Programs that only read what they are given: naming a start-up file or a unit folder with
+/// one of these alone, and no `>`, is not writing it.
+const READERS: [&str; 18] = [
+    "cat",
+    "less",
+    "more",
+    "head",
+    "tail",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ls",
+    "stat",
+    "file",
+    "wc",
+    "diff",
+    "cmp",
+    "sha256sum",
+    "readlink",
+    "realpath",
+];
+
 /// A name that looks like a backup. `{B}` in a factory pattern stands for it.
 const BACKUP: &str = r"(?i:backup|respaldo|snapshot|\.bak\b|\.dump\b|\.sql\b)";
 
@@ -101,7 +152,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -125,6 +176,18 @@ const FACTORY: &[(Class, &str)] = &[
     (Control, r"^(systemd-run|gdbus|dbus-send|busctl)\b"),
     // A scheduler runs a job later, outside the launcher and outside any permission window.
     (Control, r"^(crontab|at|batch)( |$)"),
+    // The person's own service manager loading or starting what may be new (a unit file a
+    // command just wrote, its environment): it runs outside the launcher, unmasked.
+    (
+        Control,
+        r"^systemctl( \S+)* --user( \S+)* (start|restart|try-restart|reload-or-restart|try-reload-or-restart|reload|enable|reenable|preset|preset-all|link|edit|set-property|set-environment|import-environment|daemon-reload|daemon-reexec|isolate|add-wants|add-requires|unmask|revert)( |$)",
+    ),
+    (
+        Control,
+        r"^systemctl( \S+)* (start|restart|try-restart|reload-or-restart|try-reload-or-restart|reload|enable|reenable|preset|preset-all|link|edit|set-property|set-environment|import-environment|daemon-reload|daemon-reexec|isolate|add-wants|add-requires|unmask|revert)( \S+)* --user( |$)",
+    ),
+    // A terminal multiplexer's server runs outside the launcher, and can type into the chat.
+    (Control, r"^(tmux|screen)( |$)"),
     // The services' timer (S-69) is the person's to turn on or off: anything that names it.
     (Control, r"\bclio-services\.(timer|service)\b"),
 ];
@@ -330,6 +393,30 @@ impl HostRules {
         self
     }
 
+    /// A `control` command (or the path of a write) that acts on the machine alone, not on Clio's
+    /// own guards: power, users, `sudoers`, or a pattern of the person's `host.json`. Never what
+    /// makes code run outside the launcher, where Clio's folders are not hidden: a launcher
+    /// (`LAUNCHERS`: `systemd-run`, D-Bus, the schedulers, a multiplexer), the person's own
+    /// service manager (`systemctl --user`), a unit folder, a shell start-up file or Clio's
+    /// programs (`LAUNCH_PATHS`). Nor one that names Clio's paths, anything called `clio` or keys
+    /// (`.ssh`). Quotes and backslashes are dropped first (`c'l'io` is `clio`); it is a word
+    /// match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
+    pub fn machine_only(&self, text: &str) -> bool {
+        let bare: String = text
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect();
+        ![text, bare.as_str()].iter().any(|t| {
+            self.control.as_ref().is_some_and(|r| r.is_match(t))
+                || t.to_lowercase().contains("clio")
+                || t.contains("authorized_keys")
+                || t.contains(".ssh")
+                || LAUNCHERS.is_match(t)
+                || LAUNCH_PATHS.is_match(t)
+                || (t.contains("systemctl") && t.contains("--user"))
+        })
+    }
+
     /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
     /// path to a file in one (plain names, none starting with a dot, so no `..`) is not, by
     /// itself, a reason for `control`. Every other path of Clio's still is. The path must end
@@ -387,6 +474,15 @@ impl HostRules {
         if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) {
             return Some(Control);
         }
+        // A start-up file, a unit folder or Clio's programs, named by anything but a reader.
+        if LAUNCH_PATHS.is_match(command)
+            && (command.contains('>')
+                || simple_commands(command)
+                    .iter()
+                    .any(|w| !READERS.contains(&w[0].as_str())))
+        {
+            return Some(Control);
+        }
         simple_commands(command).iter().find_map(|w| {
             let line = w.join(" ");
             let w: Vec<&str> = w.iter().map(String::as_str).collect();
@@ -400,11 +496,11 @@ impl HostRules {
 
     pub fn classify_write(&self, path: &Path) -> Option<Class> {
         let p = path.to_string_lossy();
-        // The person's own service manager's units (S-69: the services' timer among them).
+        // The person's own service manager's units (S-69: the services' timer among them), the
+        // system's, the shell's start-up files and Clio's programs (`LAUNCH_PATHS`).
         if p.starts_with("/etc/sudoers")
             || p.contains("authorized_keys")
-            || p.contains("/.config/systemd/")
-            || p.contains("/.local/share/systemd/")
+            || LAUNCH_PATHS.is_match(&p)
         {
             Some(Control)
         } else if path.exists()
@@ -815,6 +911,138 @@ mod tests {
                 PathBuf::from("/home/u/.local/share/clio"),
             ],
         )
+    }
+
+    // S-72: of what is `control`, the list marks as the machine's alone (which bypass may answer)
+    // only what names none of Clio's paths (wherever they are), nothing called `clio` (her
+    // commands, units, a `clio …` a scheduler or `systemd-run` would run), and no keys; one that
+    // mixes both, or hides `clio` in quotes, is Clio's and always asks. `clio bypass` is control.
+    #[test]
+    fn control_on_the_machine_is_told_apart_from_clios_own_guards() {
+        let r = HostRules::factory().with_control(
+            Path::new("/home/u"),
+            &[PathBuf::from("/srv/assistant/data")],
+        );
+        for (c, machine) in [
+            ("systemctl reboot", true),
+            ("sudo shutdown -h now", true),
+            ("visudo -c", true),
+            ("useradd deploy", true),
+            ("sudo passwd -l deploy", true),
+            // What makes code run outside the launcher, where Clio's folders are not hidden,
+            // never: however Clio is spelled in it, or not at all (S-72).
+            ("systemd-run --user touch /tmp/x", false),
+            ("systemd-run --user sh /tmp/x.sh", false),
+            (
+                "systemd-run --user sh -c 'rm ~/.local/share/cl*o/host/bypass.json'",
+                false,
+            ),
+            (
+                "systemd-run --user sh -c 'rm ~/.local/share/cl?o/host/grant.json'",
+                false,
+            ),
+            (
+                "systemd-run --user sh -c 'd=cl; rm -r ~/.config/${d}io'",
+                false,
+            ),
+            (
+                "systemd-run --user sh -c \"$(echo cm0gLXJmIH4vLmNvbmZpZy9jbGlv | base64 -d)\"",
+                false,
+            ),
+            ("crontab -r", false),
+            ("echo '0 3 * * * /usr/bin/backup' | crontab -", false),
+            ("echo '* * * * * sh /tmp/x.sh' | crontab -", false),
+            ("echo 'sh /tmp/x.sh' | at now", false),
+            ("echo 'sh /tmp/x.sh' | batch", false),
+            ("busctl list", false),
+            (
+                "busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' x.service fail 1 ExecStart a(sbas) 1 /bin/sh 2 sh /tmp/x.sh 0",
+                false,
+            ),
+            (
+                "gdbus call --session --dest org.freedesktop.systemd1 --object-path /org/freedesktop/systemd1 --method org.freedesktop.systemd1.Manager.StartUnit x.service replace",
+                false,
+            ),
+            (
+                "dbus-send --session --dest=org.freedesktop.systemd1 / x",
+                false,
+            ),
+            ("tmux send-keys -t 0 'y' Enter", false),
+            ("tmux attach", false),
+            ("screen -x", false),
+            ("screen -S s -X stuff 'y'", false),
+            ("systemctl --user daemon-reload", false),
+            ("systemctl --user start backup.service", false),
+            ("systemctl --user enable --now backup.timer", false),
+            ("systemctl link --user /tmp/x.service", false),
+            ("systemctl --user set-environment X=1", false),
+            ("systemctl --user import-environment", false),
+            ("tee ~/.config/systemd/user/x.service < /tmp/u", false),
+            ("cp /tmp/u /etc/systemd/system/x.service", false),
+            ("echo 'sh /tmp/x.sh' >> ~/.bashrc", false),
+            ("printf 'sh /tmp/x.sh' >> $HOME/.profile", false),
+            ("sed -i '1i sh /tmp/x.sh' .zshrc", false),
+            ("cp /tmp/x ~/.local/bin/clio", false),
+            ("mv /tmp/x /home/u/.local/bin/clio-vault", false),
+            ("install -m 755 /tmp/x ~/.local/bin/clio-memory", false),
+            ("cp /tmp/e ~/.config/environment.d/x.conf", false),
+            ("clio bypass on", false),
+            ("clio bypass off", false),
+            ("clio approve a1", false),
+            ("systemd-run --user clio approve a1", false),
+            ("echo '* * * * * clio approve a1' | crontab -", false),
+            ("crontab -r; clio grant off", false),
+            ("systemctl --user restart clio-services.timer", false),
+            ("systemctl --user stop clio-memory", false),
+            ("systemd-run --user c'l'io approve a1", false),
+            ("systemd-run --user cl\\io approve a1", false),
+            (
+                "systemd-run --user rm /srv/assistant/data/host/bypass.json",
+                false,
+            ),
+            ("crontab -l > ~/.ssh/authorized_keys", false),
+            ("useradd -m x && cp k /home/x/.ssh/authorized_keys", false),
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+            assert_eq!(r.machine_only(c), machine, "{c}");
+        }
+        for (path, machine) in [
+            ("/etc/sudoers.d/deploy", true),
+            ("/home/u/.config/systemd/user/backup.service", false),
+            ("/home/u/.local/share/systemd/user/backup.service", false),
+            ("/etc/systemd/system/backup.service", false),
+            ("/usr/lib/systemd/user/backup.service", false),
+            ("/home/u/.config/environment.d/x.conf", false),
+            ("/home/u/.bashrc", false),
+            ("/home/u/.bash_profile", false),
+            ("/home/u/.profile", false),
+            ("/home/u/.zprofile", false),
+            ("/home/u/.bash_login", false),
+            ("/home/u/.local/bin/clio", false),
+            ("/home/u/.local/bin/clio-memory", false),
+            ("/home/u/.config/systemd/user/clio-services.timer", false),
+            ("/home/u/.ssh/authorized_keys", false),
+        ] {
+            assert_eq!(r.classify_write(Path::new(path)), Some(Control), "{path}");
+            assert_eq!(r.machine_only(path), machine, "{path}");
+        }
+        // Reading them, or acting on what already runs, is not `control`.
+        for c in [
+            "cat ~/.bashrc",
+            "grep PATH ~/.profile | head -3",
+            "ls ~/.config/systemd/user",
+            "ls -l ~/.local/bin/clio",
+            "systemctl --user status backup.service",
+            "systemctl --user stop backup.service",
+            "systemctl --user list-timers",
+            "sudo systemctl restart nginx",
+            "journalctl --user -u backup.service",
+        ] {
+            assert_eq!(r.classify_command(c), None, "{c}");
+        }
+        for path in ["/home/u/.local/bin/other", "/home/u/notes/profile.md"] {
+            assert_eq!(r.classify_write(Path::new(path)), None, "{path}");
+        }
     }
 
     #[test]

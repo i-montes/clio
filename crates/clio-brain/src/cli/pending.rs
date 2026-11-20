@@ -3,7 +3,7 @@
 //! What is set aside comes from the toolhost (`clio_toolhost::pending`); here it is only shown,
 //! and an approval runs in a host-mode `ToolHost` on that session's run folder.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clio_brain::pi::launch::valid_id;
 use clio_toolhost::ask::HostRules;
@@ -70,6 +70,14 @@ pub fn suspect_run(dirs: &Dirs, run: &str) -> bool {
             .is_ok_and(|t| t.contains("\"suspect\""))
 }
 
+/// Whether the judge did not answer for text the session of run `run` read (its tool host left
+/// the mark): bypass and a window no longer answer its items (S-72).
+pub fn unjudged_run(dirs: &Dirs, run: &str) -> bool {
+    valid_id(run)
+        && std::fs::read_to_string(dirs.runs.join(run).join("toolhost/tainted.json"))
+            .is_ok_and(|t| t.contains(&format!("\"{}\"", clio_toolhost::UNJUDGED)))
+}
+
 /// Whether the judge is on (`jev.enabled`): no permission window opens, or acts, without it.
 pub fn judge_on(dirs: &Dirs) -> bool {
     super::home::Config::load(dirs).is_ok_and(|c| c.jev.enabled)
@@ -81,15 +89,217 @@ pub const JUDGE_OFF_YES: &str = "the judge is off: this approves only what is li
 /// The permission window open now, if the judge is on: one found open with the judge off closes
 /// (the judge is what closes a window on an injection; without it there is none).
 pub fn window_now(dirs: &Dirs) -> Option<grant::Window> {
+    open_now(dirs, grant::Kind::Window)
+}
+
+/// Bypass, if it is on and the judge is on: found on with the judge off, it turns off.
+pub fn bypass_now(dirs: &Dirs) -> Option<grant::Window> {
+    open_now(dirs, grant::Kind::Bypass)
+}
+
+fn open_now(dirs: &Dirs, kind: grant::Kind) -> Option<grant::Window> {
     let st = state(dirs);
-    let w = grant::current(&st)?;
+    let w = kind.current(&st)?;
     if judge_on(dirs) {
         return Some(w);
     }
-    if let Err(e) = grant::close(&st, grant::JUDGE_OFF) {
-        eprintln!("clio: the permission window could not be closed: {e}");
+    if let Err(e) = kind.close(&st, grant::JUDGE_OFF) {
+        eprintln!("clio: the {} could not be closed: {e}", kind.name());
     }
     None
+}
+
+/// What answers `p` by itself now (`grant::answering`: bypass, else the window), the judge on:
+/// found with the judge off, it closes and nothing does.
+pub fn answering(dirs: &Dirs, p: &Pending) -> Option<grant::Window> {
+    let w = grant::answering(&state(dirs), p)?;
+    open_now(dirs, grant::Kind::of(&w))
+}
+
+/// What the `/bypass on` box says, word for word (the design's).
+pub const BYPASS_BOX: &str = "Clio will approve by herself everything that asks you, with no end, until `/bypass off`. It turns itself off if the judge flags an injection.";
+
+/// What still asks under bypass, for the box and `/bypass`.
+pub const BYPASS_KEEPS: &str = "What still asks you: what would change Clio's own setup (her folders, her `clio` commands, keys), what would start new code outside the jail (systemd-run, D-Bus, cron, at, tmux, screen, a unit or shell start-up file), a change to your blocks from a session that read outside text, anything in a session the judge flagged or whose judge did not answer, a round's items, secrets and questions.";
+
+/// Why bypass is not turned on from a chat: the judge off, or a session the judge flagged.
+fn bypass_refused(dirs: &Dirs, suspect: bool) -> Res<()> {
+    if !judge_on(dirs) {
+        return Err("the judge is off (jev.enabled): bypass is not turned on without it".into());
+    }
+    if suspect {
+        return Err(
+            "this conversation read content that tried to give orders: bypass is not turned on from it".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The `/bypass on` box: the approval timing (a quiet second, `y` then Enter; a paste or a
+/// click never answers). Not with the judge off, from a `suspect` session, nor when it is on
+/// already.
+pub fn bypass_ask(dirs: &Dirs, suspect: bool) -> Res<super::tui::app::Confirm> {
+    use super::tui::ask::Part;
+    bypass_refused(dirs, suspect)?;
+    if bypass_now(dirs).is_some() {
+        return Err("bypass is on already (/bypass says since when and what it approved)".into());
+    }
+    let mut c = super::tui::app::Confirm::new(
+        super::tui::app::Action::Bypass,
+        "bypass".into(),
+        0,
+        String::new(),
+    );
+    c.block = Some(super::tui::ask::BlockAsk::rows(
+        "bypass",
+        vec![
+            (Part::Head, "Turn bypass on?".into()),
+            (Part::Text, BYPASS_BOX.into()),
+            (Part::Label, BYPASS_KEEPS.into()),
+        ],
+        " yes, turn bypass on",
+    ));
+    Ok(c)
+}
+
+/// The person said yes in the `/bypass on` box: bypass turns on, with the judge on. Its only
+/// caller is the chat's answer to that box (`Cmd::BypassOn`): no command, tool, MCP call, config
+/// key or file turns it on.
+pub fn bypass_on(dirs: &Dirs, suspect: bool) -> Res<grant::Window> {
+    bypass_refused(dirs, suspect)?;
+    grant::bypass_on(&state(dirs))
+}
+
+/// Bypass in one line: on since when, or off (and why, when the judge turned it off).
+pub fn bypass_line(dirs: &Dirs) -> String {
+    let at = |ms: i64| pending::local(ms, "%Y-%m-%d %H:%M").unwrap_or_else(|| ms.to_string());
+    match bypass_now(dirs) {
+        Some(w) => format!(
+            "bypass is on since {}: Clio approves by herself what would ask you, with no end · /bypass off turns it off",
+            at(w.opened_ms)
+        ),
+        None => match grant::Kind::Bypass.read(&state(dirs)) {
+            Some(w) if w.closed_ms.is_some() => format!(
+                "bypass is off (turned off {}: {})",
+                at(w.closed_ms.unwrap_or_default()),
+                w.why.as_deref().unwrap_or("")
+            ),
+            _ => "bypass is off".into(),
+        },
+    }
+}
+
+/// `/bypass`: its line, then every bypass recorded, newest first, each with what Clio approved
+/// under it (the newest `max` acts in all). Only the acts shown count as seen.
+pub fn bypass_list(dirs: &Dirs, max: usize) -> Vec<String> {
+    let st = state(dirs);
+    let at = |ms: i64| pending::local(ms, "%Y-%m-%d %H:%M").unwrap_or_else(|| ms.to_string());
+    let mut out = vec![bypass_line(dirs)];
+    let mut left = max;
+    for (w, acts) in grant::Kind::Bypass.all(&st) {
+        let until = w.closed_ms.map_or_else(|| "now".to_owned(), at);
+        out.push(format!(
+            "bypass {} to {until}: {} act(s) approved by Clio herself",
+            at(w.opened_ms),
+            acts.len()
+        ));
+        let shown = &acts[acts.len().saturating_sub(left)..];
+        left -= shown.len();
+        let skip = acts.len() - shown.len();
+        if skip > 0 {
+            out.push(format!("  … {skip} earlier (clio bypass lists them all)"));
+        }
+        out.extend(
+            grant::bypass_act_lines(shown)
+                .iter()
+                .map(|l| format!("  {}", sanitize::line(l))),
+        );
+        grant::bypass_seen(&st, &w.id, shown);
+    }
+    out
+}
+
+/// What every bypass approved that the person has not been shown yet.
+fn bypass_unseen_count(st: &Path) -> usize {
+    grant::Kind::Bypass
+        .all(st)
+        .iter()
+        .map(|(w, _)| grant::bypass_unseen(st, &w.id).len())
+        .sum()
+}
+
+/// `/bypass off`, `clio bypass off`: bypass turns off, and the summary of what Clio approved by
+/// herself under it that the person has not been shown; earlier ones are counted.
+pub fn bypass_off(dirs: &Dirs) -> Res<Vec<String>> {
+    let st = state(dirs);
+    let Some(w) = grant::Kind::Bypass.close(&st, grant::BY_PERSON)? else {
+        return Ok(vec!["bypass is off already".into()]);
+    };
+    let acts = grant::bypass_unseen(&st, &w.id);
+    let mut out = vec!["bypass is off: Clio asks you again for everything".to_owned()];
+    if acts.is_empty() {
+        out.push("nothing was approved by herself since you last looked".into());
+    } else {
+        out.push(format!(
+            "what Clio approved by herself since you last looked ({}):",
+            acts.len()
+        ));
+        out.extend(
+            grant::bypass_act_lines(&acts)
+                .iter()
+                .map(|l| format!("  {}", sanitize::line(l))),
+        );
+    }
+    grant::bypass_seen(&st, &w.id, &acts);
+    match bypass_unseen_count(&st) {
+        0 => {}
+        n => out.push(format!(
+            "and {n} act(s) under an earlier bypass you have not looked at · /bypass lists them"
+        )),
+    }
+    Ok(out)
+}
+
+/// What a chat says when it opens: bypass the judge turned off (once), and how many acts bypass
+/// approved that the person has not looked at.
+pub fn bypass_notes(dirs: &Dirs) -> Vec<String> {
+    let st = state(dirs);
+    let n = bypass_unseen_count(&st);
+    if let Some(w) = grant::bypass_off_notice(&st) {
+        return vec![format!(
+            "bypass was turned off: {} · Clio approved {n} act(s) by herself you have not looked at · /bypass lists them, /bypass on turns it on again",
+            w.why.as_deref().unwrap_or("")
+        )];
+    }
+    match (bypass_now(dirs), n) {
+        (_, 0) => vec![],
+        (Some(_), n) => vec![format!(
+            "bypass is on: Clio approved {n} act(s) by herself since you last looked · /bypass lists them"
+        )],
+        (None, n) => vec![format!(
+            "bypass is off: Clio approved {n} act(s) by herself under it that you have not looked at · /bypass lists them"
+        )],
+    }
+}
+
+/// `clio bypass [off]`: its state and everything every bypass approved; `off` turns it off.
+/// There is no `on`: a command can be typed by anything, the box is the person.
+pub fn bypass_cmd(dirs: &Dirs, arg: Option<&str>) -> Res<()> {
+    let lines = match arg {
+        None => bypass_list(dirs, usize::MAX),
+        Some("off") => bypass_off(dirs)?,
+        Some("on") => {
+            return Err(
+                "bypass is turned on only in the chat, with /bypass on: a command can be typed by anything, the box is you"
+                    .into(),
+            );
+        }
+        Some(_) => return Err("usage: clio bypass [off]".into()),
+    };
+    for l in lines {
+        println!("{l}");
+    }
+    Ok(())
 }
 
 /// The person said yes to `ids` in an approval box or with `clio approve`, and the first of them
@@ -279,6 +489,9 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
 
 /// The permission window in one line: open and how long is left, or that none is.
 pub fn grant_line(dirs: &Dirs) -> String {
+    if bypass_now(dirs).is_some() && window_now(dirs).is_none() {
+        return "no permission window opens while bypass is on (/bypass)".into();
+    }
     match window_now(dirs) {
         Some(w) => format!(
             "a permission window is open: {} left (until {}); Clio approves by herself what deletes, spends or sends, `ask` MCP calls, skills, and turning what she created back on, back or away (control, secrets, your blocks, new services and MCP servers always ask you), and `off` closes it",
@@ -420,7 +633,10 @@ pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> 
         // What the model asked of what it created: only here, with the person's own commands'
         // functions, and only if it is still what the box showed.
         pending::approve_manage(&state(dirs), id, at, |p| {
-            super::manage::carry_out(dirs, p, granted.is_some())
+            // What only a window may not do (`on` of what the person turned off, a shipped
+            // skill's `remove`, a service's `undo`) bypass may: its own test let it here.
+            let window = granted.is_some_and(|g| !g.starts_with(grant::BYPASS_ID));
+            super::manage::carry_out(dirs, p, window)
         })?
     } else if pending::mcp_of(&p).is_some() {
         // Downloaded, checked, probed and registered only here, by the person's own `clio`
@@ -1297,6 +1513,191 @@ mod tests {
         let id = skill("1. Four.", true);
         approve_cmd_with(&d, &id, (true, true), |_| true).unwrap();
         assert_eq!(grant::current(&st).unwrap().by, [id]);
+    }
+
+    // S-72: nothing but the chat's box turns bypass on: `grant::bypass_on` is called from one
+    // place (`bypass_on`), that only from the chat's answer to its box (`Cmd::BypassOn`), which
+    // only the `/bypass on` box's yes gives (`Action::Bypass`, built only by `bypass_ask`). No
+    // CLI (`clio bypass on` says so), tool, MCP call or config key reaches it.
+    #[test]
+    fn bypass_is_turned_on_by_the_chats_box_only() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<(&str, String)> = Vec::new();
+        let mut todo = vec![src.clone()];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                let rel = p.strip_prefix(&src).unwrap().display().to_string();
+                if rel.contains("tests") {
+                    continue;
+                }
+                let code = text.split("\nmod tests {").next().unwrap_or("");
+                for needle in [
+                    "grant::bypass_on(",
+                    "pending::bypass_on(",
+                    "Cmd::BypassOn {",
+                    "Action::Bypass,",
+                ] {
+                    for _ in code.matches(needle) {
+                        found.push((needle, rel.clone()));
+                    }
+                }
+            }
+        }
+        found.sort();
+        let want: Vec<(&str, String)> = [
+            ("Action::Bypass,", "cli/pending.rs"),
+            ("Cmd::BypassOn {", "cli/tui/app.rs"),
+            ("Cmd::BypassOn {", "cli/tui/mod.rs"),
+            ("grant::bypass_on(", "cli/pending.rs"),
+            ("pending::bypass_on(", "cli/tui/mod.rs"),
+        ]
+        .into_iter()
+        .map(|(n, f)| (n, f.to_owned()))
+        .collect();
+        assert_eq!(found, want);
+        // The terminal: the state and off, never on.
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(state(&d)).unwrap();
+        assert!(
+            bypass_cmd(&d, Some("on"))
+                .unwrap_err()
+                .contains("/bypass on")
+        );
+        assert!(grant::Kind::Bypass.current(&state(&d)).is_none());
+        // `clio bypass …` is the person's: the model's command waits, even under bypass.
+        let rules = HostRules::factory();
+        for c in ["clio bypass on", "clio bypass off", "clio bypass"] {
+            assert_eq!(
+                rules.classify_command(c),
+                Some(clio_toolhost::ask::Class::Control),
+                "{c}"
+            );
+            assert!(!rules.machine_only(c), "{c}");
+        }
+    }
+
+    // S-72: no bypass without the judge, nor from a suspect conversation: its box is not offered
+    // and the yes turns nothing on; with the judge on the box turns it on, and found on with the
+    // judge off it turns off. `/bypass` lists every bypass, newest first, with dates, and only
+    // the acts it showed count as seen; `/bypass off` says what it approved since the person
+    // last looked; a chat that opens says how many are not looked at, and, once, that the judge
+    // turned it off, with that count.
+    #[test]
+    fn bypass_needs_the_judge_and_tells_the_person_what_it_did() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let st = state(&d);
+        std::fs::create_dir_all(&st).unwrap();
+        with_cfg(&d, 4, false);
+        assert!(bypass_ask(&d, false).unwrap_err().contains("judge is off"));
+        assert!(bypass_on(&d, false).unwrap_err().contains("judge is off"));
+        assert!(grant::Kind::Bypass.current(&st).is_none());
+        with_cfg(&d, 4, true);
+        assert!(
+            bypass_ask(&d, true)
+                .unwrap_err()
+                .contains("tried to give orders")
+        );
+        assert!(
+            bypass_on(&d, true)
+                .unwrap_err()
+                .contains("tried to give orders")
+        );
+        assert!(grant::Kind::Bypass.current(&st).is_none());
+        let c = bypass_ask(&d, false).unwrap();
+        assert_eq!(c.action, super::super::tui::app::Action::Bypass);
+        assert!(c.action.timed());
+        let b = bypass_on(&d, false).unwrap();
+        assert!(bypass_ask(&d, false).unwrap_err().contains("on already"));
+        assert!(bypass_line(&d).starts_with("bypass is on since"));
+        assert!(bypass_notes(&d).is_empty(), "nothing approved yet");
+        // No window opens from a yes while it is on.
+        assert!(person_said_yes(&d, &["a1".into()], false).is_none());
+        let mut p: Pending = serde_json::from_value(serde_json::json!({"id": "c0",
+            "class": "delete", "tool": "exec", "args": {"command": "rm -r /srv/old.bak"},
+            "hash": "", "what": "", "run": "r1", "session": "s1", "created_ms": 0,
+            "expires_ms": 1, "state": "waiting"}))
+        .unwrap();
+        let act = |p: &mut Pending, id: &str, what: &str| {
+            p.id = id.into();
+            let w = grant::Kind::Bypass.begin(&st, p, what).unwrap();
+            grant::done(&st, &w, id, "done (exit 0)");
+        };
+        for id in ["c1", "c2"] {
+            act(&mut p, id, &format!("rm -r /srv/{id}.bak"));
+        }
+        let notes = bypass_notes(&d);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("approved 2 act(s) by herself"),
+            "{notes:?}"
+        );
+        // Shown one of two: the one not shown still counts.
+        let listed = bypass_list(&d, 1);
+        let day = pending::local(b.opened_ms, "%Y-%m-%d").unwrap();
+        assert!(
+            listed[1].contains("2 act(s)")
+                && listed[1].contains(&day)
+                && listed[2].contains("1 earlier")
+                && listed[3].contains("rm -r /srv/c2.bak")
+                && listed[3].starts_with(&format!("  {day} ")),
+            "{listed:?}"
+        );
+        assert!(bypass_notes(&d)[0].contains("approved 1 act(s)"));
+        let listed = bypass_list(&d, 30);
+        assert!(
+            listed.iter().any(|l| l.contains("/srv/c1.bak")),
+            "{listed:?}"
+        );
+        assert!(bypass_notes(&d).is_empty(), "looked at");
+        act(&mut p, "c3", "rm -r /srv/c3.bak");
+        let off = bypass_off(&d).unwrap();
+        assert!(off[0].starts_with("bypass is off"), "{off:?}");
+        assert_eq!(off.len(), 3, "only what was not seen: {off:?}");
+        assert!(off[2].contains("rm -r /srv/c3.bak"), "{off:?}");
+        assert_eq!(bypass_off(&d).unwrap(), ["bypass is off already"]);
+        assert!(bypass_notes(&d).is_empty(), "the person turned it off");
+        // On again, one act, then the judge flags an injection: one notice at the next chat open,
+        // with the count; the list has both periods, the newest first.
+        let b2 = bypass_on(&d, false).unwrap();
+        assert_ne!(b2.id, b.id);
+        act(&mut p, "c4", "rm -r /srv/c4.bak");
+        grant::Kind::Bypass.close(&st, grant::FLAGGED).unwrap();
+        let notes = bypass_notes(&d);
+        assert!(
+            notes[0].contains(grant::FLAGGED) && notes[0].contains("1 act(s)"),
+            "{notes:?}"
+        );
+        assert!(
+            bypass_notes(&d)[0].starts_with("bypass is off: Clio approved 1 act(s)"),
+            "the notice once, the count until looked at"
+        );
+        let listed = bypass_list(&d, 30);
+        let heads: Vec<usize> = listed
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("bypass ") && l.contains(" to "))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(heads.len(), 2, "{listed:?}");
+        assert!(listed[heads[0] + 1].contains("/srv/c4.bak"), "{listed:?}");
+        assert!(listed[heads[1]..].iter().any(|l| l.contains("/srv/c1.bak")));
+        assert!(bypass_notes(&d).is_empty());
+        // Found on with the judge off: off.
+        bypass_on(&d, false).unwrap();
+        with_cfg(&d, 4, false);
+        assert!(bypass_now(&d).is_none());
+        assert_eq!(
+            grant::Kind::Bypass.read(&st).unwrap().why.as_deref(),
+            Some(grant::JUDGE_OFF)
+        );
     }
 
     // S-36: nothing but the person's yes opens a window: `grant::open` is called from one place
