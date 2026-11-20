@@ -828,7 +828,7 @@ impl ToolHost {
                 }
                 match self.granted(state, req, &p, cancel) {
                     Ok(done) => return done,
-                    Err(None) => (aside_text(&p), "host/aside"),
+                    Err(None) => (self.kept_text(state, &p), "host/aside"),
                     Err(Some(why)) => (
                         format!(
                             "{} (It could not run under the person's {}: {why}.)",
@@ -881,12 +881,7 @@ impl ToolHost {
         p: &Pending,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
-        // A session whose judge did not answer acts under neither: it asks (S-72).
-        if self.review
-            || self.unattended
-            || self.is_suspect(&req.session)
-            || self.is_unjudged(&req.session)
-        {
+        if !self.acts_unasked(&req.session) {
             return Err(None);
         }
         let w = crate::grant::answering(state, p).ok_or(None)?;
@@ -934,6 +929,59 @@ impl ToolHost {
             tainted: self.is_tainted(&req.session),
             external,
         })
+    }
+
+    /// Bypass or a window may act for `session` at all: never in a review or a round, nor in a
+    /// session the judge flagged or did not answer for (S-72).
+    pub(crate) fn acts_unasked(&self, session: &str) -> bool {
+        !(self.review || self.unattended || self.is_suspect(session) || self.is_unjudged(session))
+    }
+
+    /// What answers `p` by itself once this turn ends (the chat checks what waits): bypass or the
+    /// window, as `granted` decides, with the judge on. `None`: it waits for the person. What the
+    /// model is told follows it.
+    pub(crate) fn answered_later(&self, state: &Path, p: &Pending) -> Option<crate::grant::Kind> {
+        let judge = self.memory.as_ref().is_some_and(|m| m.judge_on());
+        (judge && self.in_chat() && self.acts_unasked(&p.session))
+            .then(|| crate::grant::answering(state, p))
+            .flatten()
+            .map(|w| crate::grant::Kind::of(&w))
+    }
+
+    /// A person's chat is attached: only a chat may be asked a secret (`Config.secrets`, never in
+    /// a `clio run`, a round or a review), and only a chat's check answers what waits after a
+    /// turn. Without one, nothing is promised for later.
+    fn in_chat(&self) -> bool {
+        self.secrets.is_some()
+    }
+
+    /// Bypass is on and acts for `session` (the judge on, in a chat): what it answers is done by
+    /// itself.
+    pub(crate) fn bypass_acts(&self, state: &Path, session: &str) -> bool {
+        self.memory.as_ref().is_some_and(|m| m.judge_on())
+            && self.in_chat()
+            && self.acts_unasked(session)
+            && crate::grant::Kind::Bypass.current(state).is_some()
+    }
+
+    /// `aside_text`, and, while bypass is on, why it leaves `p` to the person
+    /// (`grant::bypass_keeps`, from the facts it decided on).
+    pub(crate) fn kept_text(&self, state: &Path, p: &Pending) -> String {
+        let text = aside_text(p);
+        if crate::grant::Kind::Bypass.current(state).is_none() {
+            return text;
+        }
+        let c = crate::grant::Conversation {
+            suspect: self.is_suspect(&p.session),
+            unjudged: self.is_unjudged(&p.session),
+            round: self.unattended,
+        };
+        match crate::grant::bypass_keeps(p, c) {
+            Some(why) => {
+                format!("{text} The person's bypass is on, and leaves this to them: {why}.")
+            }
+            None => text,
+        }
     }
 
     /// The person approves `id`: it runs as it was saved, through the same path as an allowed

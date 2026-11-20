@@ -936,12 +936,19 @@ impl ToolHost {
         } else {
             "the new service"
         };
+        // What happens after the review, as it will: bypass registers a service by itself (a
+        // window never does); else the person decides.
+        let then = if self.bypass_acts(&h.cfg.state, &req.session) {
+            "if it passes, Clio registers it by herself, since the person's bypass is on, and you are told what came of it (registered, the review's findings, or a failure) in a turn she starts by herself"
+        } else {
+            "then it waits for the person's approval (always, for a service). The result comes by itself with a later message"
+        };
         self.service_answer(
             req,
             true,
             "services/draft",
             format!(
-                "draft {id} of {what} «{name}» stored. It is not registered: a reviewer checks it now, in the background, and then it waits for the person's approval (always, for a service). The result comes by itself with a later message. Go on with the rest; do not write it again until then."
+                "draft {id} of {what} «{name}» stored. It is not registered: a reviewer checks it now, in the background, and {then}. Go on with the rest; do not write it again until then."
             ),
         )
     }

@@ -265,10 +265,12 @@ pub enum SkillOutcome {
         n: u32,
         notes: Option<String>,
     },
-    /// Waits for the person (`pending` id): its Approval box, when Clio asks.
+    /// Set aside (`pending` id): its Approval box, when Clio asks; `by`: bypass or the
+    /// permission window (`grant::Kind::name`) answers it by itself at the chat's next check.
     Waits {
         id: String,
         ask: Box<Option<super::tui::ask::BlockAsk>>,
+        by: Option<&'static str>,
     },
     /// Not registered (the review failed): the findings go to the model (`to_model`); `dropped`
     /// after the third failure in a row.

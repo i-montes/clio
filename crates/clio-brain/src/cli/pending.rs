@@ -116,6 +116,45 @@ pub fn answering(dirs: &Dirs, p: &Pending) -> Option<grant::Window> {
     open_now(dirs, grant::Kind::of(&w))
 }
 
+/// What the decision knows of item `p`'s conversation (`grant::Conversation`): `suspect`, the
+/// chat's own mark, or its run's; whether its judge did not answer; whether it is a round's.
+pub fn conversation(dirs: &Dirs, p: &Pending, suspect: bool) -> grant::Conversation {
+    grant::Conversation {
+        suspect: suspect || suspect_run(dirs, &p.run),
+        unjudged: unjudged_run(dirs, &p.run),
+        round: super::round::is_round(dirs, &p.run),
+    }
+}
+
+/// What answers `p` by itself at the chat's next check (`answering`), unless its conversation
+/// acts under neither bypass nor a window (flagged, unjudged, a round), or they already tried it:
+/// `None`, it waits for the person.
+pub fn answers_later(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<grant::Window> {
+    let c = conversation(dirs, p, suspect);
+    if c.suspect || c.unjudged || c.round || tried(dirs, p) {
+        return None;
+    }
+    answering(dirs, p)
+}
+
+/// Bypass or the window already tried `p` (the last one's record has it): one that failed is
+/// never tried again by itself; it asks the person.
+pub fn tried(dirs: &Dirs, p: &Pending) -> bool {
+    let st = state(dirs);
+    [grant::Kind::Window, grant::Kind::Bypass].iter().any(|k| {
+        k.read(&st)
+            .and_then(|w| k.record(&st, &w.id))
+            .is_some_and(|(_, acts)| acts.iter().any(|a| a.pending == p.id))
+    })
+}
+
+/// Why bypass, on now, leaves `p` to the person (`grant::bypass_keeps`); `None` when bypass is
+/// off or answers it.
+pub fn bypass_keeps(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<&'static str> {
+    bypass_now(dirs)?;
+    grant::bypass_keeps(p, conversation(dirs, p, suspect))
+}
+
 /// What the `/bypass on` box says, word for word (the design's).
 pub const BYPASS_BOX: &str = "Clio will approve by herself everything that asks you, with no end, until `/bypass off`. It turns itself off if the judge flags an injection.";
 
@@ -455,6 +494,17 @@ pub fn line(p: &Pending, now: i64) -> String {
     )
 }
 
+/// `p`'s line in `clio pending`, and why bypass, when on, leaves it to the person.
+fn listed(dirs: &Dirs, p: &Pending, now: i64) -> String {
+    let keeps = bypass_keeps(dirs, p, false).map_or_else(String::new, |why| {
+        format!("  · bypass leaves it to you: {why}")
+    });
+    format!(
+        "{}{keeps}",
+        line(&super::round::with_origin(dirs, p.clone()), now)
+    )
+}
+
 pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
     let list = waiting(dirs);
     if json {
@@ -470,7 +520,7 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
     }
     let now = now_ms();
     for p in &list {
-        println!("{}", line(&super::round::with_origin(dirs, p.clone()), now));
+        println!("{}", listed(dirs, p, now));
     }
     for p in &cut {
         println!("{}", interrupted_line(p));
@@ -1137,6 +1187,30 @@ mod tests {
         assert_eq!(
             interrupted_line(&cut[0]),
             "ab12  «delete»  rm -r /srv/old  · interrupted: it may have run in part"
+        );
+    }
+
+    // S-72: `clio pending` says why bypass, when on, leaves an item to the person; with bypass
+    // off the line is as before.
+    #[test]
+    fn clio_pending_says_why_bypass_leaves_an_item_to_the_person() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
+        cfg.jev.enabled = true;
+        std::fs::create_dir_all(&d.config).unwrap();
+        std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        std::fs::create_dir_all(state(&d).join("pending")).unwrap();
+        let p: Pending = serde_json::from_value(json!({"id": "own1", "class": "control",
+            "tool": "exec", "args": {"command": "systemctl reboot"}, "hash": "", "what": "",
+            "run": "r1", "session": "s1", "created_ms": 0, "expires_ms": 1, "state": "waiting"}))
+        .unwrap();
+        let off = listed(&d, &p, 0);
+        assert!(off.contains("own1") && !off.contains("bypass"), "{off}");
+        grant::bypass_on(&state(&d)).unwrap();
+        assert_eq!(
+            listed(&d, &p, 0),
+            format!("{off}  · bypass leaves it to you: it touches Clio's own setup")
         );
     }
 

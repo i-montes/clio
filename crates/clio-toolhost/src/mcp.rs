@@ -1473,15 +1473,19 @@ impl ToolHost {
             Ok(p) => p,
             Err(e) => return fail(&format!("it could not be set aside ({e})")),
         };
-        self.mcp_answer(
-            req,
-            true,
-            "mcp/propose",
+        // Bypass installs it by itself when this turn ends (a window never does): said as it is.
+        let text = if self.answered_later(&h.cfg.state, &p).is_some() {
+            format!(
+                "set aside {}: the MCP server «{}» ({}@{}) is installed by Clio by herself when this turn ends, since the person's bypass is on. Nothing was downloaded yet. She installs it, lists its tools and turns it on, and you are told what came of it (installed, or why not) in a turn she starts by herself; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest.",
+                p.id, m.name, m.package, m.version
+            )
+        } else {
             format!(
                 "set aside {}: the MCP server «{}» ({}@{}) waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end.",
                 p.id, m.name, m.package, m.version
-            ),
-        )
+            )
+        };
+        self.mcp_answer(req, true, "mcp/propose", text)
     }
 
     /// `mcp_tools`: the servers that are on, their tools, schemas and modes (outside text).

@@ -25,8 +25,9 @@ pub struct Approvals {
     /// model what came of them. Only rejections or failures start nothing: they go with the
     /// person's next message.
     pub answered: bool,
-    /// Acts on what Clio created were done when a turn ended: once nothing else waits, a turn
-    /// gives the model what came of them, so it goes on with the person's request.
+    /// Acts on what Clio created were done when a turn ended, or bypass or a window answered
+    /// what a turn set aside (a service, a skill, an MCP server): once nothing else waits, ONE
+    /// turn gives the model what came of them, so it goes on with the person's request.
     pub acted: bool,
     /// Turns `acted` started since the person's last message (`MAX_AUTO_TURNS` at most).
     pub auto_turns: u8,
@@ -43,6 +44,9 @@ pub struct Approvals {
     pub judge_off: bool,
     /// Bypass is on: the status line says so, and a box holds only what it never answers.
     pub bypass: bool,
+    /// Why bypass leaves each item to the person, by id (`grant::bypass_keeps`), as of the last
+    /// check: the box says it.
+    pub keeps: std::collections::HashMap<String, String>,
     /// A permission window ended and its record waits in the session: one turn sums it up.
     pub summary: bool,
 }
@@ -217,9 +221,11 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         _ => " yes to all".to_owned(),
     };
     let hours = app.chat.approvals.hours.unwrap_or(4);
-    let (head, yes) = if app.chat.approvals.bypass {
+    let bypass = app.chat.approvals.bypass;
+    let (head, yes) = if bypass {
         (
-            "Yes approves all of this. Bypass is on, and these always ask you.".to_owned(),
+            "Yes approves all of this. Bypass is on, and leaves these to you: each says why."
+                .to_owned(),
             base.clone(),
         )
     } else {
@@ -240,10 +246,12 @@ pub fn one_box(app: &App, items: Vec<(String, String, Option<BlockAsk>)>) -> Opt
         let manage = block
             .as_ref()
             .is_some_and(|b| b.action == super::ask::MANAGE);
-        let note = if hours > 0 && always_asks(&class, manage) {
-            " · this one always asks you"
-        } else {
-            ""
+        let note = match app.chat.approvals.keeps.get(&id) {
+            Some(why) if bypass => format!(" · bypass leaves it to you: {why}"),
+            // Bypass would answer it, and did not: it was tried and failed, or turned on since.
+            None if bypass => " · bypass did not do it, so it asks you".to_owned(),
+            _ if hours > 0 && always_asks(&class, manage) => " · this one always asks you".into(),
+            _ => String::new(),
         };
         rows.push((Part::Warn, format!("{at}{class}{note}")));
         match block {
@@ -277,7 +285,8 @@ fn what_of(ids: &[String]) -> String {
 pub fn status(app: &App) -> Option<String> {
     let a = &app.chat.approvals;
     let now = i64::try_from(app.now_ms).unwrap_or(i64::MAX);
-    let window = a.grant_ends.filter(|e| *e > now).map(|e| {
+    // While bypass is on the status line says so instead: the window runs on underneath.
+    let window = a.grant_ends.filter(|e| *e > now && !a.bypass).map(|e| {
         format!(
             "permission: {} left",
             clio_toolhost::grant::left_text(e - now)
@@ -1135,5 +1144,88 @@ mod tests {
             false
         ));
         assert!(!super::always_asks("«delete»", false));
+    }
+
+    /// The runtime's read with an open window that ends at `ends` and bypass on or off.
+    fn window_and(ends: i64, bypass: bool) -> Input {
+        Input::Bg(Bg::Grant {
+            session: "sid".into(),
+            ends: Some(ends),
+            hours: 4,
+            suspect: false,
+            judge: true,
+            bypass,
+        })
+    }
+
+    // S-72: with a window open and bypass on the status line says `bypass on`, never the
+    // window's countdown, which runs on underneath and shows again once bypass is off.
+    #[test]
+    fn under_bypass_the_status_line_hides_the_windows_countdown() {
+        let ends = crate::cli::now_ms() + 3_600_000 + 6 * 60_000 + 30_000;
+        let (a, _) = feed(idle(), vec![window_and(ends, true), found(1)]);
+        let text = screen_text(&a, 120, 20);
+        assert!(text.contains("bypass on"), "{text}");
+        assert!(text.contains("1 waiting for approval"), "{text}");
+        assert!(!text.contains("permission:"), "{text}");
+        let (a, _) = feed(a, vec![window_and(ends, false)]);
+        let text = screen_text(&a, 120, 20);
+        assert!(text.contains("permission: 1 h 6 min left"), "{text}");
+        assert!(!text.contains("bypass on"), "{text}");
+    }
+
+    // S-72: under bypass the box says, for each item, why bypass leaves it to the person, as the
+    // runtime derived it (`grant::bypass_keeps`); one bypass would answer but did not (it failed)
+    // says that. Bypass off, the box is as before.
+    #[test]
+    fn under_bypass_the_box_says_why_each_item_still_asks() {
+        let mut a = idle();
+        a.chat.approvals.bypass = true;
+        let keeps = Input::Bg(Bg::BypassKeeps(vec![
+            (
+                "a1".into(),
+                "it would start new code outside the jail".into(),
+            ),
+            ("b2".into(), "it touches Clio's own setup".into()),
+            (
+                "c3".into(),
+                "this conversation read text the judge did not answer for".into(),
+            ),
+        ]));
+        let (a, _) = feed(
+            a,
+            vec![
+                keeps,
+                asks(vec![
+                    ("a1", "«control» systemd-run --user x", None),
+                    ("b2", "«control» clio grant off", None),
+                    ("c3", "«delete» rm -r /srv/old", None),
+                    ("d4", "«delete» rm -r /srv/older", None),
+                ]),
+            ],
+        );
+        let (_, seen, _) = read_to_the_end(a, 140, 40, 2_000);
+        let words: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+        for s in [
+            "Yes approves all of this. Bypass is on, and leaves these to you: each says why.",
+            "a1 · «control» · bypass leaves it to you: it would start new code outside the jail",
+            "b2 · «control» · bypass leaves it to you: it touches Clio's own setup",
+            "c3 · «delete» · bypass leaves it to you: this conversation read text the judge did not answer for",
+            "d4 · «delete» · bypass did not do it, so it asks you",
+        ] {
+            assert!(words.contains(s), "{s}\n{seen}");
+        }
+        assert!(!words.contains("always ask"), "{seen}");
+        // Off: as before, with no word of bypass.
+        let (a, _) = feed(
+            idle(),
+            vec![asks(vec![("a1", "«control» systemd-run --user x", None)])],
+        );
+        let (_, seen, _) = read_to_the_end(a, 140, 40, 2_000);
+        assert!(
+            seen.contains("«control» · this one always asks you"),
+            "{seen}"
+        );
+        assert!(!seen.contains("bypass"), "{seen}");
     }
 }

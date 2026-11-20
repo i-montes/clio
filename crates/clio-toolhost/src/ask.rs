@@ -89,6 +89,25 @@ static LAUNCH_PATHS: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
+/// `text` without quotes and backslashes (`c'l'io` is `clio`).
+fn bare(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
+}
+
+/// A `control` command (or a write's path) that would make code run outside the jail: a launcher
+/// (`LAUNCHERS`), the person's own service manager (`systemctl --user`), a unit folder, a shell
+/// start-up file or Clio's programs (`LAUNCH_PATHS`). Never `MACHINE` (`machine_only`); why bypass
+/// leaves it to the person (`grant::bypass_keeps`).
+pub fn starts_outside(text: &str) -> bool {
+    [text, bare(text).as_str()].iter().any(|t| {
+        LAUNCHERS.is_match(t)
+            || LAUNCH_PATHS.is_match(t)
+            || (t.contains("systemctl") && t.contains("--user"))
+    })
+}
+
 /// Programs that only read what they are given: naming a start-up file or a unit folder with
 /// one of these alone, and no `>`, is not writing it.
 const READERS: [&str; 18] = [
@@ -402,19 +421,13 @@ impl HostRules {
     /// (`.ssh`). Quotes and backslashes are dropped first (`c'l'io` is `clio`); it is a word
     /// match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
     pub fn machine_only(&self, text: &str) -> bool {
-        let bare: String = text
-            .chars()
-            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-            .collect();
-        ![text, bare.as_str()].iter().any(|t| {
-            self.control.as_ref().is_some_and(|r| r.is_match(t))
-                || t.to_lowercase().contains("clio")
-                || t.contains("authorized_keys")
-                || t.contains(".ssh")
-                || LAUNCHERS.is_match(t)
-                || LAUNCH_PATHS.is_match(t)
-                || (t.contains("systemctl") && t.contains("--user"))
-        })
+        !starts_outside(text)
+            && ![text, bare(text).as_str()].iter().any(|t| {
+                self.control.as_ref().is_some_and(|r| r.is_match(t))
+                    || t.to_lowercase().contains("clio")
+                    || t.contains("authorized_keys")
+                    || t.contains(".ssh")
+            })
     }
 
     /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
