@@ -448,10 +448,6 @@ impl SessionSource for LocalSource {
             round_news = crate::cli::round::take_notices(d);
             notes.extend(round_news.iter().cloned());
         }
-        // The shared skills folder (S-74): only a person's chat looks, and its box asks.
-        if self.looks_at_shared() {
-            notes.extend(crate::cli::skills::shared_open(d));
-        }
         let session_file =
             session_file.or_else(|| pi.state.session_file.clone().map(PathBuf::from));
         // What Pi offers this connector, kept for `/model` before a session's first message.
@@ -506,6 +502,7 @@ impl SessionSource for LocalSource {
             round_news: Mutex::new(round_news),
             round: self.round,
             subagents: self.presentation && !self.round,
+            shared: self.looks_at_shared(),
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -642,6 +639,8 @@ struct ChatSession {
     round: bool,
     /// A chat: its model has `subagent` (S-73).
     subagents: bool,
+    /// A person's chat: the shared skills folder is looked at beside it (S-74).
+    shared: bool,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -676,7 +675,9 @@ impl HostSide {
         (p.run == self.run && p.session == session)
             || (self.rounds
                 && (crate::cli::round::is_round(&self.dirs, &p.run)
-                    || p.run == crate::cli::skills::SHARED_RUN))
+                    // Once the look that sets them aside ended: all in one box (S-74).
+                    || (p.run == crate::cli::skills::SHARED_RUN
+                        && !crate::cli::skills::looking())))
     }
 
     /// Bypass acts for this conversation now: a person's chat (nothing checks what waits in a
@@ -1490,6 +1491,10 @@ impl Session for ChatSession {
         super::subagent::listed(&self.run_dir)
     }
 
+    fn looks_at_shared(&self) -> bool {
+        self.shared
+    }
+
     fn last_work(&self) -> Option<super::TurnWork> {
         let turn = locked(&self.turn).clone();
         let state = self.dirs.data.join("host");
@@ -2280,8 +2285,8 @@ mod tests {
         assert!(LocalSource::new(d).round().round);
     }
 
-    // S-74: only a person's chat looks at the shared folder and gets its box: a `clio run` and a
-    // round never look (a review and a subagent never open through `LocalSource`, and nothing
+    // S-74: only a person's chat looks at the shared folder (beside it, once it is open) and gets
+    // its box: a `clio run` and a round never look (a review and a subagent never open through `LocalSource`, and nothing
     // else calls the look), its items are asked in a person's chat and nowhere else, and bypass
     // never answers one.
     #[test]
@@ -2300,6 +2305,11 @@ mod tests {
         let p = clio_toolhost::pending::set_aside_added(&pending::state(&d), shared, shared, a)
             .unwrap();
         assert!(h.mine(&p, "s1"));
+        // While the look that sets them aside runs, none is asked: its box holds them all.
+        crate::cli::skills::LOOKING.store(true, std::sync::atomic::Ordering::SeqCst);
+        let held = !h.mine(&p, "s1");
+        crate::cli::skills::LOOKING.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(held);
         pending::bypass_on(&d, false).unwrap();
         let e = h
             .grant("s1", false, &p.id, |_| -> Result<String, String> {
@@ -2333,7 +2343,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(callers, ["cli/chat/local.rs"]);
+        // The chat's runtime, beside a session that `looks_at_shared`.
+        assert_eq!(callers, ["cli/tui/mod.rs"]);
     }
 
     /// A conversation's host side on its own folders (run `r1`), the judge on.

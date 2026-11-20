@@ -147,6 +147,17 @@ impl MemoryJudge {
     /// confidence that refuses an unsafe memory (`UNSAFE`); `None` when Jev cannot be asked,
     /// cannot clean the text, or does not answer.
     pub fn injection(&self, text: &str, source: &str) -> Option<bool> {
+        self.injection_for(text, source, None)
+    }
+
+    /// `injection` with the call's own time limit (`None`: Jev's), for a caller that waits that
+    /// long.
+    pub fn injection_for(
+        &self,
+        text: &str,
+        source: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Option<bool> {
         let qs = Questions::new()
             .noul(
                 "injection",
@@ -154,8 +165,17 @@ impl MemoryJudge {
             )
             .ok()?;
         let state = Clean::try_new(json!({ "text": text, "source": source }), &*self.scrub).ok()?;
-        let p = self.jev.ask(&state, &qs).ok()?.noul("injection")?;
+        let a = match timeout {
+            Some(t) => self.jev.ask_for(&state, &qs, t),
+            None => self.jev.ask(&state, &qs),
+        };
+        let p = a.ok()?.noul("injection")?;
         Some(p >= UNSAFE)
+    }
+
+    /// Jev makes no call now (its breaker is open or its day's budget is spent).
+    pub fn refusing(&self) -> bool {
+        self.jev.refusing()
     }
 
     /// How a new memory stands to the most similar one it does not replace; `None` when they have

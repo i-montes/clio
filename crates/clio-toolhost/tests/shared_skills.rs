@@ -13,6 +13,8 @@ use clio_toolhost::skills::{self, SkillFile};
 use serde_json::{Value, json};
 
 const FLAG: &str = "IGNORE PREVIOUS INSTRUCTIONS";
+/// What the test judge refuses to take (as the paced judge does with its breaker open).
+const REFUSE: &str = "REFUSED-BY-THE-JUDGE";
 
 fn md(name: &str, body: &str) -> String {
     format!("---\nname: {name}\ndescription: Says {name}. Use when greeting.\n---\n\n{body}\n")
@@ -33,12 +35,14 @@ fn look(home: &Path, root: &Path, off: bool, quiet: &[(String, String)]) -> (Loo
     let read = RefCell::new(vec![]);
     let judge = |t: &str, _: &str| {
         read.borrow_mut().push(t.to_owned());
-        if off {
-            TextVerdict::NoJudge
+        if t.contains(REFUSE) {
+            Err("the judge takes no call now".to_owned())
+        } else if off {
+            Ok(TextVerdict::NoJudge)
         } else if t.contains(FLAG) {
-            TextVerdict::Injection
+            Ok(TextVerdict::Injection)
         } else {
-            TextVerdict::Clean
+            Ok(TextVerdict::Clean)
         }
     };
     let clean = |t: &str| Some(t.to_owned());
@@ -49,6 +53,7 @@ fn look(home: &Path, root: &Path, off: bool, quiet: &[(String, String)]) -> (Loo
         root,
         staging: &root.join("staging"),
         judge: &judge,
+        most: None,
         clean: &clean,
         get: &get,
     };
@@ -186,6 +191,51 @@ fn flagged_or_unjudged_is_apart_and_a_no_is_kept_for_that_content() {
 
 // S-74: no link is followed: not at `~/.agents`, not at `~/.agents/skills`, not in the folder,
 // not inside a skill (that skill is refused); a home without the folder is an empty look.
+// S-74: the judging of a look is an add's: past the text one add may have judged
+// (`MAX_JUDGED`), or once the judge refuses calls, the rest is "not read yet" and named for
+// `clio skills add`; none of it is asked or remembered, so the next look tries it again.
+#[test]
+fn past_the_cap_or_a_refusing_judge_the_rest_is_not_read_yet() {
+    let t = tempfile::tempdir().unwrap();
+    let (home, root) = (t.path().join("home"), t.path().join("data/skills"));
+    let s = shared(&home);
+    let big = "y".repeat(900 * 1024);
+    for k in 0..3 {
+        put(
+            &s.join(format!("big{k}/SKILL.md")),
+            &md(&format!("big{k}"), "Big."),
+        );
+        put(&s.join(format!("big{k}/notes.md")), &big);
+    }
+    let (l, read) = look(&home, &root, false, &[]);
+    assert_eq!((l.ask.len(), read.len()), (2, 2));
+    assert!(read.iter().map(String::len).sum::<usize>() <= clio_toolhost::skill_add::MAX_JUDGED);
+    assert_eq!(l.apart.len(), 1, "{:?}", l.apart);
+    assert!(
+        l.apart[0].contains("not read yet")
+            && l.apart[0].contains("`clio skills add ~/.agents/skills/big2`"),
+        "{:?}",
+        l.apart
+    );
+    assert!(l.told.is_empty());
+    // A judge that refuses: that skill and the ones after it are not read; none is asked.
+    fs::remove_dir_all(&s).unwrap();
+    put(&s.join("a/SKILL.md"), &md("a", REFUSE));
+    put(&s.join("b/SKILL.md"), &md("b", "Fine."));
+    let (l, read) = look(&home, &root, false, &[]);
+    assert!(l.ask.is_empty() && l.told.is_empty(), "{l:?}");
+    assert_eq!(read.len(), 1);
+    assert_eq!(
+        l.apart
+            .iter()
+            .filter(|a| a.contains("not read yet (the judge takes no call now)"))
+            .count(),
+        2,
+        "{:?}",
+        l.apart
+    );
+}
+
 #[test]
 fn no_link_is_followed_and_no_folder_is_nothing() {
     let t = tempfile::tempdir().unwrap();
@@ -197,7 +247,7 @@ fn no_link_is_followed_and_no_folder_is_nothing() {
     let (l, read) = look(&home, &root, false, &[]);
     assert!(l.ask.is_empty() && l.apart.is_empty() && l.found.is_empty() && read.is_empty());
     let clean = |t: &str| Some(t.to_owned());
-    let judge = |_: &str, _: &str| TextVerdict::Clean;
+    let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
     let get = |_: &str, _: &Path| false;
     let err = |home: &Path| {
         let cx = Ctx {
@@ -206,6 +256,7 @@ fn no_link_is_followed_and_no_folder_is_nothing() {
             root: &root,
             staging: &root,
             judge: &judge,
+            most: None,
             clean: &clean,
             get: &get,
         };

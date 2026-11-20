@@ -1016,8 +1016,10 @@ export default function clioGuard(pi: ExtensionAPI) {
 				required: ["source", "reason"],
 				additionalProperties: false,
 			},
+			// No limit: the judge reads every skill at its own pace (a minute and more for a large
+			// one); the person's abort still ends it.
 			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
-				content: [{ type: "text" as const, text: (await host("skill_add", params, id, signal, 420_000)).content }],
+				content: [{ type: "text" as const, text: (await host("skill_add", params, id, signal, null)).content }],
 				details: {},
 			}),
 		});

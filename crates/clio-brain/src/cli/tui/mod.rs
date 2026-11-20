@@ -1334,6 +1334,17 @@ impl Ctx {
                         }
                         g.session = Some(opened.session.clone());
                         drop(g);
+                        // A person's chat: the shared skills folder is judged beside it, the chat
+                        // does not wait (S-74); its box comes once that ends and the chat is idle.
+                        if opened.session.looks_at_shared() {
+                            let (d, tx) = (d.clone(), tx.clone());
+                            let _ = std::thread::Builder::new()
+                                .name("clio-shared-skills".into())
+                                .spawn(move || {
+                                    let notes = super::skills::shared_open(&d);
+                                    let _ = tx.send(Input::Bg(Bg::SharedLooked(notes)));
+                                });
+                        }
                         // Skill drafts of this session whose review never ended (a quit, `/new`,
                         // a crash) are reviewed again, once the chat is open.
                         let (drafts, notes) = opened.session.skill_news();

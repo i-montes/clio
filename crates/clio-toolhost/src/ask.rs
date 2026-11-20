@@ -131,6 +131,123 @@ const READERS: [&str; 18] = [
     "realpath",
 ];
 
+/// Besides `READERS`, programs that may name a file in a window (S-68) without writing it: they
+/// read it or run it (what a skill's script does is the jail's: the window is read-only to it).
+const WINDOW_USERS: [&str; 13] = [
+    "cd", "bash", "sh", "dash", "zsh", "python", "python3", "node", "source", ".", "jq", "cut",
+    "du",
+];
+
+/// `text` with `//` and `/./` in paths as one `/`, as the system reads them.
+fn squash(text: &str) -> String {
+    static SLASHES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"/(\./)*/+|/(\./)+").expect("a fixed pattern"));
+    let mut out = text.to_owned();
+    while let std::borrow::Cow::Owned(o) = SLASHES.replace_all(&out, "/") {
+        out = o;
+    }
+    out
+}
+
+/// A path's components, without `.` and empty ones.
+fn components(p: &Path) -> Vec<String> {
+    p.components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Does the shell glob `glob` (one component: `*`, `?`, `[…]`, `{a,b}`) match `name`? A glob it cannot
+/// read is taken to match; as in the shell, only a `.` matches a leading one.
+fn glob_matches(glob: &str, name: &str) -> bool {
+    if name.starts_with('.') && !glob.starts_with('.') {
+        return false;
+    }
+    let (mut re, mut depth) = (String::from("^"), 0usize);
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            '[' => {
+                re.push('[');
+                if chars.peek().is_some_and(|c| matches!(c, '!' | '^')) {
+                    chars.next();
+                    re.push('^');
+                }
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                    if c == '\\' || c == '[' {
+                        re.push('\\');
+                    }
+                    re.push(c);
+                }
+                re.push(']');
+            }
+            // `{a,b}`: either (S-74: `~/.{agents,x}`).
+            '{' => {
+                depth += 1;
+                re.push_str("(?:");
+            }
+            ',' if depth > 0 => re.push('|'),
+            '}' if depth > 0 => {
+                depth -= 1;
+                re.push(')');
+            }
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    re.push('$');
+    Regex::new(&re).map_or(true, |r| r.is_match(name))
+}
+
+/// A command that sets or reads variables by name (`eval`, `export`, `declare`…): what a
+/// variable holds is not only what its assignment says.
+fn evals(command: &str) -> bool {
+    static NAMED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(^|[\s;&|(])(eval|export|declare|typeset|readonly|local|builtin)(\s|;|$)")
+            .expect("a fixed pattern")
+    });
+    NAMED.is_match(command)
+}
+
+/// A pipe into a shell or another runner: what it runs is text the command made.
+fn into_shell(command: &str) -> bool {
+    static PIPE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\|&?\s*([^|;&]*\s)?(\S*/)?(bash|sh|dash|zsh|python3?|node|perl|ruby)(\s|$)")
+            .expect("a fixed pattern")
+    });
+    PIPE.is_match(command)
+}
+
+/// A runner given code on its command line (`bash -c`, `python3 -c`, `node -e`/`-p`): the code
+/// can build any path from its arguments.
+fn runs_code(command: &str) -> bool {
+    split(command).iter().any(|w| {
+        let Some((p, args)) = unwrap(w).split_first() else {
+            return false;
+        };
+        let short = |set: &[char]| {
+            args.iter()
+                .any(|a| a.starts_with('-') && !a.starts_with("--") && a[1..].contains(set))
+        };
+        match p.rsplit('/').next().unwrap_or(p) {
+            "bash" | "sh" | "dash" | "zsh" | "python" | "python3" => short(&['c']),
+            "node" => {
+                short(&['e', 'p'])
+                    || args
+                        .iter()
+                        .any(|a| a.starts_with("--eval") || a.starts_with("--print"))
+            }
+            _ => false,
+        }
+    })
+}
+
 /// A name that looks like a backup. `{B}` in a factory pattern stands for it.
 const BACKUP: &str = r"(?i:backup|respaldo|snapshot|\.bak\b|\.dump\b|\.sql\b)";
 
@@ -229,12 +346,13 @@ fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
 
 /// The home's `~/.agents` (S-74: the shared skills folder is in it), as a command may name it:
 /// absolute, `~/`, `$HOME/`, `${HOME}/`, `./` or bare (a command runs in the home), after a `..`,
-/// or by a glob a shell would expand to it (`~/.age*`, `~/.[a]gents`, `~/.{agents,x}`).
+/// glued to a short option, or by a glob a shell would expand to it (`names_by_glob`).
 #[derive(Debug, Clone)]
 struct Agents {
     dirs: Vec<PathBuf>,
+    /// The same, by component, for `names_by_glob`.
+    paths: Vec<Vec<String>>,
     exact: Regex,
-    globbed: Regex,
 }
 
 impl Agents {
@@ -245,76 +363,15 @@ impl Agents {
         }
         dirs.dedup();
         let any = spellings(home, &dirs).join("|");
-        let homes: Vec<String> = dirs
-            .iter()
-            .filter_map(|d| d.parent())
-            .map(|h| format!("{}/", regex::escape(&h.to_string_lossy())))
-            .collect();
-        let pre = r"(^|[^\w.~/$-]|\.\./)";
         Self {
-            dirs,
-            exact: Regex::new(&format!(r"{pre}({any})($|[^\w.-])")).expect("escaped paths"),
-            globbed: Regex::new(&format!(
-                r"{pre}(~/|\$HOME/|\$\{{HOME\}}/|\./|{})?(\.[^\s/;&|<>()]*[*?\[{{][^\s/;&|<>()]*)",
-                homes.join("|")
+            paths: dirs.iter().map(|d| components(d)).collect(),
+            exact: Regex::new(&format!(
+                r"(^|[^\w.~/$-]|\.\./|(^|\s)-[A-Za-z0-9]+)({any})($|[^\w.-])"
             ))
             .expect("escaped paths"),
+            dirs,
         }
     }
-
-    /// `text` names `~/.agents` (quotes and backslashes dropped too).
-    fn named(&self, text: &str) -> bool {
-        [text, bare(text).as_str()].iter().any(|t| {
-            self.exact.is_match(t)
-                || self
-                    .globbed
-                    .captures_iter(t)
-                    .filter_map(|c| c.get(3))
-                    .any(|g| glob_matches(g.as_str(), ".agents"))
-        })
-    }
-}
-
-/// Whether the shell glob `pattern` (`*`, `?`, `[…]`, `{a,b}`) would expand to `name`; one it
-/// cannot read counts as one that would.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let (mut re, mut depth) = (String::from("^"), 0usize);
-    let mut chars = pattern.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '*' => re.push_str(".*"),
-            '?' => re.push('.'),
-            '[' => {
-                re.push('[');
-                if chars.peek() == Some(&'!') {
-                    chars.next();
-                    re.push('^');
-                }
-                for c in chars.by_ref() {
-                    if c == ']' {
-                        break;
-                    }
-                    if c == '\\' || c == '[' {
-                        re.push('\\');
-                    }
-                    re.push(c);
-                }
-                re.push(']');
-            }
-            '{' => {
-                depth += 1;
-                re.push_str("(?:");
-            }
-            ',' if depth > 0 => re.push('|'),
-            '}' if depth > 0 => {
-                depth -= 1;
-                re.push(')');
-            }
-            c => re.push_str(&regex::escape(&c.to_string())),
-        }
-    }
-    re.push('$');
-    Regex::new(&re).map_or(true, |r| r.is_match(name))
 }
 
 /// Absolute folders match by prefix; a bare name matches a folder of that name anywhere.
@@ -451,6 +508,11 @@ pub struct HostRules {
     /// A registered skill's file in the read-only window of Clio's skills (S-68): naming it does
     /// not make a command `control`.
     window: Option<Regex>,
+    /// The windows' own paths, anywhere in a text: what a command names in them (`window_writes`).
+    window_any: Option<Regex>,
+    /// Clio's own paths, by component, and the home they may be spelled under (`names_by_glob`).
+    control_paths: Vec<Vec<String>>,
+    home: PathBuf,
     /// The shared skills folder's parent, `~/.agents` (S-74): what writes under it is `control`.
     agents: Option<Agents>,
     backup: Regex,
@@ -487,6 +549,9 @@ impl HostRules {
             foreign: FOREIGN.iter().map(PathBuf::from).collect(),
             control: None,
             window: None,
+            window_any: None,
+            control_paths: Vec::new(),
+            home: PathBuf::new(),
             agents: None,
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
@@ -498,12 +563,79 @@ impl HostRules {
     /// `$HOME/rel` or `rel`, is `control`.
     pub fn with_control(mut self, home: &Path, control: &[PathBuf]) -> Self {
         let spellings = spellings(home, control);
+        // Also glued to a short option (`cp -t/path`, `sort -o~/path`).
         self.control = (!spellings.is_empty()).then(|| {
             let any = spellings.join("|");
-            Regex::new(&format!(r"(^|[^\w.~/$-])({any})($|[^\w.-])")).expect("escaped paths")
+            Regex::new(&format!(
+                r"(^|[^\w.~/$-]|(^|\s)-[A-Za-z0-9]+)({any})($|[^\w.-])"
+            ))
+            .expect("escaped paths")
         });
+        self.control_paths = control.iter().map(|p| components(p)).collect();
+        self.home = home.to_path_buf();
         self.agents = Some(Agents::new(home));
         self
+    }
+
+    /// `text` names one of Clio's paths through a glob (`~/.config/cl?o/x`, `/home/u/.loc*/share/
+    /// c[l]io`): a word whose components, as globs, match every component of that path.
+    fn names_by_glob(&self, text: &str) -> bool {
+        self.names_by_glob_of(&self.control_paths, text)
+    }
+
+    /// `text` names one of `paths` (by component) through a glob, as `names_by_glob`.
+    fn names_by_glob_of(&self, paths: &[Vec<String>], text: &str) -> bool {
+        static WORD: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r#"[^\s;&|()<>'"`]+"#).expect("a fixed pattern"));
+        let home = components(&self.home);
+        WORD.find_iter(text).any(|m| {
+            let mut w = m.as_str();
+            if w.starts_with('-') || w.contains('=') {
+                // What follows an option (`-o/x`, `--out=/x`) or an assignment.
+                match w.find(['/', '~', '$']) {
+                    Some(i) => w = &w[i..],
+                    None => return false,
+                }
+            }
+            if !w.contains(['*', '?', '[', '{']) {
+                return false;
+            }
+            let (absolute, rest) = if let Some(r) = ["~/", "$HOME/", "${HOME}/"]
+                .iter()
+                .find_map(|h| w.strip_prefix(h))
+            {
+                (
+                    true,
+                    home.iter()
+                        .cloned()
+                        .chain(components(Path::new(r)))
+                        .collect(),
+                )
+            } else {
+                (w.starts_with('/'), components(Path::new(w)))
+            };
+            paths.iter().any(|c| {
+                let c: &[String] = if absolute {
+                    c
+                } else {
+                    match c.strip_prefix(home.as_slice()) {
+                        Some(c) if !c.is_empty() => c,
+                        _ => return false,
+                    }
+                };
+                rest.len() >= c.len() && c.iter().zip(&rest).all(|(name, g)| glob_matches(g, name))
+            })
+        })
+    }
+
+    /// `text` names `~/.agents` (S-74), as written, without quotes and backslashes, or by a glob.
+    fn names_agents(&self, text: &str) -> bool {
+        self.agents.as_ref().is_some_and(|a| {
+            let text = squash(text);
+            [text.as_str(), bare(&text).as_str()]
+                .iter()
+                .any(|t| a.exact.is_match(t) || self.names_by_glob_of(&a.paths, t))
+        })
     }
 
     /// A `control` command (or the path of a write) that acts on the machine alone, not on Clio's
@@ -515,8 +647,10 @@ impl HostRules {
     /// (`.ssh`). Quotes and backslashes are dropped first (`c'l'io` is `clio`); it is a word
     /// match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
     pub fn machine_only(&self, text: &str) -> bool {
+        let text = &squash(text);
         !starts_outside(text)
-            && !self.agents.as_ref().is_some_and(|a| a.named(text))
+            && !self.names_by_glob(text)
+            && !self.names_agents(text)
             && ![text, bare(text).as_str()].iter().any(|t| {
                 self.control.as_ref().is_some_and(|r| r.is_match(t))
                     || t.to_lowercase().contains("clio")
@@ -535,11 +669,177 @@ impl HostRules {
         self.window = (!spellings.is_empty()).then(|| {
             let any = spellings.join("|");
             Regex::new(&format!(
-                r#"(?P<pre>^|[^\w.~/$-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>$|[^\w./\-"'\\$`*?\[\]{{}}~])"#
+                r#"(?P<pre>^|[^\w.~/$=-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>"?($|[^\w./\-"'\\$`*?\[\]{{}}~]))"#
             ))
             .expect("escaped paths")
         });
+        self.window_any = (!spellings.is_empty())
+            .then(|| Regex::new(&format!("({})", spellings.join("|"))).expect("escaped paths"));
         self
+    }
+
+    /// `command` with each variable set to a path in a window (`S=<live>/demo; bash $S/run.sh`)
+    /// read where it is used, and its assignment left as `S=SKILL`: what the command names in the
+    /// window is then judged where it is used. Only a variable set on its own (`S=…;`, never
+    /// `S=… cmd`), to a whole word (unquoted, or in one pair of double quotes) that starts with a
+    /// window, and used nowhere but as plain `$S` or `${S}`; none at all when the command could
+    /// reach a variable another way (`${!`, `eval`, `export`, a here-doc, a pipe into a shell).
+    /// Any other stays as written, so its path of Clio's is seen.
+    fn window_vars(&self, command: &str) -> String {
+        static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"(?:^|[;&|(\n])\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)=(?:"(?P<quoted>[^"$\\`]*)"|(?P<plain>[^\s;&|'"`$()<>\\]+))\s*(?P<end>$|[;&|)\n])"#,
+            )
+            .expect("a fixed pattern")
+        });
+        let Some(any) = &self.window_any else {
+            return command.to_owned();
+        };
+        if command.contains("${!")
+            || command.contains("<<")
+            || evals(command)
+            || into_shell(command)
+        {
+            return command.to_owned();
+        }
+        let in_window = |v: &str| {
+            any.find(v).is_some_and(|m| {
+                m.start() == 0 && (m.end() == v.len() || v[m.end()..].starts_with('/'))
+            })
+        };
+        let mut out = command.to_owned();
+        let mut at = 0;
+        while let Some(c) = ASSIGN.captures_at(&out, at) {
+            let (whole, name) = (c.get(0).expect("a match"), c.name("name").expect("a name"));
+            at = c
+                .name("end")
+                .map_or(whole.end(), |e| e.start())
+                .max(whole.start() + 1);
+            let value = c
+                .name("quoted")
+                .or(c.name("plain"))
+                .expect("a value")
+                .as_str();
+            if !in_window(value) {
+                continue;
+            }
+            let uses = Regex::new(&format!(r"\b{}\b", name.as_str())).expect("a name");
+            let plain: Option<Vec<std::ops::Range<usize>>> = uses
+                .find_iter(&out)
+                .filter(|u| u.start() != name.start())
+                .map(|u| {
+                    let (before, after) = (&out[..u.start()], &out[u.end()..]);
+                    if before.ends_with("${") && after.starts_with('}') {
+                        Some(u.start() - 2..u.end() + 1)
+                    } else if before.ends_with('$') && !before.ends_with("\\$") {
+                        Some(u.start() - 1..u.end())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let Some(plain) = plain else {
+                continue;
+            };
+            let (value, assign) = (
+                value.to_owned(),
+                name.start()..c.name("end").map_or(whole.end(), |e| e.start()),
+            );
+            // A use before it reads another value: left as it is.
+            let mut next = out.clone();
+            for r in plain.iter().rev().filter(|r| r.start > assign.start) {
+                next.replace_range(r.clone(), &value);
+            }
+            next.replace_range(assign, &format!("{}=SKILL ", name.as_str()));
+            out = next;
+            at = 0;
+        }
+        out
+    }
+
+    /// Whether the window's paths may be taken as its in `command` at all: not when the shell
+    /// could build another path from them (`..`, `${S%/*}` or any `${…}` with an operator, `PWD`,
+    /// `$(…)`, backticks, `eval`), when code given on the command line reads them (`bash -c`,
+    /// `python3 -c`, `node -e`, a here-doc, a pipe into a shell), or under `sudo`.
+    fn window_holds(&self, command: &str) -> bool {
+        static BRACES: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\$\{[^}]*\}?").expect("a fixed pattern"));
+        static PLAIN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$").expect("a fixed pattern")
+        });
+        !["..", "PWD", "$(", "`", "<<"]
+            .iter()
+            .any(|t| command.contains(t))
+            && !evals(command)
+            && BRACES
+                .find_iter(command)
+                .all(|b| PLAIN.is_match(b.as_str()))
+            && !into_shell(command)
+            && !runs_code(command)
+            && !self.uses_sudo(command)
+    }
+
+    /// Does `command` write in a window, or hand a path in one to something other than a program
+    /// that reads or runs it? A `>` onto it; a path in it glued to anything (an option, a
+    /// script); a program not in `READERS` or `WINDOW_USERS`; `sed` with anything but printing;
+    /// `cp` onto it. After a `cd` into it, any redirection and any `cp` or other program too.
+    fn window_writes(&self, command: &str) -> bool {
+        static REDIRECT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"[0-9&]?>[>|]?\s*([^&\s]|&[^0-9\s-])").expect("a fixed pattern")
+        });
+        static SED_READS: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^(-[nEr]+|(\$|[0-9]+)(,(\$|[0-9]+))?p|/[^/]*/p)$")
+                .expect("a fixed pattern")
+        });
+        let Some(any) = &self.window_any else {
+            return false;
+        };
+        let onto = Regex::new(&format!(r#">[>|]?\s*["']?\s*{}"#, any.as_str())).expect("escaped");
+        if onto.is_match(command) {
+            return true;
+        }
+        let starts = |x: &str| any.find(x).is_some_and(|m| m.start() == 0);
+        let names = |x: &String| any.is_match(x);
+        let cmds = simple_commands(command);
+        let inside = cmds
+            .iter()
+            .any(|w| w.first().is_some_and(|p| p == "cd") && w.get(1).is_some_and(|a| starts(a)));
+        let quiet = |t: &str| t.starts_with("/dev/null") || t.starts_with("/dev/std");
+        if inside
+            && REDIRECT
+                .captures_iter(command)
+                .any(|c| !quiet(&command[c.get(1).expect("a target").start()..]))
+        {
+            return true;
+        }
+        cmds.iter().any(|w| {
+            // `2>&1` is cut at its `&`: the `1` is no program.
+            if (!inside && !w.iter().any(names)) || w[0].bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            if w.iter().any(|x| names(x) && !starts(x)) {
+                return true;
+            }
+            let (p, args) = (w[0].as_str(), &w[1..]);
+            match p {
+                "sed" => !args.iter().all(|a| starts(a) || SED_READS.is_match(a)),
+                "cp" => {
+                    inside
+                        || args.iter().any(|a| {
+                            a == "-T"
+                                || a.starts_with("-t")
+                                || a.starts_with("--target")
+                                || a.starts_with("--no-target")
+                        })
+                        || args
+                            .iter()
+                            .filter(|a| !a.starts_with('-'))
+                            .skip(1)
+                            .any(names)
+                }
+                _ => !(READERS.contains(&p) || WINDOW_USERS.contains(&p)),
+            }
+        })
     }
 
     /// The person's `host.json`: it can only add (patterns are matched like the factory ones,
@@ -569,21 +869,30 @@ impl HostRules {
     }
 
     pub fn classify_command(&self, command: &str) -> Option<Class> {
-        // Each match takes the character after it, which the next one may start from: again until
-        // nothing changes.
-        let mut outside = command.to_owned();
-        // A `..` anywhere may climb out of a window (`cd <window>/demo && cat ../../records/x`):
-        // then no path counts as in it.
-        if let Some(w) = self.window.as_ref().filter(|_| !command.contains("..")) {
-            while let std::borrow::Cow::Owned(o) = w.replace_all(&outside, "${pre}SKILL${post}") {
-                outside = o;
+        // As the shell reads it: a line continued with `\` is one line.
+        let command = &command.replace("\\\n", "");
+        let seen = squash(command);
+        let mut outside = seen.clone();
+        // A path in a window is not, by itself, a reason for `control` (S-68), unless the shell
+        // could build another path from it or the command writes there (`window_holds`,
+        // `window_writes`). Each match takes the character after it, which the next one may
+        // start from: again until nothing changes.
+        if let Some(w) = self.window.as_ref().filter(|_| self.window_holds(&seen)) {
+            let resolved = self.window_vars(&seen);
+            if !self.window_writes(&resolved) {
+                outside = resolved;
+                while let std::borrow::Cow::Owned(o) = w.replace_all(&outside, "${pre}SKILL${post}")
+                {
+                    outside = o;
+                }
             }
         }
-        if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) {
+        if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) || self.names_by_glob(&seen)
+        {
             return Some(Control);
         }
         // The shared skills folder (S-74), named by anything but a reader or `cd`.
-        if self.agents.as_ref().is_some_and(|a| a.named(command))
+        if self.names_agents(&seen)
             && (command.contains('>')
                 || simple_commands(command)
                     .iter()
@@ -1204,6 +1513,141 @@ mod tests {
             format!("cd {live}/demo; cat ../../../vault.key"),
         ] {
             assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+        }
+        // S-68: a skill's own steps (seen in a real run of superpowers' subagent-driven-development):
+        // a variable set to the window or a skill in it, used to read and run its files.
+        let home = "/home/u/proj";
+        for ok in [
+            format!(
+                "S={live}/subagent-driven-development; cd {home} && bash $S/scripts/task-brief {home}/PLAN.md 1"
+            ),
+            format!(
+                "S={live}; cd {home} && bash $S/subagent-driven-development/scripts/review-package {home}/PLAN.md 19727a9 HEAD; cat $S/requesting-code-review/code-reviewer.md"
+            ),
+            format!("S={live}; sed -n 1,40p ${{S}}/demo/SKILL.md"),
+            format!("cp {live}/demo/template.md {home}/x.md"),
+        ] {
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
+        }
+        for bad in [
+            // Writing in it, or giving a path in it to a writer.
+            format!("echo x > {live}/demo/SKILL.md"),
+            format!("S={live}; echo x >> $S/demo/SKILL.md"),
+            format!("S={live}/demo; cp {home}/x $S/new.md"),
+            format!("cp -t {live}/demo {home}/x"),
+            format!("sed -i s/a/b/ {live}/demo/SKILL.md"),
+            format!("S={live}; tee $S/demo/SKILL.md < x"),
+            format!("rm {live}/demo/SKILL.md"),
+            format!("mv {live}/demo/a.md {home}/a.md"),
+            // Leaving it, or the variable naming another folder of Clio's.
+            format!("S={live}; cat $S/../records/demo.json"),
+            format!("S={live}/demo; cd $S && cat ../../records/x"),
+            "S=/home/u/.local/share/clio/skills; cat $S/live/demo/SKILL.md".to_owned(),
+            format!("S={live}; cd $S && ls"),
+        ] {
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+            assert!(!r.machine_only(&bad), "{bad}");
+        }
+        // What a review tried, to make the shell build a path the rules do not see: each one is
+        // `control`, and never the machine's alone. `<L>` is the window.
+        let at = |t: &str| t.replace("<L>", live);
+        for bad in [
+            // Another use of a variable than a plain `$S` or `${S}`, or a way to reach it.
+            "S=<L>; sudo -u root bash -c 'umount $0 && echo {} > $0/host/bypass.json' ${S%/*/*}",
+            "S=<L>; bash $S/demo/run.sh; sudo nsenter -t 1 -m cat ${S%/*/*}/host/bypass.json",
+            "S=<L>; cat ${S%/*/*}/host/bypass.json",
+            "S=<L>; cat ${S/skills*/host}/bypass.json",
+            "S=<L>; cat ${S:0:25}/host/bypass.json",
+            "S=<L>; cat ${S/live/..}/x",
+            "S=<L>; cat ${S%/live}",
+            "S=<L>; ls ${S%/*}/versions",
+            "S=<L>; cp /tmp/x ${S%/*/*}/host/bypass.json",
+            "S=<L>; echo {} > ${S%/*/*}/host/bypass.json",
+            "v=S; S=<L>; cat ${!v}/demo/SKILL.md",
+            "S=<L>; T=${S%/*/*}; cat $T/host/bypass.json",
+            "S=<L>; eval 'cat ${S%/*/*}/host/bypass.json'",
+            "S=<L>/demo; eval \"cat $S/.\"\"./x\"",
+            "export S=<L>; bash -c 'cat ${S%/*/*}/host/bypass.json'",
+            "export S=<L>/demo; bash -c 'cat $S/SKILL.md'",
+            "S=<L> bash -c 'cat ${S%/*/*}/host/bypass.json'",
+            "S=<L>/demo bash $S/run.sh",
+            "S=<L>; sh <<EOF\ncat ${S%/*/*}/host/bypass.json\nEOF",
+            "S=<L>/demo; cat <<EOF | sh\ncat $S/x\nEOF",
+            "S=<L>/demo; echo cat $S/x | bash",
+            "S=<L>; cp /tmp/x ${S%/share*}/bin/clio",
+            "S=<L>; cp /tmp/x ${S%/share*}/bin/clio-vault",
+            // A value the shell reads longer than the rules would.
+            "S=<L>/demo\"/.\"\"./.\"\"./.\"\".\";cat $S/host/bypass.json",
+            "S=<L>/demo$'/\\x2e\\x2e/\\x2e\\x2e/\\x2e\\x2e'; sudo bash -c 'umount $0; echo {} > $0/host/bypass.json' $S",
+            "Y=$(printf '/\\56\\56/\\56\\56/\\56\\56'); S=<L>/demo$Y; cat $S/host/bypass.json",
+            "S=<L>/demo\\/.\\.\\/.\\.\\/.\\.; cat $S/host/bypass.json",
+            "S=<L>/demo\"/.\"\"./.\"\"./.\"\".\";bash -c 'echo {} > $0/host/bypass.json' $S",
+            // Code that builds a path from a window's.
+            "bash -c 'cat ${0%/*/*/*}/host/bypass.json' <L>/demo",
+            "python3 -c 'import sys,os.path as p;print(open(p.dirname(p.dirname(p.dirname(sys.argv[1])))+\"/host/bypass.json\").read())' <L>/demo/x",
+            "cd <L>/demo && cd ${PWD%/*/*/*} && cat host/bypass.json",
+            "cd <L>/demo && cd $(dirname $(dirname $(dirname $PWD))) && cat host/bypass.json",
+            "S=<L>/demo; cat ${S%/*/*/*}/host/bypass.json",
+            "sudo bash <L>/demo/run.sh",
+            // Writes in the window.
+            "S=<L>; sort -o $S/demo/a /tmp/x",
+            "S=<L>; sort --output=$S/demo/a /tmp/x",
+            "S=<L>; sort /tmp/x -o$S/demo/a",
+            "S=<L>; uniq $S/demo/a $S/demo/b",
+            "S=<L>; tree -o $S/demo/a /tmp",
+            "S=<L>; sed -Ei s/a/b/ $S/demo/a",
+            "S=<L>; sed -ni p $S/demo/a",
+            "S=<L>; sed -n 'w '$S/demo/b $S/demo/a",
+            "S=<L>; cp /tmp/x $S/demo/a -T",
+            "S=<L>; cp /tmp/x $S/demo/a --no-preserve=all",
+            "S=<L>; cp -t$S/demo /tmp/x",
+            "S=<L>; bash $S/demo/x >\\\n$S/demo/y",
+            "bash -c 'echo x > $0' <L>/demo/SKILL.md",
+            "python3 -c 'import sys; open(sys.argv[1], \"w\")' <L>/demo/SKILL.md",
+            "node -e 'require(\"fs\").writeFileSync(process.argv[1], \"x\")' <L>/demo/SKILL.md",
+            "cd <L>/demo && echo x > SKILL.md",
+            "cd <L>/demo && cp /tmp/x .",
+            // Clio's paths spelled another way (these were missed before the window too).
+            "cat //home/u/.config/clio/config.json",
+            "cat /home/u/.config//clio/config.json",
+            "cat /home/u/./.config/clio/config.json",
+            "cat ~/.config/cl?o/config.json",
+            "sudo nsenter -t 1 -m cat ~/.local/share/cl?o/host/bypass.json",
+            "cat /home/u/.local/sh*/c[l]io/host/bypass.json",
+            "cp -t/home/u/.config/clio /tmp/x",
+            "sort -o/home/u/.config/clio/x /tmp/x",
+            // The shared skills folder (S-74): a write there, however it is spelled.
+            "cp -r /tmp/x //home/u/.agents/skills/",
+            "cp -r /tmp/x /home/u/./.agents//skills/",
+            "cp -t/home/u/.agents/skills /tmp/x",
+            "sort -o~/.agents/skills/x/SKILL.md /tmp/x",
+            "cp -r /tmp/x ~/.age*/skills/",
+            "cp -r /tmp/x /home/u/.ag?nts/skills/",
+            "mkdir -p $HOME/.[a]gents/skills/x",
+            "mkdir -p ~/.{agents,x}/skills/x",
+            "S=~/.agents/skills; cp -r /tmp/x $S/",
+            "echo x > '/home/u/.agents/skills/x/SKILL.md'",
+        ] {
+            let bad = at(bad);
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+            assert!(!r.machine_only(&bad), "{bad}");
+        }
+        // A skill's own steps still run: skill-creator's, and a quoted path or value.
+        for ok in [
+            "cd <L>/skill-creator && bash scripts/check-skill.sh .",
+            "bash <L>/skill-creator/scripts/check-skill.sh <L>/demo",
+            "S=<L>/demo; cat \"$S/SKILL.md\"",
+            "S=\"<L>/demo\"; cat $S/SKILL.md",
+            "cat <L>/demo/SKILL.md 2>/dev/null | head -5",
+            "cd <L>/demo && bash scripts/run.sh 2>&1",
+            "S=<L>; sed -n 1,40p $S/demo/SKILL.md",
+            "ls */* ~/proj/*.rs",
+            // Reading the shared folder stays free (S-74).
+            "cat //home/u/.agents/skills/x/SKILL.md",
+            "ls ~/.age*/skills",
+        ] {
+            let ok = at(ok);
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
         }
         // The other classes see the same command.
         assert_eq!(

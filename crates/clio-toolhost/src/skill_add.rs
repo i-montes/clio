@@ -730,13 +730,19 @@ pub struct Ctx<'a> {
     pub root: &'a Path,
     /// Where an archive is downloaded (under Clio's data); it is removed at once.
     pub staging: &'a Path,
-    /// The judge's verdict on a text and where it is from.
-    pub judge: &'a dyn Fn(&str, &str) -> TextVerdict,
+    /// The judge's verdict on a text and where it is from; an error stops the add (`REFUSING`).
+    pub judge: &'a dyn Fn(&str, &str) -> Result<TextVerdict, String>,
+    /// How many skills one add may take (`skill_add`: as many as may wait for the person).
+    pub most: Option<usize>,
     /// A text as the vault's filter leaves it (`None`: it could not filter it).
     pub clean: &'a dyn Fn(&str) -> Option<String>,
     /// How an archive is downloaded (`curl`).
     pub get: Get<'a>,
 }
+
+/// The most text the judge reads in one add: about 700,000 tokens of its daily 2,000,000, so an
+/// add that has every window asked twice still leaves the day's other judging some.
+pub const MAX_JUDGED: usize = 2 << 20;
 
 /// Something shaped like a secret, the same check as `skill_write`'s: fixed words.
 const SECRET: &str = "it holds something shaped like a secret (a key, a token, a password): a skill never carries one, nothing was added";
@@ -809,12 +815,23 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
                 .join(", ")
         ));
     }
-    let mut out: Vec<Value> = vec![];
-    for (name, dir) in named {
-        if !names.is_empty() && !names.contains(&name) {
-            continue;
-        }
-        if out.iter().any(|v| v["name"] == name.as_str()) {
+    let chosen: Vec<_> = named
+        .into_iter()
+        .filter(|(name, _)| names.is_empty() || names.contains(name))
+        .collect();
+    if let Some(most) = cx.most.filter(|m| chosen.len() > *m) {
+        return Err(format!(
+            "{origin} has {} skills: at most {most} are proposed at once; ask the person which ones they want and give them in names",
+            chosen.len()
+        ));
+    }
+    // Every skill found and checked before the judge reads any.
+    let mut found = vec![];
+    for (name, dir) in chosen {
+        if found
+            .iter()
+            .any(|(f, ..): &(Found, bool, String)| f.name == name)
+        {
             return Err(format!("{origin} has two skills named «{}»", shown(&name)));
         }
         let f = build(&tree, dir, &name)?;
@@ -826,7 +843,19 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             )
         })?;
         let whole = skills::whole_text(&f.skill_md, &f.files);
-        let verdict = (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name));
+        found.push((f, update, whole));
+    }
+    let bytes: usize = found.iter().map(|(.., w)| w.len()).sum();
+    if bytes > MAX_JUDGED {
+        return Err(format!(
+            "these skills of {origin} hold {} KiB: the judge reads at most {} KiB in one add; name the skills wanted, a few at a time",
+            bytes >> 10,
+            MAX_JUDGED >> 10
+        ));
+    }
+    let mut out: Vec<Value> = vec![];
+    for (f, update, whole) in found {
+        let verdict = (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name))?;
         // Where the person reads exactly what would be installed: the repository at that commit.
         let url = match (&src, &commit) {
             (Source::GitHub { owner, repo, .. }, Some(c)) => Some(format!(
@@ -888,10 +917,6 @@ fn update_of(root: &Path, name: &str, origin: &str) -> Result<bool, String> {
 /// The folder other agents read their skills from (Agent Skills), under the home. Clio looks at
 /// it when a person's chat opens (design `2026-11-20-shared-skills-design.md`, S-74).
 pub const SHARED: &str = ".agents/skills";
-/// The judged text of one look, at most: past it, the rest is "not read yet".
-// shortcut: its own cap until the add's cap (#84) is on main, then that one.
-pub const MAX_LOOK_JUDGED: usize = 2 << 20;
-
 /// What a skill of the shared folder is recorded as coming from: `~/.agents/skills/<dir>`.
 pub fn shared_origin(dir: &str) -> String {
     format!("~/{SHARED}/{dir}")
@@ -1039,8 +1064,8 @@ fn tree_digest(tree: &Tree) -> String {
 /// followed), each read as `clio skills add <that folder>` reads it, checked and compared by
 /// digest with the person's last yes to it. Unchanged, or `quiet` for what is there (the person
 /// said no to it, or was told why it is not asked), it is left alone; new or changed, the judge
-/// reads it (at most `MAX_LOOK_JUDGED` in all, and as many as can wait) and it is asked (`ask`,
-/// each with `seen`: what is there) or listed apart. Nothing is written. A home without the
+/// reads it (at most an add's `MAX_JUDGED` in all, and as many as can wait; none once the judge
+/// refuses calls) and it is asked (`ask`, each with `seen`: what is there) or listed apart. Nothing is written. A home without the
 /// folder: an empty look. `Err`: it could not be read, and nothing is known of it.
 pub fn look_shared(cx: &Ctx, quiet: &dyn Fn(&str, &str) -> bool) -> Result<Look, String> {
     let mut look = Look::default();
@@ -1068,6 +1093,7 @@ pub fn look_shared(cx: &Ctx, quiet: &dyn Fn(&str, &str) -> bool) -> Result<Look,
         }
     }
     let (mut judged, mut names) = (0usize, Vec::<String>::new());
+    let mut refused: Option<String> = None;
     for dir in dirs {
         let origin = shared_origin(dir);
         let sub = sub_tree(&tree, dir);
@@ -1119,15 +1145,27 @@ pub fn look_shared(cx: &Ctx, quiet: &dyn Fn(&str, &str) -> bool) -> Result<Look,
         }
         let by_name = format!("`clio skills add {origin}` adds it on its own");
         let whole = skills::whole_text(&f.skill_md, &f.files);
-        if judged + whole.len() > MAX_LOOK_JUDGED || look.ask.len() >= crate::pending::MAX_WAITING {
+        if let Some(why) = &refused {
+            look.apart
+                .push(format!("{origin}: not read yet ({why}): {by_name}"));
+            continue;
+        }
+        if judged + whole.len() > MAX_JUDGED || look.ask.len() >= crate::pending::MAX_WAITING {
             look.apart
                 .push(format!("{origin}: not read yet: {by_name}"));
             continue;
         }
         judged += whole.len();
         match (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name)) {
-            TextVerdict::Clean => {}
-            TextVerdict::Injection => {
+            Ok(TextVerdict::Clean) => {}
+            // The judge takes no call now: this one and the rest wait for the next look.
+            Err(why) => {
+                look.apart
+                    .push(format!("{origin}: not read yet ({why}): {by_name}"));
+                refused = Some(why);
+                continue;
+            }
+            Ok(TextVerdict::Injection) => {
                 told(
                     &mut look,
                     format!(
@@ -1136,7 +1174,7 @@ pub fn look_shared(cx: &Ctx, quiet: &dyn Fn(&str, &str) -> bool) -> Result<Look,
                 );
                 continue;
             }
-            v => {
+            Ok(v) => {
                 look.apart.push(format!(
                     "{origin}: not judged ({}), so it is not asked; {by_name}",
                     if v == TextVerdict::NoJudge {
@@ -1178,11 +1216,14 @@ const MAX_REASON: usize = 300;
 impl crate::ToolHost {
     /// `skill_add {source, names?, reason}`: finds, checks and judges the skills of `source` and
     /// sets each aside for the person (class `skill`, tool `skill_add`). Nothing is registered:
-    /// only the person's own yes does that, never a permission window or bypass.
+    /// only the person's own yes does that, never a permission window or bypass. The guard waits
+    /// for it with no limit: once `cancel` says the caller went away, no skill is judged further
+    /// and nothing is set aside.
     pub(crate) fn skill_add(
         &self,
         req: &crate::Request,
         args: &serde_json::Map<String, Value>,
+        cancel: &dyn Fn() -> bool,
     ) -> crate::Response {
         let fail = |why: &str| {
             self.skill_answer(
@@ -1243,8 +1284,9 @@ impl crate::ToolHost {
         }
         // `verdict`, not `verdict_of`: a port without a judge is "not judged" here, never clean.
         let judge = |t: &str, from: &str| match &self.memory {
-            Some(port) => crate::judge::verdict(port, t, from),
-            None => TextVerdict::NoJudge,
+            _ if cancel() => Ok(TextVerdict::NoAnswer),
+            Some(port) => crate::judge::verdict(port, t, from, cancel, &|_, _| {}),
+            None => Ok(TextVerdict::NoJudge),
         };
         let staging = self.run_dir.join("skills/staging");
         let clean = |t: &str| self.try_clean(t);
@@ -1254,20 +1296,15 @@ impl crate::ToolHost {
             root,
             staging: &staging,
             judge: &judge,
+            most: Some(crate::pending::MAX_WAITING),
             clean: &clean,
             get: &self.archive_get,
         };
         let items = match prepare(s("source"), &names, &cx) {
+            Ok(_) if cancel() => return fail("the call was stopped before every skill was judged"),
             Ok(i) => i,
             Err(why) => return fail(&why),
         };
-        if items.len() > crate::pending::MAX_WAITING {
-            return fail(&format!(
-                "{} skills: at most {} wait at once; ask which ones the person wants and give them in names",
-                items.len(),
-                crate::pending::MAX_WAITING
-            ));
-        }
         let origin = items
             .first()
             .and_then(|a| a["origin"].as_str())

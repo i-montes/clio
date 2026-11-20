@@ -935,7 +935,7 @@ fn add(d: &Dirs, args: &[String]) -> Res<()> {
         d,
         args,
         (
-            &|t, from| clio_toolhost::verdict(&port, t, from),
+            &at_terminal(&port, std::io::stdout().is_terminal()),
             &*clean,
             &clio_toolhost::skill_add::curl,
         ),
@@ -1036,6 +1036,7 @@ fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Op
         root: &root,
         staging: &d.data.join("staging"),
         judge,
+        most: None,
         clean,
         get: &|_, _| false,
     };
@@ -1098,21 +1099,43 @@ fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Op
     (notes, Some(look.ask))
 }
 
-/// When a person's chat opens (S-74): the shared folder looked at, what is new or changed set
-/// aside for the chat's box (what waited for what is no longer there is dropped), and the notes
-/// to show. Nothing when `skills.shared` is off.
+/// A look at the shared folder for a chat runs (`shared_open`): what it sets aside is not asked
+/// before it ends, so its box holds all of them.
+pub(crate) static LOOKING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn looking() -> bool {
+    LOOKING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// When a person's chat opens (S-74), beside it (the chat does not wait for it): the shared
+/// folder looked at with the paced judge (what it sets aside waits for any person's chat, so it
+/// goes on when this one closes; it ends with the process), what is new or changed set aside for the chat's box (what waited for what is no longer there
+/// is dropped), and the notes to show. Nothing when `skills.shared` is off, or while another
+/// look runs.
 pub fn shared_open(d: &Dirs) -> Vec<String> {
+    use std::sync::atomic::Ordering;
     let Ok(cfg) = super::home::Config::load(d) else {
         return vec![];
     };
-    if !cfg.skills.shared {
+    if !cfg.skills.shared || LOOKING.swap(true, Ordering::SeqCst) {
         return vec![];
     }
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            LOOKING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _done = Done;
     let (port, clean) = outside(d, &cfg);
-    shared_open_with(
-        d,
-        (&|t, from| clio_toolhost::verdict(&port, t, from), &*clean),
-    )
+    let judge = |t: &str, from: &str| {
+        if !port.judge_on() {
+            return Ok(clio_toolhost::TextVerdict::NoJudge);
+        }
+        clio_toolhost::verdict(&port, t, from, &|| false, &|_, _| {})
+    };
+    shared_open_with(d, (&judge, &*clean))
 }
 
 fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
@@ -1138,7 +1161,7 @@ fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
         .collect();
     let judge = |t: &str, from: &str| {
         if texts.iter().any(|w| w == t) {
-            clio_toolhost::TextVerdict::Clean
+            Ok(clio_toolhost::TextVerdict::Clean)
         } else {
             (io.0)(t, from)
         }
@@ -1179,7 +1202,10 @@ fn sync(d: &Dirs, args: &[String]) -> Res<()> {
     sync_with(
         d,
         args,
-        (&|t, from| clio_toolhost::verdict(&port, t, from), &*clean),
+        (
+            &at_terminal(&port, std::io::stdout().is_terminal()),
+            &*clean,
+        ),
         std::io::stdin().is_terminal(),
         super::apply::confirm,
     )
@@ -1252,7 +1278,43 @@ fn sync_with(
     Ok(())
 }
 
-type Judge<'a> = &'a dyn Fn(&str, &str) -> clio_toolhost::TextVerdict;
+/// The judge of `clio skills add` and `sync` (paced, as `skill_add`'s): no judge reads nothing
+/// and says nothing; while it reads, the progress line (`judging`), cleared when it ends.
+fn at_terminal(
+    port: &std::sync::Arc<dyn clio_toolhost::MemoryPort>,
+    tty: bool,
+) -> impl Fn(&str, &str) -> Result<clio_toolhost::TextVerdict, String> {
+    move |t: &str, from: &str| {
+        if !port.judge_on() {
+            return Ok(clio_toolhost::TextVerdict::NoJudge);
+        }
+        let v = clio_toolhost::verdict(port, t, from, &|| false, &|read, n| {
+            judging(tty, from, read, n);
+        });
+        if tty {
+            print!("\r\x1b[K");
+        }
+        v
+    }
+}
+
+/// While the judge reads a skill (`from`): a plain line when it starts; at a terminal, one more
+/// line kept up to date with how many of its `n` parts were read, cleared when it ends.
+fn judging(tty: bool, from: &str, read: usize, n: usize) {
+    use std::io::Write;
+    if read == 0 {
+        println!(
+            "the judge is reading {} ({n} part{})…",
+            super::tui::sanitize::line(from),
+            if n == 1 { "" } else { "s" }
+        );
+    } else if tty {
+        print!("\r\x1b[K  {read} of {n} read");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+type Judge<'a> = &'a dyn Fn(&str, &str) -> Result<clio_toolhost::TextVerdict, String>;
 /// What `add_with` asks of the world: the judge, the vault's filter and the download.
 type AddIo<'a> = (
     Judge<'a>,
@@ -1293,6 +1355,7 @@ fn add_with(
             root: &root,
             staging: &d.data.join("staging"),
             judge,
+            most: None,
             clean,
             get,
         },
@@ -1926,11 +1989,11 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let read = std::cell::Cell::new(0);
         let judge = |t: &str, _: &str| {
             read.set(read.get() + 1);
-            if t.contains("FLAG") {
+            Ok(if t.contains("FLAG") {
                 clio_toolhost::TextVerdict::Injection
             } else {
                 clio_toolhost::TextVerdict::Clean
-            }
+            })
         };
         let notes = shared_open_with(d, (&judge, &|t: &str| Some(t.to_owned())));
         let waiting = super::super::pending::waiting(d)
@@ -2086,7 +2149,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let s = d.home.join(".agents/skills");
         put(&s.join("a/SKILL.md"), &shared_md("a", "A."));
         put(&s.join("b/SKILL.md"), &shared_md("b", "B."));
-        let judge = |_: &str, _: &str| clio_toolhost::TextVerdict::Clean;
+        let judge = |_: &str, _: &str| Ok(clio_toolhost::TextVerdict::Clean);
         let clean = |t: &str| Some(t.to_owned());
         let io = || -> Look { (&judge, &clean) };
         let e = sync_with(&d, &[], io(), false, |_| true).unwrap_err();
@@ -2197,11 +2260,11 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         fs::create_dir_all(src.join("hooks")).unwrap();
         fs::write(src.join("hooks/hooks.json"), "{}").unwrap();
         let judge = |t: &str, _: &str| {
-            if t.contains("FLAG") {
+            Ok(if t.contains("FLAG") {
                 TextVerdict::Injection
             } else {
                 TextVerdict::Clean
-            }
+            })
         };
         let clean = |t: &str| Some(t.to_owned());
         let get = |_: &str, _: &Path| false;
