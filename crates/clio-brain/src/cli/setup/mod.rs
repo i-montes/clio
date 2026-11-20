@@ -95,6 +95,10 @@ pub struct Opts {
     pub update: bool,
     /// This process is the new binary an update started: it replaces nothing again.
     pub reexec: bool,
+    /// install.sh just installed clio and clio-vault: the binaries step looks for nothing.
+    pub fresh: bool,
+    /// Not finding the release is a failure (`clio update`), not a warning.
+    pub release_required: bool,
     /// The running `clio`, and the folder it and `clio-vault` live in.
     pub exe: PathBuf,
     pub bin: PathBuf,
@@ -400,6 +404,8 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
     // Hidden: the new binary an update started goes on where the old one stopped.
     let resume = a.flag("--resume-update");
     opts.reexec = resume;
+    // Hidden: install.sh just put the binaries in place.
+    opts.fresh = a.flag("--fresh");
     let lang = a
         .value("--lang")?
         .map(|l| Lang::from_code(&l).ok_or("--lang is es or en"))
@@ -443,7 +449,7 @@ pub fn run(dirs: &Dirs, argv: Vec<String>) -> Res<i32> {
     }
     let (sys, pins) = (Sys::from_env(), Pins::from_env());
     if opts.yes {
-        let lang = lang.unwrap_or_else(Lang::from_env);
+        let lang = lang.unwrap_or_else(|| Lang::saved_or_env(dirs));
         let found = Found::detect(dirs, &sys);
         let action = if resume || found.installed {
             Action::Update

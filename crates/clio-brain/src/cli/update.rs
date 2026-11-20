@@ -2,7 +2,7 @@
 //! questions: the same steps as the installer's Update (`setup::steps`), without the screens. It
 //! never touches config, vault, memory, conversations, skills, services or servers.
 
-use super::home::{Config, Dirs};
+use super::home::Dirs;
 use super::setup::fetch::{Pins, Release};
 use super::setup::steps::{Action, Step};
 use super::setup::text::{Lang, M, say};
@@ -11,11 +11,7 @@ use super::{Args, Res};
 
 /// The language the installer was run in, else English.
 fn lang(dirs: &Dirs) -> Lang {
-    Config::load(dirs)
-        .ok()
-        .and_then(|c| c.ui.language)
-        .and_then(|l| Lang::from_code(&l))
-        .unwrap_or(Lang::En)
+    Lang::saved(dirs).unwrap_or(Lang::En)
 }
 
 pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
@@ -58,6 +54,7 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let mut opts = Opts::here()?;
     opts.update = true;
     opts.reexec = reexec;
+    opts.release_required = true;
     // No questions here: the vault and the model are the wizard's (`clio setup`).
     let steps: Vec<_> = Action::Update
         .steps()

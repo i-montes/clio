@@ -340,7 +340,11 @@ pub fn stop_server(dirs: &Dirs) -> Res<bool> {
     let Some(pid) = running(&p) else {
         return Ok(false);
     };
-    let _ = Command::new("kill").arg(pid.to_string()).status();
+    let _ = Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     let t = Instant::now();
     while comm(pid).is_some() && t.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(50));

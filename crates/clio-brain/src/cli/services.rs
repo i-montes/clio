@@ -886,7 +886,7 @@ fn unit_dir(home: &Path) -> PathBuf {
     home.join(".config/systemd/user")
 }
 
-fn timer_files_exist(home: &Path) -> bool {
+pub fn timer_files_exist(home: &Path) -> bool {
     UNITS.iter().all(|u| unit_dir(home).join(u).is_file())
 }
 
@@ -938,16 +938,33 @@ pub(crate) fn systemctl() -> Option<PathBuf> {
 
 fn call(systemctl: Option<&Path>, args: &[&str]) -> Res<()> {
     let Some(s) = systemctl else { return Ok(()) };
-    let st = std::process::Command::new(s)
+    // Captured, never on the terminal (the installer's screen may be up): what it said goes in
+    // the error, its last line.
+    let out = std::process::Command::new(s)
         .arg("--user")
         .args(args)
-        .status()
+        .stdin(std::process::Stdio::null())
+        .output()
         .map_err(|e| format!("systemctl: {e}"))?;
-    if st.success() {
-        Ok(())
-    } else {
-        Err(format!("systemctl --user {} failed ({st})", args.join(" ")))
+    if out.status.success() {
+        return Ok(());
     }
+    let said = String::from_utf8_lossy(&out.stderr);
+    let why = said
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    Err(format!(
+        "systemctl --user {} failed ({}){}",
+        args.join(" "),
+        out.status,
+        if why.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", why.trim())
+        }
+    ))
 }
 
 /// `clio services enable`: writes the two unit files (0600) and starts the timer with the
@@ -1058,6 +1075,9 @@ pub(crate) fn timer_on(home: &Path, systemctl: Option<&Path>) -> bool {
         && systemctl.is_some_and(|s| {
             std::process::Command::new(s)
                 .args(["--user", "is-active", "--quiet", UNITS[1]])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .is_ok_and(|st| st.success())
         })
@@ -1956,6 +1976,27 @@ pub(crate) mod tests {
                 .contains("--user disable --now clio-services.timer\n")
         );
         assert!(!fs::read_to_string(&log).unwrap().contains("sudo"));
+    }
+
+    // What systemctl says is captured (the installer's screen may be up): its last line is the
+    // error's cause.
+    #[test]
+    fn what_systemctl_says_goes_into_the_error_not_the_terminal() {
+        let t = tmp();
+        let home = t.path().join("home");
+        let fake = t.path().join("systemctl");
+        fs::write(
+            &fake,
+            "#!/bin/sh\necho noise\necho 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let e = enable_in(&home, Path::new("/usr/local/bin/clio"), Some(&fake)).unwrap_err();
+        assert!(
+            e.starts_with("systemctl --user daemon-reload failed")
+                && e.ends_with(": Failed to connect to bus: No such file or directory"),
+            "{e}"
+        );
     }
 
     // S-69: `run-due` runs what is due and only that; a gap of any length gives one run.
