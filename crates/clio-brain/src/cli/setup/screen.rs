@@ -660,7 +660,7 @@ pub fn wizard(
     let lang = match lang {
         Some(l) => l,
         None => {
-            let sel = usize::from(Lang::from_env() == Lang::En);
+            let sel = usize::from(Lang::saved_or_env(dirs) == Lang::En);
             match ui.show(Page::Language { sel }) {
                 Some(Page::Language { sel: 0 }) => Lang::Es,
                 Some(_) => Lang::En,
@@ -725,6 +725,7 @@ pub fn wizard(
         let steps = action.steps();
         r.ask_all(&steps);
         r.all(&steps);
+        r.sign_in(&steps);
         (r.failed, r.replaced, r.left, r.blocked)
     };
     if replaced {
@@ -828,13 +829,18 @@ pub fn done_page(dirs: &Dirs, lang: Lang, action: Action, end: &End) -> Page {
     } else if let Some(b) = end.blocked {
         (t(M::DoneBlocked), vec![left(b)])
     } else if action == Action::RemoveKeep {
-        let kept = format!("{} · {}", dirs.config.display(), dirs.data.display());
+        let kept = format!(
+            "{} · {} · {}",
+            dirs.config.display(),
+            dirs.data.display(),
+            dirs.home.join(".cache/clio-models").display()
+        );
         (
             t(M::RemovedTitle),
-            vec![M::RemovedKept.fill(lang, &[&kept]), t(M::RemovedMemory)],
+            vec![M::RemovedKept.fill(lang, &[&kept])],
         )
     } else if action == Action::RemoveAll {
-        (t(M::RemovedTitle), vec![t(M::RemovedMemory)])
+        (t(M::RemovedTitle), vec![])
     } else {
         (t(M::DoneTitle), end.left.map(left).into_iter().collect())
     };

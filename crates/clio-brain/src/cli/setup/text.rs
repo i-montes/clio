@@ -26,11 +26,30 @@ impl Lang {
 
     /// Spanish when the locale says so, English otherwise.
     pub fn from_env() -> Self {
+        Self::from_locale(|k| std::env::var(k).ok())
+    }
+
+    /// Spanish when the locale that decides messages (`LC_ALL`, else `LC_MESSAGES`, else `LANG`)
+    /// is Spanish.
+    pub fn from_locale(var: impl Fn(&str) -> Option<String>) -> Self {
         let es = ["LC_ALL", "LC_MESSAGES", "LANG"]
             .iter()
-            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+            .find_map(|k| var(k).filter(|v| !v.is_empty()))
             .is_some_and(|v| v.starts_with("es"));
         if es { Self::Es } else { Self::En }
+    }
+
+    /// The language an earlier run saved (`ui.language`), else the locale's.
+    pub fn saved_or_env(dirs: &crate::cli::home::Dirs) -> Self {
+        Self::saved(dirs).unwrap_or_else(Self::from_env)
+    }
+
+    /// The language an earlier run saved in the config.
+    pub fn saved(dirs: &crate::cli::home::Dirs) -> Option<Self> {
+        crate::cli::home::Config::load(dirs)
+            .ok()
+            .and_then(|c| c.ui.language)
+            .and_then(|l| Self::from_code(&l))
     }
 }
 
@@ -98,7 +117,8 @@ table! {
     StStopVault: "Detener el baúl", "Stop the vault";
     StRemoveTimer: "Quitar el temporizador", "Remove the timer";
     StRemoveNodePi: "Quitar Node y Pi privados", "Remove the private Node and Pi";
-    StRemoveBinaries: "Quitar clio y clio-vault", "Remove clio and clio-vault";
+    StRemoveBinaries: "Quitar clio, clio-vault y clio-memory", "Remove clio, clio-vault and clio-memory";
+    StRemoveModel: "Quitar clio-memory y su modelo", "Remove clio-memory and its model";
     StRemoveData: "Borrar configuración y datos", "Delete configuration and data";
 
     NoteCreated: "creado", "created";
@@ -110,10 +130,12 @@ table! {
     NoteLater: "más tarde", "later";
     NoteDone: "hecho", "done";
     NoteRemoved: "quitado", "removed";
+    NoteRemovedNoSystemd: "quitado (systemd no respondió)", "removed (systemd did not answer)";
+    NoteNoRelease: "no pude buscar una versión nueva", "could not look for a newer version";
+    NoteAtEnd: "al terminar", "when the install finishes";
     NoteOn: "activado", "on";
     NoteRestarted: "reiniciado", "restarted";
     NoteOff: "desactivado", "off";
-    NoteKept: "{} se conserva", "{} stays";
     NoteDoctorOk: "todo bien", "all good";
     NoteNewVault: "creado y abierto", "created and open";
     NoteOpened: "abierto", "open";
@@ -160,6 +182,10 @@ table! {
     ModelOpencode: "OpenCode", "OpenCode";
     ModelLater: "Más tarde", "Later";
     KeyTitle: "Pega tu clave de {}", "Paste your {} key";
+    ClaudeHowTitle: "¿Cómo conectas tu suscripción?", "How do you connect your subscription?";
+    ClaudeSignIn: "Iniciar sesión cuando termine la instalación", "Sign in when the install finishes";
+    ClaudePaste: "Pegar un token", "Paste a token";
+    ClaudeCopy: "Copia el token que aparece arriba, pégalo aquí y pulsa Enter: la pantalla se borrará.", "Copy the token shown above, paste it here and press Enter: the screen will be cleared.";
     KeyClaudeHint: "Empieza por sk-ant-oat. Sale de «claude setup-token», en cualquier equipo con Claude Code. Esc: más tarde.", "It starts with sk-ant-oat. It comes from `claude setup-token`, on any machine with Claude Code. Esc: later.";
     KeyApiHint: "Empieza por sk-ant-api. Está en console.anthropic.com → API keys.", "It starts with sk-ant-api. It is in console.anthropic.com → API keys.";
     KeyOpencodeHint: "Está en opencode.ai, en tu cuenta → API keys.", "It is in opencode.ai, your account → API keys.";
@@ -189,14 +215,14 @@ table! {
     ChatOpenTitle: "Hay un chat de Clio abierto.", "A Clio chat is open.";
     ChatOpenHint: "Ciérralo y pulsa Enter.", "Close it and press Enter.";
     ConfirmTitle: "¿Quitar todo?", "Remove everything?";
-    ConfirmLost: "Se pierden el baúl con todas sus claves, la memoria, las conversaciones, la configuración, las skills, los servicios y los servidores MCP.", "You lose the vault with every key in it, the memory, the conversations, the configuration, the skills, the services and the MCP servers.";
+    ConfirmLost: "Se pierden el baúl con todas sus claves, la memoria, las conversaciones, la configuración, las skills, los servicios, los servidores MCP, y clio-memory y su modelo.", "You lose the vault with every key in it, the memory, the conversations, the configuration, the skills, the services, the MCP servers, and clio-memory and its model.";
     ConfirmNo: "No, conservarlo", "No, keep it";
     ConfirmYes: "Sí, quitarlo todo", "Yes, remove everything";
 
     DoneTitle: "Clio está lista.", "Clio is ready.";
     DoneLeft: "Falta una cosa: {}", "One thing left: {}";
     LeftModel: "conectar un modelo (clio connect claude, anthropic-api u opencode)", "connect a model (clio connect claude, anthropic-api or opencode)";
-    LeftClaude: "conectar Claude: genera un token con «claude setup-token» y ejecuta «clio connect claude»", "connect Claude: make a token with `claude setup-token` and run `clio connect claude`";
+    LeftModelAgain: "conectar el modelo: ejecuta «clio setup» otra vez y elige el modelo", "connect the model: run `clio setup` again and choose the model";
     LeftJailBwrap: "pide a un administrador que instale bubblewrap: sin él Clio no arranca", "ask an administrator to install bubblewrap: Clio does not start without it";
     LeftJailUserns: "pide a un administrador que permita a bubblewrap crear espacios de nombres de usuario (un perfil de AppArmor para /usr/bin/bwrap)", "ask an administrator to let bubblewrap create user namespaces (an AppArmor profile for /usr/bin/bwrap)";
     LeftJailOther: "pide a un administrador que permita a tu usuario usar bubblewrap (prueba: bwrap --ro-bind / / true)", "ask an administrator to let your user run bubblewrap (test: bwrap --ro-bind / / true)";
@@ -206,8 +232,7 @@ table! {
     DoneFailed: "Algo falló.", "Something failed.";
     DoneFailedLine: "Arregla lo que dice el paso y ejecuta «clio setup» otra vez.", "Fix what the step says and run `clio setup` again.";
     RemovedTitle: "Clio se quitó.", "Clio was removed.";
-    RemovedKept: "Tus datos siguen en {}.", "Your data stays in {}.";
-    RemovedMemory: "clio-memory se conserva: otros agentes pueden usarlo.", "clio-memory stays: other agents may use it.";
+    RemovedKept: "Tus datos, la configuración y el modelo siguen en {}.", "Your data, configuration and model stay in {}.";
 
     NoTerminal: "No hay una terminal: ejecuta «clio setup» en una.", "There is no terminal: run `clio setup` in one.";
     UpdateNone: "Clio ya está al día ({}).", "Clio is already up to date ({}).";

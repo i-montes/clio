@@ -138,7 +138,8 @@ clio_install() {
     esac
     # `curl | sh` gives the script, not the person, as standard input: the setup reads the terminal.
     if (: </dev/tty) 2>/dev/null; then
-        exec "$bin/clio" setup </dev/tty
+        # --fresh: what was just installed is not looked for again.
+        exec "$bin/clio" setup --fresh </dev/tty
     fi
     printf '%s setup\n' "$bin/clio"
 }

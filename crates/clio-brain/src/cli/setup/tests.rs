@@ -724,15 +724,26 @@ fn installed(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         (".local/share/clio/skills/mine/SKILL.md", b"a skill"),
         (".local/share/clio/services/watch/service.json", b"{}"),
         (".config/clio/mcp.json", b"{}"),
-        // Clio-memory and its model stay in both removals.
-        (".local/bin/clio-memory", b"memory binary"),
+        // The model is kept with the data; the profile is the person's own file.
         (".cache/clio-models/fake/model.onnx", b"weights"),
+        (".profile", b"export EDITOR=vi\n"),
     ] {
         write(&home.join(rel), bytes);
     }
     let kept = tree(home);
+    // What install.sh added to the profile, as it adds it.
+    let mut profile = std::fs::read(home.join(".profile")).unwrap();
+    profile.extend_from_slice(
+        b"\n# Clio: ~/.local/bin on the PATH\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+    );
+    write(&home.join(".profile"), &profile);
+    write(
+        &home.join(".zshrc"),
+        b"\n# Clio: ~/.local/bin on the PATH\nexport PATH=\"$HOME/.local/bin:$PATH\"\n",
+    );
     for (rel, bytes) in [
         (".local/bin/clio", &b"clio"[..]),
+        (".local/bin/clio-memory", b"memory binary"),
         (".local/bin/clio-vault", b"vault"),
         (".local/share/clio/node/bin/node", b"node"),
         (".local/share/clio/pi/0.70.0/package.json", b"{}"),
@@ -748,13 +759,18 @@ fn installed(home: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     kept
 }
 
-/// Runs `action`'s steps on an installed home; returns what Remove-keeping-data must keep.
-fn remove(home: &Path, action: Action) -> BTreeMap<PathBuf, Vec<u8>> {
+/// Runs `action`'s steps on an installed home with `systemctl` (a script's body); returns what
+/// Remove-keeping-data must keep, and the rows.
+fn remove(
+    home: &Path,
+    action: Action,
+    systemctl: &str,
+) -> (BTreeMap<PathBuf, Vec<u8>>, BTreeMap<usize, St>) {
     let kept = installed(home);
     let d = dirs(home);
     let bin = home.join(".local/bin");
     let sys_dir = home.join("sys");
-    script(&sys_dir.join("systemctl"), "exit 0");
+    script(&sys_dir.join("systemctl"), systemctl);
     let mut ui = FakeUi::default();
     let opts = Opts {
         yes: true,
@@ -776,27 +792,50 @@ fn remove(home: &Path, action: Action) -> BTreeMap<PathBuf, Vec<u8>> {
     r.all(&action.steps());
     assert!(!r.failed, "{:?}", ui.rows);
     std::fs::remove_dir_all(&sys_dir).unwrap();
-    kept
+    (kept, ui.rows)
 }
 
 #[test]
 fn remove_keeping_data_leaves_exactly_the_data() {
     let t = tempfile::tempdir().unwrap();
-    let kept = remove(t.path(), Action::RemoveKeep);
+    let (kept, _) = remove(t.path(), Action::RemoveKeep, "exit 0");
     assert_eq!(tree(t.path()), kept);
 }
 
 #[test]
-fn remove_everything_keeps_only_clio_memory_and_its_model() {
+fn remove_everything_leaves_only_the_persons_own_files() {
     let t = tempfile::tempdir().unwrap();
-    remove(t.path(), Action::RemoveAll);
-    let after: Vec<PathBuf> = tree(t.path()).into_keys().collect();
+    remove(t.path(), Action::RemoveAll, "exit 0");
+    let after: Vec<(PathBuf, Vec<u8>)> = tree(t.path()).into_iter().collect();
     assert_eq!(
         after,
-        [
-            PathBuf::from(".cache/clio-models/fake/model.onnx"),
-            PathBuf::from(".local/bin/clio-memory"),
-        ]
+        [(PathBuf::from(".profile"), b"export EDITOR=vi\n".to_vec())]
+    );
+}
+
+// No user bus: systemd is said in the row, not a failure, and the unit files go anyway.
+#[test]
+fn a_timer_systemd_cannot_reach_is_removed_with_a_warning() {
+    let t = tempfile::tempdir().unwrap();
+    let (_, rows) = remove(
+        t.path(),
+        Action::RemoveAll,
+        "echo 'Failed to connect to bus: No such file or directory' >&2; exit 1",
+    );
+    let i = Action::RemoveAll
+        .shown()
+        .iter()
+        .position(|s| *s == Step::RemoveTimer)
+        .unwrap();
+    assert_eq!(
+        rows[&i],
+        St::Warn("removed (systemd did not answer)".into())
+    );
+    assert!(
+        !t.path()
+            .join(".config/systemd/user")
+            .join(crate::cli::services::UNITS[0])
+            .exists()
     );
 }
 
@@ -821,7 +860,8 @@ fn the_steps_of_each_choice() {
     for s in [Step::Judge, Step::Folders, Step::System] {
         assert!(!u.contains(&s), "{s:?}");
     }
-    assert_eq!(Action::RemoveAll.steps().last(), Some(&Step::RemoveData));
+    assert_eq!(Action::RemoveAll.steps().last(), Some(&Step::RemoveModel));
+    assert!(!Action::RemoveKeep.steps().contains(&Step::RemoveModel));
 }
 
 // No version noted (a run that did not finish): Repair is the choice offered first.
@@ -923,6 +963,75 @@ fn every_question_comes_before_the_work() {
     assert!(calls.contains("install -y -qq bubblewrap"), "{calls}");
     assert!(calls.contains("enable-linger someone"), "{calls}");
     assert!(!calls.contains("tee"), "{calls}");
+}
+
+// A Claude subscription asks how, and "sign in when the install finishes" asks for no key; when the
+// sign-in cannot happen, the one thing left is choosing the model again, not a command to type.
+#[test]
+fn claude_sign_in_comes_at_the_end_and_its_failure_points_back_to_the_installer() {
+    let t = tempfile::tempdir().unwrap();
+    let mut ui = FakeUi {
+        answers: [
+            Answer::Secret(SecretValue::new(PASS.into())),
+            Answer::Choice(0),
+            Answer::Choice(0),
+        ]
+        .into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), fake_sys(&t.path().join("sys")), &mut ui);
+        r.ask_all(&[Step::Vault, Step::Model]);
+        assert!(r.answers.sign_in);
+        // No Claude Code in this home: the sign-in does not run, the row says later.
+        r.answers.sign_in_ready = clio_brain::connector::by_name("claude");
+        r.sign_in(&[Step::Model]);
+        assert_eq!(r.left, Some(M::LeftModelAgain));
+    }
+    let en = |m: M| m.get(Lang::En).to_owned();
+    assert_eq!(
+        ui.asked,
+        [
+            en(M::VaultNewTitle),
+            en(M::ModelTitle),
+            en(M::ClaudeHowTitle)
+        ]
+    );
+    assert_eq!(ui.rows[&0], St::Warn(en(M::NoteLater)));
+}
+
+// The language screen starts on the saved language, else the locale's.
+#[test]
+fn the_language_preselected_is_the_saved_one_else_the_locales() {
+    let var = |pairs: &'static [(&str, &str)]| {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    };
+    assert_eq!(Lang::from_locale(var(&[("LANG", "es_CO.UTF-8")])), Lang::Es);
+    assert_eq!(
+        Lang::from_locale(var(&[("LC_MESSAGES", "es_ES")])),
+        Lang::Es
+    );
+    assert_eq!(
+        Lang::from_locale(var(&[("LC_ALL", "en_US.UTF-8"), ("LANG", "es_CO.UTF-8")])),
+        Lang::En
+    );
+    assert_eq!(Lang::from_locale(var(&[])), Lang::En);
+    let t = tempfile::tempdir().unwrap();
+    let d = dirs(t.path());
+    assert_eq!(Lang::saved(&d), None);
+    std::fs::create_dir_all(&d.config).unwrap();
+    crate::cli::home::write_default_config(&d).unwrap();
+    let mut cfg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.config_file()).unwrap()).unwrap();
+    cfg["ui"]["language"] = "es".into();
+    write(&d.config_file(), cfg.to_string().as_bytes());
+    assert_eq!(Lang::saved(&d), Some(Lang::Es));
+    assert_eq!(Lang::saved_or_env(&d), Lang::Es);
 }
 
 // Where the kernel restricts user namespaces and the jail does not start, the AppArmor profile is

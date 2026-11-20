@@ -13,7 +13,9 @@ use serde_json::Value;
 use super::home::{Config, Dirs, lacks_bridge, names_builtin_adapter};
 use super::{Args, Res, io_err, usage, vault, write_private};
 
-const CLAUDE_WARNING: &str = "Clio uses your subscription through Claude Code (official). The token comes from: claude setup-token";
+const CLAUDE_WARNING: &str = "Clio uses your subscription through Claude Code (official). Paste a token from `claude setup-token`, or press Enter to sign in now.";
+const CLAUDE_COPY: &str =
+    "Copy the token shown above, paste it here and press Enter: the screen will be cleared.";
 
 pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     let mut args = Args::new(args);
@@ -102,11 +104,59 @@ pub fn store_key(dirs: &Dirs, c: &Connector, value: &clio_vault::SecretValue) ->
     vault::put(dirs, c.secret, &format!("model:{}", c.domain), value)
 }
 
+/// Claude Code's own sign-in (`setup-token`, the bridge's bundled copy, with Pi's home so
+/// `~/.claude` is not touched), on the terminal; `copy` asks for the token it showed. The line
+/// pasted back is read with no echo, and the screen and its scrollback are cleared before
+/// anything else. A line that is not a subscription token is `None`.
+pub fn claude_sign_in(dirs: &Dirs, copy: &str) -> Option<clio_vault::SecretValue> {
+    let claude = super::home::claude_code(dirs).ok()?;
+    let prefix = by_name("claude")?.key_prefix;
+    let home = super::pi::paths(dirs).home_dir();
+    // Ctrl-C cancels the sign-in, not Clio: the installer still shows its last screen.
+    let held = signal_hook::flag::register(
+        signal_hook::consts::SIGINT,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .ok();
+    let ran = std::process::Command::new(&claude)
+        .arg("setup-token")
+        .env("HOME", &home)
+        .status()
+        .is_ok_and(|s| s.success());
+    let line = if ran {
+        println!("\n{copy}");
+        vault::read_secret("token").ok()
+    } else {
+        None
+    };
+    // The screen, then its scrollback: the token shown above never stays on the terminal.
+    print!("\x1b[H\x1b[2J\x1b[3J");
+    let _ = std::io::stdout().flush();
+    if let Some(id) = held {
+        signal_hook::low_level::unregister(id);
+    }
+    let mut line = line?;
+    let mut key = line.trim().to_owned();
+    clio_vault::wipe(&mut line);
+    if key.starts_with(prefix) {
+        Some(clio_vault::SecretValue::new(key))
+    } else {
+        clio_vault::wipe(&mut key);
+        None
+    }
+}
+
 /// The key to store, and the old key file to offer deleting when it was the source.
 fn ask_key(dirs: &Dirs, c: &Connector) -> Res<(String, Option<std::path::PathBuf>)> {
     if c.name == "claude" {
         println!("{CLAUDE_WARNING}");
-        let v = vault::read_secret("token")?.trim().to_owned();
+        let mut v = vault::read_secret("token")?.trim().to_owned();
+        // Nothing pasted: the same sign-in the installer offers.
+        if v.is_empty()
+            && let Some(k) = claude_sign_in(dirs, CLAUDE_COPY)
+        {
+            v = k.expose().to_owned();
+        }
         if !v.starts_with(c.key_prefix) {
             return Err(format!(
                 "that is not a subscription token (it must start with {}): nothing was stored. It comes from: claude setup-token",

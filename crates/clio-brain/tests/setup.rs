@@ -552,6 +552,31 @@ fn update_replaces_both_binaries_or_neither_and_goes_on_in_the_new_one() {
     );
 }
 
+// The release cannot be read: the setup says so in its row and goes on; install.sh's `--fresh`
+// looks for nothing; `clio update`, whose whole job that is, fails.
+#[test]
+fn an_unreachable_release_warns_in_setup_and_fails_update() {
+    let f = Fx::new();
+    let o = f.setup(&["--no-model"]);
+    assert!(o.status.success(), "{}", all(&o));
+    // Installed: a second run is an update, whose first step is the binaries.
+    std::fs::remove_file(f.p("release/VERSION")).unwrap();
+    let o = f.setup(&["--no-model"]);
+    let out = all(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains("clio and clio-vault · could not look for a newer version")
+            && out.contains("Final check"),
+        "the rest ran: {out}"
+    );
+    let o = f.setup(&["--no-model", "--fresh"]);
+    let out = all(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("clio and clio-vault · already there"), "{out}");
+    let o = f.clio(&["update"]);
+    assert_eq!(o.status.code(), Some(1), "{}", all(&o));
+}
+
 /// Serves `files` over HTTP; `stall`: the file sent only in part, and then held until the
 /// returned sender is dropped.
 fn serve(

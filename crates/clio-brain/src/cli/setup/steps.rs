@@ -36,6 +36,7 @@ pub enum Step {
     RemoveNodePi,
     RemoveBinaries,
     RemoveData,
+    RemoveModel,
 }
 
 impl Step {
@@ -59,6 +60,7 @@ impl Step {
             Self::RemoveNodePi => M::StRemoveNodePi,
             Self::RemoveBinaries => M::StRemoveBinaries,
             Self::RemoveData => M::StRemoveData,
+            Self::RemoveModel => M::StRemoveModel,
         }
     }
 }
@@ -95,6 +97,7 @@ impl Action {
                 RemoveNodePi,
                 RemoveBinaries,
                 RemoveData,
+                RemoveModel,
             ],
         }
     }
@@ -128,6 +131,10 @@ pub struct Answers {
     temis: Option<(String, Option<SecretValue>)>,
     /// How the sudo moment ended: the system step's row.
     system: Option<Out>,
+    /// The person chose to sign in to Claude when the install finishes (`Run::sign_in`).
+    pub(super) sign_in: bool,
+    /// The model step found everything ready for that sign-in.
+    pub(super) sign_in_ready: Option<&'static Connector>,
 }
 
 /// A run of the installer's steps.
@@ -164,7 +171,7 @@ impl Run<'_> {
     /// Notes `m` as the thing left, unless one that comes first is already noted.
     fn leave(&mut self, m: M) {
         let rank = |m: M| {
-            [M::LeftVault, M::LeftClaude, M::LeftModel]
+            [M::LeftVault, M::LeftModelAgain, M::LeftModel]
                 .iter()
                 .position(|x| *x == m)
                 .unwrap_or(0)
@@ -181,6 +188,7 @@ impl Run<'_> {
     pub fn ask_all(&mut self, steps: &[Step]) {
         if steps.contains(&Step::Binaries)
             && !self.opts.reexec
+            && !self.opts.fresh
             && Release::find(&self.opts.bin).is_ok_and(|r| r.is_newer())
         {
             return;
@@ -262,6 +270,44 @@ impl Run<'_> {
             Step::RemoveNodePi => self.remove_node_pi(),
             Step::RemoveBinaries => self.remove_binaries(),
             Step::RemoveData => self.remove_data(),
+            Step::RemoveModel => {
+                rm(&self.dirs.home.join(".cache/clio-models"))?;
+                Ok(Out::Done(self.t(M::NoteRemoved)))
+            }
+        }
+    }
+
+    /// The Claude sign-in the person chose for the end: after the last step, the screen is
+    /// handed to Claude Code's own `setup-token`, and the token pasted back goes to the vault.
+    /// Whatever goes wrong leaves one thing: choosing the model again.
+    pub fn sign_in(&mut self, steps: &[Step]) {
+        let Some(c) = self.answers.sign_in_ready.take() else {
+            return;
+        };
+        let row = steps
+            .iter()
+            .filter(|s| **s != Step::Mcp)
+            .position(|s| *s == Step::Model);
+        let mut token = None;
+        if !self.failed && self.blocked.is_none() && !self.replaced {
+            let (dirs, copy) = (self.dirs.clone(), self.t(M::ClaudeCopy));
+            self.ui.outside(&mut || {
+                token = crate::cli::connect::claude_sign_in(&dirs, &copy);
+            });
+        }
+        let stored = token.is_some_and(|k| {
+            crate::cli::connect::store_key(&self.dirs, c, &k)
+                .and_then(|()| crate::cli::connect::switch_config(&self.dirs, c, c.default_model))
+                .is_ok()
+        });
+        let st = if stored {
+            St::Done(c.name.into())
+        } else {
+            self.leave(M::LeftModelAgain);
+            St::Warn(self.t(M::NoteLater))
+        };
+        if let Some(i) = row {
+            self.ui.set(i, st);
         }
     }
 
@@ -276,7 +322,17 @@ impl Run<'_> {
     // ---- Clio's own binaries -----------------------------------------------------------------
 
     fn binaries(&mut self, i: usize) -> FRes<Out> {
-        let rel = Release::find(&self.opts.bin)?;
+        // install.sh just put them in place: nothing to look for.
+        if self.opts.fresh {
+            return Ok(Out::Done(self.t(M::NoteThere)));
+        }
+        let rel = match Release::find(&self.opts.bin) {
+            Ok(r) => r,
+            // Looking for a new version is `clio update`'s whole job; for the setup it is one
+            // step of many.
+            Err(e) if self.opts.release_required => return Err(e),
+            Err(_) => return Ok(Out::Warn(self.t(M::NoteNoRelease))),
+        };
         if !rel.is_newer() || self.opts.reexec {
             return Ok(Out::Done(self.t(M::NoteUpToDate)));
         }
@@ -706,6 +762,28 @@ impl Run<'_> {
         let Some(c) = c else {
             return;
         };
+        // A Claude subscription: paste a token now, or sign in when the install finishes.
+        if c.name == "claude" && !self.opts.yes {
+            let q = Ask::Choice {
+                title: self.t(M::ClaudeHowTitle),
+                lines: vec![],
+                options: vec![self.t(M::ClaudeSignIn), self.t(M::ClaudePaste)],
+                default: 0,
+            };
+            match self.ui.ask(q) {
+                Some(Answer::Choice(0)) => {
+                    self.answers.sign_in = true;
+                    self.answers.model = Some((c, None));
+                    return;
+                }
+                Some(Answer::Choice(_)) => {}
+                // Esc: later, said on the last screen.
+                _ => {
+                    self.answers.model = Some((c, None));
+                    return;
+                }
+            }
+        }
         let hint = match c.name {
             "claude" => M::KeyClaudeHint,
             "anthropic-api" => M::KeyApiHint,
@@ -753,9 +831,13 @@ impl Run<'_> {
                 "the Claude bridge (pi-claude-agent-sdk) is missing: clio pi install".into(),
             ));
         }
+        if std::mem::take(&mut self.answers.sign_in) {
+            self.answers.sign_in_ready = Some(c);
+            return Ok(Out::Skip(self.t(M::NoteAtEnd)));
+        }
         let Some(key) = key else {
             self.leave(if c.name == "claude" {
-                M::LeftClaude
+                M::LeftModelAgain
             } else {
                 M::LeftModel
             });
@@ -866,6 +948,9 @@ impl Run<'_> {
             }
             let ok = Command::new(&sc)
                 .args(["--user", "restart", crate::cli::services::UNITS[1]])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success());
             return Ok(if ok {
@@ -913,8 +998,15 @@ impl Run<'_> {
 
     fn remove_timer(&mut self) -> FRes<Out> {
         let sc = self.sys.find("systemctl");
-        crate::cli::services::disable_in(&self.dirs.home, sc.as_deref())?;
-        Ok(Out::Done(self.t(M::NoteRemoved)))
+        let r = crate::cli::services::disable_in(&self.dirs.home, sc.as_deref());
+        // systemd not answering (no user session) is said; the unit files are gone either way.
+        Ok(match r {
+            Ok(_) => Out::Done(self.t(M::NoteRemoved)),
+            Err(e) if crate::cli::services::timer_files_exist(&self.dirs.home) => {
+                return Err(Fail::Other(e));
+            }
+            Err(_) => Out::Warn(self.t(M::NoteRemovedNoSystemd)),
+        })
     }
 
     /// The private Node and Pi's installed versions; Pi's sessions, agent and home folders are
@@ -931,14 +1023,19 @@ impl Run<'_> {
         Ok(Out::Done(self.t(M::NoteRemoved)))
     }
 
+    /// The programs: clio, clio-vault, clio-memory, and the PATH line install.sh added.
     fn remove_binaries(&mut self) -> FRes<Out> {
         for name in fetch::BINARIES {
             rm(&self.opts.bin.join(name))?;
         }
+        rm(&self.dirs.home.join(".local/bin/clio-memory"))?;
         // What the installer noted about the binaries goes with them.
         rm(&super::version_file(&self.dirs))?;
         rm(&crate::cli::update::cache(&self.dirs))?;
-        Ok(Out::Done(self.f(M::NoteKept, &["clio-memory"])))
+        for rc in [".bash_profile", ".profile", ".zshrc"] {
+            unpath(&self.dirs.home.join(rc))?;
+        }
+        Ok(Out::Done(self.t(M::NoteRemoved)))
     }
 
     fn remove_data(&mut self) -> FRes<Out> {
@@ -985,6 +1082,31 @@ fn as_root(sudo: Option<&Path>, c: &[String], input: Option<&str>) -> bool {
         let _ = std::io::Write::write_all(&mut i, text.as_bytes());
     }
     child.wait().is_ok_and(|s| s.success())
+}
+
+/// The line install.sh adds to a profile, after its mark.
+const PATH_MARK: &str = "# Clio: ~/.local/bin on the PATH";
+const PATH_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
+
+/// Takes install.sh's PATH line (its mark, the line, and the blank line it put before them) out
+/// of `rc`; the rest of the file stays as it was.
+fn unpath(rc: &Path) -> FRes<()> {
+    let Ok(text) = std::fs::read_to_string(rc) else {
+        return Ok(());
+    };
+    let added = format!("\n{PATH_MARK}\n{PATH_LINE}\n");
+    let mut out = text.replace(&added, "");
+    if out == text {
+        out = text.replace(&format!("{PATH_MARK}\n{PATH_LINE}\n"), "");
+    }
+    if out == text {
+        return Ok(());
+    }
+    // Only the PATH line was there: install.sh made the file, so it goes.
+    if out.trim().is_empty() {
+        return rm(rc);
+    }
+    std::fs::write(rc, out).map_err(|e| Fail::Other(crate::cli::io_err(rc, &e)))
 }
 
 /// Removes a file or a folder; one that is not there is fine.

@@ -1581,7 +1581,7 @@ fn connect_claude_trims_stores_and_switches() {
     assert!(o.status.success(), "{out}");
     assert!(!out.contains("sk-ant-oat01-decoy"), "{out}");
     assert!(
-        out.contains("Clio uses your subscription through Claude Code (official). The token comes from: claude setup-token"),
+        out.contains("Clio uses your subscription through Claude Code (official). Paste a token from `claude setup-token`, or press Enter to sign in now."),
         "{out}"
     );
     assert!(
