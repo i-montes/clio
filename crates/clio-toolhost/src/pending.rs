@@ -783,13 +783,15 @@ impl ToolHost {
         (class, reason): (Class, Option<&str>),
         cancel: &dyn Fn() -> bool,
     ) -> Response {
-        if self.review {
+        // Nobody can be asked by a review or a child (S-67, S-73), with or without a window or
+        // bypass: refused, never stored.
+        if self.review || self.writer() {
             return self.refuse_in_review(
                 Some((state, run)),
                 req,
                 &args,
-                "review/aside",
-                crate::REVIEW_CANNOT_ASK,
+                self.rule("aside"),
+                self.cannot_ask(),
             );
         }
         let now = now_ms();
@@ -883,6 +885,7 @@ impl ToolHost {
     ) -> Result<Response, Option<String>> {
         // A session whose judge did not answer acts under neither: it asks (S-72).
         if self.review
+            || self.writer()
             || self.unattended
             || self.is_suspect(&req.session)
             || self.is_unjudged(&req.session)

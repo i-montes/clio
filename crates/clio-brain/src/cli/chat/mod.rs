@@ -12,6 +12,7 @@
 pub mod local;
 pub mod review;
 pub mod run;
+pub mod subagent;
 
 use std::path::PathBuf;
 use std::sync::Arc;

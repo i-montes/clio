@@ -17,6 +17,12 @@
 //!
 //! `--skills D`: Clio's skills folder (`skill_write`, `skill_report`, reading a registered skill).
 //!
+//! `--child read|write` (S-73): a chat's subagent. `read` is a review's service (it implies
+//! `--review`); `write` serves only the file tools and `exec`. Neither sets anything aside, asks
+//! for a secret, or uses the memory's tools (`--memory-data` only gives it the judge); with
+//! `--skills` it reads Clio's registered skills, never writes one. `--subagents`: a chat's
+//! service, which holds the model's `subagent` calls for the brain.
+//!
 //! `--show D` (host mode, repeatable): a folder inside Clio's masked ones that commands see
 //! read-only (a skill draft's stage, for its reviewer).
 //!
@@ -77,6 +83,7 @@ pub fn run_with(
     let (mut secret_state, mut secret_run, mut vault_person) = (None, None, None);
     let mut review = false;
     let mut unattended = false;
+    let (mut child, mut subagents) = (None, false);
     let mut skills = None;
     let mut shows = Vec::new();
     let (mut mcp_config, mut mcp_data, mut mcp_runtime, mut mcp_node) = (None, None, None, None);
@@ -85,6 +92,14 @@ pub fn run_with(
         match a.as_str() {
             "--review" => review = true,
             "--unattended" => unattended = true,
+            "--subagents" => subagents = true,
+            "--child" => {
+                let v = value()?;
+                child = Some(
+                    crate::subagent::Child::parse(&v)
+                        .ok_or_else(|| format!("--child must be read or write, not {v}"))?,
+                );
+            }
             "--skills" => skills = Some(PathBuf::from(value()?)),
             "--show" => shows.push(PathBuf::from(value()?)),
             "--mcp-config" => mcp_config = Some(PathBuf::from(value()?)),
@@ -136,7 +151,8 @@ pub fn run_with(
                 // A review's and a round's commands: only under bwrap (its own pid namespace and
                 // /tmp), never under the systemd launcher, which shares the person's: through
                 // another process's `/proc/<pid>/root` the machine would not be read-only.
-                launcher: (review || unattended).then_some(clio_node::Launcher::Bwrap),
+                launcher: (review || unattended || child == Some(crate::subagent::Child::Read))
+                    .then_some(clio_node::Launcher::Bwrap),
             })
         }
         None if host_state.is_some()
@@ -170,8 +186,20 @@ pub fn run_with(
     if unattended && (review || host.is_none() || cfg.secrets.is_some()) {
         return Err("--unattended is a round's: host mode, not a review, nobody to ask".into());
     }
-    if review && skills.is_some() {
+    // A reader child is a review's service (S-73).
+    let review = review || child == Some(crate::subagent::Child::Read);
+    if review && skills.is_some() && child.is_none() {
         return Err("a review (--review) cannot write skills".into());
+    }
+    if child.is_some() && (unattended || subagents || cfg.secrets.is_some() || mcp_config.is_some())
+    {
+        return Err("a subagent (--child) has no secrets, MCP servers or subagents of its own, and is not a round".into());
+    }
+    if child == Some(crate::subagent::Child::Write) && review {
+        return Err("--child write is not a review".into());
+    }
+    if subagents && (review || unattended) {
+        return Err("--subagents is a chat's".into());
     }
     cfg.mcp = match (mcp_config, mcp_data, mcp_runtime, &host) {
         (None, None, None, _) => None,
@@ -201,6 +229,8 @@ pub fn run_with(
     };
     cfg.review = review;
     cfg.unattended = unattended;
+    cfg.child = child;
+    cfg.subagents = subagents;
     cfg.skills = skills;
     cfg.shows = shows;
     cfg.host = host;

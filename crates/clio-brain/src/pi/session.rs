@@ -60,18 +60,26 @@ pub const HOST_GUARD_TOOLS: [&str; 10] = [
     "skill_manage",
     "mcp_manage",
 ];
-/// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode.
+/// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode. A
+/// reading subagent's too (S-73).
 pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
-pub const PROMPT_NAME: &str = "clio-agent@28";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@28.md");
+/// A writing subagent's tools (`WRITER_TOOL_NAMES`, S-73).
+pub const WRITER_GUARD_TOOLS: [&str; 6] = ["read", "write", "edit", "bash", "find", "ls"];
+/// What a chat registers on top (`CHAT_TOOL_NAMES`, S-73): never a child, a review or a round.
+pub const CHAT_GUARD_TOOLS: [&str; 1] = ["subagent"];
+pub const PROMPT_NAME: &str = "clio-agent@29";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@29.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@12";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@12.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@13";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@13.md");
+/// The prompt of a subagent (S-73), reader or writer.
+pub const SUBAGENT_PROMPT_NAME: &str = "clio-subagent@1";
+pub const SUBAGENT_PROMPT: &str = include_str!("../../../../prompts/system/clio-subagent@1.md");
 /// The prompt of a review (the second agent that checks a piece of work).
 pub const REVIEW_PROMPT_NAME: &str = "clio-reviewer@3";
 pub const REVIEW_PROMPT: &str = include_str!("../../../../prompts/system/clio-reviewer@3.md");
@@ -240,8 +248,35 @@ pub fn review_guard_env(
     Ok(env)
 }
 
-/// Set in Pi's environment for a review.
+/// `guard_env` for a subagent (S-73): its own prompt, and the reduced tool list of a reader
+/// (`CLIO_GUARD_REVIEW=1`) or of a writer (`CLIO_GUARD_WRITER=1`); `host` as its parent. Nobody
+/// answers its questions.
+pub fn child_guard_env(
+    paths: &PiPaths,
+    toolhost: &Toolhost,
+    host: bool,
+    writer: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut env = guard_env_with(
+        paths,
+        toolhost,
+        host,
+        false,
+        (SUBAGENT_PROMPT_NAME, SUBAGENT_PROMPT),
+    )?;
+    env.push((
+        if writer { WRITER_ENV } else { REVIEW_ENV }.into(),
+        "1".into(),
+    ));
+    Ok(env)
+}
+
+/// Set in Pi's environment for a review, and for a reading subagent.
 pub const REVIEW_ENV: &str = "CLIO_GUARD_REVIEW";
+/// Set in Pi's environment for a writing subagent (S-73).
+pub const WRITER_ENV: &str = "CLIO_GUARD_WRITER";
+/// Set in Pi's environment for a chat: it has `subagent` (S-73).
+pub const SUBAGENTS_ENV: &str = "CLIO_GUARD_SUBAGENTS";
 /// Set in Pi's environment for a host-mode session.
 pub const HOST_ENV: &str = "CLIO_GUARD_HOST";
 /// Set in Pi's environment when a person answers the guard's dialogs.
@@ -271,6 +306,10 @@ pub struct ToolhostOpts<'a> {
     pub show: Option<&'a Path>,
     /// Host mode, a chat: the MCP servers (S-70), `clio toolhost --mcp-*`.
     pub mcp: Option<McpOpts<'a>>,
+    /// A chat's subagent (`clio toolhost --child read|write`, S-73).
+    pub child: Option<clio_toolhost::subagent::Child>,
+    /// A chat: it holds the model's `subagent` calls (`clio toolhost --subagents`, S-73).
+    pub subagents: bool,
 }
 
 /// The `--mcp-*` options of `clio toolhost`: Clio's folders, and the Node Pi runs with.
@@ -334,6 +373,8 @@ impl Toolhost {
             skills,
             show,
             mcp,
+            child,
+            subagents,
         } = opts;
         // Units a `clio` killed before it could stop them do not run forever as the person.
         // `CLIO_JAIL=off` has no commands: no launcher, and systemd is not asked either.
@@ -412,6 +453,18 @@ impl Toolhost {
         }
         if let Some(s) = show {
             cmd.arg("--show").arg(s);
+        }
+        match child {
+            Some(clio_toolhost::subagent::Child::Read) => {
+                cmd.args(["--child", "read"]);
+            }
+            Some(clio_toolhost::subagent::Child::Write) => {
+                cmd.args(["--child", "write"]);
+            }
+            None => {}
+        }
+        if subagents {
+            cmd.arg("--subagents");
         }
         if let Some(m) = mcp {
             cmd.arg("--mcp-config")
@@ -543,6 +596,16 @@ mod tests {
             assert!(review.contains(&format!("\"{t}\"")), "{t}");
         }
         assert_eq!(review.matches('"').count(), REVIEW_GUARD_TOOLS.len() * 2);
+        for (list, want) in [
+            ("export const WRITER_TOOL_NAMES", &WRITER_GUARD_TOOLS[..]),
+            ("export const CHAT_TOOL_NAMES", &CHAT_GUARD_TOOLS[..]),
+        ] {
+            let line = index.lines().find(|l| l.contains(list)).unwrap();
+            for t in want {
+                assert!(line.contains(&format!("\"{t}\"")), "{t}");
+            }
+            assert_eq!(line.matches('"').count(), want.len() * 2);
+        }
     }
 
     #[test]
@@ -558,8 +621,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 28\n"));
-        assert!(HOST_PROMPT.starts_with("version: 12\n"));
+        assert!(PROMPT.starts_with("version: 29\n"));
+        assert!(HOST_PROMPT.starts_with("version: 13\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -597,6 +660,43 @@ mod tests {
             let without = format!("{}{}", &new[..start + 1], &new[end + 1..]);
             let first = |t: &str| t.split_once('\n').map(|(_, r)| r.to_owned()).unwrap();
             assert_eq!(first(&without), first(&was));
+        }
+    }
+
+    // S-73: `clio-agent@29` and `clio-host@13` are `@28` and `@12` plus one Subagents section,
+    // nothing else changed; the subagent's own prompt names its tools and none it lacks.
+    #[test]
+    fn the_new_prompts_only_add_a_subagents_section() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was) in [
+            (PROMPT, old("clio-agent@28.md")),
+            (HOST_PROMPT, old("clio-host@12.md")),
+        ] {
+            let start = new.find("\nSubagents\n").expect("a Subagents section");
+            let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
+            let without = format!("{}{}", &new[..start + 1], &new[end + 1..]);
+            let first = |t: &str| t.split_once('\n').map(|(_, r)| r.to_owned()).unwrap();
+            assert_eq!(first(&without), first(&was));
+            assert!(new[start..end].contains("`subagent`"));
+        }
+        assert!(SUBAGENT_PROMPT.starts_with("version: 1\n"));
+        for t in WRITER_GUARD_TOOLS {
+            assert!(SUBAGENT_PROMPT.contains(&format!("`{t}`")), "{t}");
+        }
+        for t in [
+            "memory_",
+            "ask_person",
+            "request_secret",
+            "skill_write",
+            "`subagent`",
+        ] {
+            assert!(!SUBAGENT_PROMPT.contains(t), "{t}");
         }
     }
 
@@ -726,9 +826,13 @@ mod tests {
             .unwrap()
         };
         for (new, was, lines) in [
-            (PROMPT, old("clio-agent@27.md"), &[0, 13, 23][..]),
             (
-                HOST_PROMPT,
+                old("clio-agent@28.md").as_str(),
+                old("clio-agent@27.md"),
+                &[0, 13, 23][..],
+            ),
+            (
+                old("clio-host@12.md").as_str(),
                 old("clio-host@11.md"),
                 &[0, 14, 22, 23, 33, 44, 48, 52, 53][..],
             ),
@@ -743,6 +847,7 @@ mod tests {
             assert!(!new.contains("clio approve") && !new.contains("/bypass"));
         }
         assert!(HOST_PROMPT.contains("approvals: bypass on"));
+        // Held by every later version too.
         assert!(HOST_PROMPT.contains("never say you are waiting for it"));
         for p in [PROMPT, HOST_PROMPT] {
             assert!(p.contains("nor to turn bypass on (that is theirs alone)"));

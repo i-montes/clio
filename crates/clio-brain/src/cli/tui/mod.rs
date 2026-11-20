@@ -26,6 +26,7 @@ pub mod review;
 pub mod sanitize;
 pub mod sessions;
 pub mod status;
+pub mod subagents;
 pub mod text;
 pub mod theme;
 pub mod todo;

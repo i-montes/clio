@@ -477,6 +477,21 @@ pub fn undo_lines(dirs: &Dirs, id: &str, force: bool) -> Res<(bool, Vec<String>)
     // A host session changed the machine itself: its own journal says what to give back.
     let run = runs::resolve(dirs, id)?;
     if run.meta().is_ok_and(|m| m.host) {
+        // A writing subagent's changes are joined to the run's when it ends (S-73); one that
+        // Clio could not join (it stopped first) is joined now.
+        // shortcut: joined after the parent's later changes, so undone before them; fine while a
+        // child's and its parent's later edits touch different files.
+        let mut children: Vec<(u64, std::path::PathBuf)> =
+            std::fs::read_dir(run.path.join("subagents"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| Some((e.file_name().to_str()?.parse().ok()?, e.path())))
+                .collect();
+        children.sort();
+        for (_, dir) in children {
+            clio_toolhost::host::fold_journal(&dir.join("toolhost"), &run.path.join("toolhost"))?;
+        }
         let said = clio_toolhost::host::undo(&run.path.join("toolhost"))?;
         if said.is_empty() {
             return Ok((

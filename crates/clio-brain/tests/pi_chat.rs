@@ -2003,6 +2003,225 @@ fn quitting_or_a_new_session_during_a_review_leaves_no_reviewer_behind() {
     }
 }
 
+/// A conversation whose model hands `tasks` to subagents, the children's steps (`children`, in
+/// the order the fake model is asked), and the model's answer once they reported (`after`).
+fn subagent_world(tasks: Value, children: &[Value], after: &str) -> World {
+    let mut script = vec![
+        json!({"tool_calls": [{"name": "subagent", "arguments": {"reason": "repartir", "tasks": tasks}}]}),
+    ];
+    script.extend(children.iter().cloned());
+    script.push(json!({"text": after}));
+    World::new_with(&Value::Array(script).to_string(), &["--log-body"])
+}
+
+/// The run folder of the conversation (the one with a tool host).
+fn the_run(w: &World) -> PathBuf {
+    std::fs::read_dir(w.home().join(".local/share/clio/runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.join("toolhost").is_dir())
+        .unwrap()
+}
+
+fn tools_of(r: &Value) -> Vec<String> {
+    let mut t: Vec<String> = r["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_owned())
+        .collect();
+    t.sort_unstable();
+    t
+}
+
+// S-73: a reading subagent is a second jailed agent with its own prompt, the reader's tools and
+// a clean context; its report comes back cleaned, judged and wrapped as a subagent summary, with
+// the conversation marked first; the person sees its row, the end's note, `/usage` and
+// `/subagents`; nothing is left running.
+#[test]
+fn a_reading_subagent_reports_back_as_data_and_the_conversation_is_marked_first() {
+    if can_run("subagents", true).is_none() {
+        return;
+    }
+    let w = subagent_world(
+        json!([{"name": "look", "task": "Say what app.py prints.", "mode": "read"}]),
+        &[
+            json!({"tool_calls": [{"name": "bash", "arguments": {"reason": "leer", "command": "cat app.py"}}]}),
+            json!({"text": "app.py prints hola"}),
+        ],
+        "the child says it prints hola",
+    );
+    let v = w.pty_with(
+        "subagents",
+        json!({"ask": "mira app.py", "answer": "the child says it prints hola",
+            "note": "1 subagent: 1 done", "usage": "subagents     1 launched (1 read, 0 write)",
+            "listed": "look · read"}),
+        &[],
+        &decoy(),
+    );
+    ok(&v, &["opened", "answered", "note", "usage", "listed"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    w.assert_key_nowhere();
+    let reqs = w._provider.requests();
+    let is_child = |r: &&Value| r["body"].to_string().contains("You are a subagent of Clio");
+    let child: Vec<&Value> = reqs.iter().filter(is_child).collect();
+    let convo: Vec<&Value> = reqs.iter().filter(|r| !is_child(r)).collect();
+    assert_eq!((child.len(), convo.len()), (2, 2), "{reqs:#?}");
+    for r in &child {
+        assert_eq!(tools_of(r), ["bash", "find", "ls", "read"], "{r:#}");
+        let body = r["body"].to_string();
+        assert!(body.contains("Say what app.py prints."), "{body}");
+        // Never the conversation, the identity or the memory: only its task.
+        for absent in [
+            IDENTITY_HEADING.trim_end(),
+            "La persona ya se presentó",
+            "mira app.py",
+        ] {
+            assert!(!body.contains(absent), "{absent}: {body}");
+        }
+    }
+    // The conversation has the tool; no child does.
+    assert!(tools_of(convo[0]).contains(&"subagent".to_owned()));
+    let system = |r: &Value| {
+        r["body"]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // The same prompt in the turn; the conversation was marked by the report (the tool host
+    // marks it before it hands the report over: `clio-toolhost/tests/subagent.rs`).
+    assert_eq!(system(convo[1]), system(convo[0]));
+    let last = convo[1]["body"].to_string();
+    assert!(
+        last.contains("UNTRUSTED-DATA subagent-summary")
+            && last.contains("The report of subagent «look»")
+            && last.contains("app.py prints hola")
+            && last.contains("1 subagent: 1 done"),
+        "{last}"
+    );
+    let run = the_run(&w);
+    let dir = run.join("subagents/1");
+    let kept: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("subagent.json")).unwrap()).unwrap();
+    assert_eq!(
+        (&kept["state"], &kept["mode"], &kept["name"]),
+        (&json!("done"), &json!("read"), &json!("look")),
+        "{kept:#}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("report.txt")).unwrap(),
+        "app.py prints hola"
+    );
+    // What it ran is in its own effect log; it read a command's output, so it ended marked.
+    let effects = std::fs::read_to_string(dir.join("toolhost/effects.jsonl")).unwrap();
+    assert!(effects.contains("exit_code"), "{effects}");
+    assert!(dir.join("toolhost/tainted.json").is_file());
+    let marks = std::fs::read_to_string(run.join("toolhost/tainted.json")).unwrap();
+    assert!(marks.contains("subagent"), "{marks}");
+}
+
+// S-73: `Esc` while a subagent runs a long command stops the call: the child's Pi, its tool host
+// and its command are gone, and `/subagents` says it was stopped.
+#[test]
+fn esc_stops_a_running_subagent_and_leaves_no_process() {
+    if can_run("subagents_esc", true).is_none() {
+        return;
+    }
+    let w = subagent_world(
+        json!([{"name": "slow", "task": "Wait.", "mode": "read"}]),
+        &[
+            json!({"tool_calls": [{"name": "bash", "arguments": {"reason": "esperar", "command": "sleep 97"}}]}),
+        ],
+        "never asked",
+    );
+    let v = w.pty_with("subagents_esc", json!({}), &[], &decoy());
+    ok(
+        &v,
+        &[
+            "opened",
+            "running",
+            "child_up",
+            "command_ran",
+            "idle_again",
+            "child_gone",
+            "command_gone",
+            "listed_stopped",
+        ],
+    );
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+}
+
+// S-73: in host mode a writing subagent writes where the session works, under the session's own
+// rules; what it changed is the run's: the action log shows it as the child's and `clio undo`
+// takes it back with the parent's own change, in order.
+#[test]
+fn a_writing_subagents_change_is_the_runs_and_undo_takes_it_back() {
+    if can_run("subagents_write", true).is_none() {
+        return;
+    }
+    let w = World::new_with(
+        &json!([
+            {"tool_calls": [{"name": "write", "arguments": {"reason": "antes", "path": "first.txt", "content": "uno\n"}}]},
+            {"tool_calls": [{"name": "subagent", "arguments": {"reason": "repartir", "tasks": [{"name": "maker", "task": "Write made.txt.", "mode": "write"}]}}]},
+            {"tool_calls": [{"name": "write", "arguments": {"reason": "hacer", "path": "made.txt", "content": "hecho\n"}}]},
+            {"text": "wrote made.txt"},
+            {"text": "the child wrote made.txt"},
+        ])
+        .to_string(),
+        &["--log-body"],
+    );
+    let cfg_path = w.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["mode"] = json!("host");
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    let v = w.pty_with(
+        "subagents",
+        json!({"ask": "haz made.txt", "answer": "the child wrote made.txt",
+            "note": "1 subagent: 1 done", "usage": "subagents     1 launched (0 read, 1 write)",
+            "listed": "maker · write"}),
+        &[("CLIO_JAIL", "off")],
+        &decoy(),
+    );
+    ok(&v, &["opened", "answered", "note", "usage", "listed"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    assert_eq!(v["procs_after_quit"], json!(0), "{v:#}");
+    let reqs = w._provider.requests();
+    let child: Vec<&Value> = reqs
+        .iter()
+        .filter(|r| r["body"].to_string().contains("You are a subagent of Clio"))
+        .collect();
+    assert_eq!(child.len(), 2, "{reqs:#?}");
+    assert_eq!(
+        tools_of(child[0]),
+        ["bash", "edit", "find", "ls", "read", "write"]
+    );
+    let (first, made) = (w.home().join("first.txt"), w.home().join("made.txt"));
+    assert_eq!(std::fs::read_to_string(&made).unwrap(), "hecho\n");
+    let run = the_run(&w);
+    let id = run.file_name().unwrap().to_str().unwrap().to_owned();
+    // One journal for the run: the child's was joined to it.
+    let journal = std::fs::read_to_string(run.join("toolhost/changes.jsonl")).unwrap();
+    assert_eq!(journal.lines().count(), 2, "{journal}");
+    assert!(
+        run.join("subagents/1/toolhost/changes.folded.jsonl")
+            .is_file()
+    );
+    let o = w.clio(&["actions", "--run", &id]).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        text.contains("subagent 1 · ") && text.contains("made.txt"),
+        "{text}"
+    );
+    let o = w.clio(&["undo", &id]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!made.exists() && !first.exists());
+    w.assert_key_nowhere();
+}
+
 /// What `clio approve` and `/mcp confirm` leave of an MCP server that is on (S-70): its approved
 /// manifest, its record and its confirmed tools.
 fn mcp_installed(w: &World, name: &str) {

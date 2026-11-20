@@ -38,8 +38,8 @@ use clio_brain::pi::level::{self, Assessor, run_assessed_with};
 use clio_brain::pi::preprompt::{APPROVALS_ASK, GRANT_ASK, MANAGE_ASK, PrePrompt};
 use clio_brain::pi::rpc::{Cancel, Event, RunSummary};
 use clio_brain::pi::session::{
-    GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, Toolhost, ToolhostOpts, ensure_guard,
-    guard_env, round_guard_env,
+    CHAT_GUARD_TOOLS, GUARD_TOOLS, HOST_GUARD_TOOLS, HostOpts, McpOpts, SUBAGENTS_ENV, Toolhost,
+    ToolhostOpts, ensure_guard, guard_env, round_guard_env,
 };
 use clio_brain::pi::sessions::{SessionInfo, list_sessions};
 use clio_gateway::Source;
@@ -347,6 +347,9 @@ impl SessionSource for LocalSource {
                     runtime: runtime_dir,
                     node: &node.path,
                 }),
+                child: None,
+                // A conversation's model hands tasks to subagents (S-73).
+                subagents: self.presentation && !self.round,
             },
         )?;
         // 3. Pi
@@ -355,12 +358,21 @@ impl SessionSource for LocalSource {
             guard_tools: GUARD_TOOLS
                 .iter()
                 .chain(HOST_GUARD_TOOLS.iter().filter(|_| host))
+                .chain(
+                    CHAT_GUARD_TOOLS
+                        .iter()
+                        .filter(|_| self.presentation && !self.round),
+                )
                 .map(|t| (*t).to_owned())
                 .collect(),
             extra_env: if self.round {
                 round_guard_env(&paths, &toolhost)?
             } else {
-                guard_env(&paths, &toolhost, host, self.presentation)?
+                let mut env = guard_env(&paths, &toolhost, host, self.presentation)?;
+                if self.presentation {
+                    env.push((SUBAGENTS_ENV.into(), "1".into()));
+                }
+                env
             },
             provider: provider_of(d, &cfg),
             api_key: Some(key),
@@ -478,6 +490,7 @@ impl SessionSource for LocalSource {
             skill_handed: Mutex::default(),
             round_news: Mutex::new(round_news),
             round: self.round,
+            subagents: self.presentation && !self.round,
             // Host mode, or a chat (copy mode): what waits for the person (a secret request).
             host: (host || self.presentation).then(|| HostSide {
                 dirs: self.dirs.clone(),
@@ -612,6 +625,8 @@ struct ChatSession {
     round_news: Mutex<Vec<String>>,
     /// A round's session (`LocalSource::round`).
     round: bool,
+    /// A chat: its model has `subagent` (S-73).
+    subagents: bool,
 }
 
 /// Host mode, or a chat: what the session set aside or asked for, and what the person answered.
@@ -1199,7 +1214,7 @@ fn own_ask(acted: bool, answered: bool) -> &'static str {
     }
 }
 
-fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -1326,12 +1341,6 @@ impl Session for ChatSession {
             start_ms: crate::cli::now_ms(),
             ..Default::default()
         };
-        let mut watch = |e: &Event| {
-            if let Event::ToolStart { id, name, args } = e {
-                turn.calls.push((id.clone(), name.clone(), args.clone()));
-            }
-            on_event(e);
-        };
         // Whether bypass acts for this session goes in front of the message, read by the brain.
         self.pre.set_bypass(self.host.as_ref().is_some_and(|h| {
             !self.suspect()
@@ -1339,16 +1348,55 @@ impl Session for ChatSession {
                 && !pending::unjudged_run(&h.dirs, &h.run)
                 && pending::bypass_now(&h.dirs).is_some()
         }));
-        let r = run_assessed_with(
-            &self.pi.client,
-            &self.assessor,
-            &self.pre,
-            text,
-            &given,
+        // The model's `subagent` calls run on threads of this scope: every child has stopped,
+        // and its Pi and tool host are gone, before the turn returns (S-73).
+        let subs = super::subagent::Turn::new(super::subagent::Ctx {
+            dirs: &self.dirs,
+            run: &self.id,
+            run_dir: &self.run_dir,
+            work: &self.work,
+            host: self.host_mode,
+            socket: &self.toolhost.socket,
+            token: &self.toolhost.said_token,
+            session: &self.pi.session_id,
+            taint_file: &self.taint_file,
+            day: self.day.clone(),
+            model: locked(&self.model).clone(),
+            client: &self.pi.client,
             cancel,
-            &mut guard,
-            &mut watch,
-        );
+        });
+        let r = std::thread::scope(|sc| {
+            let mut watch = |e: &Event| {
+                match e {
+                    Event::ToolStart { id, name, args } => {
+                        turn.calls.push((id.clone(), name.clone(), args.clone()));
+                        if name == "subagent" && self.subagents {
+                            let (subs, id) = (&subs, id.clone());
+                            sc.spawn(move || subs.run_call(&id));
+                        }
+                    }
+                    Event::ToolEnd { id, name, .. } if name == "subagent" => subs.tool_ended(id),
+                    _ => {}
+                }
+                on_event(e);
+            };
+            let r = run_assessed_with(
+                &self.pi.client,
+                &self.assessor,
+                &self.pre,
+                text,
+                &given,
+                cancel,
+                &mut guard,
+                &mut watch,
+            );
+            subs.finish();
+            r
+        });
+        // How a call stood when it was stopped, once its children are gone: still the chat's.
+        for e in self.pi.client.take_injected() {
+            on_event(&e);
+        }
         turn.end_ms = crate::cli::now_ms();
         if let Ok(s) = &r {
             turn.answer.clone_from(&s.text);

@@ -314,6 +314,52 @@ pub fn undo(run_dir: &Path) -> Result<Vec<String>, String> {
     Ok(said)
 }
 
+/// A writing subagent's changes become its parent's (S-73): the child's journal (`from`, its
+/// tool host's run folder) is appended to the parent's (`into`) in order, each line renumbered
+/// after the parent's last and its copy moved to the parent's `backups/` under the new number, so
+/// `undo` takes the run's changes back as one sequence and no two copies share a number. The
+/// child's journal is then set aside as `changes.folded.jsonl`. The parent writes nothing while
+/// its child runs (the call waits), so nothing is appended between. Nothing to fold: `Ok(0)`.
+pub fn fold_journal(from: &Path, into: &Path) -> Result<usize, String> {
+    let journal = from.join("changes.jsonl");
+    let text = match fs::read_to_string(&journal) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("{}: {e}", journal.display())),
+    };
+    let log = into.join("changes.jsonl");
+    let first = fs::read_to_string(&log).map_or(0, |t| t.lines().count() as u64);
+    let mut lines = String::new();
+    let mut n = 0;
+    for (line, seq) in text.lines().zip(first..) {
+        let mut c: Change =
+            serde_json::from_str(line).map_err(|e| format!("{}: {e}", journal.display()))?;
+        c.seq = seq;
+        // shortcut: a crash between moving a copy and appending its line leaves that copy
+        // unnamed; the window is a rename, and the child's own line still names nothing.
+        if let Some(b) = c.backup.take() {
+            let to = into.join("backups").join(seq.to_string());
+            private_dir(&into.join("backups")).map_err(|e| e.to_string())?;
+            fs::rename(&b, &to).map_err(|e| format!("{}: {e}", b.display()))?;
+            c.backup = Some(to);
+        }
+        lines.push_str(&serde_json::to_string(&c).map_err(|e| e.to_string())?);
+        lines.push('\n');
+        n += 1;
+    }
+    private_dir(into).map_err(|e| e.to_string())?;
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log)
+        .and_then(|mut f| f.write_all(lines.as_bytes()))
+        .map_err(|e| format!("{}: {e}", log.display()))?;
+    fs::rename(&journal, from.join("changes.folded.jsonl"))
+        .map_err(|e| format!("{}: {e}", journal.display()))?;
+    Ok(n)
+}
+
 /// Gives `path` the content of `backup` in place (no `chmod` before it: `fs::copy` truncates,
 /// then sets the mode, and on a file of another owner that `chmod` fails once it is empty), then
 /// its saved `mode` if it differs. A mode that cannot be set comes back as the warning; the

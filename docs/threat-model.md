@@ -199,6 +199,17 @@ A review (`/review`, or the judge's after a turn that changed something) starts 
 
 **What it does not defend:** it is not an injection guard. It is another model of the same family reading the same text: what fooled the author can fool it, and a hostile subject can steer its verdict. A `passes` proves nothing to the guards: the tool host, the list, the judge and the marks apply to the next turn exactly as before. Its findings can carry text the reviewer read from outside; they arrive as data and mark the session, as any other outside text. In host mode its `bash` runs as the person on the real machine: what it can still write is `/tmp` (shared with the person's other programs), and what any user can reach without writing a file (a local socket or service it can talk to, such as a user D-Bus or a database on a Unix socket); `sudo` is refused by its name and, with the `Systemd` launcher, has no new privileges to gain. The `sudo` check is a word match: a command that hides the word is caught only by the launcher (`NoNewPrivileges` with `Systemd`, `no_new_privs` with `Bwrap`). In copy mode its `/tmp` lives for one command only. Read-only means a check that must build or write next to the code cannot run there: it is `could not check`.
 
+### Subagents: children that do less than their parent (S-73)
+
+A chat's model can hand tasks to child agents with `subagent` and wait for their reports. Each child is started like the reviewer (its own Pi, session, run folder `runs/<id>/subagents/<n>/` and tool host, its prompt `clio-subagent@1`, only its task as context), so it adds no way in or out that its parent lacks.
+
+- **Less, never more**: a reader's tool host is a review's (`--child read`); a writer's (`--child write`) adds `write` and `edit` where the session works, under the session's rules. What would wait for the person is refused in both, with or without a window or bypass; no memory, secret, `ask_person`, skill or service written, MCP, managing, background jobs or child of its own.
+- **Marks both ways**: it starts with its parent's marks; its report is outside text, judged and wrapped by the parent's tool host after the conversation is marked; a child the judge flags ends and flags the conversation.
+- **Bounded**: at most 8 tasks a call, one writer alone, `subagent.max_per_hour` a conversation, per-child caps of steps, time and cost, the session's day budget. `Esc` and the turn's end stop every child.
+- **Undone with the run**: a writer's journal joins the run's, so `clio undo` covers it.
+
+**What it does not defend:** a reader's report steers the parent like any outside text the judge did not flag. A writer changes the person's files (host mode) with the session's own rules: what those let the session do without asking, they let the child do too.
+
 ### Skills: instructions that persist (S-68)
 
 A skill is text the model follows in every later session, plus scripts it runs: the same kind of risk as a persistent memory, with commands attached. So the way in is narrow and the way out is the same as any command:

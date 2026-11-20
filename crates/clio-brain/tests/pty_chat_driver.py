@@ -3,7 +3,7 @@ prints a JSON verdict. Stdlib only. Linux only (it reads /proc).
 
 usage: python3 -I pty_chat_driver.py SCENARIO CONFIG_JSON
 SCENARIO: new_chat | abort | steer | reopen | sigkill | hangup | sigterm | one_turn | reopen_turn |
-    review | approve | …
+    review | approve | subagents | subagents_esc | …
 
 The terminal stream is a diff and is not parsed. In a debug build `clio` writes the text of every
 frame to the file named by CLIO_TUI_SCREEN_DUMP: that is what the waits read. Every wait is
@@ -379,6 +379,75 @@ elif scenario in ("review_quit", "review_new"):
         out["gone_after_new"] = gone(20)
         if not out["gone_after_new"]:
             out["left"] = pi_procs()
+    send(fd, CTRL_C)
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "subagents":
+    # A turn whose model hands tasks to subagents (cfg "ask" / "answer"), the end's note (cfg
+    # "note"), the line in `/usage` (cfg "usage") and `/subagents` (cfg "listed"); then leave.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, cfg["ask"], cfg["answer"], 120)
+    out["note"] = cfg["note"] in screen()
+    for cmd, key in (("/usage", "usage"), ("/subagents", "listed")):
+        type_text(fd, cmd)
+        send(fd, ENTER)
+        out[key] = wait_screen(fd, cfg[key], 10)
+        if not out[key]:
+            out[key + "_screen"] = screen()
+        send(fd, ESC)
+        time.sleep(0.3)
+    if not out["answered"] or not out["note"]:
+        out["screen"] = screen()
+    time.sleep(0.5)
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "subagents_esc":
+    # A subagent whose model runs a long command (`sleep 97`); `Esc` while it runs: the turn
+    # stops, and the child's Pi, tool host and command are gone with it.
+    out["opened"] = open_new_chat(fd)
+    type_text(fd, "mira app.py")
+    send(fd, ENTER)
+    out["running"] = wait_screen(fd, "1 subagent running", 60)
+    # The conversation's tool host and Pi, and the child's (copy mode adds the jail's own
+    # processes around each Pi: only tool hosts and Pis are counted).
+    def agents():
+        return sum(1 for _, c in pi_procs() if " toolhost " in c or c.startswith("pi "))
+
+    def sleeping():
+        out = []
+        for d in os.listdir("/proc"):
+            try:
+                cmd = open(f"/proc/{d}/cmdline", "rb").read().replace(b"\0", b" ") if d.isdigit() else b""
+                # The command, however it was started; never the fake model, whose script names it.
+                if b"sleep 97" in cmd and b"python" not in cmd:
+                    out.append(cmd.decode("utf8", "replace")[:90])
+            except OSError:
+                pass
+        return out
+
+    end = time.time() + 30
+    while time.time() < end and (agents() < 4 or not sleeping()):
+        pump(fd)
+    out["child_up"] = agents() == 4
+    out["command_ran"] = bool(sleeping())
+    send(fd, ESC)
+    out["idle_again"] = idle(fd, 60)
+    end = time.time() + 20
+    while time.time() < end and agents() > 2:
+        pump(fd)
+    out["child_gone"] = agents() == 2
+    if not out["child_gone"]:
+        out["left"] = pi_procs()
+    out["command_gone"] = not sleeping()
+    out["sleeping"] = sleeping()
+    type_text(fd, "/subagents")
+    send(fd, ENTER)
+    out["listed_stopped"] = wait_screen(fd, "stopped", 10)
+    if not out["listed_stopped"]:
+        out["screen"] = screen()
+    send(fd, ESC)
+    time.sleep(0.5)
     send(fd, CTRL_C)
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
