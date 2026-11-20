@@ -106,6 +106,24 @@ pub(crate) fn notice(root: &Path, name: &str, text: &str) {
     }
 }
 
+/// `notice`, unless the same one was given already (seen or not).
+pub(crate) fn notice_once(root: &Path, name: &str, text: &str) {
+    let n = Notice {
+        at_ms: now_ms(),
+        name: name.into(),
+        text: text.into(),
+        seen: false,
+    };
+    let r = with_notices(root, |all| {
+        if !all.iter().any(|o| o.name == n.name && o.text == n.text) {
+            all.push(n);
+        }
+    });
+    if let Err(e) = r {
+        eprintln!("clio services: a notice was lost: {e}");
+    }
+}
+
 fn notice_line(n: &Notice, word: &str) -> String {
     super::tui::sanitize::line(&format!("{word} «{}»: {}", n.name, n.text))
 }
@@ -1549,6 +1567,52 @@ pub(crate) mod tests {
         let p = set_aside(&d, &bad, &[]);
         assert!(register_approved(&d, &p).unwrap_err().contains("writes"));
         assert!(skills::record(&root(&d), "fourth").is_none());
+    }
+
+    // S-70, at the start itself: `"*"` is only an MCP server's, and only with nothing to take
+    // there (a read of the home is refused; Clio's own Chromium is not).
+    #[test]
+    fn any_site_is_checked_again_when_a_program_starts() {
+        let Some(jail) = bwrap() else { return };
+        let t = tmp();
+        let d = dirs_in(t.path());
+        let r = runner(&d, &jail, t.path());
+        let any = vec![clio_toolhost::mcp::ANY_HOST.to_owned()];
+        let browser = clio_toolhost::catalog::browser_dir(&super::super::mcp_servers::root(&d))
+            .display()
+            .to_string();
+        fs::write(d.home.join("notes"), "the person's").unwrap();
+        let home_read = d.home.join("notes").display().to_string();
+        let prepare = |tool: &str, reads: &[String]| {
+            let own = t.path().join("own");
+            mkdir_private(&own).unwrap();
+            r.prepare(&Spec {
+                tool,
+                name: "x",
+                command: "true",
+                stdin: false,
+                cwd: own.clone(),
+                home: own.clone(),
+                network: &any,
+                secrets: &[],
+                reads,
+                writes: &[],
+                own: vec![own],
+                shows: vec![],
+                env: vec![],
+                cpu_percent: 50,
+                memory_mb: 512,
+                seconds: 10,
+            })
+        };
+        let why = |x: Res<Prepared>| match x {
+            Err(e) => e,
+            Ok(_) => String::from("ready"),
+        };
+        assert!(why(prepare("service", &[])).contains("only an MCP server"));
+        let w = why(prepare("mcp", &[home_read]));
+        assert!(w.contains("reads nothing but Clio's browser"), "{w}");
+        assert_eq!(why(prepare("mcp", &[browser])), "ready");
     }
 
     // S-69, with `bwrap`: an ok run, an `attention` run (a notice, not a failure), three failures

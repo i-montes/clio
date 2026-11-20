@@ -321,14 +321,13 @@ fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>, public:
 }
 
 /// The `host:port` a tunnel to `target` may open: one of `allow`, or with `"*"` in a service's
-/// proxy (`public`: only checked public addresses are connected to) any host on 443 or 80.
+/// proxy (`public`: only checked public addresses are connected to) any host on 443.
 fn allowed<'a>(allow: &'a [String], target: &'a str, public: bool) -> Option<&'a str> {
     if let Some(a) = allow.iter().find(|a| *a == target) {
         return Some(a);
     }
     let port = target.rsplit_once(':').map(|(_, p)| p);
-    (public && allow.iter().any(|a| a == "*") && matches!(port, Some("443" | "80")))
-        .then_some(target)
+    (public && allow.iter().any(|a| a == "*") && port == Some("443")).then_some(target)
 }
 
 fn reply_open(c: &mut UnixStream) {
@@ -688,20 +687,21 @@ mod tests {
         assert_eq!(lookups.load(Ordering::SeqCst), 7);
     }
 
-    // S-70: `"*"` opens any host, but only on 443 and 80 and only in a service's proxy, whose
+    // S-70: `"*"` opens any host, but only on 443 and only in a service's proxy, whose
     // connections go only to checked public addresses (above); a plain list stays exact.
     #[test]
-    fn any_host_is_only_ports_443_and_80_of_a_services_proxy() {
+    fn any_host_is_only_port_443_of_a_services_proxy() {
         let any = vec!["*".to_owned()];
         assert_eq!(
             allowed(&any, "example.com:443", true),
             Some("example.com:443")
         );
-        assert_eq!(
-            allowed(&any, "example.com:80", true),
-            Some("example.com:80")
-        );
-        for t in ["example.com:22", "example.com:8443", "example.com"] {
+        for t in [
+            "example.com:80",
+            "example.com:22",
+            "example.com:8443",
+            "example.com",
+        ] {
             assert_eq!(allowed(&any, t, true), None, "{t}");
         }
         // Pi's proxy (not `public`) never reads `*`.
@@ -725,6 +725,24 @@ mod tests {
         ] {
             let r = connect_public("x.example.com:443", &to(a), &[]);
             assert!(matches!(r, Err(Refused(_))), "{a}");
+        }
+        // Through the real proxy: no tunnel to the machine, to another port, or a plain request.
+        let t = tempfile::TempDir::new_in("/var/tmp").unwrap();
+        let p = EgressProxy::start_service(t.path(), &any).unwrap();
+        for (ask, want) in [
+            ("CONNECT 127.0.0.1:443 HTTP/1.1", "403"),
+            ("CONNECT localhost:443 HTTP/1.1", "403"),
+            ("CONNECT [::1]:443 HTTP/1.1", "403"),
+            ("CONNECT 169.254.169.254:443 HTTP/1.1", "403"),
+            ("CONNECT example.com:80 HTTP/1.1", "403"),
+            ("GET http://example.com/ HTTP/1.1", "405"),
+        ] {
+            let mut c = UnixStream::connect(p.socket()).unwrap();
+            c.write_all(format!("{ask}\r\nHost: x\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut got = String::new();
+            let _ = c.read_to_string(&mut got);
+            assert!(got.starts_with(&format!("HTTP/1.1 {want}")), "{ask}: {got}");
         }
     }
 

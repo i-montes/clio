@@ -351,7 +351,7 @@ impl Run<'_> {
             return;
         };
         for (e, _) in offer.iter().zip(ticked).filter(|(_, t)| *t) {
-            if e.needs_browser() {
+            if e.browser {
                 match self.browser_packages() {
                     Some(p) => self.answers.packages.extend(p),
                     None => {
@@ -417,10 +417,10 @@ impl Run<'_> {
                 warn.push(later);
                 continue;
             }
-            if e.needs_browser() {
+            if e.browser {
                 let ui = &mut *self.ui;
                 let got = mcp_servers::ensure_browser(&self.dirs, &mut |n| {
-                    Self::progress(ui, i, n, 185_000_000_u64.max(n));
+                    Self::progress(ui, i, n, 210_000_000_u64.max(n));
                 });
                 self.ui.set(i, St::Working(None));
                 if got.is_err() {
@@ -473,25 +473,37 @@ impl Run<'_> {
         if names.is_empty() {
             return Out::Skip(self.t(M::NoteNone));
         }
-        let browser = clio_toolhost::catalog::browser_dir(&root)
-            .display()
-            .to_string();
+        let browser = clio_toolhost::catalog::browser_dir(&root);
         let mut notes = Vec::new();
         for n in &names {
             let Some(m) = clio_toolhost::mcp::current_manifest(&root, n) else {
                 continue;
             };
-            if let Some(e) = clio_toolhost::catalog::entry(n).filter(|e| e.package == m.package)
+            let entry = clio_toolhost::catalog::entry(n).filter(|e| e.package == m.package);
+            if let Some(e) = &entry
                 && fetch::version(&e.version) > fetch::version(&m.version)
             {
                 let note = self.f(M::NoteMcpNewer, &[n, &e.version, n]);
                 self.changes.push(note.clone());
                 notes.push(note);
             }
-            if m.reads.contains(&browser) {
+            // Its Chromium is not the catalog's any more: it starts again with a new yes.
+            if let Some(old) = mcp_servers::browser_read(&self.dirs, &m)
+                && old != browser
+            {
+                let rev = |p: &std::path::Path| {
+                    p.file_name()
+                        .map(|f| f.to_string_lossy().replace("chromium-", ""))
+                        .unwrap_or_default()
+                };
+                let note = self.f(M::NoteMcpBrowser, &[n, &rev(&old), &rev(&browser), n]);
+                self.changes.push(note.clone());
+                notes.push(note);
+            }
+            if mcp_servers::reads_browser(&m, &root) {
                 let ui = &mut *self.ui;
                 if mcp_servers::ensure_browser(&self.dirs, &mut |b| {
-                    Self::progress(ui, i, b, 185_000_000_u64.max(b));
+                    Self::progress(ui, i, b, 210_000_000_u64.max(b));
                 })
                 .is_err()
                 {
@@ -499,6 +511,7 @@ impl Run<'_> {
                 }
             }
         }
+        mcp_servers::prune_browsers(&self.dirs);
         if notes.is_empty() {
             Out::Done(self.t(M::NoteUpToDate))
         } else {
@@ -589,11 +602,7 @@ impl Run<'_> {
         let profile = self.sys.userns_restricted()
             && !self.sys.bwrap_profiled()
             && (bwrap || !self.sys.jail_ready());
-        let pkgs: Vec<String> = bwrap
-            .then(|| "bubblewrap".to_owned())
-            .into_iter()
-            .chain(extra.iter().cloned())
-            .collect();
+        let pkgs: Vec<String> = bwrap.then(|| "bubblewrap".to_owned()).into_iter().collect();
         let pm = self.sys.package_manager(&pkgs);
         let mut cmds: Vec<Vec<String>> = Vec::new();
         if !pkgs.is_empty()
@@ -601,6 +610,15 @@ impl Run<'_> {
         {
             cmds.extend(install.iter().cloned());
         }
+        // The browser's own install, last: an optional server never stops the jail's commands.
+        // Its package list is fresh when bubblewrap's install refreshed it.
+        let browser_cmds: Vec<Vec<String>> = match self.sys.package_manager(&extra) {
+            Some((_, c)) if !extra.is_empty() => c
+                .into_iter()
+                .filter(|c| cmds.is_empty() || !c.iter().any(|a| a == "update"))
+                .collect(),
+            _ => Vec::new(),
+        };
         if linger && let (Some(lc), Some(u)) = (self.sys.find("loginctl"), self.sys.user.clone()) {
             cmds.push(vec![lc.display().to_string(), "enable-linger".into(), u]);
         }
@@ -620,8 +638,7 @@ impl Run<'_> {
             (bwrap, !extra.is_empty()),
             linger,
             pm.as_ref(),
-            &cmds,
-            &profile_cmds,
+            [&cmds, &profile_cmds, &browser_cmds],
         );
         if self.sys.jail_ready() {
             return out;
@@ -645,13 +662,12 @@ impl Run<'_> {
         (bwrap, browser): (bool, bool),
         linger: bool,
         pm: Option<&(String, Vec<Vec<String>>)>,
-        cmds: &[Vec<String>],
-        profile_cmds: &[Vec<String>],
+        [cmds, profile_cmds, browser_cmds]: [&[Vec<String>]; 3],
     ) -> Out {
         if !bwrap && !browser && !linger && profile_cmds.is_empty() {
             return Out::Done(self.t(M::NoteThere));
         }
-        if cmds.is_empty() && profile_cmds.is_empty() {
+        if cmds.is_empty() && profile_cmds.is_empty() && browser_cmds.is_empty() {
             return Out::Warn(self.t(M::NoteNoPkg));
         }
         let sudo = if self.sys.root {
@@ -689,6 +705,7 @@ impl Run<'_> {
                 lines.push(self.t(M::SudoProfile));
                 lines.extend(profile_cmds.iter().map(|c| format!("  {}", shown(c))));
             }
+            lines.extend(browser_cmds.iter().map(|c| format!("  {}", shown(c))));
             lines.push(self.t(M::SudoHow));
             let q = Ask::Choice {
                 title: self.t(M::SudoTitle),
@@ -704,6 +721,7 @@ impl Run<'_> {
         // timestamp covers the next command), and Clio never reads the password. Each command is
         // printed before it runs.
         let mut failed = None;
+        let mut browser_failed = false;
         let sys = &self.sys;
         self.ui.outside(&mut || {
             for c in cmds {
@@ -724,7 +742,21 @@ impl Run<'_> {
                     }
                 }
             }
+            for c in browser_cmds {
+                println!("$ {}", shown(c));
+                if !as_root(sudo.as_deref(), c, None) && !c.iter().any(|a| a == "update") {
+                    browser_failed = true;
+                    break;
+                }
+            }
         });
+        // Playwright's row says it; the rest of the install goes on.
+        if browser_failed {
+            self.answers.mcp.retain(|(n, _)| {
+                crate::cli::mcp_servers::catalog_entry(n).is_ok_and(|e| !e.browser)
+            });
+            self.answers.mcp_left = Some(self.t(M::NoteMcpLibsFailed));
+        }
         match failed {
             Some(what) => Out::Warn(self.f(M::NoteSysFailed, &[&what])),
             None => Out::Done(self.t(M::NoteDone)),

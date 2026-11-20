@@ -489,6 +489,7 @@ impl SessionSource for LocalSource {
                 acted: std::sync::atomic::AtomicBool::new(false),
                 told: Mutex::default(),
                 summary: Mutex::default(),
+                since_ms: crate::cli::now_ms(),
             }),
         };
         let refresh = s.refresh().ok();
@@ -634,6 +635,8 @@ struct HostSide {
     /// An ended permission window (its id) and what it approved, for the turn that sums it up:
     /// claimed (`grant::claim_summary`) only when that turn is sent.
     summary: Mutex<Option<(String, String)>>,
+    /// When this side was made: what finished before it is not news of this chat.
+    since_ms: i64,
 }
 
 impl HostSide {
@@ -753,21 +756,47 @@ impl HostSide {
     /// What this session set aside that the person approved elsewhere (`clio approve`, another
     /// chat's `/pending`) and that ran, each said once: neither the box nor a window told it.
     fn outside_news(&self, session: &str) -> Vec<String> {
+        let st = pending::state(&self.dirs);
+        // Told in an earlier opening of this conversation: kept in its run folder.
+        let file = self.dirs.runs.join(&self.run).join("told-outside.json");
         let mut told = locked(&self.told);
-        clio_toolhost::pending::list(&pending::state(&self.dirs))
+        let before: Vec<String> = std::fs::read(&file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        told.extend(before.iter().cloned());
+        let finished = |id: &str| {
+            std::fs::metadata(st.join("pending").join(format!("{id}.json")))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        };
+        let news: Vec<_> = clio_toolhost::pending::list(&st)
             .into_iter()
             .filter(|p| {
                 p.run == self.run
                     && p.session == session
                     && matches!(p.state, clio_toolhost::pending::State::Done { .. })
+                    // A window's approval is `granted_news`'s to tell.
+                    && p.granted.is_none()
+                    && finished(&p.id) >= self.since_ms
                     && told.insert(p.id.clone())
             })
+            .collect();
+        if !news.is_empty() {
+            let all: Vec<&String> = before.iter().chain(news.iter().map(|p| &p.id)).collect();
+            if let Ok(b) = serde_json::to_vec(&all) {
+                let _ = crate::cli::write_private(&file, &b);
+            }
+        }
+        news.iter()
             .map(|p| {
                 format!(
                     "the person approved {} outside the chat and it ran: {} {}",
                     p.id,
-                    pending::label(&p),
-                    pending::what(&p)
+                    pending::label(p),
+                    pending::what(p)
                 )
             })
             .collect()
@@ -2094,6 +2123,7 @@ mod tests {
             acted: std::sync::atomic::AtomicBool::new(false),
             told: Mutex::default(),
             summary: Mutex::default(),
+            since_ms: 0,
         }
     }
 
@@ -2185,6 +2215,14 @@ mod tests {
         for id in ["out1", "oth1"] {
             ran(&h, id, 0).unwrap();
         }
+        // One a permission window answered is the window's news.
+        waits(&h, "win1", "delete", "s1", now);
+        ran(&h, "win1", 0).unwrap();
+        let f = pending::state(&h.dirs).join("pending/win1.json");
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        v["granted"] = json!("w1");
+        std::fs::write(&f, v.to_string()).unwrap();
+        std::fs::create_dir_all(h.dirs.runs.join("r1")).unwrap();
         let news = h.outside_news("s1");
         assert_eq!(news.len(), 1, "{news:?}");
         assert!(
@@ -2193,6 +2231,18 @@ mod tests {
         );
         assert!(!news[0].contains("IGNORE"), "{news:?}");
         assert!(h.outside_news("s1").is_empty());
+        // The conversation opened again: what it was told stays told, and what finished before
+        // it opened is not news.
+        let again = host_side(t.path());
+        assert!(again.outside_news("s1").is_empty());
+        waits(&h, "old2", "delete", "s1", now);
+        ran(&h, "old2", 0).unwrap();
+        let later = HostSide {
+            since_ms: crate::cli::now_ms() + 60_000,
+            ..host_side(t.path())
+        };
+        assert!(later.outside_news("s1").is_empty());
+        assert_eq!(again.outside_news("s1").len(), 1);
     }
 
     // S-36: the chat's window answers only an item of this conversation set aside after it

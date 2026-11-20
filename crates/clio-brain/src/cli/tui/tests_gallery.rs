@@ -1014,6 +1014,7 @@ fn mcp_states(out: &mut Vec<(&'static str, App)>) {
             tree: "t".into(),
             integrity: "sha512-x".into(),
             packages: 12,
+            lock: String::new(),
             confirmed,
             tools,
         };

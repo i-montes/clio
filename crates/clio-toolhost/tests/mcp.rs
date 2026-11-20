@@ -260,6 +260,7 @@ fn install(e: &Env, name: &str, on: bool, confirmed: bool, seconds: u64) {
         tree: "t".into(),
         integrity: "sha512-x".into(),
         packages: 1,
+        lock: String::new(),
         confirmed,
         tools: confirmed_tools(),
     };
@@ -473,8 +474,11 @@ fn any_public_site_is_only_for_a_server_with_nothing_to_take_there() {
         let mut bad = base.clone();
         bad[field] = value;
         let r = call(&e, "s", "c1", "mcp_propose", bad);
+        // A secret is refused first for its host, which `"*"` does not name.
         assert!(
-            !r.ok && r.content.contains("any public site"),
+            !r.ok
+                && (r.content.contains("any public site")
+                    || (field == "secrets" && r.content.contains("not one of the hosts"))),
             "{field}: {r:?}"
         );
     }

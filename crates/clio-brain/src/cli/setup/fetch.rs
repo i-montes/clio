@@ -573,7 +573,9 @@ fn unpack(file: &Path, into: &Path) -> FRes<()> {
 }
 
 /// Chromium's program inside its folder.
-pub const CHROME: &str = "chrome-linux/chrome";
+/// The program, in the archive's one folder (`chrome-linux64/`, `chrome-linux-arm64/`), which is
+/// moved in as the browser's folder itself.
+pub const CHROME: &str = "chrome";
 const BROWSER_MARK: &str = ".clio-browser";
 
 /// Puts Chromium `a` in `<data>/browsers/chromium-<revision>`, unless it is there already:
@@ -609,19 +611,25 @@ pub fn install_browser(data: &Path, a: &Archive, on: &mut dyn FnMut(u64)) -> FRe
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
-        if !ok || !staging.join(CHROME).is_file() {
+        // The archive holds one folder, named for its processor.
+        let top: Vec<PathBuf> = std::fs::read_dir(&staging)
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        let [top] = top.as_slice() else {
+            return Err(Fail::Other(format!("could not unpack {}", name_of(&a.url))));
+        };
+        if !ok || !top.join(CHROME).is_file() {
             return Err(Fail::Other(format!("could not unpack {}", name_of(&a.url))));
         }
-        std::fs::write(staging.join(BROWSER_MARK), &a.sha256)
-            .map_err(|e| crate::cli::io_err(&staging, &e))?;
-        clio_brain::pi::install::lock_down(&staging).map_err(|e| Fail::Other(e.to_string()))
+        std::fs::write(top.join(BROWSER_MARK), &a.sha256)
+            .map_err(|e| crate::cli::io_err(top, &e))?;
+        clio_brain::pi::install::lock_down(top).map_err(|e| Fail::Other(e.to_string()))?;
+        Ok(top.clone())
     });
     let _ = std::fs::remove_file(&file);
-    if let Err(e) = r {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(e);
-    }
-    swap_dir(&staging, &dir)?;
+    let r = r.and_then(|top| swap_dir(&top, &dir));
+    let _ = std::fs::remove_dir_all(&staging);
+    r?;
     Ok(true)
 }
 
@@ -645,7 +653,7 @@ pub fn missing_libs(program: &Path) -> Vec<String> {
 /// The libraries Chromium links to (`readelf -d chrome`, the same for both processors) that are
 /// not part of the C library or always present, and the Debian and Ubuntu packages that bring
 /// each: before Ubuntu 24.04 and Debian 13, then after their 64-bit time change (`t64`).
-pub const CHROME_LIBS: [(&str, &str, &str); 24] = [
+pub const CHROME_LIBS: [(&str, &str, &str); 26] = [
     ("libglib-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
     ("libgobject-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
     ("libgio-2.0.so.0", "libglib2.0-0", "libglib2.0-0t64"),
@@ -674,19 +682,31 @@ pub const CHROME_LIBS: [(&str, &str, &str); 24] = [
     ("libcairo.so.2", "libcairo2", "libcairo2"),
     ("libpango-1.0.so.0", "libpango-1.0-0", "libpango-1.0-0"),
     ("libasound.so.2", "libasound2", "libasound2t64"),
+    ("libexpat.so.1", "libexpat1", "libexpat1"),
+    ("libudev.so.1", "libudev1", "libudev1"),
 ];
+
+/// The sonames of `CHROME_LIBS` missing from `ldconfig -p`'s list (`known`).
+pub fn missing_sonames(known: &str) -> Vec<&'static str> {
+    CHROME_LIBS
+        .iter()
+        .map(|(so, ..)| *so)
+        .filter(|so| {
+            !known
+                .lines()
+                .any(|l| l.trim_start().starts_with(&format!("{so} ")))
+        })
+        .collect()
+}
 
 /// The packages that bring the libraries of `CHROME_LIBS` missing from `ldconfig`'s list
 /// (`known`: its `-p` output), named for this system (`os_release`'s text): `None` when some are
 /// missing and this is not a Debian or Ubuntu whose names are known.
 pub fn chrome_packages(known: &str, os_release: &str) -> Option<Vec<String>> {
+    let gone = missing_sonames(known);
     let missing: Vec<&(&str, &str, &str)> = CHROME_LIBS
         .iter()
-        .filter(|(so, ..)| {
-            !known
-                .lines()
-                .any(|l| l.trim_start().starts_with(&format!("{so} ")))
-        })
+        .filter(|(so, ..)| gone.contains(so))
         .collect();
     if missing.is_empty() {
         return Some(Vec::new());

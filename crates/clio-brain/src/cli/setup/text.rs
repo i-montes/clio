@@ -159,7 +159,9 @@ table! {
     NoteMcpLater: "{}: termina más tarde (clio mcp add {})", "{}: finishes later (clio mcp add {})";
     NoteMcpToken: "{}: apagado hasta tener su token (clio mcp add {})", "{}: off until it has its token (clio mcp add {})";
     NoteMcpNewer: "{} tiene una versión nueva en el catálogo, {}: clio mcp add {}", "{} has a newer version in the catalog, {}: clio mcp add {}";
+    NoteMcpBrowser: "{}: el catálogo cambió su Chromium ({} → {}); no arranca hasta clio mcp add {}", "{}: the catalog changed its Chromium ({} → {}); it does not start until clio mcp add {}";
     NoteMcpNoLibs: "Playwright queda fuera: a este sistema le faltan bibliotecas que no sé instalar aquí", "Playwright is left out: this system lacks libraries I cannot install here";
+    NoteMcpLibsFailed: "Playwright queda fuera: no se pudieron instalar las bibliotecas de Chromium (clio mcp add playwright después)", "Playwright is left out: Chromium's libraries could not be installed (clio mcp add playwright later)";
     NoteNoSudoLibs: "no tienes sudo: faltan las bibliotecas de Chromium (Playwright)", "no sudo: Chromium's libraries (Playwright) are missing";
     NoteDoctorIssues: "hay avisos: ejecuta «clio doctor»", "there are warnings: run `clio doctor`";
 

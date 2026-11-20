@@ -102,46 +102,60 @@ result.
 - **The catalog** is `mcp/catalog.json`, read by `clio_toolhost::catalog`. `{browser}` in an
   entry's `args` and `reads` stands for Clio's Chromium folder; the manifest the box shows has the
   real path. Its modes free a tool only when the installed manifest is exactly the catalog's (a
-  changed argument makes it an ordinary server).
-- **Playwright is pinned at `@playwright/mcp@0.0.30`**, not 0.0.86: every later version depends on
-  alpha builds of Playwright; 0.0.30 depends on Playwright 1.54.1, which asks for Chromium
-  revision 1181. Its tools all say `openWorldHint: true`, so none would start free by the server's
-  word; the catalog frees the five that only read (`browser_snapshot`, `browser_console_messages`,
-  `browser_network_requests`, `browser_tab_list`, `browser_wait_for`). `--caps tabs,history,wait`
-  leaves out the install, file, PDF and testing tools.
-- **An entry may pin packages deep in its tree** (`overrides`, npm's own, written into the install
-  folder's `package.json`, exact versions only, from Clio's catalog only, never from a proposal).
-  `@playwright/mcp@0.0.30` declares no `zod` and takes the MCP SDK's; today the SDK's range
-  resolves to `zod` 4, and its `zod-to-json-schema` then gives every tool an empty schema (the
-  model would see no arguments). The entry pins `zod` 3.25.76, the last 3.x; every package is
-  still a registry tarball with its integrity in the lockfile.
-- **Verified for real** (2026-11-19, aarch64, Ubuntu 24.04, a throwaway home under `/var/tmp`):
-  `clio mcp add playwright --yes` downloaded Chromium 1181 (SHA-256 checked), installed 102
-  packages, probed 21 tools (5 free by the catalog), and one `browser_navigate` to
-  `https://example.com` through the jail and the proxy returned the page ("Example Domain");
-  `https://127.0.0.1/` and `https://169.254.169.254/` failed to connect; `http://example.com/`
-  failed (below). `clio mcp add notion --yes` installed 177 packages and probed 24 tools whose names
-  match the catalog's 14 modes; with a made-up token in the vault (`mcp:api.notion.com`),
-  `API-get-self` reached `api.notion.com` and got its `401 unauthorized`. Without a token the
-  server is installed off, saying why. The x86_64 Chromium archive was checked by its SHA-256
-  only, not run.
-- **`"*"` is stricter than written**: besides secrets and writes, any read but Clio's own browser
-  folder of the catalog's revision is refused, under the home or not (`/srv` too). It is checked at
-  the proposal, at the install and before every start (`Runner::prepare`, which also refuses `"*"`
-  for anything that is not an MCP server).
-- **Plain `http://` pages do not load**: the proxy tunnels `CONNECT` only, and Chromium sends a
-  plain `GET` through a proxy for `http://`. Port 80 is allowed in the rule but reached only by a
-  client that tunnels. shortcut: https only; a `GET` path in the proxy is its own change.
-- **The libraries Chromium lacks** are predicted before any download, from the sonames Chromium
-  1181 needs (fixed in `fetch.rs`, the names from Playwright's own `nativeDeps`) and `ldconfig -p`;
-  the `t64` package names on Ubuntu 24.04 and Debian 13 and later. After the download `ldd` checks
-  again, and a server whose Chromium lacks a library is not started, saying which and that
-  `clio setup` (Repair) installs them. `unzip` joins the sudo moment when it is missing.
-- **The wizard**: the checklist comes after the judge's question and before the sudo moment; a tick
-  is the person's yes (no second box). Notion's token is asked on its own screen, masked; Esc
-  leaves it for later, and the server is installed off ("waiting for its token"). An update says
-  when the catalog holds a newer version and keeps Chromium at the catalog's revision; older
-  revisions are not removed.
+  changed argument makes it an ordinary server). Each entry carries the day it was verified.
+- **Each entry ships its lockfile** (`mcp/locks/<name>.json`, made with Clio's own npm 10.9.9):
+  a catalog server is installed with `npm ci --ignore-scripts` against it, the installed lockfile
+  must be exactly it, and its digest is part of what lets an installed tree be reused. An
+  ordinary proposal installs as before (`npm install`, the lockfile checked for registry
+  tarballs).
+- **Playwright is pinned at `@playwright/mcp@0.0.86`**, the newest, with the exact Playwright it
+  depends on (`playwright` and `playwright-core` 1.66.0-alpha-2026-11-18, published by the
+  Playwright team) and the Chromium that version's `browsers.json` asks for: revision 1255,
+  Chrome for Testing 159.0.8154.6, by SHA-256 for x64 and arm64. (A first build pinned 0.0.30 to
+  avoid "alpha" Playwright; that froze the browser at a June 2025 Chromium, reversed by the
+  owner.) Arguments: `--headless --isolated --browser chromium --executable-path
+  {browser}/chrome --no-sandbox --no-webmcp --image-responses omit`. Its tools carry no hint the
+  host accepts as read-only; the catalog frees six that only read (`browser_snapshot`,
+  `browser_find`, `browser_console_messages`, `browser_network_requests`,
+  `browser_network_request`, `browser_wait_for`); the other 19 ask, among them
+  `browser_evaluate` and `browser_run_code_unsafe` (code in the jailed server process).
+- **Freshness**: when a catalog server that reaches any site starts more than 12 weeks after its
+  entry was verified, one notice says the browser is old and that `clio update` brings the newer
+  one (a notice, not a refusal). Its data folder (its `HOME`) is emptied before every start.
+- **`"*"` means port 443 only** (a plain `http://` page cannot load through the CONNECT tunnel),
+  and is stricter than written: besides secrets and writes, any read but Clio's own browser
+  folder of the catalog's revision is refused, under the home or not. It is checked at the
+  proposal, at the install and before every start (`Runner::prepare`, which also refuses `"*"`
+  for anything that is not an MCP server). After one approved navigation a page's own scripts
+  can reach any public host on 443 from this machine's address while the server runs.
+- **The libraries Chromium lacks** are predicted before any download, from the sonames the pinned
+  build needs (`readelf -d`, the same on both processors, held by a test) and `ldconfig -p`; the
+  `t64` package names on Ubuntu 24.04 and Debian 13 and later. Known missing: nothing is
+  downloaded and the person is told which. In the wizard's sudo moment they are their own
+  install, after bubblewrap, lingering and the AppArmor profile; its failure is a warning on
+  Playwright's row and stops nothing else. Before every start the folder must be there and `ldd`
+  must find every library, or the server does not start, saying which.
+- **The wizard**: the checklist comes after the judge's question and before the sudo moment; a
+  tick is the person's yes (no second box). Notion's token is asked on its own screen, masked;
+  Esc leaves it for later, and the server is installed off. An update says when the catalog
+  holds a newer version or another Chromium revision for an installed server (each a new yes),
+  keeps Chromium at the catalog's revision and removes every revision no installed server reads.
 - **`clio mcp add <name>`** shows the same box at a terminal (`--yes` answers it), asks a missing
-  token without echo, and installs. The model's `mcp_propose {catalog, reason}` takes nothing else.
+  token without echo, and installs. A secret of that name already in the vault is never replaced
+  (the vault cannot add a destination to it): the line says for what it is taken, and the server
+  stays off. The model's `mcp_propose {catalog, reason}` takes nothing else.
+- **Approvals given outside the chat** are told to the model once: the told ids are kept in the
+  run folder, and an item a permission window answered, or one that finished before the chat
+  opened, is not told.
+- **Verified for real** (2026-11-19, aarch64, Ubuntu 24.04, throwaway homes under `/var/tmp`):
+  `clio mcp add playwright --yes` downloaded Chromium 1255 (SHA-256 checked), ran `npm ci` (3
+  packages), probed 25 tools, every one with its argument schema; a `browser_navigate` to
+  `https://example.com` through the jail and the proxy returned "Example Domain";
+  `https://127.0.0.1/` and `https://169.254.169.254/` failed to connect; a file left in its data
+  folder was gone at the next start. `clio mcp add notion --yes` ran `npm ci` (177 packages) and
+  probed 24 tools whose names match the catalog's 14 modes; with a made-up token in the vault
+  (`mcp:api.notion.com`), `API-get-self` reached `api.notion.com` and got its `401
+  unauthorized`; with `notion-token` already bound to `service:api.notion.com`, the token typed
+  was refused, the existing binding kept and the server installed off. The x86_64 Chromium
+  archive was checked by its SHA-256 and its `readelf -d`, not run.
 - **Prompts**: no system prompt changed.

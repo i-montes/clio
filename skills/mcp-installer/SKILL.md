@@ -54,8 +54,8 @@ add` lists the catalog). For anything else, choose a package as below.
   in `secrets`, never here.
 - `network`: only the hosts it must reach (`api.github.com`, or `host:port` when not 443). Leave it
   out when it needs none: then it has no network at all. It reaches them only through Clio's
-  proxy, at public addresses; anything else fails. `["*"]` alone means any public site (ports 443
-  and 80), only for a server with no secrets, no writes and no reads (a browser): the box says
+  proxy, at public addresses; anything else fails. `["*"]` alone means any public site (https, port
+  443), only for a server with no secrets, no writes and no reads (a browser): the box says
   so.
 - `secrets`: `[{"name": "gh-token", "env": "GITHUB_PERSONAL_ACCESS_TOKEN", "host":
   "api.github.com"}]`: the server gets the value in that variable, and nowhere else. Bind each
