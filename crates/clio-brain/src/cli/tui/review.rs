@@ -174,10 +174,19 @@ pub fn next_skill(app: &mut App) -> Vec<Cmd> {
     app.chat.review.running = Some(app.now_ms);
     app.chat.items.push(Item::Note(
         if clio_toolhost::services::is_service_draft(&id) {
-            format!(
-                "reviewing the service «{}» before you are asked to approve it…",
-                super::app::clean(&name)
-            )
+            // Bypass registers it by itself if it passes, unless this conversation is marked.
+            let a = &app.chat.approvals;
+            if a.bypass && !a.suspect && !app.chat.judge_said {
+                format!(
+                    "reviewing the service «{}»: if it passes, your bypass registers it…",
+                    super::app::clean(&name)
+                )
+            } else {
+                format!(
+                    "reviewing the service «{}» before you are asked to approve it…",
+                    super::app::clean(&name)
+                )
+            }
         } else {
             format!(
                 "reviewing the skill «{}» before it is registered…",
@@ -237,15 +246,16 @@ fn skill_ended(app: &mut App, rv: &Reviewed, outcome: &SkillOutcome) {
                 cap(description, 200)
             )));
         }
-        SkillOutcome::Waits { id, ask, .. } => {
+        SkillOutcome::Waits { id, ask, by } => {
             let service = (**ask)
                 .as_ref()
                 .and_then(|b| b.skill.as_ref())
                 .is_some_and(|s| s.service.is_some());
-            app.chat.items.push(Item::Note(format!(
-                "a {} waits for your approval ({id}) · review: {verdict}",
-                if service { "service" } else { "skill" }
-            )));
+            let kind = if service { "service" } else { "skill" };
+            app.chat.items.push(Item::Note(match by {
+                Some(by) => format!("a {kind} is approved by your {by} ({id}) · review: {verdict}"),
+                None => format!("a {kind} waits for your approval ({id}) · review: {verdict}"),
+            }));
             // Its box opens at once, with the rest, or an open permission window approves it.
             app.chat.approvals.check = true;
         }

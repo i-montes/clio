@@ -40,7 +40,7 @@ pub struct Envelope<'a> {
 }
 
 /// The envelope's line while the person's bypass is on.
-pub const BYPASS_ON: &str = "approvals: bypass on (the person's standing yes): what would wait for their approval runs at once and the answer says it was approved under bypass; what changes Clio's own setup, commands or keys, a change to their blocks from a session that read outside text, a secret and a question still wait for them";
+pub const BYPASS_ON: &str = "approvals: bypass on (the person's standing yes): what would wait for their approval runs at once and the answer says it was approved under bypass (a new service, a skill that waits, an MCP server and acts on what Clio created are done when the turn ends, after their review, and you are told what came of them in a turn Clio starts by herself); what changes Clio's own setup, commands or keys, a change to their blocks from a session that read outside text, a secret and a question still wait for them";
 
 /// `stamp` in front of the person's `text`, inside the envelope.
 pub fn wrap(stamp: &str, text: &str) -> String {

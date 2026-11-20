@@ -32,6 +32,9 @@ impl MemoryPort for Judge {
     fn get(&self, _: i64) -> Result<MemoryItem, String> {
         Err("no".into())
     }
+    fn judge_on(&self) -> bool {
+        true
+    }
     fn judge_text(&self, text: &str, _: &str) -> TextVerdict {
         self.asked.lock().unwrap().push(text.to_owned());
         if text.contains(FLAG) {
@@ -602,4 +605,54 @@ fn a_suspect_session_asks_for_all_but_status_and_the_brake_holds() {
     let r = manage(&b, "s", "service_manage", "backup", "status");
     assert!(!r.ok && r.content.contains("an hour"), "{r:?}");
     assert!(manage(&b, "t", "service_manage", "backup", "status").ok);
+}
+
+// S-72: what the model is told is what will happen. Bypass off: a service waits for the person
+// and an act on what Clio created needs their approval, word for word as before. Bypass on: a
+// service is registered by Clio by herself if its review passes, and an act on what Clio created
+// is done when the turn ends, under bypass, and the model hears what came of it.
+#[test]
+fn under_bypass_a_service_and_an_act_are_said_as_they_will_happen() {
+    let e = env_with(true, true);
+    with_kinds(&e);
+    let r = call(&e, "s", "service_write", draft_args("disk-check"));
+    assert!(
+        r.ok && r.content.contains(
+            "a reviewer checks it now, in the background, and then it waits for the person's approval (always, for a service). The result comes by itself with a later message."
+        ),
+        "{}",
+        r.content
+    );
+    let r = manage(&e, "s", "service_manage", "backup", "remove");
+    assert!(
+        r.content.contains("«service» needs the person's approval")
+            && r.content.ends_with(
+                "If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after."
+            ),
+        "{}",
+        r.content
+    );
+    clio_toolhost::grant::bypass_on(&e.data.join("host")).unwrap();
+    let r = call(&e, "s", "service_write", draft_args("disk-two"));
+    assert!(
+        r.ok && r.content.contains(
+            "if it passes, Clio registers it by herself, since the person's bypass is on, and you are told what came of it (registered, the review's findings, or a failure) in a turn she starts by herself."
+        ) && !r.content.contains("waits for the person"),
+        "{}",
+        r.content
+    );
+    for (tool, name, action) in [
+        ("skill_manage", "notes", "undo"),
+        ("mcp_manage", "time", "on"),
+    ] {
+        let r = manage(&e, "s", tool, name, action);
+        assert_eq!(r.decision.outcome, "ask", "{r:?}");
+        assert!(
+            r.content.contains(
+                "is done by Clio by herself when this turn ends, under the person's bypass; you hear what came of it right after, in a turn she starts by herself."
+            ) && !r.content.contains("needs the person's approval"),
+            "{tool} {action}: {}",
+            r.content
+        );
+    }
 }

@@ -116,6 +116,33 @@ pub fn answering(dirs: &Dirs, p: &Pending) -> Option<grant::Window> {
     open_now(dirs, grant::Kind::of(&w))
 }
 
+/// What the decision knows of item `p`'s conversation (`grant::Conversation`): `suspect`, the
+/// chat's own mark, or its run's; whether its judge did not answer; whether it is a round's.
+pub fn conversation(dirs: &Dirs, p: &Pending, suspect: bool) -> grant::Conversation {
+    grant::Conversation {
+        suspect: suspect || suspect_run(dirs, &p.run),
+        unjudged: unjudged_run(dirs, &p.run),
+        round: super::round::is_round(dirs, &p.run),
+    }
+}
+
+/// What answers `p` by itself at the chat's next check (`answering`), unless its conversation
+/// acts under neither bypass nor a window (flagged, unjudged, a round): `None`, it waits.
+pub fn answers_later(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<grant::Window> {
+    let c = conversation(dirs, p, suspect);
+    if c.suspect || c.unjudged || c.round {
+        return None;
+    }
+    answering(dirs, p)
+}
+
+/// Why bypass, on now, leaves `p` to the person (`grant::bypass_keeps`); `None` when bypass is
+/// off or answers it.
+pub fn bypass_keeps(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<&'static str> {
+    bypass_now(dirs)?;
+    grant::bypass_keeps(p, conversation(dirs, p, suspect))
+}
+
 /// What the `/bypass on` box says, word for word (the design's).
 pub const BYPASS_BOX: &str = "Clio will approve by herself everything that asks you, with no end, until `/bypass off`. It turns itself off if the judge flags an injection.";
 
@@ -470,7 +497,13 @@ pub fn show(dirs: &Dirs, json: bool) -> Res<()> {
     }
     let now = now_ms();
     for p in &list {
-        println!("{}", line(&super::round::with_origin(dirs, p.clone()), now));
+        let keeps = bypass_keeps(dirs, p, false).map_or_else(String::new, |why| {
+            format!("  · bypass leaves it to you: {why}")
+        });
+        println!(
+            "{}{keeps}",
+            line(&super::round::with_origin(dirs, p.clone()), now)
+        );
     }
     for p in &cut {
         println!("{}", interrupted_line(p));

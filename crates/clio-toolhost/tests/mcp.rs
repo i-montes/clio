@@ -1324,3 +1324,28 @@ fn a_host_without_its_mcp_side_starts_and_says_why() {
     drop(child.stdin.take());
     let _ = child.wait();
 }
+
+// S-72: bypass off, a proposal waits for the person, as before; on, the answer says Clio
+// installs it by herself when the turn ends and that the model hears what came of it.
+#[test]
+fn mcp_propose_says_what_bypass_will_do() {
+    let Some(e) = env() else { return };
+    let r = call(&e, "s", "c1", "mcp_propose", propose_args());
+    assert!(
+        r.ok && r.content.contains("waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does)"),
+        "{}",
+        r.content
+    );
+    clio_toolhost::grant::bypass_on(&e.data.join("host")).unwrap();
+    let mut other = propose_args();
+    other["name"] = json!("github-two");
+    let r = call(&e, "s", "c2", "mcp_propose", other);
+    assert!(
+        r.ok && r.content.contains(
+            "is installed by Clio by herself when this turn ends, since the person's bypass is on. Nothing was downloaded yet."
+        ) && r.content.contains("in a turn she starts by herself")
+            && !r.content.contains("waits for the person"),
+        "{}",
+        r.content
+    );
+}

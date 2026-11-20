@@ -571,6 +571,17 @@ fn offer(d: &Dirs, waiting: &[clio_toolhost::pending::Pending], suspect: bool, t
     if !secrets.is_empty() {
         let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, suspect)));
     }
+    // Why bypass leaves each to the person, from the facts it decided on: the box says it.
+    let keeps: Vec<_> = aside
+        .iter()
+        .filter_map(|p| {
+            let why = super::pending::bypass_keeps(d, p, suspect)?;
+            Some((p.id.clone(), why.to_owned()))
+        })
+        .collect();
+    if !keeps.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::BypassKeeps(keeps)));
+    }
     let asks: Vec<_> = aside
         .into_iter()
         .map(|p| {
@@ -1748,21 +1759,24 @@ impl Ctx {
                         // Under bypass or an open window (the judge on, the session not suspect,
                         // its judge not silent) what it may answer is approved by it, through the
                         // same path as the person's yes; the rest keeps its box.
+                        // What came of them is Clio's to tell: ONE turn she starts by herself
+                        // (`Acted`), once the chat is idle, for all of this check's.
                         let suspect = s.suspect();
-                        if !suspect {
-                            for p in s.waiting() {
-                                if !super::pending::unjudged_run(d, &p.run)
-                                    && super::pending::answering(d, &p).is_some()
-                                {
-                                    // An act on what Clio created goes on by itself (`Acted`).
-                                    let _ = tx.send(Input::Bg(match s.grant(&p.id) {
-                                        Ok(n) if clio_toolhost::manage::is_manage(&p) => {
-                                            Bg::Acted(vec![n])
-                                        }
-                                        r => Bg::Granted(r),
-                                    }));
+                        let mut acted: Option<Vec<String>> = None;
+                        for p in s.waiting() {
+                            if super::pending::answers_later(d, &p, suspect).is_none() {
+                                continue;
+                            }
+                            let done = acted.get_or_insert_with(Vec::new);
+                            match s.grant(&p.id) {
+                                Ok(n) => done.push(n),
+                                Err(e) => {
+                                    let _ = tx.send(Input::Bg(Bg::Granted(Err(e))));
                                 }
                             }
+                        }
+                        if let Some(notes) = acted {
+                            let _ = tx.send(Input::Bg(Bg::Acted(notes)));
                         }
                         send_grant(d, &session, s.as_ref(), tx);
                         let waiting = s.waiting();

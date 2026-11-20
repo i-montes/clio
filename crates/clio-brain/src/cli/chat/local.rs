@@ -690,14 +690,19 @@ impl HostSide {
         let Some(w) = pending::answering(&self.dirs, &p) else {
             let on = pending::window_now(&self.dirs).is_some()
                 || pending::bypass_now(&self.dirs).is_some();
-            return Err(if on {
-                format!("{id}: this one always asks you")
-            } else {
-                format!("{id}: no permission window is open, so it waits for you")
-            });
+            return Err(
+                if let Some(why) = pending::bypass_keeps(&self.dirs, &p, suspect) {
+                    format!("{id}: bypass leaves it to you: {why}")
+                } else if on {
+                    format!("{id}: this one always asks you")
+                } else {
+                    format!("{id}: no permission window is open, so it waits for you")
+                },
+            );
         };
         let st = pending::state(&self.dirs);
-        let what = format!("{} {}", pending::label(&p), pending::what(&p));
+        // The class and the act: why it would have waited is no longer true of it.
+        let what = format!("«{}» {}", p.class, pending::what(&p));
         // Recorded before anything runs; one that closed meanwhile leaves it waiting.
         let w = grant::Kind::of(&w)
             .begin(&st, &p, &pending::what(&p))
@@ -976,6 +981,12 @@ fn skill_count(
 }
 
 impl ChatSession {
+    /// What answers `p`, just set aside, by itself at the chat's next check: bypass or the
+    /// window (`pending::answers_later`), by name; `None`: it waits for the person.
+    fn answered_by(&self, p: &Pending) -> Option<&'static str> {
+        pending::answers_later(&self.dirs, p, self.suspect()).map(|w| grant::Kind::of(&w).name())
+    }
+
     /// The mark the session's tool host left in the run folder: `Some(suspect)` when marked.
     fn mark_file(&self) -> Option<bool> {
         std::fs::read_to_string(&self.taint_file)
@@ -1088,13 +1099,21 @@ impl ChatSession {
             &reason,
         )?;
         locked(&h.asked).insert(p.id.clone());
-        locked(&h.notes).push(format!(
-            "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({}); do not write it again meanwhile.",
-            p.id
-        ));
+        let by = self.answered_by(&p);
+        locked(&h.notes).push(match by {
+            Some(k) => format!(
+                "your skill «{name}» was not registered by the review alone: {reason}. The person's {k} approves it by itself ({}); what came of it follows.",
+                p.id
+            ),
+            None => format!(
+                "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({}); do not write it again meanwhile.",
+                p.id
+            ),
+        });
         Ok(super::SkillOutcome::Waits {
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
+            by,
         })
     }
 
@@ -1168,13 +1187,21 @@ impl ChatSession {
             reason,
         )?;
         locked(&h.asked).insert(p.id.clone());
-        locked(&h.notes).push(format!(
-            "your service «{name}» passed to the person: it waits for their approval ({}); do not write it again meanwhile.",
-            p.id
-        ));
+        let by = self.answered_by(&p);
+        locked(&h.notes).push(match by {
+            Some(k) => format!(
+                "your service «{name}» passed its review ({}): the person's {k} registers it by itself; what came of it follows.",
+                p.id
+            ),
+            None => format!(
+                "your service «{name}» passed to the person: it waits for their approval ({}); do not write it again meanwhile.",
+                p.id
+            ),
+        });
         Ok(super::SkillOutcome::Waits {
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
+            by,
         })
     }
 }
@@ -1280,7 +1307,11 @@ impl Session for ChatSession {
             .host
             .as_ref()
             .is_some_and(|h| h.acted.swap(false, Ordering::SeqCst));
-        let approved_none = approved.is_empty();
+        // The person answered something (a box, `clio approve`): not only bypass or a window.
+        let person = approved
+            .iter()
+            .chain(&notes)
+            .any(|l| l.starts_with("the person "));
         let told = summary.as_ref().map(|(id, _)| id.clone());
         let summary = summary.map(|(_, record)| record);
         if !approved.is_empty() || summary.is_some() {
@@ -1301,7 +1332,7 @@ impl Session for ChatSession {
             self.pre.reviewed(GRANT_ASK);
         }
         match approvals_turn(text, findings.is_some(), self.pre.presenting(), &data) {
-            Some(true) if summary.is_none() => self.pre.reviewed(own_ask(acted, !approved_none)),
+            Some(true) if summary.is_none() => self.pre.reviewed(own_ask(acted, person)),
             Some(_) => {}
             None => {
                 return Ok(RunSummary {
@@ -1891,6 +1922,11 @@ impl ChatSession {
             .ok_or_else(|| format!("{id} is not of this session"))?;
         // Answered here: never told again as approved outside the chat.
         locked(&h.told).insert(id.to_owned());
+        // Bypass or a window answered after the turn ended: its outcome is Clio's own news, told
+        // in the turn she starts by herself (`MANAGE_ASK`), not the person's answer.
+        if granted.is_some() {
+            h.acted.store(true, Ordering::SeqCst);
+        }
         if pending::waiting(&h.dirs)
             .iter()
             .any(|p| p.id == id && clio_toolhost::pending::secret_of(p).is_some())
@@ -2319,10 +2355,31 @@ mod tests {
             .unwrap();
         assert!(said.starts_with("approved under bypass: "), "{said}");
         assert!(!said.contains("left"), "{said}");
-        assert!(h.grant("s1", false, "mch1", |_| ran(&h, "mch1", 0)).is_ok());
-        for id in ["own1", "mem1", "sec1"] {
+        // The class and the act, never the reason it would have waited for.
+        let said = h
+            .grant("s1", false, "mch1", |_| ran(&h, "mch1", 0))
+            .unwrap();
+        assert!(
+            said.starts_with("approved under bypass: «control» systemctl reboot # mch1"),
+            "{said}"
+        );
+        // Why bypass leaves each to the person, from the same facts.
+        for (id, why) in [
+            ("own1", "it touches Clio's own setup"),
+            (
+                "mem1",
+                "it is a change to your blocks from a conversation that read outside text",
+            ),
+            ("sec1", "it needs you by nature: a secret only you can type"),
+        ] {
             let err = h.grant("s1", false, id, |_| ran(&h, id, 0)).unwrap_err();
-            assert!(err.contains("always asks you"), "{id}: {err}");
+            assert_eq!(err, format!("{id}: bypass leaves it to you: {why}"));
+            let p = pending::waiting(&h.dirs)
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap();
+            assert_eq!(pending::bypass_keeps(&h.dirs, &p, false), Some(why));
+            assert!(pending::answers_later(&h.dirs, &p, false).is_none());
         }
         item("new1", "delete", None, "r1");
         assert!(
@@ -2335,6 +2392,27 @@ mod tests {
             .grant("s1", false, "rnd1", |_| ran(&h, "rnd1", 0))
             .unwrap_err();
         assert!(err.contains("a round's item"), "{err}");
+        // The box and `clio pending` say it, and the chat's check never tries it.
+        let rnd = pending::waiting(&h.dirs)
+            .into_iter()
+            .find(|p| p.id == "rnd1")
+            .unwrap();
+        assert_eq!(
+            pending::bypass_keeps(&h.dirs, &rnd, false),
+            Some("it is a round's item")
+        );
+        assert!(pending::answers_later(&h.dirs, &rnd, false).is_none());
+        let new1 = pending::waiting(&h.dirs)
+            .into_iter()
+            .find(|p| p.id == "new1")
+            .unwrap();
+        assert_eq!(
+            pending::bypass_keeps(&h.dirs, &new1, true),
+            Some("the judge flagged this conversation")
+        );
+        assert!(pending::answers_later(&h.dirs, &new1, true).is_none());
+        assert!(pending::answers_later(&h.dirs, &new1, false).is_some());
+        assert_eq!(pending::bypass_keeps(&h.dirs, &new1, false), None);
         let (_, acts) = grant::Kind::Bypass.record(&st, &b.id).unwrap();
         let done: Vec<(&str, Option<&str>)> = acts
             .iter()
@@ -2374,6 +2452,14 @@ mod tests {
             .grant("s1", false, "unj1", |_| ran(&h, "unj1", 0))
             .unwrap_err();
         assert!(err.contains("judge did not answer"), "{err}");
+        let unj = pending::waiting(&h.dirs)
+            .into_iter()
+            .find(|p| p.id == "unj1")
+            .unwrap();
+        assert_eq!(
+            pending::bypass_keeps(&h.dirs, &unj, false),
+            Some("this conversation read text the judge did not answer for")
+        );
         assert!(pending::bypass_now(&h.dirs).is_some());
         // The judge turned off: bypass turns off at the next act, which waits.
         let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
