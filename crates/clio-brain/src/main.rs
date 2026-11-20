@@ -39,7 +39,8 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
                                               under it; off turns it off (only the chat's /bypass on turns it on)
   clio actions [--run <id>] [--json]          the log of what Clio ran and changed on the machine
   clio skills [off|on|undo|remove <name>]     Clio's skills: list them, turn one off or on, undo a change, remove one
-  clio skills add <source> [name…]            add skills from a folder or owner/repo[@ref] on GitHub, each on your yes
+  clio skills add <source> [name…] [--show]   add skills from a folder or owner/repo[@branch-or-tag] on GitHub,
+                                              each on your yes at a terminal; --show prints their files, adds nothing
   clio services [show|on|off|undo|remove|run|logs <name>] | enable | disable
                                               Clio's services (programs run on a schedule): list them, look at one,
                                               turn one off or on, run one now; enable/disable the timer that runs them
@@ -304,9 +305,13 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         }
         "skills" => {
             let yes = args.flag("--yes");
+            let show = args.flag("--show");
             let mut rest = args.rest()?;
             if yes {
                 rest.push("--yes".into());
+            }
+            if show {
+                rest.push("--show".into());
             }
             cli::skills::cmd(&dirs, &rest)?;
         }

@@ -6,9 +6,14 @@
 //! item of class `skill` (tool `skill_add`) that only the person's own yes registers: no
 //! permission window and no bypass answers it (`grant`).
 //!
-//! - GitHub only over https (`codeload.github.com`), the archive at most `MAX_ARCHIVE`, at most
-//!   `MAX_UNPACKED` unpacked, read here in memory: nothing in it runs and nothing of it is written
-//!   but the download itself, in a staging folder under Clio's data, removed at once.
+//! - GitHub only over https (`codeload.github.com`), at a branch or a tag of that repository (or
+//!   its default branch), never a commit hash: GitHub serves a fork's commits through the parent's
+//!   name. The archive at most `MAX_ARCHIVE`, at most `MAX_UNPACKED` unpacked, read here in
+//!   memory: nothing in it runs and nothing of it is written but the download itself, in a
+//!   staging folder under Clio's data, removed at once. The commit is the archive's own.
+//! - A folder only for the person (`clio skills add`): the model can write folders. It is walked
+//!   from a handle on its top folder, no link followed even if one is swapped in while it is read.
+//! - Every file goes through the vault's filter: a secret shape refuses the skill.
 //! - A path outside the archive's folder, or an entry that is not a file, a folder or a link,
 //!   refuses the whole archive. A link is never followed or kept: one inside a skill refuses it.
 //! - In a skill, a file that is not text, whose name Clio does not take (`valid_path`) or that
@@ -19,7 +24,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -42,6 +46,10 @@ const MAX_UNPACKED: usize = 100 << 20;
 const MAX_ENTRIES: usize = 20_000;
 /// The parts of a plugin that are not skills: named, never installed.
 const PLUGIN_PARTS: [&str; 3] = ["hooks", "commands", "agents"];
+/// Folders deep, at most, in a folder read.
+const MAX_FOLDER_DEPTH: usize = 16;
+/// The model's `skill_add` never takes a folder: fixed words.
+pub const FOLDER_PERSON: &str = "a folder is added only by the person, with `clio skills add` at a terminal; skill_add takes a GitHub repository (owner/repo, owner/repo@branch-or-tag)";
 const WHERE: &str = "a folder with SKILL.md, skills/*/SKILL.md, .claude/skills/*/SKILL.md or plugins/*/skills/*/SKILL.md";
 
 /// Where skills come from.
@@ -51,7 +59,7 @@ pub enum Source {
     GitHub {
         owner: String,
         repo: String,
-        /// A branch, a tag or a commit; `HEAD` (the default branch) when none is given.
+        /// A branch or a tag; `HEAD` (the default branch) when none is given.
         reference: String,
     },
 }
@@ -138,7 +146,9 @@ type Tree = BTreeMap<String, Item>;
 fn relevant(rel: &str, whole: bool) -> bool {
     let parts: Vec<&str> = rel.split('/').collect();
     if whole {
-        return !parts.iter().any(|p| p.starts_with('.'));
+        // A repository that is one skill: its plugin parts are named (the folder), never taken.
+        let part = PLUGIN_PARTS.contains(&parts[0]);
+        return !parts.iter().any(|p| p.starts_with('.')) && (!part || parts.len() == 1);
     }
     match parts.as_slice() {
         [_] | ["skills", ..] | [".claude", _] | [".claude", "skills", ..] => true,
@@ -147,59 +157,127 @@ fn relevant(rel: &str, whole: bool) -> bool {
     }
 }
 
-/// The relevant entries of folder `top`, no link followed (a link is kept as one).
+/// The relevant entries of folder `top`, walked from a handle on it (`openat`, `O_NOFOLLOW`): a
+/// link is kept as one and never followed, even one swapped in for a folder or a file while it is
+/// read (that open fails, and nothing is taken).
 fn read_folder(top: &Path) -> Result<Tree, String> {
-    let whole = fs::symlink_metadata(top.join("SKILL.md")).is_ok_and(|m| m.is_file());
-    let (mut tree, mut bytes, mut stack) = (Tree::new(), 0usize, vec![String::new()]);
-    while let Some(dir) = stack.pop() {
-        let at = top.join(&dir);
-        let names: Vec<String> = fs::read_dir(&at)
-            .map_err(|e| format!("{}: {e}", at.display()))?
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
+    use rustix::fs::{AtFlags, Mode, statat};
+    let fd = rustix::fs::open(top, dir_flags(), Mode::empty())
+        .map_err(|e| format!("{}: {e}", one_line(&top.display().to_string())))?;
+    let whole = statat(&fd, "SKILL.md", AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_file());
+    let mut w = Walk {
+        tree: Tree::new(),
+        bytes: 0,
+        whole,
+    };
+    w.dir(&fd, "", 0)?;
+    Ok(w.tree)
+}
+
+fn dir_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+}
+
+struct Walk {
+    tree: Tree,
+    bytes: usize,
+    whole: bool,
+}
+
+impl Walk {
+    fn dir(&mut self, fd: &rustix::fd::OwnedFd, dir: &str, depth: usize) -> Result<(), String> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+        let changed = |rel: &str| {
+            format!(
+                "{}: it changed while it was read: nothing was taken",
+                shown(rel)
+            )
+        };
+        if depth > MAX_FOLDER_DEPTH {
+            return Err(format!(
+                "more than {MAX_FOLDER_DEPTH} folders deep: name a narrower folder"
+            ));
+        }
+        let mut names = vec![];
+        for e in rustix::fs::Dir::read_from(fd).map_err(|_| changed(dir))? {
+            let e = e.map_err(|_| changed(dir))?;
+            if let Ok(n) = e.file_name().to_str()
+                && n != "."
+                && n != ".."
+            {
+                names.push(n.to_owned());
+            }
+        }
+        names.sort();
         for n in names {
             let rel = if dir.is_empty() {
-                n
+                n.clone()
             } else {
                 format!("{dir}/{n}")
             };
-            if !relevant(&rel, whole) {
+            if !relevant(&rel, self.whole) {
                 continue;
             }
-            if tree.len() >= MAX_ENTRIES {
+            if self.tree.len() >= MAX_ENTRIES {
                 return Err(format!(
                     "more than {MAX_ENTRIES} entries: name a narrower folder"
                 ));
             }
-            let p = top.join(&rel);
-            let m = fs::symlink_metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            let item = if m.is_dir() {
-                stack.push(rel.clone());
-                Item::Dir
-            } else if m.is_file() {
-                bytes += usize::try_from(m.len()).unwrap_or(usize::MAX);
-                if bytes > MAX_UNPACKED {
-                    return Err(format!(
-                        "more than {} MiB to read: name a narrower folder",
-                        MAX_UNPACKED >> 20
-                    ));
+            let st =
+                statat(fd, n.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(|_| changed(&rel))?;
+            let item = match FileType::from_raw_mode(st.st_mode) {
+                FileType::Directory => {
+                    let sub = openat(fd, n.as_str(), dir_flags(), Mode::empty())
+                        .map_err(|_| changed(&rel))?;
+                    self.tree.insert(rel.clone(), Item::Dir);
+                    self.dir(&sub, &rel, depth + 1)?;
+                    continue;
                 }
-                let mut b = Vec::new();
-                fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-                    .open(&p)
-                    .and_then(|mut f| f.read_to_end(&mut b))
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
-                Item::File(b)
-            } else {
-                Item::Link
+                FileType::RegularFile => {
+                    // NONBLOCK: a pipe swapped in does not hang the open; fstat says what it is.
+                    let f = openat(
+                        fd,
+                        n.as_str(),
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                        Mode::empty(),
+                    )
+                    .map_err(|_| changed(&rel))?;
+                    let st = rustix::fs::fstat(&f).map_err(|_| changed(&rel))?;
+                    if !FileType::from_raw_mode(st.st_mode).is_file() {
+                        return Err(changed(&rel));
+                    }
+                    self.bytes += usize::try_from(st.st_size).unwrap_or(usize::MAX);
+                    if self.bytes > MAX_UNPACKED {
+                        return Err(format!(
+                            "more than {} MiB to read: name a narrower folder",
+                            MAX_UNPACKED >> 20
+                        ));
+                    }
+                    let mut b = Vec::new();
+                    fs::File::from(f)
+                        .take(MAX_UNPACKED as u64)
+                        .read_to_end(&mut b)
+                        .map_err(|_| changed(&rel))?;
+                    Item::File(b)
+                }
+                _ => Item::Link,
             };
-            tree.insert(rel, item);
+            self.tree.insert(rel, item);
         }
+        Ok(())
     }
-    Ok(tree)
+}
+
+/// A name from a source as an error may carry it (to the model too): plain characters, short.
+fn shown(s: &str) -> String {
+    let t: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        .take(80)
+        .collect();
+    if t.is_empty() { "?".into() } else { t }
 }
 
 /// A number of a tar header: octal, NUL or space ended. `None`: not one (base-256 too).
@@ -366,18 +444,13 @@ fn gunzip(file: &Path) -> Result<Vec<u8>, String> {
     }
 }
 
-/// The archive of `owner/repo` at `reference`, from GitHub over https only (TLS 1.2 or newer, no
-/// redirect off https, at most `MAX_ARCHIVE`), downloaded into `staging` and removed there.
-fn fetch(owner: &str, repo: &str, reference: &str, staging: &Path) -> Result<Vec<u8>, String> {
-    crate::host::private_dir(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
-    let file = staging.join(format!(
-        "{}-{}.tar.gz",
-        std::process::id(),
-        crate::host::now_ms()
-    ));
-    let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{reference}");
-    // The installer's flags (`setup::fetch::get`), and a cap on the size and the time.
-    let got = Command::new("curl")
+/// Downloads `url` into `file`: whether the server gave it (curl, https only, at most
+/// `MAX_ARCHIVE`, the installer's flags).
+pub type Get<'a> = &'a dyn Fn(&str, &Path) -> bool;
+
+/// curl, as `Get`.
+pub fn curl(url: &str, file: &Path) -> bool {
+    Command::new("curl")
         .args([
             "-fsSL",
             "--retry",
@@ -399,23 +472,65 @@ fn fetch(owner: &str, repo: &str, reference: &str, staging: &Path) -> Result<Vec
             &MAX_ARCHIVE.to_string(),
             "-o",
         ])
-        .arg(&file)
-        .arg(&url)
+        .arg(file)
+        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    let r = match got {
-        Err(e) => Err(format!("curl could not start: {e}")),
-        Ok(s) if !s.success() => Err(format!(
-            "GitHub did not give the archive of {owner}/{repo} at {reference} (no such repository or ref, larger than {} MiB, or no network)",
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The archive URLs of `owner/repo` at `reference`, in order: a branch, then a tag of that
+/// repository (`refs/heads/`, `refs/tags/`), so only a real ref of it resolves, never a commit
+/// (GitHub serves a fork's commit through the parent's name); the default branch when none.
+pub fn archive_urls(owner: &str, repo: &str, reference: &str) -> Vec<String> {
+    let base = format!("https://codeload.github.com/{owner}/{repo}/tar.gz");
+    if reference == "HEAD" {
+        vec![format!("{base}/HEAD")]
+    } else {
+        vec![
+            format!("{base}/refs/heads/{reference}"),
+            format!("{base}/refs/tags/{reference}"),
+        ]
+    }
+}
+
+/// The archive of `owner/repo` at `reference` (`archive_urls`, through `get`), downloaded into
+/// `staging` and removed there, unpacked.
+fn fetch(
+    owner: &str,
+    repo: &str,
+    reference: &str,
+    staging: &Path,
+    get: Get,
+) -> Result<Vec<u8>, String> {
+    crate::host::private_dir(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let file = staging.join(format!(
+        "{}-{}.tar.gz",
+        std::process::id(),
+        crate::host::now_ms()
+    ));
+    let got = archive_urls(owner, repo, reference)
+        .iter()
+        .any(|u| get(u, &file));
+    let hex = reference.len() >= 7 && reference.bytes().all(|b| b.is_ascii_hexdigit());
+    let r = if !got && hex {
+        Err(format!(
+            "{reference} is not a branch or a tag of {owner}/{repo}: name a branch or a tag"
+        ))
+    } else if !got {
+        Err(format!(
+            "GitHub did not give the archive of {owner}/{repo} at {reference} (no such repository, branch or tag, larger than {} MiB, or no network)",
             MAX_ARCHIVE >> 20
-        )),
-        Ok(_) if !fs::metadata(&file).is_ok_and(|m| m.len() <= MAX_ARCHIVE) => Err(format!(
+        ))
+    } else if !fs::metadata(&file).is_ok_and(|m| m.len() <= MAX_ARCHIVE) {
+        Err(format!(
             "the archive is larger than {} MiB: nothing of it was taken",
             MAX_ARCHIVE >> 20
-        )),
-        Ok(_) => gunzip(&file),
+        ))
+    } else {
+        gunzip(&file)
     };
     let _ = fs::remove_file(&file);
     r
@@ -494,18 +609,24 @@ fn name_in(tree: &Tree, dir: &str, top: &str) -> String {
     } else {
         dir.rsplit('/').next().unwrap_or(dir)
     };
-    skills::clio_name(
-        &skills::front_matter(&md)
-            .0
-            .unwrap_or_else(|| folder.to_owned()),
-    )
+    // Its own name as written (`check_added` refuses one that is not exactly Clio's), else the
+    // folder's made Clio's.
+    match skills::added_front_matter(&md).ok().and_then(|f| f.0) {
+        Some(n) => n,
+        None => skills::clio_name(folder),
+    }
 }
 
 fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
     let who = |why: String| {
         format!(
-            "the skill «{name}» ({}): {why}",
-            if dir.is_empty() { "." } else { dir }
+            "the skill «{}» ({}): {why}",
+            shown(name),
+            if dir.is_empty() {
+                ".".into()
+            } else {
+                shown(dir)
+            }
         )
     };
     let prefix = if dir.is_empty() {
@@ -522,7 +643,8 @@ fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
             Item::Dir => {}
             Item::Link => {
                 return Err(who(format!(
-                    "{rel} is a link: a skill with a link is not taken"
+                    "{} is a link: a skill with a link is not taken",
+                    shown(rel)
                 )));
             }
             Item::File(b) if rel == "SKILL.md" => {
@@ -546,8 +668,18 @@ fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
         }
     }
     let md = md.ok_or_else(|| who("no SKILL.md".into()))?;
-    let description = skills::front_matter(&md).1.unwrap_or_default();
+    if !skills::valid_name(name) {
+        return Err(who(
+            "its name is not one Clio takes (lowercase letters, digits and single hyphens, at most 64)"
+                .into(),
+        ));
+    }
     skills::check_added(name, &md, &files).map_err(who)?;
+    let description = skills::added_front_matter(&md)
+        .map_err(who)?
+        .1
+        .trim()
+        .to_owned();
     Ok(Found {
         name: name.to_owned(),
         description,
@@ -580,16 +712,20 @@ pub struct Ctx<'a> {
     pub home: &'a Path,
     /// What a relative folder is under.
     pub base: &'a Path,
-    /// Why a folder may not be read, if it may not (the model's: its read rules; the person's:
-    /// none).
-    pub refuse: &'a dyn Fn(&Path) -> Option<String>,
     /// The skills folder (`<data>/skills`): who holds each name.
     pub root: &'a Path,
     /// Where an archive is downloaded (under Clio's data); it is removed at once.
     pub staging: &'a Path,
     /// The judge's verdict on a text and where it is from.
     pub judge: &'a dyn Fn(&str, &str) -> TextVerdict,
+    /// A text as the vault's filter leaves it (`None`: it could not filter it).
+    pub clean: &'a dyn Fn(&str) -> Option<String>,
+    /// How an archive is downloaded (`curl`).
+    pub get: Get<'a>,
 }
+
+/// Something shaped like a secret, the same check as `skill_write`'s: fixed words.
+const SECRET: &str = "it holds something shaped like a secret (a key, a token, a password): a skill never carries one, nothing was added";
 
 /// Every skill of `source` (only those in `names`, when some are given), found, checked and
 /// judged whole: each one the arguments of its item, in the source's order. One that fails a
@@ -600,9 +736,6 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             let p = p
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", one_line(&p.display().to_string())))?;
-            if let Some(why) = (cx.refuse)(&p) {
-                return Err(why);
-            }
             if !p.is_dir() {
                 return Err(format!("{} is not a folder", p.display()));
             }
@@ -618,8 +751,13 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             repo,
             reference,
         } => {
-            let tar = fetch(&owner, &repo, &reference, cx.staging)?;
+            let tar = fetch(&owner, &repo, &reference, cx.staging, cx.get)?;
             let (commit, tree) = untar(&tar)?;
+            // The yes is to that repository at that commit: an archive that does not say which
+            // is not taken.
+            if commit.is_none() {
+                return Err("the archive does not name its commit: nothing of it was taken".into());
+            }
             let top = repo.clone();
             (
                 Source::GitHub {
@@ -643,10 +781,10 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
     if let Some(n) = names.iter().find(|n| !named.iter().any(|(m, _)| m == *n)) {
         return Err(format!(
             "there is no skill «{}» in {origin}; it has: {}",
-            one_line(n),
+            shown(n),
             named
                 .iter()
-                .map(|(m, _)| m.as_str())
+                .map(|(m, _)| shown(m))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -657,9 +795,20 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             continue;
         }
         if out.iter().any(|v| v["name"] == name.as_str()) {
-            return Err(format!("{origin} has two skills named «{name}»"));
+            return Err(format!("{origin} has two skills named «{}»", shown(&name)));
         }
         let f = build(&tree, dir, &name)?;
+        for t in
+            std::iter::once(f.skill_md.as_str()).chain(f.files.iter().map(|x| x.content.as_str()))
+        {
+            match (cx.clean)(t) {
+                None => return Err("the vault could not filter the text: nothing was added".into()),
+                Some(c) if c != t || clio_vault::count_masks(&c) > clio_vault::count_masks(t) => {
+                    return Err(format!("the skill «{}»: {SECRET}", shown(&f.name)));
+                }
+                Some(_) => {}
+            }
+        }
         let update = match owner(cx.root, &f.name) {
             None => false,
             Some(o) if o.as_deref() == Some(origin.as_str()) => true,
@@ -673,6 +822,18 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
         };
         let whole = skills::whole_text(&f.skill_md, &f.files);
         let verdict = (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name));
+        // Where the person reads exactly what would be installed: the repository at that commit.
+        let url = match (&src, &commit) {
+            (Source::GitHub { owner, repo, .. }, Some(c)) => Some(format!(
+                "https://github.com/{owner}/{repo}/tree/{c}{}",
+                if f.from.is_empty() {
+                    String::new()
+                } else {
+                    format!("/{}", f.from)
+                }
+            )),
+            _ => None,
+        };
         out.push(json!({
             "name": f.name,
             "description": f.description,
@@ -684,6 +845,7 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             "commit": commit,
             "ref": match &src { Source::GitHub { reference, .. } => Some(reference.as_str()), Source::Folder(_) => None },
             "from": f.from,
+            "url": url,
             "layout": layouts.join(", "),
             "judge": judge_word(verdict),
             "skipped": f.skipped,
@@ -753,21 +915,30 @@ impl crate::ToolHost {
             Some(_) => return fail("names must be a list of skill names"),
         };
         let home = h.cfg.home.as_path();
-        let refuse =
-            |p: &Path| crate::services::read_refused(&p.to_string_lossy(), home, &h.cfg.control);
+        // A folder is something the model can write: only the person adds one (`clio skills add`).
+        if !matches!(parse(s("source"), home, home), Ok(Source::GitHub { .. })) {
+            return fail(match parse(s("source"), home, home) {
+                Ok(_) => FOLDER_PERSON,
+                Err(_) => {
+                    "source: a GitHub repository (owner/repo, owner/repo@branch-or-tag, or https://github.com/owner/repo); only GitHub, only over https"
+                }
+            });
+        }
         // `verdict`, not `verdict_of`: a port without a judge is "not judged" here, never clean.
         let judge = |t: &str, from: &str| match &self.memory {
             Some(port) => crate::judge::verdict(port, t, from),
             None => TextVerdict::NoJudge,
         };
         let staging = self.run_dir.join("skills/staging");
+        let clean = |t: &str| self.try_clean(t);
         let cx = Ctx {
             home,
             base: home,
-            refuse: &refuse,
             root,
             staging: &staging,
             judge: &judge,
+            clean: &clean,
+            get: &self.archive_get,
         };
         let items = match prepare(s("source"), &names, &cx) {
             Ok(i) => i,
@@ -785,9 +956,12 @@ impl crate::ToolHost {
             .and_then(|a| a["origin"].as_str())
             .unwrap_or("")
             .to_owned();
+        // The person is told when this conversation read text from outside before proposing it.
+        let marked = self.is_tainted(&req.session) || self.is_unjudged(&req.session);
         let mut set = vec![];
         for mut a in items {
             a["why"] = Value::String(self.clean(reason));
+            a["marked"] = Value::Bool(marked);
             let name = a["name"].as_str().unwrap_or("").to_owned();
             match crate::pending::set_aside_added(&h.cfg.state, &h.cfg.run, &req.session, a) {
                 Ok(p) => set.push(format!("{} «{name}»", p.id)),
@@ -850,7 +1024,102 @@ mod tests {
     }
 
     const MD: &str =
-        "---\nname: Hello World\ndescription: Says hello. Use when greeting.\n---\n\nSay hello.\n";
+        "---\nname: hello-world\ndescription: Says hello. Use when greeting.\n---\n\nSay hello.\n";
+
+    fn gz(b: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut c = Command::new("gzip")
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(b).unwrap();
+        c.wait_with_output().unwrap().stdout
+    }
+
+    // S-68: a ref is a branch or a tag of that repository, asked for as one (`refs/heads/`, then
+    // `refs/tags/`), never a commit: GitHub serves a fork's commit through the parent's name. The
+    // commit kept is the archive's own.
+    #[test]
+    fn a_ref_is_a_branch_or_a_tag_never_a_commit() {
+        let c = "c".repeat(40);
+        let body = gz(&tar(
+            "r-x",
+            &c,
+            &[("skills/hello/SKILL.md", b'0', MD.as_bytes())],
+        ));
+        let base = "https://codeload.github.com/o/r/tar.gz";
+        // The fake server: a branch `main`, a tag `v1`, the default branch; and a commit any
+        // name would give (a fork's), which a well-formed request never asks for.
+        let served = [
+            format!("{base}/refs/heads/main"),
+            format!("{base}/refs/tags/v1"),
+            format!("{base}/HEAD"),
+            format!("{base}/6e3b636d0000"),
+        ];
+        let asked = std::sync::Mutex::new(vec![]);
+        let get = |url: &str, file: &Path| {
+            asked.lock().unwrap().push(url.to_owned());
+            served.contains(&url.to_owned()) && fs::write(file, &body).is_ok()
+        };
+        let t = tempfile::tempdir().unwrap();
+        for r in ["main", "v1", "HEAD"] {
+            let (commit, tree) = untar(&fetch("o", "r", r, t.path(), &get).unwrap()).unwrap();
+            assert_eq!(commit.as_deref(), Some(c.as_str()));
+            assert!(tree.contains_key("skills/hello/SKILL.md"), "{r}");
+        }
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            [
+                format!("{base}/refs/heads/main"),
+                format!("{base}/refs/heads/v1"),
+                format!("{base}/refs/tags/v1"),
+                format!("{base}/HEAD"),
+            ]
+        );
+        let e = fetch("o", "r", "6e3b636d0000", t.path(), &get).unwrap_err();
+        assert!(e.contains("name a branch or a tag"), "{e}");
+        assert!(
+            fetch("o", "r", "nope", t.path(), &get)
+                .unwrap_err()
+                .contains("no such")
+        );
+        assert!(
+            !asked
+                .lock()
+                .unwrap()
+                .contains(&format!("{base}/6e3b636d0000"))
+        );
+        assert_eq!(
+            fs::read_dir(t.path()).unwrap().count(),
+            0,
+            "the download is removed"
+        );
+    }
+
+    // S-68: a repository that is one skill (SKILL.md at its top): its hooks, commands and agents
+    // are named as not installed, never taken as that skill's files.
+    #[test]
+    fn a_repository_that_is_one_skill_leaves_its_plugin_parts_out() {
+        let c = "d".repeat(40);
+        let t = tar(
+            "o",
+            &c,
+            &[
+                ("SKILL.md", b'0', MD.as_bytes()),
+                ("ref.md", b'0', b"more"),
+                ("hooks/hooks.json", b'0', b"{}"),
+                ("commands/x.md", b'0', b"x"),
+                ("agents/a.md", b'0', b"a"),
+            ],
+        );
+        let (_, tree) = untar(&t).unwrap();
+        let f = build(&tree, "", "hello-world").unwrap();
+        let paths: Vec<&str> = f.files.iter().map(|x| x.path.as_str()).collect();
+        assert_eq!(paths, ["ref.md"]);
+        assert_eq!(plugin_parts(&tree), ["hooks", "commands", "agents"]);
+    }
 
     #[test]
     fn sources_are_folders_or_github_over_https() {
@@ -992,8 +1261,13 @@ mod tests {
         fs::create_dir_all(t.path().join("elsewhere/deep")).unwrap();
         fs::write(t.path().join("elsewhere/deep/x"), "not read").unwrap();
         std::os::unix::fs::symlink("/etc/passwd", s.join("pw")).unwrap();
+        // A folder that is a link (what a swap mid-read would leave): kept as a link, not entered.
+        std::os::unix::fs::symlink(t.path().join("elsewhere"), t.path().join("skills/two"))
+            .unwrap();
         let tree = read_folder(t.path()).unwrap();
         assert_eq!(tree.get("skills/one/pw"), Some(&Item::Link));
+        assert_eq!(tree.get("skills/two"), Some(&Item::Link));
+        assert!(!tree.keys().any(|k| k.starts_with("skills/two/")));
         assert!(!tree.contains_key("elsewhere/deep/x"));
         assert!(
             build(&tree, "skills/one", "one")

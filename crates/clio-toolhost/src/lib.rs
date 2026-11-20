@@ -242,6 +242,8 @@ pub struct Config {
     /// Host mode: why the MCP servers could not be set up (no bwrap, no npm beside Node): the
     /// chat starts anyway, and the three tools say this.
     pub mcp_unavailable: Option<String>,
+    /// How `skill_add` downloads a repository's archive (`skill_add::curl`; a test serves it).
+    pub archive_get: fn(&str, &Path) -> bool,
 }
 
 impl Config {
@@ -265,6 +267,7 @@ impl Config {
             shows: Vec::new(),
             mcp: None,
             mcp_unavailable: None,
+            archive_get: skill_add::curl,
         }
     }
 }
@@ -308,6 +311,7 @@ pub struct ToolHost {
     secrets: Option<pending::SecretCfg>,
     clock: Arc<dyn Clock>,
     review: bool,
+    archive_get: fn(&str, &Path) -> bool,
     unattended: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
@@ -508,6 +512,7 @@ impl ToolHost {
             clock: cfg.clock,
             review: cfg.review,
             unattended: cfg.unattended,
+            archive_get: cfg.archive_get,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),

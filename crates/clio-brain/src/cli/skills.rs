@@ -923,10 +923,13 @@ pub fn register_found(root: &Path, a: &Value) -> Res<String> {
     ))
 }
 
-/// `clio skills add <source> [name…]`: every skill of `source` (or those named) found, checked
-/// and judged, each shown as its box shows it and added only if the person says yes to it (no is
-/// the default). Nothing is added before that, and nothing of a plugin but its skills.
+/// `clio skills add <source> [name…] [--show] [--yes]`: every skill of `source` (or those named)
+/// found, checked and judged, each shown as its box shows it and added only if the person says
+/// yes to it at a terminal (no is the default); `--yes` adds them without asking, `--show` prints
+/// every file of them and adds nothing. Nothing is added before that, and nothing of a plugin but
+/// its skills.
 fn add(d: &Dirs, args: &[String]) -> Res<()> {
+    use std::io::IsTerminal;
     let cfg = super::home::Config::load(d)?;
     let models = clio_brain::memory_link::MemoryLink::model_dirs(&d.home);
     let port: std::sync::Arc<dyn clio_toolhost::MemoryPort> =
@@ -935,23 +938,61 @@ fn add(d: &Dirs, args: &[String]) -> Res<()> {
             &cfg,
             clio_brain::memory_port::LinkPort::new(&d.data, &models),
         ));
+    // The same filter as the tool host's (`try_clean`): what it would change is a secret's shape.
+    let scrubber = super::debug::scrubber(d);
+    let vault = super::vault::gateway_socket(d)
+        .ok()
+        .filter(|s| s.exists())
+        .map(|s| clio_vault::VaultClient::new(&s).with_timeout(std::time::Duration::from_secs(2)));
+    let clean = |t: &str| {
+        let t = scrubber.scrub(&clio_toolhost::sanitize(t));
+        match &vault {
+            None => Some(t),
+            Some(v) => v.scrub(&t).ok(),
+        }
+    };
     add_with(
         d,
         args,
-        &|t, from| clio_toolhost::verdict(&port, t, from),
+        (
+            &|t, from| clio_toolhost::verdict(&port, t, from),
+            &clean,
+            &clio_toolhost::skill_add::curl,
+        ),
+        std::io::stdin().is_terminal(),
         super::apply::confirm,
     )
 }
 
+type Judge<'a> = &'a dyn Fn(&str, &str) -> clio_toolhost::TextVerdict;
+/// What `add_with` asks of the world: the judge, the vault's filter and the download.
+type AddIo<'a> = (
+    Judge<'a>,
+    &'a dyn Fn(&str) -> Option<String>,
+    clio_toolhost::skill_add::Get<'a>,
+);
+
 fn add_with(
     d: &Dirs,
     args: &[String],
-    judge: &dyn Fn(&str, &str) -> clio_toolhost::TextVerdict,
+    (judge, clean, get): AddIo,
+    tty: bool,
     confirm: impl Fn(&str) -> bool,
 ) -> Res<()> {
+    let yes = args.iter().any(|a| a == "--yes");
+    let show = args.iter().any(|a| a == "--show");
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| !matches!(a.as_str(), "--yes" | "--show"))
+        .cloned()
+        .collect();
     let (source, names) = args.split_first().ok_or(
-        "clio skills add <folder | owner/repo[@ref] | https://github.com/owner/repo> [name…]",
+        "clio skills add <folder | owner/repo[@branch-or-tag] | https://github.com/owner/repo> [name…] [--show]",
     )?;
+    // The person's yes, read by them: piped answers are not one.
+    if !tty && !yes && !show {
+        return Err("clio skills add asks you at a terminal, and standard input is not one: nothing was added (run it at a terminal, or give --yes to add them without asking)".into());
+    }
     let root = root(d);
     let cwd = std::env::current_dir().map_err(|e| format!("the current folder: {e}"))?;
     println!("reading {source}…");
@@ -961,10 +1002,11 @@ fn add_with(
         &clio_toolhost::skill_add::Ctx {
             home: &d.home,
             base: &cwd,
-            refuse: &|_| None,
             root: &root,
             staging: &d.data.join("staging"),
             judge,
+            clean,
+            get,
         },
     )?;
     if let Some(a) = items.first() {
@@ -985,14 +1027,35 @@ fn add_with(
                 _ => println!("{row}"),
             }
         }
-        if confirm(&format!("add the skill «{name}» as shown above?")) {
+        if show {
+            // Every file whole, as it would be installed, cleaned for the terminal.
+            let files = a["files"].as_array().cloned().unwrap_or_default();
+            for (path, text) in std::iter::once(("SKILL.md", a["skill_md"].as_str().unwrap_or("")))
+                .chain(files.iter().map(|f| {
+                    (
+                        f["path"].as_str().unwrap_or(""),
+                        f["content"].as_str().unwrap_or(""),
+                    )
+                }))
+            {
+                println!("--- {} ---", super::tui::sanitize::line(path));
+                println!("{}", super::tui::sanitize::multiline(text));
+            }
+            println!();
+            continue;
+        }
+        if yes || confirm(&format!("add the skill «{name}» as shown above?")) {
             println!("{}\n", register_found(&root, a)?);
             added += 1;
         } else {
             println!("the skill «{name}» was not added\n");
         }
     }
-    println!("{added} of {} added", items.len());
+    if show {
+        println!("nothing was added (--show)");
+    } else {
+        println!("{added} of {} added", items.len());
+    }
     Ok(())
 }
 
@@ -1632,21 +1695,55 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
                 TextVerdict::Clean
             }
         };
-        let args = ["add".to_owned(), src.display().to_string()];
+        let clean = |t: &str| Some(t.to_owned());
+        let get = |_: &str, _: &Path| false;
+        let io: AddIo = (&judge, &clean, &get);
+        let args = |more: &[&str]| -> Vec<String> {
+            std::iter::once(src.display().to_string())
+                .chain(more.iter().map(|m| (*m).to_owned()))
+                .collect()
+        };
         let asked = std::cell::RefCell::new(vec![]);
-        add_with(&d, &args[1..], &judge, |q| {
+        let ask = |q: &str| {
             asked.borrow_mut().push(q.to_owned());
             false
-        })
-        .unwrap();
+        };
+        add_with(&d, &args(&[]), io, true, ask).unwrap();
         assert_eq!(asked.borrow().len(), 2);
         assert!(records(&root(&d)).is_empty(), "no yes, nothing added");
-        add_with(&d, &args[1..], &judge, |q| q.contains("«hi»")).unwrap();
+        // Not at a terminal (piped answers): nothing is asked or added, unless --yes; --show
+        // prints and adds nothing.
+        let e = add_with(&d, &args(&[]), io, false, |_| true).unwrap_err();
+        assert!(e.contains("at a terminal"), "{e}");
+        add_with(&d, &args(&["--show"]), io, false, |_| true).unwrap();
+        assert!(records(&root(&d)).is_empty(), "--show adds nothing");
+        add_with(&d, &args(&[]), io, true, |q| q.contains("«hi»")).unwrap();
         let names: Vec<String> = records(&root(&d)).into_iter().map(|r| r.name).collect();
         assert_eq!(names, ["hi"]);
-        // The rows: the judge's words, the plugin's parts not installed.
+        add_with(&d, &args(&["bad", "--yes"]), io, false, |_| false).unwrap();
+        assert_eq!(records(&root(&d)).len(), 2, "--yes adds without asking");
+        // The rows: the judge's words, the plugin's parts not installed, where to read it at
+        // that commit and that the conversation read outside text.
         let mut a = added("x", "/src", "Body.");
         a["left"] = serde_json::json!(["hooks"]);
+        let url = "https://github.com/o/r/tree/0123/skills/x";
+        a["url"] = url.into();
+        a["marked"] = true.into();
+        let rows = added_rows(&a);
+        assert!(rows.contains(&(
+            Part::Label,
+            format!("read exactly what would be installed: {url}")
+        )));
+        assert!(rows.contains(&(
+            Part::Warn,
+            "this conversation read text from outside before Clio proposed this".into()
+        )));
+        a["marked"] = false.into();
+        assert!(
+            !added_rows(&a)
+                .iter()
+                .any(|(_, r)| r.contains("read text from outside"))
+        );
         for (word, warns) in [
             ("clean", false),
             ("flagged", true),

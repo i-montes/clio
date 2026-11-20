@@ -588,7 +588,16 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn save(state: &Path, p: &Pending) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(p).map_err(|e| e.to_string())?;
+    // A skill from outside, answered or past its time: its text (up to 1 MiB) is not kept.
+    let mut p = p.clone();
+    if p.tool == crate::skill_add::TOOL
+        && p.state != State::Waiting
+        && let Some(a) = p.args.as_object_mut()
+    {
+        a.remove("skill_md");
+        a.remove("files");
+    }
+    let text = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
     write_private(&file(state, &p.id)?, &text)
 }
 
@@ -616,6 +625,15 @@ pub fn list(state: &Path) -> Vec<Pending> {
                 return false;
             }
             true
+        })
+        .map(|mut p| {
+            // A skill from outside past its time: expired here, its text dropped (`save`).
+            if p.tool == crate::skill_add::TOOL && p.state == State::Waiting && now >= p.expires_ms
+            {
+                p.state = State::Expired;
+                let _ = save(state, &p);
+            }
+            p
         })
         .collect();
     all.sort_by(|a, b| (a.created_ms, a.seq, &a.id).cmp(&(b.created_ms, b.seq, &b.id)));

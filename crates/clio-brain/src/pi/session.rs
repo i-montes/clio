@@ -756,7 +756,9 @@ mod tests {
     }
 
     // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,
-    // the map of another harness's tools to Clio's, and nothing else changed.
+    // the map of another harness's tools to Clio's, the memory line without its per-session
+    // budget (there is none), and in the host the sentences on what waits for the person saying
+    // what the person's bypass does there; nothing else changed.
     #[test]
     fn the_new_prompts_only_add_the_tool_map() {
         let old = |f: &str| {
@@ -779,12 +781,45 @@ mod tests {
                 .unwrap();
             let map = n.remove(at);
             assert!(w[at - 1].ends_with("read that SKILL.md with `read` and follow it."));
-            assert_eq!(n[1..], w[1..], "only the map was added");
+            // The memory line: the budget gone, the rest as it was.
+            let i = w
+                .iter()
+                .position(|l| l.starts_with("- Consult the memory only when"))
+                .unwrap();
+            let was = w[i];
+            assert!(was.contains("there is a budget per session"));
+            assert_eq!(
+                n[i],
+                "- Consult the memory only when you need a fact about the person or about earlier work, not just in case. Do not save or ask for anything that looks like a secret."
+            );
+            assert!(!new.contains("budget per session"));
+            n[i] = was;
+            // The host's waiting sentences: what bypass does, said where it waits (S-72), and
+            // `skill_add` the exception that always asks.
+            let unless = "unless the person's bypass is on (the message's envelope says so), in which case Clio does it by herself and tells you what came of it";
+            let changed: Vec<usize> = (1..n.len()).filter(|&j| n[j] != w[j]).collect();
+            assert_eq!(changed.len(), if v == 12 { 3 } else { 0 }, "{changed:?}");
+            for j in changed {
+                assert!(n[j].contains(unless) && w[j].contains("bypass"), "{}", n[j]);
+                assert!(!n[j].contains("(or their bypass)") && !n[j].contains("always wait"));
+                n[j] = w[j];
+            }
+            if v == 12 {
+                assert!(new.contains("A skill added from outside (`skill_add`) is the exception: it always asks the person, bypass or not."));
+                assert_eq!(new.matches(unless).count(), 4);
+            }
+            assert_eq!(
+                n[1..],
+                w[1..],
+                "only the map, the memory line and the waiting sentences changed"
+            );
             for t in [
                 "A Task or Agent tool is `subagent`",
                 "a todo tool is `todo_write`",
                 "a Skill tool means reading that skill's SKILL.md with `read`",
-                "Read, Write, Edit, Bash, Grep and Glob are `read`, `write`, `edit`, `bash` and `find`",
+                "Read, Write, Edit and Bash are `read`, `write`, `edit` and `bash`",
+                "Grep (searching inside files) is `bash` with `grep` or `rg`",
+                "Glob (finding files by name) is `find`",
                 "`plugin:name` is the skill `name`",
             ] {
                 assert!(map.contains(t), "{t}");

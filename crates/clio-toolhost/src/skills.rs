@@ -346,6 +346,181 @@ fn scalar(yaml: &[&str], key: &str) -> Option<String> {
     (!v.is_empty()).then_some(v)
 }
 
+/// Why an added skill's front matter is refused: fixed words, nothing of its text.
+const NOT_SAME: &str = "SKILL.md: its front matter must be read the same by Clio and by Pi (plain `name: value` lines; name and description plain, quoted on one line, or `>`/`|` with lines of one indent): this one is not";
+
+/// The `name` (when it has one) and the `description` of a skill the person adds, read only from
+/// front matter that Clio's reading and a YAML parser (Pi's) cannot read differently: every line
+/// at the left a `key: value` (unique keys), the rest indented; `name` and `description` plain
+/// (no indicator first, nothing YAML would read as another type, on one line), quoted on one line
+/// (no escapes), or a `>`, `>-`, `|`, `|-` block of lines of one indent. Anything else refuses it.
+pub fn added_front_matter(md: &str) -> Result<(Option<String>, String), String> {
+    let bad = || Err(NOT_SAME.to_owned());
+    let lines: Vec<&str> = md.split('\n').collect();
+    if lines.first() != Some(&"---") {
+        return Err("SKILL.md: it must start with a front matter (a line `---`)".into());
+    }
+    // Pi ends it at the first line that starts with `---`: here it must be that line alone.
+    let Some(end) = lines[1..].iter().position(|l| l.starts_with("---")) else {
+        return bad();
+    };
+    if lines[end + 1] != "---" {
+        return bad();
+    }
+    let yaml = &lines[1..=end];
+    let key_re = |l: &str| -> Option<(String, String)> {
+        let (k, v) = l.split_once(':')?;
+        let ok = !k.is_empty()
+            && k.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            && (v.is_empty() || v.starts_with(' '));
+        ok.then(|| (k.to_owned(), v.trim().to_owned()))
+    };
+    let (mut keys, mut name, mut description) = (Vec::<String>::new(), None, None);
+    for (i, l) in yaml.iter().enumerate() {
+        if l.trim().is_empty() || l.starts_with(' ') || l.starts_with('#') {
+            // An indented line belongs to the key above it: none above, and YAML reads another
+            // mapping.
+            if l.starts_with(' ') && !l.trim().is_empty() && keys.is_empty() {
+                return bad();
+            }
+            continue;
+        }
+        let Some((k, v)) = key_re(l) else {
+            return bad();
+        };
+        if keys.contains(&k) {
+            return bad();
+        }
+        keys.push(k.clone());
+        // What follows the key and is not at the left: its lines.
+        let more: Vec<&str> = yaml[i + 1..]
+            .iter()
+            .take_while(|m| m.trim().is_empty() || m.starts_with(' '))
+            .copied()
+            .collect();
+        let content: Vec<&str> = more
+            .iter()
+            .copied()
+            .filter(|m| !m.trim().is_empty())
+            .collect();
+        if k != "name" && k != "description" {
+            // Another key: a quoted or flow value closes on its line (else its next lines are
+            // still it for YAML, and a `name:` among them would be read here).
+            let closed = match v.chars().next() {
+                Some('"') => quoted(&v, '"')
+                    .is_some_and(|(_, rest)| rest.is_empty() || rest.starts_with('#')),
+                Some('\'') => quoted(&v, '\'')
+                    .is_some_and(|(_, rest)| rest.is_empty() || rest.starts_with('#')),
+                Some('[') => v.ends_with(']'),
+                Some('{') => v.ends_with('}'),
+                _ => true,
+            };
+            if !closed {
+                return bad();
+            }
+            continue;
+        }
+        let value = match v.as_str() {
+            ">" | ">-" | "|" | "|-" => {
+                // One indent for every line, no empty line among them: then YAML's reading is this.
+                let Some(first) = content.first() else {
+                    return bad();
+                };
+                let indent = first.len() - first.trim_start_matches(' ').len();
+                let last = more.iter().rposition(|m| !m.trim().is_empty()).unwrap_or(0);
+                if more[..=last].iter().any(|m| m.trim().is_empty())
+                    || content
+                        .iter()
+                        .any(|m| m.len() - m.trim_start_matches(' ').len() != indent)
+                {
+                    return bad();
+                }
+                let parts: Vec<&str> = content.iter().map(|m| &m[indent..]).collect();
+                let mut out = parts.join(if v.starts_with('>') { " " } else { "\n" });
+                if !v.ends_with('-') {
+                    out.push('\n');
+                }
+                out
+            }
+            _ if !content.is_empty() => return bad(),
+            _ => match v.chars().next() {
+                Some('"') => match quoted(&v, '"') {
+                    Some((inner, "")) if !inner.contains('\\') => inner,
+                    _ => return bad(),
+                },
+                Some('\'') => match quoted(&v, '\'') {
+                    Some((inner, "")) => inner,
+                    _ => return bad(),
+                },
+                None => return bad(),
+                Some(c) if "-?:,[]{}#&*!|>%@`".contains(c) => return bad(),
+                Some(_) => {
+                    let plain = v.split(" #").next().unwrap_or("").trim_end();
+                    let other_type = matches!(
+                        plain,
+                        "null"
+                            | "Null"
+                            | "NULL"
+                            | "~"
+                            | "true"
+                            | "True"
+                            | "TRUE"
+                            | "false"
+                            | "False"
+                            | "FALSE"
+                    ) || plain.parse::<f64>().is_ok()
+                        || plain.starts_with("0x")
+                        || plain.starts_with("0o")
+                        || plain.starts_with('.');
+                    if other_type || plain.contains(": ") || plain.ends_with(':') {
+                        return bad();
+                    }
+                    plain.to_owned()
+                }
+            },
+        };
+        if k == "name" {
+            name = Some(value);
+        } else {
+            description = Some(value);
+        }
+    }
+    let d = description.unwrap_or_default();
+    if d.trim().is_empty() || d.chars().count() > MAX_DESCRIPTION {
+        return Err(format!(
+            "SKILL.md: its front matter needs a description (at most {MAX_DESCRIPTION} characters)"
+        ));
+    }
+    Ok((name, d))
+}
+
+/// A one-line quoted value: what is inside, and what is after it (trimmed). `''` is a `'` in a
+/// single-quoted one; a double-quoted one ends at the first `"` not after a `\`.
+fn quoted(v: &str, q: char) -> Option<(String, &str)> {
+    let body = v.strip_prefix(q)?;
+    let mut inner = String::new();
+    let mut it = body.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        if q == '"' && c == '\\' {
+            inner.push(c);
+            if let Some((_, n)) = it.next() {
+                inner.push(n);
+            }
+        } else if c == q {
+            if q == '\'' && it.peek().is_some_and(|(_, n)| *n == '\'') {
+                it.next();
+                inner.push('\'');
+            } else {
+                return Some((inner, body[i + 1..].trim()));
+            }
+        } else {
+            inner.push(c);
+        }
+    }
+    None
+}
+
 /// A name made Clio's: lowercase letters and digits, anything else one `-` between them, at most
 /// 64 (Pi's rules). Empty when nothing of it is a letter or a digit.
 pub fn clio_name(s: &str) -> String {
@@ -369,10 +544,16 @@ pub fn check_added(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<()
     if !valid_name(name) {
         return Err(format!("{:?} is not a skill name", one_line(name)));
     }
-    let d = front_matter(skill_md).1.unwrap_or_default();
-    if d.chars().count() > MAX_DESCRIPTION || d.is_empty() {
+    if skill_md.chars().any(hidden) {
+        return Err(
+            "SKILL.md: it has a control, invisible or tab character the box would not show as written"
+                .into(),
+        );
+    }
+    // The name Pi reads is the one registered: its own, or (none given) its folder's, Clio's.
+    if added_front_matter(skill_md)?.0.is_some_and(|n| n != name) {
         return Err(format!(
-            "SKILL.md: its front matter needs a description (at most {MAX_DESCRIPTION} characters)"
+            "SKILL.md: the name in its front matter must be exactly «{name}» (lowercase letters, digits and single hyphens)"
         ));
     }
     if files.len() + 1 > MAX_ADDED_FILES {
@@ -939,6 +1120,72 @@ mod tests {
     }
 
     // The front matter of skills as other harnesses write them: plain, quoted, folded.
+    #[test]
+    // S-68: an added skill's name and description are read only where Clio and YAML (Pi) read
+    // them the same; anything else refuses it. (Pi's own parser agrees on the accepted ones:
+    // `clio-brain/tests/skill_front_matter.rs`.)
+    fn an_added_skills_front_matter_is_read_only_where_yaml_agrees() {
+        let ok = |md: &str| added_front_matter(md).unwrap();
+        assert_eq!(
+            ok("---\nname: a-b\ndescription: Says hi # note\nlicense: MIT\n---\nbody"),
+            (Some("a-b".into()), "Says hi".into())
+        );
+        assert_eq!(
+            ok("---\ndescription: >\n  One\n  two.\nname: x\n---\n").1,
+            "One two.\n"
+        );
+        assert_eq!(
+            ok("---\ndescription: |-\n  One\n  two.\n---\n").1,
+            "One\ntwo."
+        );
+        assert_eq!(ok("---\ndescription: 'It''s'\n---\n").1, "It's");
+        assert_eq!(
+            ok("---\ndescription: \"Quoted: yes\"\n---\n").1,
+            "Quoted: yes"
+        );
+        assert_eq!(
+            ok("---\ndescription: d\nmeta:\n  name: inner\n---\n").0,
+            None
+        );
+        for bad in [
+            "no front matter",
+            "---\nname: &a skill-creator\ndescription: d\n---\n",
+            "---\nname: *a\ndescription: d\n---\n",
+            "---\nname: !!str skill-creator\ndescription: d\n---\n",
+            "---\nname: [skill-creator]\ndescription: d\n---\n",
+            "---\nname: {a: b}\ndescription: d\n---\n",
+            "---\nname: \"skill-creator\ndescription: d\n---\n",
+            "---\ndescription: \"a\\x41\"\n---\n",
+            "---\ndescription: >2\n  d\n---\n",
+            "---\ndescription: >\n  d\n    more\n---\n",
+            "---\ndescription: >\n  d\n\n  e\n---\n",
+            "---\ndescription: plain\n  continued\n---\n",
+            "---\ndescription: a: b\n---\n",
+            "---\ndescription: true\n---\n",
+            "---\ndescription: 12\n---\n",
+            "---\ndescription: d\ndescription: e\n---\n",
+            "---\n\"name\": x\ndescription: d\n---\n",
+            "---\nname : x\ndescription: d\n---\n",
+            "---\n<<: *base\ndescription: d\n---\n",
+            "---\n name: x\n description: d\n---\n",
+            "---\nx: \"open\nname: evil\ndescription: d\n---\n",
+            "---\nx: [a,\nname: evil]\ndescription: d\n---\n",
+            "---\ndescription: d\n---x\n",
+            "---\ndescription: d\n",
+            "---\nname: x\n---\n",
+        ] {
+            assert!(added_front_matter(bad).is_err(), "{bad:?}");
+        }
+        // The name, when given, is exactly the one registered.
+        let md = "---\nname: other\ndescription: d\n---\n";
+        assert!(
+            check_added("mine", md, &[])
+                .unwrap_err()
+                .contains("exactly «mine»")
+        );
+        assert!(check_added("other", md, &[]).is_ok());
+    }
+
     #[test]
     fn the_front_matter_is_read_as_its_harnesses_write_it() {
         let fm = |y: &str| front_matter(&format!("---\n{y}\n---\nbody\n"));

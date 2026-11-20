@@ -349,9 +349,10 @@ fn size(n: usize) -> String {
 }
 
 /// A skill the person adds from outside (`skill_add`'s item, `a`), as its box and `clio skills
-/// add` show it: what it is, where from (origin, ref, commit, folder), what the judge said in
-/// plain words, every file with its size and whether it is a script, what was left out, and what
-/// of a plugin is not installed. Every list whole.
+/// add` show it: what it is, where from (origin, ref, commit, folder) and where to read it at that
+/// commit, that the conversation read outside text, what the judge said in plain words, every
+/// file with its size and whether it is a script, what was left out, and what of a plugin is not
+/// installed. Every list whole.
 pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
     let s = |k: &str| {
         sanitize::line(a[k].as_str().unwrap_or(""))
@@ -383,8 +384,21 @@ pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
         from += &format!(", folder {}", s("from"));
     }
     rows.push((Part::Label, format!("from: {from}")));
+    // The yes is to that repository at that commit: where to read exactly what it installs.
+    if !s("url").is_empty() {
+        rows.push((
+            Part::Label,
+            format!("read exactly what would be installed: {}", s("url")),
+        ));
+    }
     if !s("why").is_empty() {
         rows.push((Part::Label, format!("Clio's reason: {}", s("why"))));
+    }
+    if a["marked"].as_bool() == Some(true) {
+        rows.push((
+            Part::Warn,
+            "this conversation read text from outside before Clio proposed this".into(),
+        ));
     }
     rows.push(match a["judge"].as_str().unwrap_or("") {
         "clean" => (

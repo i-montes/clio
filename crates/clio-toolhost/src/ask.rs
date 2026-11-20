@@ -1519,6 +1519,9 @@ mod tests {
             "cd /tmp && clio skills add https://github.com/a/b@v1",
         ] {
             assert_eq!(r.classify_command(c), Some(Control), "{c}");
+            // The item as the tool host makes it (`lib.rs`): the machine mark only when
+            // `machine_only` gives it, and then bypass would answer it.
+            assert!(!r.machine_only(c), "{c}");
             assert!(!crate::grant::bypass_answers(&crate::pending::Pending {
                 id: "x".into(),
                 class: Control,
@@ -1532,7 +1535,7 @@ mod tests {
                 seq: 0,
                 expires_ms: 1,
                 state: crate::pending::State::Waiting,
-                reason: None,
+                reason: r.machine_only(c).then(|| MACHINE.into()),
                 granted: None,
             }));
         }
