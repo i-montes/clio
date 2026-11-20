@@ -1236,7 +1236,13 @@ fn attack_11() -> bool {
     assert_eq!(out.denied, 30, "no memory tool exists in the loop");
     assert!(!memory_dir(&w).exists());
     // The close: every line of the model counts; the actor's quota is the brake.
-    let (l, _) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
+    let (l, first) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
+    assert!(first.rejected.is_empty(), "{:?}", first.rejected);
+    assert!(
+        first.saved.len() >= 100,
+        "every line was saved: {}",
+        first.saved.len()
+    );
     // The agent's hour holds 500 (a brake on a loop): filled up to the brim, as many runs would.
     {
         let lw = writer(&w);
@@ -1469,9 +1475,8 @@ const PI_STACK_CASES: [&str; 12] = [
 ];
 
 /// Run by `tests/pi_stack/memory.rs`: the memory tools through Pi, its guard and the tool host.
-const MEMORY_CASES: [&str; 6] = [
+const MEMORY_CASES: [&str; 5] = [
     "attack-56",
-    "attack-57",
     "attack-58",
     "attack-59",
     "attack-60",

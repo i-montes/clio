@@ -667,18 +667,26 @@ fn an_abstaining_memory_that_still_returns_items_says_so() {
     assert!(!r.content.contains("unsure"), "{r:?}");
 }
 
-// A read that cannot be logged is denied, not let through.
+// A call that cannot be logged is denied before the memory is asked.
 #[test]
-fn a_read_whose_log_cannot_be_kept_is_denied() {
+fn a_call_whose_log_cannot_be_kept_is_denied() {
     let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
     let e = env(&port);
     let run = run_dir(&e);
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o500)).unwrap();
     let probe = std::fs::write(run.join("probe"), "");
     let r = search(&e, "s1", "q");
+    // A write too, and before the memory hears of it: it is not saved and then called denied.
+    let w = propose(&e, "s1", "dato", "semantic");
+    let c = change(&e, "s1", "memory_forget", 1);
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
     if probe.is_err() {
-        assert!(denied_by_budget(&r), "{r:?}");
+        for r in [&r, &w, &c] {
+            assert!(denied_by_budget(r), "{r:?}");
+        }
+        assert_eq!(port.calls(), 0);
+        assert!(port.proposals.lock().unwrap().is_empty());
+        assert!(port.changes.lock().unwrap().is_empty());
     } else {
         eprintln!("SKIPPED the read-only folder case: permissions do not apply here");
     }
@@ -1718,7 +1726,7 @@ fn neighbor_ids_never_push_a_result_out() {
     }
 }
 
-// S-47, S-61
+// S-61
 #[test]
 fn a_write_is_refused_on_its_own_arguments_or_a_secret() {
     let value = "canario-del-baul-7f3a9c";

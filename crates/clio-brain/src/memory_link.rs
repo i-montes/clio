@@ -39,6 +39,9 @@ const MAX_NOTES: usize = 4;
 /// The name the judge (Jev) signs its relations with, as the engine names its actor.
 const JUDGE_NAME: &str = "jev";
 
+/// Refusals a close lists one by one.
+const MAX_REJECTED: usize = 20;
+
 pub const SCOPE: &str = "clio";
 pub const DB_FILE: &str = "memory.db";
 /// Tokens for what is recalled (each fixed block has its own budget).
@@ -715,6 +718,11 @@ impl MemoryLink {
                 state: o.state,
                 preview,
             }),
+            // A flood of lines past the quota is one line in the report, not thousands.
+            Err(_) if rep.rejected.len() == MAX_REJECTED => {
+                rep.rejected.push("more were refused, not listed".into());
+            }
+            Err(_) if rep.rejected.len() > MAX_REJECTED => {}
             Err(e) => rep.rejected.push(format!("{kind:?}: {}", explain(&e))),
         }
     }

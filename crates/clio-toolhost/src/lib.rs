@@ -167,7 +167,7 @@ pub(crate) const ROUND_REACHES: &str = "a round reaches nothing outside by itsel
 /// Why a round's change to a unit waits for the person.
 const ROUND_UNITS: &str = "a round changes no service";
 /// The tools a round never uses: each changes something, or needs the person.
-const ROUND_REFUSED: [&str; 8] = [
+const ROUND_REFUSED: [&str; 13] = [
     "fs_write",
     "fs_mkdir",
     "skill_write",
@@ -175,6 +175,13 @@ const ROUND_REFUSED: [&str; 8] = [
     "service_write",
     "mcp_propose",
     "memory_block_edit",
+    // A round may save memories; correcting, merging, forgetting, pinning and undoing change
+    // what is there, with nobody watching and no quota counting three of them.
+    "memory_update",
+    "memory_consolidate",
+    "memory_forget",
+    "memory_pin",
+    "memory_revert",
     "request_secret",
 ];
 
@@ -297,7 +304,7 @@ pub struct ToolHost {
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
     said_token: Option<String>,
-    /// Where the memory tools keep their budget and their log.
+    /// Where the memory tools keep their log.
     run_dir: PathBuf,
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,

@@ -706,6 +706,10 @@ impl ToolHost {
         args: &Map<String, Value>,
         out: DecisionOut,
     ) -> Response {
+        // Before the memory is asked: a write that could not be logged must not happen.
+        if let Err(why) = self.open_log() {
+            return self.budget_denied(req, &format!("the memory log cannot be kept: {why}"));
+        }
         if matches!(
             req.tool.as_str(),
             "memory_save" | "memory_session_summary" | "memory_update" | "memory_consolidate"
@@ -1159,6 +1163,15 @@ impl ToolHost {
         self.aside_at(at, req, args, (crate::ask::Class::Memory, None), &|| false)
     }
 
+    fn open_log(&self) -> Result<std::fs::File, String> {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(self.run_dir.join("memory.jsonl"))
+            .map_err(|e| e.to_string())
+    }
+
     fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1174,13 +1187,7 @@ impl ToolHost {
             "tainted": facts.marked,
             "query_hash": facts.query_hash,
         });
-        let path = self.run_dir.join("memory.jsonl");
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
+        let mut f = self.open_log()?;
         let mut line = row.to_string();
         line.push('\n');
         f.write_all(line.as_bytes()).map_err(|e| e.to_string())
@@ -1298,8 +1305,8 @@ impl ToolHost {
             };
         }
 
-        // Saturating all the way: `cap` can be the 1 KiB floor and a port's note can be longer than
-        // that, and a wrapped `room` would lift the hard cap.
+        // Saturating all the way: a port's note can be longer than `cap`, and a wrapped `room`
+        // would lift it.
         let mut room = cap
             .saturating_sub(wrap_untrusted(Source::Memory, "").len())
             .saturating_sub(OMITTED_ROOM);

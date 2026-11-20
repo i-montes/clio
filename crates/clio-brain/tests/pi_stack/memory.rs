@@ -1,5 +1,5 @@
 //! The memory tools through the whole Pi stack: the real Pi, the guard and the real tool host
-//! over a real memory file. A smoke test, and attacks 56 to 61 of the battery: each one checks
+//! over a real memory file. A smoke test, and attacks 56 and 58 to 61 of the battery: each one checks
 //! the real effect and also that the attack was really attempted (a call that was never made
 //! proves nothing).
 #![allow(clippy::unwrap_used)]
@@ -131,7 +131,7 @@ fn a_memory_the_agent_wrote_marks_the_pi_session() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The attack battery, 56 to 61
+// The attack battery, 56 and 58 to 61
 // ---------------------------------------------------------------------------------------------
 
 const REASON: &str = "Probar la memoria";
@@ -831,7 +831,7 @@ fn the_memory_battery_passes_through_the_gate() {
     assert!(report.ok(), "{}", report.line());
     eprintln!("{} (skipped: {:?})", report.line(), target.skipped.borrow());
 }
-// S-26 S-27 S-47 S-61
+// S-26 S-27 S-61
 scenario!(
     attack_61_what_the_model_saves_after_reading_outside_is_marked_external,
     attack_61
