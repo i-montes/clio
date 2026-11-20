@@ -76,6 +76,7 @@ table! {
     KeysChoose: "↑↓ elegir · Enter aceptar · Esc salir", "↑↓ choose · Enter accept · Esc quit";
     KeysGo: "Enter seguir · Esc salir", "Enter continue · Esc quit";
     KeysField: "Enter aceptar · Esc omitir", "Enter accept · Esc skip";
+    KeysChecks: "↑↓ elegir · Espacio marcar · Enter aceptar · Esc salir", "↑↓ choose · Space tick · Enter accept · Esc quit";
     KeysDone: "Enter abre el chat · Esc salir", "Enter opens the chat · Esc quit";
     KeysExit: "Enter salir", "Enter quit";
     KeysWait: "trabajando…", "working…";
@@ -112,6 +113,7 @@ table! {
     StJudge: "El juez", "The judge";
     StTimer: "Temporizador de servicios", "Services timer";
     StSkills: "Skills incluidas", "Shipped skills";
+    StMcp: "Servidores MCP", "MCP servers";
     StDoctor: "Revisión final", "Final check";
     StBinaries: "clio y clio-vault", "clio and clio-vault";
     StStopVault: "Detener el baúl", "Stop the vault";
@@ -153,6 +155,12 @@ table! {
     NoteTemis: "Temis activado", "Temis on";
     NoteModelLater: "búsqueda por significado: se completará más tarde", "search by meaning: finishes later";
     NoteTimerLater: "más tarde: no hay sesión de systemd para tu usuario", "later: there is no systemd session for your user";
+    NoteNone: "ninguno", "none";
+    NoteMcpLater: "{}: termina más tarde (clio mcp add {})", "{}: finishes later (clio mcp add {})";
+    NoteMcpToken: "{}: apagado hasta tener su token (clio mcp add {})", "{}: off until it has its token (clio mcp add {})";
+    NoteMcpNewer: "{} tiene una versión nueva en el catálogo, {}: clio mcp add {}", "{} has a newer version in the catalog, {}: clio mcp add {}";
+    NoteMcpNoLibs: "Playwright queda fuera: a este sistema le faltan bibliotecas que no sé instalar aquí", "Playwright is left out: this system lacks libraries I cannot install here";
+    NoteNoSudoLibs: "no tienes sudo: faltan las bibliotecas de Chromium (Playwright)", "no sudo: Chromium's libraries (Playwright) are missing";
     NoteDoctorIssues: "hay avisos: ejecuta «clio doctor»", "there are warnings: run `clio doctor`";
 
     FailNet: "No se pudo descargar {}.", "Could not download {}.";
@@ -208,11 +216,18 @@ table! {
     SudoTitle: "Hace falta tu contraseña del sistema, una vez.", "Your system password is needed, once.";
     SudoBwrap: "Instalar bubblewrap ({}): la jaula donde se ejecutan los comandos.", "Install bubblewrap ({}): the jail the commands run in.";
     SudoLinger: "Mantener los servicios activos aunque cierres la sesión.", "Keep the services running after you log out.";
+    SudoBrowser: "Instalar lo que Chromium necesita para Playwright.", "Install what Chromium needs for Playwright.";
     SudoProfile: "Si la jaula aún no arranca: un perfil de AppArmor que deja a bubblewrap crearla.", "If the jail still does not start: an AppArmor profile that lets bubblewrap make it.";
     SudoRuns: "Ejecutaré:", "I will run:";
     SudoHow: "sudo la pide en la terminal; Clio nunca la ve.", "sudo asks for it in the terminal; Clio never sees it.";
     SudoGo: "Seguir", "Continue";
     SudoSkip: "Omitir", "Skip";
+
+    McpTitle: "¿Qué servidores MCP quieres?", "Which MCP servers do you want?";
+    McpHint: "Cada uno da a Clio más herramientas y se ejecuta en su jaula. Ninguno está marcado: elige los que quieras, o ninguno.", "Each gives Clio more tools and runs in its jail. None is ticked: choose the ones you want, or none.";
+    McpTokenTitle: "Pega tu token de {}", "Paste your {} token";
+    McpTokenHint: "Va directamente al baúl. Esc: más tarde (el servidor queda apagado).", "It goes straight into the vault. Esc: later (the server stays off).";
+    FieldToken: "Token", "Token";
 
     ChatOpenTitle: "Hay un chat de Clio abierto.", "A Clio chat is open.";
     ChatOpenHint: "Ciérralo y pulsa Enter.", "Close it and press Enter.";

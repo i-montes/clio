@@ -43,6 +43,9 @@ pub const MANIFEST: &str = "mcp.json";
 pub const ASK_TOOL: &str = "this tool of the server may change something";
 /// The only host npm reaches, for the facts and the install.
 pub const REGISTRY: &str = "registry.npmjs.org";
+/// `network: ["*"]`: any public host on ports 443 and 80, for a server that holds nothing to take
+/// there (no secrets, no writes, no reads but Clio's browser).
+pub const ANY_HOST: &str = "*";
 pub const DEFAULT_LIMITS: Limits = Limits {
     cpu_percent: 50,
     memory_mb: 1024,
@@ -301,8 +304,19 @@ pub fn check(m: &Manifest) -> Result<(), String> {
             "limits: memory_mb at least {MIN_MEMORY_MB} (Node needs it)"
         ));
     }
+    let any = m.network.iter().any(|h| h == ANY_HOST);
+    if any && m.network.len() > 1 {
+        return Err(format!(
+            "network: {ANY_HOST:?} stands alone (any public site)"
+        ));
+    }
+    if any && (!m.secrets.is_empty() || !m.writes.is_empty()) {
+        return Err(format!(
+            "network: a server that reaches any public site ({ANY_HOST:?}) holds no secret and writes nothing: name its hosts instead"
+        ));
+    }
     services::check_grants(
-        &m.network,
+        if any { &[] } else { &m.network },
         &m.secrets,
         m.writes.len().max(m.reads.len()),
         m.limits,
@@ -343,6 +357,124 @@ fn check_settings(m: &Manifest) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Why a server's declared read is refused, if it is: Clio's own Chromium of the catalog's
+/// revision (`catalog::browser_dir`, beside `root`) may be read, before it is downloaded too (the
+/// install fetches it); anything else by the services' rule.
+pub fn read_refused(p: &str, home: &Path, control: &[PathBuf], root: &Path) -> Option<String> {
+    if Path::new(p) == crate::catalog::browser_dir(root) {
+        return None;
+    }
+    services::read_refused(p, home, control)
+}
+
+/// Why a server that reaches any public site is refused, if it is: it holds no secret, writes
+/// nothing and reads nothing but Clio's browser (beside `root`): it has nothing to take there.
+pub fn any_host_refused(
+    network: &[String],
+    secrets: &[SecretUse],
+    reads: &[String],
+    writes: &[String],
+    root: &Path,
+) -> Option<String> {
+    let browser = crate::catalog::browser_dir(root);
+    (network.iter().any(|h| h == ANY_HOST)
+        && (network.len() > 1
+            || !secrets.is_empty()
+            || !writes.is_empty()
+            || reads.iter().any(|r| Path::new(r) != browser)))
+        .then(|| {
+            format!(
+                "a server that reaches any public site ({ANY_HOST:?}) holds no secret, writes nothing and reads nothing but Clio's browser"
+            )
+        })
+}
+
+/// The manifest's paths against the home: its writes and reads by their rules, and the rule of a
+/// server that reaches any public site. `root`: `<data>/mcp`.
+pub fn check_paths(
+    m: &Manifest,
+    home: &Path,
+    control: &[PathBuf],
+    root: &Path,
+) -> Result<(), String> {
+    if let Some(why) = m
+        .writes
+        .iter()
+        .find_map(|w| services::write_refused(w, home, control))
+    {
+        return Err(format!("writes: {why}"));
+    }
+    if let Some(why) = m
+        .reads
+        .iter()
+        .find_map(|r| read_refused(r, home, control, root))
+    {
+        return Err(format!("reads: {why}"));
+    }
+    match any_host_refused(&m.network, &m.secrets, &m.reads, &m.writes, root) {
+        Some(why) => Err(format!("network: {why}")),
+        None => Ok(()),
+    }
+}
+
+/// What `mcp_propose` and the person's `clio mcp add` do alike before a server is set aside: the
+/// manifest's shape and paths, that its name is no other package's server and that it is not
+/// exactly what is installed, `brake` (counted before npm runs), and npm's facts (the catalog's
+/// integrity, when it is exactly a catalog entry). The pending item's arguments.
+pub fn proposal(
+    port: &dyn McpPort,
+    m: &Manifest,
+    (home, control): (&Path, &[PathBuf]),
+    clean: &dyn Fn(&str) -> String,
+    brake: &dyn Fn() -> Result<(), String>,
+) -> Result<Value, String> {
+    check(m)?;
+    let root = port.root();
+    check_paths(m, home, control, &root)?;
+    let now = current_manifest(&root, &m.name);
+    let installed = load_state(&root, &m.name).map(|s| s.package);
+    if let Some(other) = now
+        .as_ref()
+        .map(|n| n.package.clone())
+        .or(installed)
+        .filter(|p| *p != m.package)
+    {
+        return Err(format!(
+            "that name is the server {other}; choose another name or remove it first"
+        ));
+    }
+    // The same package and version with other hosts, secrets, paths or settings is a new
+    // proposal; exactly the same one is not.
+    if now.as_ref() == Some(m) {
+        return Err(format!(
+            "«{}» is installed at {}@{} already, exactly so: the person turns it on with /mcp",
+            m.name, m.package, m.version
+        ));
+    }
+    brake()?;
+    let facts = port
+        .npm_view(&m.name, &m.package, &m.version)
+        .and_then(|v| npm_facts(&v, &m.package, &m.version, clean))?;
+    if let Some(e) = crate::catalog::of(m, &root)
+        && facts["integrity"] != e.integrity.as_str()
+    {
+        return Err(format!(
+            "the registry's integrity of {}@{} is not the one Clio's catalog pins: nothing was proposed",
+            m.package, m.version
+        ));
+    }
+    let manifest = compose(m);
+    Ok(json!({
+        "name": m.name,
+        "description": m.description,
+        "skill_md": manifest,
+        "files": [],
+        "sha256": skills::digest(&manifest, &[]),
+        "update": now.is_some(),
+        "npm": facts,
+    }))
 }
 
 /// The manifest's text: what is shown, approved, hashed and installed.
@@ -652,11 +784,16 @@ pub fn tools_digest(tools: &[Tool]) -> String {
     skills::digest(&serde_json::to_string(tools).unwrap_or_default(), &[])
 }
 
-/// The modes a first probe gives: `free` where the server says the tool only reads, else `ask`.
-pub fn first_modes(seen: Vec<Tool>) -> Vec<Tool> {
+/// The modes a first probe gives: `free` where the server says the tool only reads, or Clio's
+/// catalog does (`also`, for exactly a catalog entry), else `ask`.
+pub fn first_modes(seen: Vec<Tool>, also: &[String]) -> Vec<Tool> {
     seen.into_iter()
         .map(|mut t| {
-            t.mode = if t.read_only { Mode::Free } else { Mode::Ask };
+            t.mode = if t.read_only || also.contains(&t.name) {
+                Mode::Free
+            } else {
+                Mode::Ask
+            };
             t.flagged = false;
             t
         })
@@ -1252,8 +1389,11 @@ impl ToolHost {
                 "reason: why this server, one line of at most {MAX_REASON} characters"
             ));
         }
-        if let Some(k) = args.keys().find(|k| {
-            !matches!(
+        // A catalog server: Clio fills the rest from its catalog, exactly as verified.
+        let catalog = args.get("catalog").map(|c| c.as_str().unwrap_or("").trim());
+        if let Some(k) = args.keys().find(|k| match catalog {
+            Some(_) => !matches!(k.as_str(), "catalog" | "reason"),
+            None => !matches!(
                 k.as_str(),
                 "name"
                     | "description"
@@ -1267,31 +1407,35 @@ impl ToolHost {
                     | "writes"
                     | "limits"
                     | "reason"
-            )
+            ),
         }) {
-            return fail(&format!(
-                "{:?} is not a field of mcp_propose; only local npm servers at an exact version are supported (no command, URL, remote server or OAuth)",
-                one_line(k)
-            ));
+            return fail(&if catalog.is_some() {
+                format!(
+                    "{:?}: with catalog give only reason (Clio fills the rest from its catalog)",
+                    one_line(k)
+                )
+            } else {
+                format!(
+                    "{:?} is not a field of mcp_propose; only local npm servers at an exact version are supported (no command, URL, remote server or OAuth)",
+                    one_line(k)
+                )
+            });
         }
-        let m = match manifest_of(args).and_then(|m| check(&m).map(|()| m)) {
+        let m = match catalog {
+            Some(c) => match crate::catalog::entry(c) {
+                Some(e) => Ok(crate::catalog::manifest(&e, &port.root())),
+                None => Err(format!(
+                    "catalog: {:?} is not in Clio's catalog ({})",
+                    one_line(c),
+                    crate::catalog::names()
+                )),
+            },
+            None => manifest_of(args),
+        };
+        let m = match m.and_then(|m| check(&m).map(|()| m)) {
             Ok(m) => m,
             Err(why) => return fail(&why),
         };
-        if let Some(why) = m
-            .writes
-            .iter()
-            .find_map(|w| services::write_refused(w, &h.cfg.home, &h.cfg.control))
-        {
-            return fail(&format!("writes: {why}"));
-        }
-        if let Some(why) = m
-            .reads
-            .iter()
-            .find_map(|r| services::read_refused(r, &h.cfg.home, &h.cfg.control))
-        {
-            return fail(&format!("reads: {why}"));
-        }
         let manifest = compose(&m);
         match self.try_clean(&manifest) {
             None => return fail("the vault could not filter the text"),
@@ -1302,50 +1446,26 @@ impl ToolHost {
             }
             Some(_) => {}
         }
-        let root = port.root();
-        let now = current_manifest(&root, &m.name);
-        let installed = load_state(&root, &m.name).map(|s| s.package);
-        if let Some(other) = now
-            .as_ref()
-            .map(|n| n.package.clone())
-            .or(installed)
-            .filter(|p| *p != m.package)
-        {
-            return fail(&format!(
-                "that name is the server {other}; choose another name or remove it first"
-            ));
-        }
-        // The same package and version with other hosts, secrets, paths or settings is a new
-        // proposal; exactly the same one is not.
-        if now.as_ref() == Some(&m) {
-            return fail(&format!(
-                "«{}» is installed at {}@{} already, exactly so: the person turns it on with /mcp",
-                m.name, m.package, m.version
-            ));
-        }
         // The brake, counted before npm runs.
-        if !self.mcp_pool.may_propose(&req.session) {
-            return fail(&format!(
-                "at most {PROPOSALS_PER_HOUR} proposals an hour in a session: wait, or ask the person"
-            ));
-        }
-        let facts = match port
-            .npm_view(&m.name, &m.package, &m.version)
-            .and_then(|v| npm_facts(&v, &m.package, &m.version, &|s| self.clean(s)))
-        {
-            Ok(f) => f,
+        let brake = || {
+            if self.mcp_pool.may_propose(&req.session) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "at most {PROPOSALS_PER_HOUR} proposals an hour in a session: wait, or ask the person"
+                ))
+            }
+        };
+        let pending_args = match proposal(
+            port.as_ref(),
+            &m,
+            (&h.cfg.home, &h.cfg.control),
+            &|s| self.clean(s),
+            &brake,
+        ) {
+            Ok(a) => a,
             Err(why) => return fail(&why),
         };
-        let update = now.is_some();
-        let pending_args = json!({
-            "name": m.name,
-            "description": m.description,
-            "skill_md": manifest,
-            "files": [],
-            "sha256": skills::digest(&manifest, &[]),
-            "update": update,
-            "npm": facts,
-        });
         let p = match crate::pending::set_aside_mcp(
             &h.cfg.state,
             &h.cfg.run,

@@ -371,13 +371,7 @@ impl Port {
         let mf = m::check_stored(name, manifest, &[])?;
         let integrity = p.args["npm"]["integrity"].as_str().unwrap_or("");
         let root = root(&self.dirs);
-        let control = self.dirs.control();
-        for w in &mf.writes {
-            if let Some(why) = clio_toolhost::services::write_refused(w, &self.dirs.home, &control)
-            {
-                return Err(format!("writes: {why}"));
-            }
-        }
+        m::check_paths(&mf, &self.dirs.home, &self.dirs.control(), &root)?;
         // Another package under this name would inherit its data folder.
         if let Some(other) = m::current_manifest(&root, &mf.name)
             .map(|c| c.package)
@@ -394,6 +388,16 @@ impl Port {
                 mf.package, mf.version, mf.name
             )
         };
+        // Clio's Chromium, when it reads it: in place before anything else is.
+        if mf.reads.contains(
+            &clio_toolhost::catalog::browser_dir(&root)
+                .display()
+                .to_string(),
+        ) {
+            ensure_browser(&self.dirs, &mut |_| {})
+                .map_err(|e| failed("Clio's browser (Chromium)", &e))?;
+        }
+        let catalog = clio_toolhost::catalog::of(&mf, &root);
         let to = tree_dir(&root, &mf.name, &mf.version);
         // The same version again (other hosts, secrets, paths or settings): its installed tree
         // is reused if it is still exactly what was installed.
@@ -412,7 +416,10 @@ impl Port {
             None => {
                 mkdir_private(&stage)?;
                 let done = (|| -> Result<(String, String, usize), String> {
-                    write_private(&stage.join("package.json"), b"{\"private\": true}\n")
+                    // A catalog entry's exact versions of what its own ranges no longer fit.
+                    let pkg = serde_json::json!({"private": true, "overrides": catalog
+                        .as_ref().map(|e| e.overrides.clone()).unwrap_or_default()});
+                    write_private(&stage.join("package.json"), pkg.to_string().as_bytes())
                         .map_err(|e| failed("preparing the install", &e))?;
                     let spec = format!("{}@{}", mf.package, mf.version);
                     self.npm(
@@ -486,7 +493,9 @@ impl Port {
             let _ = fs::remove_dir_all(&to);
             fs::rename(&stage, &to).map_err(|e| io_err(&to, &e))?;
         }
-        st.tools = m::first_modes(tools);
+        // Exactly a catalog entry: the tools it lists as only reading start free too.
+        let modes = catalog.map(|e| e.modes).unwrap_or_default();
+        st.tools = m::first_modes(tools, &modes);
         {
             let _l = m::lock_root(&root)?;
             m::save_state(&root, &st)?;
@@ -505,7 +514,7 @@ impl Port {
         )?;
         m::log_event(&root, &mf.name, "install", "ok", "");
         Ok(format!(
-            "the MCP server «{}» ({}@{}, {} package{} in all) is installed and on; it offers {} tool{} ({} run without asking: the server says they only read; every other call asks): /mcp show {} lists them",
+            "the MCP server «{}» ({}@{}, {} package{} in all) is installed and on; it offers {} tool{} ({} run without asking: they only read; every other call asks): /mcp show {} lists them",
             mf.name,
             mf.package,
             mf.version,
@@ -516,6 +525,37 @@ impl Port {
             st.tools.iter().filter(|t| t.mode == Mode::Free).count(),
             mf.name
         ))
+    }
+}
+
+/// Clio's Chromium of the catalog's revision in place (`on`: bytes so far), and able to start:
+/// every library it needs is on this system.
+pub fn ensure_browser(d: &Dirs, on: &mut dyn FnMut(u64)) -> Res<()> {
+    use super::setup::{fetch, steps, text::Lang};
+    let pin = fetch::Pins::from_env()
+        .browser
+        .ok_or("Clio pins no Chromium for this system")?;
+    fetch::install_browser(&d.data, &pin, on).map_err(|e| steps::said(Lang::En, &e).0)?;
+    let chrome = clio_toolhost::catalog::browser_dir(&root(d)).join(fetch::CHROME);
+    let missing = fetch::missing_libs(&chrome);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Chromium needs system libraries this machine does not have ({}): `clio setup` (Repair) installs them",
+            missing.join(", ")
+        ))
+    }
+}
+
+/// A server's hosts, as the person reads them.
+fn hosts_text(network: &[String]) -> String {
+    if network.iter().any(|h| h == m::ANY_HOST) {
+        "any public site".into()
+    } else if network.is_empty() {
+        "none (no network)".into()
+    } else {
+        network.join(", ")
     }
 }
 
@@ -780,11 +820,7 @@ pub fn list_lines(d: &Dirs) -> Vec<String> {
             st.as_ref()
                 .map_or("?".into(), |s| format!("{}@{}", s.package, s.version)),
             mf.as_ref()
-                .map(|m| if m.network.is_empty() {
-                    "none".into()
-                } else {
-                    m.network.join(", ")
-                })
+                .map(|m| hosts_text(&m.network))
                 .unwrap_or_default()
         ));
         for t in st.iter().flat_map(|s| &s.tools) {
@@ -810,7 +846,9 @@ pub fn list_lines(d: &Dirs) -> Vec<String> {
     out.into_iter().map(|l| sanitize::line(&l)).collect()
 }
 
-pub fn show_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
+/// `clio mcp show`: the server and each tool with its arguments' names (a `*` marks a required
+/// one); each tool's whole schema only with `schema`.
+pub fn show_lines(d: &Dirs, name: &str, schema: bool) -> Res<Vec<String>> {
     let root = root(d);
     let mf = m::current_manifest(&root, name)
         .ok_or_else(|| format!("there is no MCP server «{}»", sanitize::line(name)))?;
@@ -819,14 +857,7 @@ pub fn show_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
         format!("«{name}»: {}", mf.description),
         format!("state: {}", state_word(&root, name)),
         format!("package: {}@{}", mf.package, mf.version),
-        format!(
-            "hosts: {}",
-            if mf.network.is_empty() {
-                "none".into()
-            } else {
-                mf.network.join(", ")
-            }
-        ),
+        format!("hosts: {}", hosts_text(&mf.network)),
     ];
     for s in &mf.secrets {
         out.push(format!(
@@ -851,10 +882,36 @@ pub fn show_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
         for t in &s.tools {
             out.push(tool_line(t));
             out.push(format!("    {}", t.description));
-            out.push(format!("    arguments: {}", t.schema));
+            if schema {
+                out.push(format!("    arguments: {}", t.schema));
+            } else {
+                out.push(format!("    arguments: {}", argument_names(&t.schema)));
+            }
         }
     }
     Ok(out.into_iter().map(|l| sanitize::line(&l)).collect())
+}
+
+/// A tool's arguments by name, from its schema's `properties` (`*`: required), or `none`.
+fn argument_names(schema: &Value) -> String {
+    let required = |k: &str| {
+        schema["required"]
+            .as_array()
+            .is_some_and(|r| r.iter().any(|x| x == k))
+    };
+    let names: Vec<String> = schema["properties"]
+        .as_object()
+        .map(|o| {
+            o.keys()
+                .map(|k| format!("{k}{}", if required(k) { "*" } else { "" }))
+                .collect()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
+    }
 }
 
 pub(crate) fn logs_lines(d: &Dirs, name: &str) -> Res<Vec<String>> {
@@ -1012,8 +1069,7 @@ pub fn confirm_rows(d: &Dirs, name: &str) -> Res<(Vec<(super::tui::ask::Part, St
             format!(
                 "hosts: {}",
                 mf.as_ref()
-                    .filter(|m| !m.network.is_empty())
-                    .map_or_else(|| "none (no network)".into(), |m| m.network.join(", "))
+                    .map_or_else(|| hosts_text(&[]), |m| hosts_text(&m.network))
             ),
         ),
         (Part::Warn, FREE_MEANS.into()),
@@ -1082,9 +1138,18 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
             return Ok(());
         }
         ["show", n] => {
-            print(show_lines(d, n)?);
+            print(show_lines(d, n, false)?);
             return Ok(());
         }
+        ["show", n, "--schema"] => {
+            print(show_lines(d, n, true)?);
+            return Ok(());
+        }
+        ["add"] => {
+            print(catalog_lines(d));
+            return Ok(());
+        }
+        ["add", n] => return add_cmd(d, n, yes),
         ["logs", n] => {
             print(logs_lines(d, n)?);
             return Ok(());
@@ -1126,7 +1191,177 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
     Ok(())
 }
 
-pub const FOOT: &str = "/mcp show|on|off|confirm|remove|logs <name> · allow|ask <name> <tool>";
+// ---- Clio's catalog: `clio mcp add` --------------------------------------------------------
+
+/// The run and session a server the person asked for from the catalog is set aside under.
+const PERSON: &str = "person";
+
+/// `clio mcp add`: the catalog, and what of it is installed.
+pub fn catalog_lines(d: &Dirs) -> Vec<String> {
+    let root = root(d);
+    let mut out =
+        vec!["Clio's catalog of MCP servers (clio mcp add <name> installs one):".to_owned()];
+    for e in clio_toolhost::catalog::catalog().servers {
+        let m = clio_toolhost::catalog::manifest(&e, &root);
+        let have = match m::load_state(&root, &e.name) {
+            Some(s) if s.package == e.package => {
+                format!("installed {}, {}", s.version, state_word(&root, &e.name))
+            }
+            Some(_) => "the name is another server's".into(),
+            None => "not installed".into(),
+        };
+        out.push(String::new());
+        out.push(format!("{}  {}: {}", e.name, e.title.en, e.description.en));
+        out.push(format!(
+            "  {}@{} · hosts: {} · {have}",
+            e.package,
+            e.version,
+            hosts_text(&m.network)
+        ));
+        for sec in &e.secrets {
+            out.push(format!(
+                "  needs its token ({}): {}",
+                sec.name, sec.where_.en
+            ));
+        }
+    }
+    out.into_iter().map(|l| sanitize::line(&l)).collect()
+}
+
+/// Catalog server `name`, or why there is none.
+pub fn catalog_entry(name: &str) -> Res<clio_toolhost::catalog::Entry> {
+    clio_toolhost::catalog::entry(name).ok_or_else(|| {
+        format!(
+            "«{}» is not in Clio's catalog ({})",
+            sanitize::line(name),
+            clio_toolhost::catalog::names()
+        )
+    })
+}
+
+/// Whether catalog server `e` is installed exactly as the catalog has it.
+pub fn installed_as_catalog(d: &Dirs, e: &clio_toolhost::catalog::Entry) -> bool {
+    let root = root(d);
+    m::current_manifest(&root, &e.name) == Some(clio_toolhost::catalog::manifest(e, &root))
+}
+
+/// Composes catalog server `e`'s manifest and sets it aside as `mcp_propose` would, after the
+/// same checks and npm's facts (the integrity must be the catalog's): the item the person's yes
+/// approves.
+pub fn propose_catalog(d: &Dirs, e: &clio_toolhost::catalog::Entry) -> Res<Pending> {
+    let port = Port::new(d.clone(), None)?;
+    let mf = clio_toolhost::catalog::manifest(e, &port.root());
+    let args = m::proposal(
+        &port,
+        &mf,
+        (&d.home, &d.control()),
+        &|t: &str| sanitize::line(t),
+        &|| Ok(()),
+    )?;
+    clio_toolhost::pending::set_aside_mcp(
+        &super::pending::state(d),
+        PERSON,
+        PERSON,
+        args,
+        "the person asked for it from Clio's catalog",
+    )
+}
+
+/// Stores catalog secret `s` in the vault, bound to `mcp:<host>`.
+pub fn store_secret(
+    d: &Dirs,
+    s: &clio_toolhost::catalog::Secret,
+    value: &clio_vault::SecretValue,
+) -> Res<()> {
+    super::vault::put(d, &s.name, &format!("mcp:{}", s.host), value)
+}
+
+/// After the person's yes: installs set-aside item `id` (none: it is installed already), and turns
+/// catalog server `e` on only when the vault lets each of its secrets go to its host; else it
+/// stays off, saying so. What the person is told.
+pub fn finish_catalog(
+    d: &Dirs,
+    e: &clio_toolhost::catalog::Entry,
+    id: Option<&str>,
+) -> Res<String> {
+    let done = match id {
+        Some(id) => super::pending::outcome(&super::pending::approve(d, id)?),
+        None => format!("«{}» is installed already", e.name),
+    };
+    let missing: Vec<&str> = e
+        .secrets
+        .iter()
+        .filter(|s| !super::vault::allows(d, &s.name, "mcp", &s.host))
+        .map(|s| s.name.as_str())
+        .collect();
+    if missing.is_empty() {
+        if !m::is_on(&root(d), &e.name) {
+            set_on(d, &e.name, true)?;
+        }
+        return Ok(done);
+    }
+    let why = format!(
+        "off: waiting for its token {} (clio mcp add {} asks for it)",
+        missing.join(", "),
+        e.name
+    );
+    set_on_by(d, &e.name, false, &why)?;
+    Ok(format!(
+        "{done}
+but «{}» is turned {why}",
+        e.name
+    ))
+}
+
+/// `clio mcp add <name>`: the same box as a proposal (`--yes` skips it), then each missing secret
+/// with no echo (an empty one: later, and the server stays off), then the install and its probe.
+fn add_cmd(d: &Dirs, name: &str, yes: bool) -> Res<()> {
+    use std::io::IsTerminal;
+    let e = catalog_entry(name)?;
+    let id = if installed_as_catalog(d, &e) {
+        None
+    } else {
+        let p = propose_catalog(d, &e)?;
+        for r in proposal_rows(&p).unwrap_or_default() {
+            println!("{r}");
+        }
+        if !yes
+            && !super::apply::confirm(
+                "download this package, list its tools (no network, no secrets) and turn it on?",
+            )
+        {
+            super::pending::reject(d, &p.id)?;
+            println!("nothing was installed");
+            return Ok(());
+        }
+        Some(p.id)
+    };
+    for sec in &e.secrets {
+        if super::vault::allows(d, &sec.name, "mcp", &sec.host) || !std::io::stdin().is_terminal() {
+            continue;
+        }
+        println!("{}", sanitize::line(&sec.where_.en));
+        let v = super::vault::read_secret(&format!("{} (not shown; empty: later)", sec.name))?;
+        if !v.is_empty() {
+            store_secret(d, sec, &clio_vault::SecretValue::new(v))?;
+        }
+    }
+    if id.is_some()
+        && e.needs_browser()
+        && !clio_toolhost::catalog::browser_dir(&root(d))
+            .join(super::setup::fetch::CHROME)
+            .is_file()
+    {
+        println!("Clio's Chromium is downloaded first (about 180 MB)");
+    }
+    println!(
+        "{}",
+        sanitize::multiline(&finish_catalog(d, &e, id.as_deref())?)
+    );
+    Ok(())
+}
+
+pub const FOOT: &str = "/mcp show|on|off|confirm|remove|logs <name> · show <name> --schema · allow|ask <name> <tool> · clio mcp add [<name>]";
 
 /// `/mcp [...]` in the chat: the same as `clio mcp`, in a box. A removal and a confirmation reach
 /// here only after the person said yes to them.
@@ -1134,7 +1369,8 @@ pub fn chat_command(d: &Dirs, args: &str) -> Res<super::tui::commands::Modal> {
     let w: Vec<&str> = args.split_whitespace().collect();
     let (title, lines) = match w.as_slice() {
         [] | ["list"] => ("MCP servers", list_lines(d)),
-        ["show", n] => ("MCP server", show_lines(d, n)?),
+        ["show", n] => ("MCP server", show_lines(d, n, false)?),
+        ["show", n, "--schema"] => ("MCP server", show_lines(d, n, true)?),
         ["logs", n] => ("MCP server log", logs_lines(d, n)?),
         [verb, ..] => {
             let done = match w.as_slice() {
@@ -1225,14 +1461,12 @@ pub fn proposal_rows(p: &Pending) -> Option<Vec<String>> {
             s(&npm["license"])
         ));
     }
-    rows.push(format!(
-        "hosts: {}",
-        if mf.network.is_empty() {
-            "none (no network)".into()
-        } else {
-            mf.network.join(", ")
-        }
-    ));
+    // Where the hosts are: a server that can go anywhere is said so.
+    rows.push(if mf.network.iter().any(|h| h == m::ANY_HOST) {
+        "It can reach any public site (never this machine or its networks).".into()
+    } else {
+        format!("hosts: {}", hosts_text(&mf.network))
+    });
     for sec in &mf.secrets {
         let reach: Vec<&str> = mf
             .network
@@ -1263,6 +1497,15 @@ pub fn proposal_rows(p: &Pending) -> Option<Vec<String>> {
         "limits: {}% of a processor, {} MB, {} s a call",
         mf.limits.cpu_percent, mf.limits.memory_mb, mf.limits.seconds
     ));
+    // Exactly a catalog entry: the tools its catalog lists as only reading run without asking.
+    if let Some(e) = clio_toolhost::catalog::of_shown(&mf)
+        && !e.modes.is_empty()
+    {
+        rows.push(format!(
+            "from Clio's catalog; these tools only read and run without asking: {}",
+            e.modes.join(", ")
+        ));
+    }
     rows.push(SEES.into());
     rows.push(if mf.secrets.is_empty() {
         "This is someone else's code: it runs on this machine, in a jail, with what is listed above.".into()
@@ -2196,7 +2439,7 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
             integrity: INTEGRITY.into(),
             packages: 3,
             confirmed: false,
-            tools: m::first_modes(seen),
+            tools: m::first_modes(seen, &[]),
         };
         {
             let _l = m::lock_root(&root).unwrap();
@@ -2340,5 +2583,81 @@ fs.writeFileSync("package-lock.json", JSON.stringify({ lockfileVersion: 3, packa
         eprintln!("--- {} answered: {out}", tool.name);
         assert!(!failed, "{out}");
         assert!(out.contains("thoughtNumber"), "{out}");
+    }
+
+    // S-70, by hand, with the network: one call of a server `clio mcp add` installed, started as a
+    // chat starts it (its jail, its proxy, its secret from the vault's gateway). Only in a
+    // throwaway home under `/var/tmp/clio-cat-*`: `env -i HOME=/var/tmp/clio-cat-x
+    // XDG_RUNTIME_DIR=/var/tmp/clio-cat-x/run PATH=/usr/bin:/bin CLIO_E2E_SERVER=playwright
+    // CLIO_E2E_TOOL=browser_navigate CLIO_E2E_ARGS='{"url":"https://example.com"}' <test binary>
+    // real_catalog_call --ignored --nocapture`.
+    #[test]
+    #[ignore = "calls a real server installed in a throwaway home; run by hand"]
+    fn real_catalog_call() {
+        let home = std::env::var("HOME").unwrap();
+        assert!(
+            home.starts_with("/var/tmp/clio-cat-"),
+            "not a throwaway home: {home}"
+        );
+        let var = |k: &str| std::env::var(k).unwrap();
+        let (name, tool) = (var("CLIO_E2E_SERVER"), var("CLIO_E2E_TOOL"));
+        let args: Value = serde_json::from_str(&var("CLIO_E2E_ARGS")).unwrap();
+        let d = Dirs::from_env().unwrap();
+        let clio = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("clio");
+        let port = Port {
+            exe: clio,
+            ..Port::new(d, None).unwrap()
+        };
+        let started = port.start(&name);
+        eprintln!(
+            "--- the server's log\n{}",
+            logs_lines(&port.dirs, &name).unwrap_or_default().join("\n")
+        );
+        let mut s = m::Server::start(started.unwrap(), Duration::from_secs(120)).unwrap();
+        eprintln!(
+            "--- tools: {:?}",
+            s.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        let (out, failed) = s.call(&tool, &args, Duration::from_secs(120)).unwrap();
+        eprintln!("--- {tool} answered (failed: {failed}):\n{out}");
+    }
+
+    /// An MCP proposal of `mf` as the store keeps it.
+    fn pending_of(mf: &Manifest) -> Pending {
+        serde_json::from_value(json!({"id": "p1", "class": "mcp", "tool": "mcp_propose",
+            "args": {"name": mf.name, "description": mf.description,
+                "skill_md": serde_json::to_string(mf).unwrap(), "files": [], "update": false,
+                "npm": {"integrity": INTEGRITY}},
+            "hash": "", "what": "", "run": "r1", "session": "s1", "created_ms": 0,
+            "expires_ms": 1, "state": "waiting"}))
+        .unwrap()
+    }
+
+    // S-70: the box says a server that can reach any public site in those words, and names the
+    // tools a catalog entry frees only when the manifest is exactly the catalog's; `show` names
+    // each tool's arguments (`*`: required).
+    #[test]
+    fn the_box_says_any_site_and_the_catalogs_free_tools() {
+        let root = Path::new("/home/someone/.local/share/clio/mcp");
+        let e = clio_toolhost::catalog::entry("playwright").unwrap();
+        let mut mf = clio_toolhost::catalog::manifest(&e, root);
+        let rows = proposal_rows(&pending_of(&mf)).unwrap().join("\n");
+        assert!(rows.contains("It can reach any public site"), "{rows}");
+        assert!(
+            rows.contains("these tools only read and run without asking: browser_snapshot"),
+            "{rows}"
+        );
+        mf.args.push("--caps=pdf".into());
+        let rows = proposal_rows(&pending_of(&mf)).unwrap().join("\n");
+        assert!(!rows.contains("from Clio's catalog"), "{rows}");
+        let schema = json!({"type": "object", "properties": {"url": {}, "wait": {}},
+            "required": ["url"]});
+        assert_eq!(argument_names(&schema), "url*, wait");
+        assert_eq!(argument_names(&json!({"type": "object"})), "none");
     }
 }

@@ -24,6 +24,7 @@
 //! `README.md` for the protocol.
 
 pub mod ask;
+pub mod catalog;
 pub mod cli;
 pub mod grant;
 pub mod host;

@@ -13,7 +13,7 @@ use super::text::{Lang, M};
 use super::{Answer, Ask, Opts, St, Sys, Ui};
 use crate::cli::home::{Config, Dirs};
 use crate::cli::tui::sanitize;
-use crate::cli::{mkdir_private, vault};
+use crate::cli::{Res, mkdir_private, vault};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -28,7 +28,8 @@ pub enum Step {
     Judge,
     Timer,
     Skills,
-    /// The MCP catalog: the next stage (the design's "Default MCP servers"). Empty, no row.
+    /// The servers of Clio's MCP catalog the person ticked; on an update, what the catalog has
+    /// newer.
     Mcp,
     Doctor,
     StopVault,
@@ -53,7 +54,7 @@ impl Step {
             Self::Judge => M::StJudge,
             Self::Timer => M::StTimer,
             Self::Skills => M::StSkills,
-            Self::Mcp => M::StSkills,
+            Self::Mcp => M::StMcp,
             Self::Doctor => M::StDoctor,
             Self::StopVault => M::StStopVault,
             Self::RemoveTimer => M::StRemoveTimer,
@@ -75,7 +76,7 @@ pub enum Action {
 }
 
 impl Action {
-    /// The steps, in order (the hidden MCP step included).
+    /// The steps, in order.
     pub fn steps(self) -> Vec<Step> {
         use Step::*;
         match self {
@@ -85,7 +86,7 @@ impl Action {
             // The vault and the model too: an install left half done (a skipped passphrase, a
             // failed run, a reboot that stopped the vault) is finished by running it again.
             Self::Update => vec![
-                Binaries, Node, Pi, Memory, Vault, Model, Skills, Timer, Doctor,
+                Binaries, Node, Pi, Memory, Vault, Model, Skills, Mcp, Timer, Doctor,
             ],
             Self::Repair => vec![
                 Folders, System, Node, Pi, Memory, Vault, Model, Timer, Skills, Mcp, Doctor,
@@ -102,12 +103,9 @@ impl Action {
         }
     }
 
-    /// The steps the person sees.
+    /// The steps the person sees: all of them.
     pub fn shown(self) -> Vec<Step> {
         self.steps()
-            .into_iter()
-            .filter(|s| *s != Step::Mcp)
-            .collect()
     }
 }
 
@@ -135,6 +133,12 @@ pub struct Answers {
     pub(super) sign_in: bool,
     /// The model step found everything ready for that sign-in.
     pub(super) sign_in_ready: Option<&'static Connector>,
+    /// The catalog servers ticked, each with its token (`None`: later, or none needed).
+    pub(super) mcp: Vec<(String, Option<SecretValue>)>,
+    /// A ticked server that cannot be installed here, and why.
+    mcp_left: Option<String>,
+    /// System packages a ticked server needs (Chromium's libraries, `unzip`): the sudo moment's.
+    pub(super) packages: Vec<String>,
 }
 
 /// A run of the installer's steps.
@@ -202,6 +206,9 @@ impl Run<'_> {
         if steps.contains(&Step::Judge) {
             self.ask_judge();
         }
+        if steps.contains(&Step::Mcp) && !self.opts.update {
+            self.ask_mcp();
+        }
         if steps.contains(&Step::System) {
             let out = self.sudo_moment();
             self.answers.system = Some(out);
@@ -210,12 +217,7 @@ impl Run<'_> {
 
     /// Runs `steps`, each row updated as it goes; a failed one does not stop the others.
     pub fn all(&mut self, steps: &[Step]) {
-        let shown: Vec<Step> = steps.iter().copied().filter(|s| *s != Step::Mcp).collect();
-        for step in steps {
-            let Some(i) = shown.iter().position(|s| s == step) else {
-                self.mcp();
-                continue;
-            };
+        for (i, step) in steps.iter().enumerate() {
             self.ui.set(i, St::Working(None));
             let st = match self.one(*step, i) {
                 Ok(Out::Done(n)) => St::Done(n),
@@ -257,7 +259,7 @@ impl Run<'_> {
             Step::Skills => crate::cli::skills::ensure(&self.dirs)
                 .map(|()| Out::Done(self.t(M::NoteDone)))
                 .map_err(Fail::Other),
-            Step::Mcp => Ok(Out::Skip(String::new())),
+            Step::Mcp => Ok(self.mcp(i)),
             Step::Doctor => Ok(self.doctor()),
             Step::StopVault => {
                 // Without a runtime folder no vault of this home can be running.
@@ -284,10 +286,7 @@ impl Run<'_> {
         let Some(c) = self.answers.sign_in_ready.take() else {
             return;
         };
-        let row = steps
-            .iter()
-            .filter(|s| **s != Step::Mcp)
-            .position(|s| *s == Step::Model);
+        let row = steps.iter().position(|s| *s == Step::Model);
         let mut token = None;
         if !self.failed && self.blocked.is_none() && !self.replaced {
             let dirs = self.dirs.clone();
@@ -313,12 +312,198 @@ impl Run<'_> {
         }
     }
 
-    /// The MCP catalog's step: chosen servers installed with `clio mcp add <name>` (the next
-    /// stage). Nothing yet.
-    fn mcp(&mut self) {}
-
     fn progress(ui: &mut dyn Ui, i: usize, got: u64, total: u64) {
         ui.set(i, St::Working(Some((got, total))));
+    }
+
+    // ---- Clio's MCP catalog -------------------------------------------------------------------
+
+    /// The catalog as a checklist with nothing ticked (what is installed as the catalog has it is
+    /// not offered again), then each ticked server's token, masked, or Esc for later. Playwright
+    /// adds what Chromium needs to the sudo moment, or is left out where that cannot be done.
+    fn ask_mcp(&mut self) {
+        use crate::cli::mcp_servers;
+        if self.opts.yes || !self.sys.linux {
+            return;
+        }
+        let offer: Vec<_> = clio_toolhost::catalog::catalog()
+            .servers
+            .into_iter()
+            .filter(|e| !mcp_servers::installed_as_catalog(&self.dirs, e))
+            .collect();
+        if offer.is_empty() {
+            return;
+        }
+        let es = self.lang == Lang::Es;
+        let say = |t: &clio_toolhost::catalog::Text| if es { t.es.clone() } else { t.en.clone() };
+        let mut lines = vec![self.t(M::McpHint), String::new()];
+        lines.extend(
+            offer
+                .iter()
+                .map(|e| format!("{}: {}", say(&e.title), say(&e.description))),
+        );
+        let q = Ask::Checks {
+            title: self.t(M::McpTitle),
+            lines,
+            options: offer.iter().map(|e| say(&e.title)).collect(),
+        };
+        let Some(Answer::Checks(ticked)) = self.ui.ask(q) else {
+            return;
+        };
+        for (e, _) in offer.iter().zip(ticked).filter(|(_, t)| *t) {
+            if e.needs_browser() {
+                match self.browser_packages() {
+                    Some(p) => self.answers.packages.extend(p),
+                    None => {
+                        self.answers.mcp_left = Some(self.t(M::NoteMcpNoLibs));
+                        continue;
+                    }
+                }
+            }
+            let token = match e.secrets.first() {
+                Some(sec) if self.vault_coming() => {
+                    let q = Ask::Secret {
+                        title: self.f(M::McpTokenTitle, &[&say(&e.title)]),
+                        lines: vec![say(&sec.where_), self.t(M::McpTokenHint)],
+                        labels: vec![self.t(M::FieldToken)],
+                        error: None,
+                    };
+                    self.secret(None, q)
+                }
+                _ => None,
+            };
+            self.answers.mcp.push((e.name.clone(), token));
+        }
+    }
+
+    /// What this system must install for Chromium to start: the packages of its missing libraries
+    /// and `unzip`; `None` when libraries are missing and their packages are not known here.
+    fn browser_packages(&self) -> Option<Vec<String>> {
+        let known = self
+            .sys
+            .find("ldconfig")
+            .and_then(|l| Command::new(l).arg("-p").stdin(Stdio::null()).output().ok())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let os = std::fs::read_to_string(&self.sys.os_release).unwrap_or_default();
+        let mut pkgs = fetch::chrome_packages(&known, &os)?;
+        if self.sys.find("unzip").is_none() {
+            pkgs.push("unzip".into());
+        }
+        Some(pkgs)
+    }
+
+    /// The servers ticked, installed as the person's yes (the tick) with the same checks, install
+    /// and probe as `clio mcp add`; on an update, what the catalog has newer, and Chromium kept.
+    /// A server that fails is a warning, never a failed install.
+    fn mcp(&mut self, i: usize) -> Out {
+        use crate::cli::mcp_servers;
+        if self.opts.update {
+            return self.mcp_update(i);
+        }
+        let chosen = std::mem::take(&mut self.answers.mcp);
+        let mut warn: Vec<String> = self.answers.mcp_left.take().into_iter().collect();
+        if chosen.is_empty() && warn.is_empty() {
+            return Out::Skip(self.t(M::NoteNone));
+        }
+        let mut done = Vec::new();
+        for (name, token) in chosen {
+            let later = self.f(M::NoteMcpLater, &[&name, &name]);
+            let Ok(e) = mcp_servers::catalog_entry(&name) else {
+                warn.push(later);
+                continue;
+            };
+            if self.blocked.is_some() {
+                warn.push(later);
+                continue;
+            }
+            if e.needs_browser() {
+                let ui = &mut *self.ui;
+                let got = mcp_servers::ensure_browser(&self.dirs, &mut |n| {
+                    Self::progress(ui, i, n, 185_000_000_u64.max(n));
+                });
+                self.ui.set(i, St::Working(None));
+                if got.is_err() {
+                    warn.push(later);
+                    continue;
+                }
+            }
+            let dirs = self.dirs.clone();
+            let mut r: Res<()> = Err(String::new());
+            self.ui.busy(&mut || {
+                r = (|| {
+                    let id = if mcp_servers::installed_as_catalog(&dirs, &e) {
+                        None
+                    } else {
+                        Some(mcp_servers::propose_catalog(&dirs, &e)?.id)
+                    };
+                    // A token the vault does not take leaves the server off, said below.
+                    if let (Some(v), Some(sec)) = (&token, e.secrets.first()) {
+                        let _ = mcp_servers::store_secret(&dirs, sec, v);
+                    }
+                    mcp_servers::finish_catalog(&dirs, &e, id.as_deref()).map(|_| ())
+                })();
+            });
+            match r {
+                Ok(()) if clio_toolhost::mcp::is_on(&mcp_servers::root(&self.dirs), &name) => {
+                    done.push(name);
+                }
+                Ok(()) => warn.push(self.f(M::NoteMcpToken, &[&name, &name])),
+                Err(_) => warn.push(later),
+            }
+        }
+        let all = done
+            .into_iter()
+            .chain(warn.iter().cloned())
+            .collect::<Vec<_>>();
+        if warn.is_empty() {
+            Out::Done(all.join(", "))
+        } else {
+            Out::Warn(all.join("; "))
+        }
+    }
+
+    /// On an update: each installed catalog server whose catalog version is newer is said (a new
+    /// version is a new yes: nothing is installed), and Chromium is kept for the servers that
+    /// read it.
+    fn mcp_update(&mut self, i: usize) -> Out {
+        use crate::cli::mcp_servers;
+        let root = mcp_servers::root(&self.dirs);
+        let names = clio_toolhost::mcp::names(&root);
+        if names.is_empty() {
+            return Out::Skip(self.t(M::NoteNone));
+        }
+        let browser = clio_toolhost::catalog::browser_dir(&root)
+            .display()
+            .to_string();
+        let mut notes = Vec::new();
+        for n in &names {
+            let Some(m) = clio_toolhost::mcp::current_manifest(&root, n) else {
+                continue;
+            };
+            if let Some(e) = clio_toolhost::catalog::entry(n).filter(|e| e.package == m.package)
+                && fetch::version(&e.version) > fetch::version(&m.version)
+            {
+                let note = self.f(M::NoteMcpNewer, &[n, &e.version, n]);
+                self.changes.push(note.clone());
+                notes.push(note);
+            }
+            if m.reads.contains(&browser) {
+                let ui = &mut *self.ui;
+                if mcp_servers::ensure_browser(&self.dirs, &mut |b| {
+                    Self::progress(ui, i, b, 185_000_000_u64.max(b));
+                })
+                .is_err()
+                {
+                    notes.push(self.f(M::NoteMcpLater, &[n, n]));
+                }
+            }
+        }
+        if notes.is_empty() {
+            Out::Done(self.t(M::NoteUpToDate))
+        } else {
+            Out::Warn(notes.join("; "))
+        }
     }
 
     // ---- Clio's own binaries -----------------------------------------------------------------
@@ -398,14 +583,22 @@ impl Run<'_> {
         }
         let bwrap = self.sys.find("bwrap").is_none();
         let linger = self.sys.linger_off();
+        let extra = std::mem::take(&mut self.answers.packages);
         // Only where the kernel restricts user namespaces, no profile names bwrap yet, and the jail
         // does not start already: a second profile for the same path breaks bwrap.
         let profile = self.sys.userns_restricted()
             && !self.sys.bwrap_profiled()
             && (bwrap || !self.sys.jail_ready());
-        let pm = self.sys.package_manager();
+        let pkgs: Vec<String> = bwrap
+            .then(|| "bubblewrap".to_owned())
+            .into_iter()
+            .chain(extra.iter().cloned())
+            .collect();
+        let pm = self.sys.package_manager(&pkgs);
         let mut cmds: Vec<Vec<String>> = Vec::new();
-        if bwrap && let Some((_, install)) = &pm {
+        if !pkgs.is_empty()
+            && let Some((_, install)) = &pm
+        {
             cmds.extend(install.iter().cloned());
         }
         if linger && let (Some(lc), Some(u)) = (self.sys.find("loginctl"), self.sys.user.clone()) {
@@ -423,7 +616,13 @@ impl Run<'_> {
             ],
             _ => Vec::new(),
         };
-        let out = self.moment(bwrap, linger, pm.as_ref(), &cmds, &profile_cmds);
+        let out = self.moment(
+            (bwrap, !extra.is_empty()),
+            linger,
+            pm.as_ref(),
+            &cmds,
+            &profile_cmds,
+        );
         if self.sys.jail_ready() {
             return out;
         }
@@ -440,15 +639,16 @@ impl Run<'_> {
         }
     }
 
+    /// `(bwrap, browser)`: bubblewrap, and what Chromium needs, are to be installed.
     fn moment(
         &mut self,
-        bwrap: bool,
+        (bwrap, browser): (bool, bool),
         linger: bool,
         pm: Option<&(String, Vec<Vec<String>>)>,
         cmds: &[Vec<String>],
         profile_cmds: &[Vec<String>],
     ) -> Out {
-        if !bwrap && !linger && profile_cmds.is_empty() {
+        if !bwrap && !browser && !linger && profile_cmds.is_empty() {
             return Out::Done(self.t(M::NoteThere));
         }
         if cmds.is_empty() && profile_cmds.is_empty() {
@@ -461,6 +661,7 @@ impl Run<'_> {
                 Some(s) => Some(s),
                 None if bwrap => return Out::Warn(self.t(M::NoteNoSudo)),
                 None if linger => return Out::Warn(self.t(M::NoteNoSudoLinger)),
+                None if browser => return Out::Warn(self.t(M::NoteNoSudoLibs)),
                 None => return Out::Warn(self.t(M::NoteNoJail)),
             }
         };
@@ -475,6 +676,9 @@ impl Run<'_> {
             let mut lines = Vec::new();
             if bwrap {
                 lines.push(self.f(M::SudoBwrap, &[pm.map_or("", |(n, _)| n.as_str())]));
+            }
+            if browser {
+                lines.push(self.t(M::SudoBrowser));
             }
             if linger {
                 lines.push(self.t(M::SudoLinger));

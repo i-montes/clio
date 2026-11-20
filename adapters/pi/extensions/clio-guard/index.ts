@@ -904,6 +904,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 			parameters: {
 				type: "object",
 				properties: {
+					catalog: {
+						type: "string",
+						minLength: 1,
+						maxLength: 64,
+						description: "A server of Clio's catalog by name (the mcp-installer skill lists them): give only this and reason; Clio fills the rest with the values it verified.",
+					},
 					name: { ...NAME, description: "Lowercase letters, digits and single hyphens. An existing server's name proposes a new version." },
 					description: { type: "string", minLength: 20, maxLength: 1024, description: "One line: what it is for, for the person." },
 					package: { type: "string", minLength: 1, maxLength: 214, description: "The npm package: name or @scope/name, lowercase. Never a URL, a path, a git source or a tag." },
@@ -920,7 +926,12 @@ export default function clioGuard(pi: ExtensionAPI) {
 						additionalProperties: { type: "string", maxLength: 500 },
 						description: "Settings that are not secret, as variables (UPPER_CASE names; never NODE_*, PATH, HOME, LD_* or a secret's variable). A secret goes in secrets.",
 					},
-					network: { type: "array", maxItems: 10, items: { type: "string", minLength: 1, maxLength: 200 }, description: "The only hosts it may reach (host, or host:port; 443 by default). None: no network." },
+					network: {
+						type: "array",
+						maxItems: 10,
+						items: { type: "string", minLength: 1, maxLength: 200 },
+						description: "The only hosts it may reach (host, or host:port; 443 by default). None: no network. [\"*\"] alone: any public site (a browser), only for a server with no secrets, no writes and no reads.",
+					},
 					secrets: {
 						type: "array",
 						maxItems: 8,
@@ -948,7 +959,8 @@ export default function clioGuard(pi: ExtensionAPI) {
 						additionalProperties: false,
 					},
 				},
-				required: ["name", "description", "package", "version"],
+				// Either `catalog`, or name, description, package and version: Clio's tool host says which is missing.
+				required: [],
 				additionalProperties: false,
 			},
 			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({

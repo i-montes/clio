@@ -63,12 +63,20 @@ pub enum Ask {
         value: String,
         error: Option<String>,
     },
+    /// A checklist: nothing ticked; each option the person's to take or leave.
+    Checks {
+        title: String,
+        lines: Vec<String>,
+        options: Vec<String>,
+    },
 }
 
 pub enum Answer {
     Choice(usize),
     Secret(SecretValue),
     Text(String),
+    /// What was ticked, one per option.
+    Checks(Vec<bool>),
 }
 
 /// What the steps show and ask through: the screens, or plain lines.
@@ -144,6 +152,8 @@ pub struct Sys {
     pub root: bool,
     pub user: Option<String>,
     pub linux: bool,
+    /// `/etc/os-release`: which names the system's packages have.
+    pub os_release: PathBuf,
     /// The fake system of the tests: whether the jail starts is its `bwrap`'s answer.
     pub fake: bool,
 }
@@ -161,6 +171,7 @@ impl Sys {
                 linger: d.join("linger"),
                 userns: d.join("userns_restrict"),
                 apparmor: d.join("apparmor.d"),
+                os_release: d.join("os-release"),
                 dirs: vec![d],
                 root: false,
                 user,
@@ -182,6 +193,7 @@ impl Sys {
             linger: "/var/lib/systemd/linger".into(),
             userns: "/proc/sys/kernel/apparmor_restrict_unprivileged_userns".into(),
             apparmor: "/etc/apparmor.d".into(),
+            os_release: "/etc/os-release".into(),
             root: rustix::process::getuid().is_root(),
             user,
             linux,
@@ -234,11 +246,12 @@ impl Sys {
                 .is_some_and(|u| !self.linger.join(u).exists())
     }
 
-    /// The package manager, and the commands that install bubblewrap with it.
-    pub fn package_manager(&self) -> Option<(String, Vec<Vec<String>>)> {
-        let cmd = |p: &Path, args: &[&str]| {
+    /// The package manager, and the commands that install `pkgs` with it.
+    pub fn package_manager(&self, pkgs: &[String]) -> Option<(String, Vec<Vec<String>>)> {
+        let cmd = |p: &Path, args: &[&str], pkgs: &[String]| {
             std::iter::once(p.display().to_string())
                 .chain(args.iter().map(|a| (*a).to_owned()))
+                .chain(pkgs.iter().cloned())
                 .collect::<Vec<_>>()
         };
         if let Some(p) = self.find("apt-get") {
@@ -247,28 +260,19 @@ impl Sys {
             return Some((
                 "apt".into(),
                 vec![
-                    cmd(&p, &[&lock[..], &["update", "-qq"]].concat()),
-                    cmd(
-                        &p,
-                        &[&lock[..], &["install", "-y", "-qq", "bubblewrap"]].concat(),
-                    ),
+                    cmd(&p, &[&lock[..], &["update", "-qq"]].concat(), &[]),
+                    cmd(&p, &[&lock[..], &["install", "-y", "-qq"]].concat(), pkgs),
                 ],
             ));
         }
         for (name, args) in [
-            ("dnf", &["install", "-y", "bubblewrap"][..]),
-            (
-                "pacman",
-                &["-S", "--noconfirm", "--needed", "bubblewrap"][..],
-            ),
-            (
-                "zypper",
-                &["--non-interactive", "install", "bubblewrap"][..],
-            ),
-            ("apk", &["add", "bubblewrap"][..]),
+            ("dnf", &["install", "-y"][..]),
+            ("pacman", &["-S", "--noconfirm", "--needed"][..]),
+            ("zypper", &["--non-interactive", "install"][..]),
+            ("apk", &["add"][..]),
         ] {
             if let Some(p) = self.find(name) {
-                return Some((name.into(), vec![cmd(&p, args)]));
+                return Some((name.into(), vec![cmd(&p, args, pkgs)]));
             }
         }
         None

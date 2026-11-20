@@ -42,9 +42,10 @@ const USAGE: &str = "clio: a personal agent that works on your machine (or on a 
                                               turn one off or on, run one now; enable/disable the timer that runs them
   clio round [now]                            the round (Clio looks by herself at what she watches, from the
                                               services timer): the last rounds and what each told; now: one now
-  clio mcp [show|on|off|confirm|remove|logs <name> | allow|ask <name> <tool>] [--yes]
+  clio mcp [show [--schema]|on|off|confirm|remove|logs <name> | allow|ask <name> <tool> | add [<name>]] [--yes]
                                               MCP servers (npm packages the model proposed and you approved):
-                                              list them, confirm their tools, turn one on or off, set a tool free or ask
+                                              list them, confirm their tools, turn one on or off, set a tool free or ask;
+                                              add: Clio's catalog, and installs one of it (the box, then its token)
   clio runs [--all] [--json] | clio show <id> [--json]
   clio connect opencode|claude|anthropic-api [--model M] [--new-key]
                                               picks the model (opencode, your Claude subscription or the Anthropic API) and keeps its key in the vault

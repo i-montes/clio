@@ -1,6 +1,6 @@
 # The installer (design, 2026-11-19)
 
-Status: asked for by the owner on 2026-11-19. Built on the branch `feat/installer`, except "Default MCP servers" (the setup has an empty, marked step for it). The decisions taken while building it are at the end.
+Status: asked for by the owner on 2026-11-19. Built on the branch `feat/installer`, except "Default MCP servers", built after it on `feat/mcp-catalog` (`2026-11-19-default-mcp-design.md`). The decisions taken while building it are at the end.
 
 ## What the owner asked for
 
@@ -90,6 +90,8 @@ for, the hosts and token it needs, verified against the real registry and by a r
 jail before it is listed. Playwright and Notion are the first candidates; an entry that cannot run
 inside Clio's jail is left out and said so. Choosing one in the installer is the person's approval
 (a new person-side command, `clio mcp add <name>`); the model's own proposals keep asking.
+
+Built in the second stage: `2026-11-19-default-mcp-design.md`.
 
 ## Releases
 

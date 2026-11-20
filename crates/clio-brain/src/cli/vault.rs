@@ -468,10 +468,15 @@ fn locked(p: &Paths) -> Option<bool> {
 /// Whether the vault already lets `model` send connector `c`'s secret to its domain. The
 /// connector's variable does not count: this is about the vault.
 pub fn has_model_key(dirs: &Dirs, c: &Connector) -> bool {
+    allows(dirs, c.secret, "model", c.domain)
+}
+
+/// Whether the running, open vault lets `tool` send secret `name` to `host`.
+pub fn allows(dirs: &Dirs, name: &str, tool: &str, host: &str) -> bool {
     paths(dirs).is_ok_and(|p| {
         VaultClient::new(&p.gateway)
             .with_timeout(Duration::from_secs(2))
-            .check(c.secret, "model", Some(c.domain), "")
+            .check(name, tool, Some(host), "")
             .is_ok()
     })
 }

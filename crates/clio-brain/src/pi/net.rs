@@ -109,6 +109,8 @@ impl EgressProxy {
     /// resolved once per connection and connected to only at a public address that was checked
     /// (`is_public`, never one of this machine's own): a name that points at the machine, its
     /// network or the cloud's metadata service, now or after it was approved, reaches nothing.
+    /// `"*"` in `allow` (an MCP server that reaches any public site) allows any host on ports
+    /// 443 and 80, checked the same way.
     pub fn start_service(parent: &Path, allow: &[String]) -> Result<Self, String> {
         Self::start_with(parent, allow, true)
     }
@@ -294,7 +296,7 @@ fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>, public:
         return refuse(&mut c, "405 Method Not Allowed");
     }
     let target = target.to_ascii_lowercase();
-    let Some(allow) = allow.iter().find(|a| **a == target) else {
+    let Some(allow) = allowed(allow, &target, public) else {
         remember(log, target.chars().take(120).collect());
         return refuse(&mut c, "403 Forbidden");
     };
@@ -316,6 +318,17 @@ fn handle(mut c: UnixStream, allow: &[String], log: &Mutex<Vec<String>>, public:
     reply_open(&mut c);
     let _ = c.set_read_timeout(None);
     tunnel(c, up, &rest);
+}
+
+/// The `host:port` a tunnel to `target` may open: one of `allow`, or with `"*"` in a service's
+/// proxy (`public`: only checked public addresses are connected to) any host on 443 or 80.
+fn allowed<'a>(allow: &'a [String], target: &'a str, public: bool) -> Option<&'a str> {
+    if let Some(a) = allow.iter().find(|a| *a == target) {
+        return Some(a);
+    }
+    let port = target.rsplit_once(':').map(|(_, p)| p);
+    (public && allow.iter().any(|a| a == "*") && matches!(port, Some("443" | "80")))
+        .then_some(target)
 }
 
 fn reply_open(c: &mut UnixStream) {
@@ -673,6 +686,46 @@ mod tests {
         assert!(matches!(r, Err(Refused(_))), "{r:?}");
         // One lookup per connection: what was checked is what would be connected to.
         assert_eq!(lookups.load(Ordering::SeqCst), 7);
+    }
+
+    // S-70: `"*"` opens any host, but only on 443 and 80 and only in a service's proxy, whose
+    // connections go only to checked public addresses (above); a plain list stays exact.
+    #[test]
+    fn any_host_is_only_ports_443_and_80_of_a_services_proxy() {
+        let any = vec!["*".to_owned()];
+        assert_eq!(
+            allowed(&any, "example.com:443", true),
+            Some("example.com:443")
+        );
+        assert_eq!(
+            allowed(&any, "example.com:80", true),
+            Some("example.com:80")
+        );
+        for t in ["example.com:22", "example.com:8443", "example.com"] {
+            assert_eq!(allowed(&any, t, true), None, "{t}");
+        }
+        // Pi's proxy (not `public`) never reads `*`.
+        assert_eq!(allowed(&any, "example.com:443", false), None);
+        let some = vec!["api.example.com:443".to_owned()];
+        assert_eq!(
+            allowed(&some, "api.example.com:443", true),
+            Some("api.example.com:443")
+        );
+        assert_eq!(allowed(&some, "other.example.com:443", true), None);
+        // What `*` lets through still connects only to a public address.
+        let to = |a: &str| {
+            let a: SocketAddr = a.parse().unwrap();
+            move |_: &str| vec![a]
+        };
+        for a in [
+            "127.0.0.1:443",
+            "169.254.169.254:80",
+            "192.168.1.1:443",
+            "[::1]:443",
+        ] {
+            let r = connect_public("x.example.com:443", &to(a), &[]);
+            assert!(matches!(r, Err(Refused(_))), "{a}");
+        }
     }
 
     #[test]

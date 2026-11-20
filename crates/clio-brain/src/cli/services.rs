@@ -652,11 +652,26 @@ impl Runner<'_> {
             writable.push(PathBuf::from(w));
         }
         let mut shows = s.shows.clone();
+        let mcp = s.tool == "mcp";
+        let root = super::mcp_servers::root(d);
         for p in s.reads {
-            if let Some(why) = sv::read_refused(p, &d.home, &control) {
+            let refused = if mcp {
+                clio_toolhost::mcp::read_refused(p, &d.home, &control, &root)
+            } else {
+                sv::read_refused(p, &d.home, &control)
+            };
+            if let Some(why) = refused {
                 return Err(format!("reads: {why}"));
             }
             shows.push(PathBuf::from(p));
+        }
+        // Any public site only for an MCP server that holds nothing to take there.
+        if s.network.iter().any(|h| h == clio_toolhost::mcp::ANY_HOST)
+            && let Some(why) =
+                clio_toolhost::mcp::any_host_refused(s.network, s.secrets, s.reads, s.writes, &root)
+                    .or_else(|| (!mcp).then(|| "only an MCP server may reach any site".into()))
+        {
+            return Err(format!("network: {why}"));
         }
         // The forwarder (`clio pi-net`) runs inside: the binary is shown when a mask hides it.
         shows.push(self.exe.clone());
@@ -724,7 +739,17 @@ impl Runner<'_> {
         let proxy = if s.network.is_empty() {
             None
         } else {
-            let allow: Vec<String> = s.network.iter().filter_map(|h| sv::host_port(h)).collect();
+            let allow: Vec<String> = s
+                .network
+                .iter()
+                .filter_map(|h| {
+                    if h == clio_toolhost::mcp::ANY_HOST {
+                        Some(h.clone())
+                    } else {
+                        sv::host_port(h)
+                    }
+                })
+                .collect();
             let p = clio_brain::pi::net::EgressProxy::start_service(&self.proxy_parent, &allow)?;
             shows.push(p.dir().to_path_buf());
             for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"] {
