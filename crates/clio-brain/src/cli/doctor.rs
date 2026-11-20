@@ -49,26 +49,28 @@ impl Report {
     }
 }
 
-/// The folder a jailed program writes: a service's state (`services/state/<name>`) or an MCP
-/// server's data, its `HOME` (`mcp/data/<name>`), live or kept with a removed one
-/// (`skills::remove_in`). What the program wrote, not Clio: its own mode is checked, what is
-/// inside is the program's (Chromium makes its caches 755).
-fn jailed_data(p: &Path) -> bool {
-    [("services", "state"), ("mcp", "data")]
-        .iter()
-        .any(|(root, kept)| {
-            p.parent()
-                .is_some_and(|q| q.ends_with(Path::new(root).join(kept)))
-                || (p.ends_with(kept)
-                    && p.parent()
-                        .and_then(Path::parent)
-                        .is_some_and(|q| q.ends_with(Path::new(root).join("removed"))))
-        })
+/// The folder a jailed program writes, under Clio's `data`: a service's state
+/// (`services/state/<name>`) or an MCP server's data, its `HOME` (`mcp/data/<name>`), live or
+/// kept with a removed one (`skills::remove_in`). What the program wrote, not Clio: its own mode
+/// is checked, what is inside is the program's (Chromium makes its caches 755). Only at those
+/// places from the data root: the same names deeper (a skill's files, a project copy) are Clio's.
+fn jailed_data(data: &Path, p: &Path) -> bool {
+    let Ok(rel) = p.strip_prefix(data) else {
+        return false;
+    };
+    let c: Vec<&str> = rel.iter().map(|s| s.to_str().unwrap_or("")).collect();
+    matches!(
+        c[..],
+        ["mcp", "data", _]
+            | ["mcp", "removed", _, "data"]
+            | ["services", "state", _]
+            | ["services", "removed", _, "state"]
+    )
 }
 
 /// Every file and folder under `dir`: folders must be 0700, files and sockets without access for
-/// group and others. A jailed program's own folder is checked, not walked.
-fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
+/// group and others. A jailed program's own folder under `data` is checked, not walked.
+fn check_tree(o: &mut Report, data: &Path, dir: &Path, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -89,8 +91,8 @@ fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
                     Some(format!("chmod 700 {}", p.display())),
                 );
             }
-            if depth < 8 && !jailed_data(&p) {
-                check_tree(o, &p, depth + 1);
+            if depth < 8 && !jailed_data(data, &p) {
+                check_tree(o, data, &p, depth + 1);
             }
         } else if md & 0o077 != 0 {
             o.say(
@@ -170,7 +172,13 @@ const NOT_CLIO_OUTPUT: [&str; 5] = ["sandbox", "scratch", "backup", "node_module
 /// A file bigger than this is not read.
 const AUDIT_MAX_BYTES: u64 = 32 << 20;
 
-fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<PathBuf>, usize)) {
+fn audit_walk(
+    data: &Path,
+    dir: &Path,
+    depth: usize,
+    f: &Scrubber,
+    out: &mut (usize, Vec<PathBuf>, usize),
+) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -182,8 +190,8 @@ fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<Path
                 .file_name()
                 .to_str()
                 .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
-            if !skip && depth < 8 && !jailed_data(&p) {
-                audit_walk(&p, depth + 1, f, out);
+            if !skip && depth < 8 && !jailed_data(data, &p) {
+                audit_walk(data, &p, depth + 1, f, out);
             }
         } else if t.is_file() {
             if e.metadata().map_or(0, |m| m.len()) > AUDIT_MAX_BYTES {
@@ -207,7 +215,7 @@ fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<Path
 /// never the values. The vault's own values are checked by `vault_audit`, which needs its server.
 fn data_audit(o: &mut Report, data: &Path) {
     let mut found = (0, Vec::new(), 0);
-    audit_walk(data, 0, &Scrubber::default(), &mut found);
+    audit_walk(data, data, 0, &Scrubber::default(), &mut found);
     let (read, mut hits, unread) = found;
     hits.sort();
     if hits.is_empty() {
@@ -852,7 +860,7 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
                 None,
             ),
         }
-        check_tree(&mut o, d, 0);
+        check_tree(&mut o, &dirs.data, d, 0);
     }
     if dirs.runtime.is_none() {
         o.say(
@@ -1083,7 +1091,7 @@ mod tests {
         )
         .unwrap();
         let mut o = Report::default();
-        check_tree(&mut o, t.path(), 0);
+        check_tree(&mut o, t.path(), t.path(), 0);
         let said: Vec<_> = o
             .checks
             .iter()
@@ -1126,59 +1134,75 @@ mod tests {
         }
         std::fs::set_permissions(state.join("b"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut o = Report::default();
-        check_tree(&mut o, &data, 0);
+        check_tree(&mut o, &data, &data, 0);
         let said: Vec<_> = o.checks.iter().map(|c| c.msg.clone()).collect();
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].contains("state/b has mode 755"), "{said:?}");
         let mut found = (0, Vec::new(), 0);
-        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
         assert!(found.1.is_empty(), "{:?}", found.1);
     }
 
     // S-70: an MCP server's data folder is its `HOME` in the jail, where Chromium makes its caches
-    // 755: the folder's own mode is checked, what the server wrote inside is not (live or removed).
-    // A 755 folder anywhere else in Clio's data still fails.
+    // 755: the folder's own mode is checked, what the server wrote inside is not (live or removed),
+    // for S-23 nor for key shapes. Only at those places from the data root: a 755 folder anywhere
+    // else (the rest of a removed copy, the same names inside a skill or a project) still fails.
     #[test]
     fn an_mcp_servers_data_folder_is_checked_but_not_walked() {
         use std::os::unix::fs::PermissionsExt;
+        fn private(d: &Path) {
+            std::fs::set_permissions(d, PermissionsExt::from_mode(0o700)).unwrap();
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    private(&p);
+                }
+            }
+        }
         let t = tempfile::tempdir().unwrap();
         let data = t.path().join("data");
-        let live = data.join("mcp/data/playwright");
-        let kept = data.join("mcp/removed/playwright-1/data");
-        let open = data.join("mcp/data/notion");
-        let other = data.join("mcp/servers/stray");
-        for d in [&live, &kept, &open, &other] {
-            std::fs::create_dir_all(d.join(".cache/fontconfig")).unwrap();
+        let skipped = ["mcp/data/playwright", "mcp/removed/playwright-1/data"];
+        let walked = [
+            "mcp/servers/stray",
+            "mcp/removed/playwright-1/servers",
+            "skills/versions/s/1/mcp/data/x",
+            "skills/live/s/mcp/removed/a/data",
+            "services/versions/v/2/mcp/data/x",
+            "sandbox/proj/mcp/data/x",
+        ];
+        for d in skipped.iter().chain(&walked) {
+            std::fs::create_dir_all(data.join(d).join(".cache/fontconfig")).unwrap();
         }
-        let mode = |d: &Path, m| std::fs::set_permissions(d, PermissionsExt::from_mode(m)).unwrap();
-        for d in [&data, &data.join("mcp")] {
-            mode(d, 0o700);
+        std::fs::create_dir_all(data.join("mcp/data/notion")).unwrap();
+        private(&data);
+        let open =
+            |d: &Path| std::fs::set_permissions(d, PermissionsExt::from_mode(0o755)).unwrap();
+        for d in skipped {
+            open(&data.join(d).join(".cache"));
+            open(&data.join(d).join(".cache/fontconfig"));
         }
-        for d in [
-            "mcp/data",
-            "mcp/removed",
-            "mcp/removed/playwright-1",
-            "mcp/servers",
-        ] {
-            mode(&data.join(d), 0o700);
+        let mut want: Vec<PathBuf> = walked.iter().map(|d| data.join(d).join(".cache")).collect();
+        want.extend(["mcp/data/notion", "mcp/removed/playwright-1"].map(|d| data.join(d)));
+        for d in &want {
+            open(d);
         }
-        for d in [&live, &kept, &open, &other] {
-            mode(d, 0o700);
-            mode(&d.join(".cache"), 0o755);
-            mode(&d.join(".cache/fontconfig"), 0o755);
-        }
-        mode(&open, 0o755);
-        mode(&other.join(".cache/fontconfig"), 0o700);
         let mut o = Report::default();
-        check_tree(&mut o, &data, 0);
+        check_tree(&mut o, &data, &data, 0);
         let mut said: Vec<_> = o.checks.iter().map(|c| c.msg.clone()).collect();
+        let mut want: Vec<_> = want
+            .iter()
+            .map(|d| format!("{} has mode 755, it must be 700 (S-23)", d.display()))
+            .collect();
         said.sort();
-        assert_eq!(said.len(), 2, "{said:?}");
-        assert!(said[0].contains("mcp/data/notion has mode 755"), "{said:?}");
-        assert!(
-            said[1].contains("servers/stray/.cache has mode 755"),
-            "{said:?}"
-        );
+        want.sort();
+        assert_eq!(said, want);
+        // Key shapes: what the server wrote is its own; Clio's files beside it are scanned.
+        let key = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        std::fs::write(data.join("mcp/data/playwright/token"), key).unwrap();
+        std::fs::write(data.join("mcp/servers/stray/token"), key).unwrap();
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
+        assert_eq!(found.1, vec![data.join("mcp/servers/stray/token")]);
     }
 
     // The private Node is nodejs.org's files, not what Clio wrote: a key-looking string inside
@@ -1194,14 +1218,14 @@ mod tests {
         )
         .unwrap();
         let mut found = (0, Vec::new(), 0);
-        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
         assert!(found.1.is_empty(), "{:?}", found.1);
         std::fs::write(
             data.join("notes.txt"),
             "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         )
         .unwrap();
-        audit_walk(&data, 0, &Scrubber::default(), &mut found);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
         assert_eq!(found.1.len(), 1, "{:?}", found.1);
     }
 
@@ -1229,7 +1253,7 @@ mod tests {
         };
         super::super::sessions::delete(&p).unwrap();
         let mut o = Report::default();
-        check_tree(&mut o, &data, 0);
+        check_tree(&mut o, &data, &data, 0);
         assert!(
             o.checks.is_empty(),
             "{:?}",

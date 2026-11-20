@@ -1356,6 +1356,15 @@ fn doctor_shows_each_check_once_with_the_real_host_script() {
             .any(|m| m.contains("firewall") || m.contains("OpenSSH") || m.contains("bwrap")),
         "{msgs:#?}"
     );
+    // On its own, a jailed program's folder (an MCP server's data) has its mode checked and its
+    // contents left alone; the same names deeper (inside a skill) are Clio's and are checked.
+    let data = e.home().join(".local/share/clio");
+    for f in ["mcp/data/pw/.cache/x", "skills/versions/s/1/mcp/data/x/f"] {
+        std::fs::create_dir_all(data.join(f).parent().unwrap()).unwrap();
+        std::fs::write(data.join(f), "x").unwrap();
+        std::fs::set_permissions(data.join(f), PermissionsExt::from_mode(0o644)).unwrap();
+    }
+    std::fs::set_permissions(data.join("mcp/data/pw"), PermissionsExt::from_mode(0o700)).unwrap();
     // The script on its own still does every check and keeps its exit code.
     let alone = Command::new("bash")
         .arg(&script)
@@ -1366,6 +1375,12 @@ fn doctor_shows_each_check_once_with_the_real_host_script() {
     let alone_out = text(&alone.stdout);
     assert!(
         alone_out.contains("is private (700)") && alone_out.contains("S-38"),
+        "{alone_out}"
+    );
+    assert!(
+        alone_out.contains("skills/versions/s/1/mcp/data/x/f has mode 644")
+            && !alone_out.contains("mcp/data/pw/.cache/x has mode")
+            && !alone_out.contains("mcp/data/pw has mode"),
         "{alone_out}"
     );
     assert!(

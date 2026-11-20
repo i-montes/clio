@@ -30,13 +30,24 @@ fi
 
 # --- S-23: Clio's folders and files are private ---------------------------------------------
 if [ -z "$embedded" ]; then
-  for d in "${XDG_RUNTIME_DIR:-/nonexistent}/clio" "$HOME/.local/share/clio" "$HOME/.config/clio"; do
+  data="$HOME/.local/share/clio"
+  for d in "${XDG_RUNTIME_DIR:-/nonexistent}/clio" "$data" "$HOME/.config/clio"; do
     [ -d "$d" ] || continue
     mode=$(stat -c %a "$d")
     if [ $((8#$mode & 8#077)) -ne 0 ]; then say FAIL "$d has mode $mode, it must be 700 (S-23)"; else say PASS "$d is private ($mode)"; fi
+    # A jailed program's own folder, at these places from the data root only (a service's state, an
+    # MCP server's data, live or removed): its mode is checked, what it wrote inside is its own.
+    prune=()
+    if [ "$d" = "$data" ]; then
+      for j in "$d"/mcp/data/* "$d"/mcp/removed/*/data "$d"/services/state/* "$d"/services/removed/*/state; do
+        { [ -d "$j" ] && [ ! -L "$j" ]; } || continue
+        m=$(stat -c %a "$j"); [ $((8#$m & 8#077)) -ne 0 ] && say FAIL "$j has mode $m, it must be 700 (S-23)"
+        prune+=(-path "$(printf '%s' "$j" | sed 's/[][*?\\]/\\&/g')" -prune -o)
+      done
+    fi
     while IFS= read -r f; do
       m=$(stat -c %a "$f"); [ $((8#$m & 8#077)) -ne 0 ] && say FAIL "$f has mode $m, it must be 600 (S-23)"
-    done < <(find "$d" -type f 2>/dev/null)
+    done < <(find "$d" ${prune[@]+"${prune[@]}"} -type f -print 2>/dev/null)
   done
 fi
 
