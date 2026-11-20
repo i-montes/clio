@@ -242,7 +242,13 @@ pub fn set_aside_skill(
     args: Value,
     reason: &str,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, Class::Skill)
+    set_aside_made(
+        state,
+        (run, session),
+        args,
+        reason,
+        (Class::Skill, "skill_write"),
+    )
 }
 
 /// A reviewed service draft, as `set_aside_skill` (S-69): it always waits for the person.
@@ -253,7 +259,30 @@ pub fn set_aside_service(
     args: Value,
     reason: &str,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, Class::Service)
+    set_aside_made(
+        state,
+        (run, session),
+        args,
+        reason,
+        (Class::Service, "service_write"),
+    )
+}
+
+/// A skill from outside (`skill_add`, the design of 2026-11-20): `args` as
+/// `skill_add::prepare` made them. It waits for the person's own yes, always.
+pub fn set_aside_added(
+    state: &Path,
+    run: &str,
+    session: &str,
+    args: Value,
+) -> Result<Pending, String> {
+    set_aside_made(
+        state,
+        (run, session),
+        args,
+        crate::skill_add::WAITS,
+        (Class::Skill, crate::skill_add::TOOL),
+    )
 }
 
 /// An MCP server the model proposed, with npm's facts (S-70): it always waits for the person.
@@ -264,7 +293,13 @@ pub fn set_aside_mcp(
     args: Value,
     reason: &str,
 ) -> Result<Pending, String> {
-    set_aside_made(state, (run, session), args, reason, Class::Mcp)
+    set_aside_made(
+        state,
+        (run, session),
+        args,
+        reason,
+        (Class::Mcp, "mcp_propose"),
+    )
 }
 
 fn set_aside_made(
@@ -272,12 +307,12 @@ fn set_aside_made(
     (run, session): (&str, &str),
     args: Value,
     reason: &str,
-    class: Class,
+    (class, tool): (Class, &str),
 ) -> Result<Pending, String> {
-    let (tool, rule) = match class {
-        Class::Service => ("service_write", "services/aside"),
-        Class::Mcp => ("mcp_propose", "mcp/aside"),
-        _ => ("skill_write", "skills/aside"),
+    let rule = match class {
+        Class::Service => "services/aside",
+        Class::Mcp => "mcp/aside",
+        _ => "skills/aside",
     };
     let now = now_ms();
     let name = args["name"].as_str().unwrap_or("").to_owned();
@@ -374,6 +409,12 @@ fn approve_made(
     let mut p = check(state, id, now_ms)?;
     if p.class != class {
         return Err(format!("{id} is not a {class}"));
+    }
+    // Second lock (`grant` is the first): a skill from outside is the person's own yes, always.
+    if p.tool == crate::skill_add::TOOL && granted.is_some() {
+        return Err(format!(
+            "{id} is a skill from outside: only the person's own yes adds it"
+        ));
     }
     if hash_of(&p.tool, &p.args) != p.hash {
         return Err(format!(
@@ -547,7 +588,16 @@ fn write_private(path: &Path, text: &str) -> Result<(), String> {
 }
 
 fn save(state: &Path, p: &Pending) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(p).map_err(|e| e.to_string())?;
+    // A skill from outside, answered or past its time: its text (up to 1 MiB) is not kept.
+    let mut p = p.clone();
+    if p.tool == crate::skill_add::TOOL
+        && p.state != State::Waiting
+        && let Some(a) = p.args.as_object_mut()
+    {
+        a.remove("skill_md");
+        a.remove("files");
+    }
+    let text = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
     write_private(&file(state, &p.id)?, &text)
 }
 
@@ -575,6 +625,15 @@ pub fn list(state: &Path) -> Vec<Pending> {
                 return false;
             }
             true
+        })
+        .map(|mut p| {
+            // A skill from outside past its time: expired here, its text dropped (`save`).
+            if p.tool == crate::skill_add::TOOL && p.state == State::Waiting && now >= p.expires_ms
+            {
+                p.state = State::Expired;
+                let _ = save(state, &p);
+            }
+            p
         })
         .collect();
     all.sort_by(|a, b| (a.created_ms, a.seq, &a.id).cmp(&(b.created_ms, b.seq, &b.id)));

@@ -171,7 +171,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -1519,6 +1519,39 @@ mod tests {
             assert_eq!(r.classify_command(c), Some(Control), "{c}");
         }
         assert_eq!(r.classify_command("systemctl status nginx"), None);
+    }
+
+    // S-68: adding a skill from outside is the person's (`clio skills add` asks them at their
+    // terminal): the model running it is `control`, never answered by a window or bypass.
+    #[test]
+    fn adding_a_skill_at_the_terminal_is_control() {
+        let r = HostRules::factory();
+        for c in [
+            "clio skills add obra/superpowers",
+            "clio skills add ./skills hello",
+            "cd /tmp && clio skills add https://github.com/a/b@v1",
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+            // The item as the tool host makes it (`lib.rs`): the machine mark only when
+            // `machine_only` gives it, and then bypass would answer it.
+            assert!(!r.machine_only(c), "{c}");
+            assert!(!crate::grant::bypass_answers(&crate::pending::Pending {
+                id: "x".into(),
+                class: Control,
+                tool: "exec".into(),
+                args: serde_json::json!({ "command": c }),
+                hash: String::new(),
+                what: c.into(),
+                run: "r".into(),
+                session: "s".into(),
+                created_ms: 0,
+                seq: 0,
+                expires_ms: 1,
+                state: crate::pending::State::Waiting,
+                reason: r.machine_only(c).then(|| MACHINE.into()),
+                granted: None,
+            }));
+        }
     }
 
     // S-71: a round sees the service manager's sockets: what changes a unit is told apart from

@@ -142,6 +142,8 @@ pub fn covers(p: &Pending) -> bool {
     let manage = crate::manage::is_manage(p);
     match p.class {
         Class::Delete | Class::Spend => true,
+        // A skill from outside is text Clio will read as her own: never a window's.
+        Class::Skill if p.tool == crate::skill_add::TOOL => false,
         Class::Skill => !manage || p.reason.is_none(),
         Class::Service | Class::Mcp => manage && p.reason.is_none(),
         Class::Send => p
@@ -175,6 +177,10 @@ pub struct Conversation {
     pub round: bool,
 }
 
+/// Why bypass leaves a skill from outside (`skill_add`) to the person.
+pub const SKILL_ADD_KEEPS: &str =
+    "it is text from outside that Clio would read as her own: only your yes adds it";
+
 /// Why bypass leaves `p` (of conversation `c`) to the person, in plain words; `None`: it answers
 /// it. The one place the reason comes from, for the tool host's answer, the chat's box and
 /// `clio pending`, from the same facts `bypass_answers` decides on (never the model's text).
@@ -190,6 +196,8 @@ pub fn bypass_keeps(p: &Pending, c: Conversation) -> Option<&'static str> {
         return Some("it is a round's item");
     }
     match p.class {
+        // A skill from outside: never bypass's, in any conversation.
+        Class::Skill if p.tool == crate::skill_add::TOOL => Some(SKILL_ADD_KEEPS),
         // What the list marked as the machine's alone (`ask::MACHINE`) is bypass's; the rest of
         // `control` either starts code outside the jail or touches Clio's own guards.
         Class::Control if reason != Some(crate::ask::MACHINE) => {
@@ -846,9 +854,10 @@ mod tests {
         assert!(!bypass_answers(&p), "a marked session's block change");
     }
 
-    // S-72: why bypass leaves an item to the person comes from the facts it decided on, in plain
+    // S-72, S-68: why bypass leaves an item to the person comes from the facts it decided on, in plain
     // words, one per case: the conversation (unjudged, flagged, a round) first, then the item
-    // (new code outside the jail, Clio's own setup, a block change, a secret); what it answers
+    // (new code outside the jail, Clio's own setup, a block change, a secret, a skill from
+    // outside); what it answers
     // has none, and `bypass_answers` is exactly "no reason".
     #[test]
     fn bypass_says_why_it_leaves_each_item_to_the_person() {
@@ -911,6 +920,14 @@ mod tests {
             assert_eq!(bypass_keeps(&p, c), None, "{class}");
             assert!(bypass_answers(&p));
         }
+        // S-68: a skill from outside, in any conversation.
+        p.class = Class::Skill;
+        p.tool = crate::skill_add::TOOL.into();
+        assert_eq!(
+            why(&p, c),
+            "it is text from outside that Clio would read as her own: only your yes adds it"
+        );
+        assert!(!bypass_answers(&p));
     }
 
     // S-72: a missing or damaged bypass file, or one that holds a window, is off; only

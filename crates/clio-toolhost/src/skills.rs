@@ -284,6 +284,321 @@ pub fn check_stored(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(
     Ok(())
 }
 
+/// A skill the person adds from outside (`skill_add`, `clio skills add`), SKILL.md included: at
+/// most this many files and bytes. `skill_write`'s limits are the ones above.
+pub const MAX_ADDED_FILES: usize = 100;
+pub const MAX_ADDED_BYTES: usize = 1 << 20;
+
+/// `name` and `description` of a SKILL.md's front matter (the YAML between its first two `---`
+/// lines): top-level keys only, each a plain, quoted or block (`>`, `|`) scalar, as plain text.
+pub fn front_matter(md: &str) -> (Option<String>, Option<String>) {
+    let mut lines = md.lines();
+    if lines.next() != Some("---") {
+        return (None, None);
+    }
+    let yaml: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
+    (scalar(&yaml, "name"), scalar(&yaml, "description"))
+}
+
+fn scalar(yaml: &[&str], key: &str) -> Option<String> {
+    let i = yaml
+        .iter()
+        .position(|l| l.strip_prefix(key).is_some_and(|r| r.starts_with(':')))?;
+    let first = yaml[i][key.len() + 1..].trim();
+    // What follows it and belongs to it: indented lines, and empty ones between them.
+    let more: Vec<&str> = yaml[i + 1..]
+        .iter()
+        .take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t']))
+        .map(|l| l.trim())
+        .collect();
+    let v = if first.starts_with(['>', '|']) {
+        let fold = first.starts_with('>');
+        let mut out = String::new();
+        for l in &more {
+            if l.is_empty() {
+                out.push('\n');
+            } else {
+                if fold && !out.is_empty() && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                out.push_str(l);
+                if !fold {
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    } else {
+        let joined = std::iter::once(first)
+            .chain(more.iter().copied())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if joined.starts_with('"') {
+            serde_json::from_str::<String>(&joined).ok()?
+        } else if let Some(inner) = joined.strip_prefix('\'').and_then(|j| j.strip_suffix('\'')) {
+            inner.replace("''", "'")
+        } else {
+            joined.split(" #").next().unwrap_or("").to_owned()
+        }
+    };
+    let v = v.trim().to_owned();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Why an added skill's front matter is refused: fixed words, nothing of its text.
+const NOT_SAME: &str = "SKILL.md: its front matter must be read the same by Clio and by Pi (plain `name: value` lines; name and description plain, quoted on one line, or `>`/`|` with lines of one indent): this one is not";
+
+/// The `name` (when it has one) and the `description` of a skill the person adds, read only from
+/// front matter that Clio's reading and a YAML parser (Pi's) cannot read differently: every line
+/// at the left a `key: value` (unique keys), the rest indented; `name` and `description` plain
+/// (no indicator first, nothing YAML would read as another type, on one line), quoted on one line
+/// (no escapes), or a `>`, `>-`, `|`, `|-` block of lines of one indent. Anything else refuses it.
+pub fn added_front_matter(md: &str) -> Result<(Option<String>, String), String> {
+    let bad = || Err(NOT_SAME.to_owned());
+    let lines: Vec<&str> = md.split('\n').collect();
+    if lines.first() != Some(&"---") {
+        return Err("SKILL.md: it must start with a front matter (a line `---`)".into());
+    }
+    // Pi ends it at the first line that starts with `---`: here it must be that line alone.
+    let Some(end) = lines[1..].iter().position(|l| l.starts_with("---")) else {
+        return bad();
+    };
+    if lines[end + 1] != "---" {
+        return bad();
+    }
+    let yaml = &lines[1..=end];
+    let key_re = |l: &str| -> Option<(String, String)> {
+        let (k, v) = l.split_once(':')?;
+        let ok = !k.is_empty()
+            && k.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            && (v.is_empty() || v.starts_with(' '));
+        ok.then(|| (k.to_owned(), v.trim().to_owned()))
+    };
+    let (mut keys, mut name, mut description) = (Vec::<String>::new(), None, None);
+    for (i, l) in yaml.iter().enumerate() {
+        if l.trim().is_empty() || l.starts_with(' ') || l.starts_with('#') {
+            // An indented line belongs to the key above it: none above, and YAML reads another
+            // mapping.
+            if l.starts_with(' ') && !l.trim().is_empty() && keys.is_empty() {
+                return bad();
+            }
+            continue;
+        }
+        let Some((k, v)) = key_re(l) else {
+            return bad();
+        };
+        if keys.contains(&k) {
+            return bad();
+        }
+        keys.push(k.clone());
+        // What follows the key and is not at the left: its lines.
+        let more: Vec<&str> = yaml[i + 1..]
+            .iter()
+            .take_while(|m| m.trim().is_empty() || m.starts_with(' '))
+            .copied()
+            .collect();
+        let content: Vec<&str> = more
+            .iter()
+            .copied()
+            .filter(|m| !m.trim().is_empty())
+            .collect();
+        if k != "name" && k != "description" {
+            // Another key: a quoted or flow value closes on its line (else its next lines are
+            // still it for YAML, and a `name:` among them would be read here).
+            let closed = match v.chars().next() {
+                Some('"') => quoted(&v, '"')
+                    .is_some_and(|(_, rest)| rest.is_empty() || rest.starts_with('#')),
+                Some('\'') => quoted(&v, '\'')
+                    .is_some_and(|(_, rest)| rest.is_empty() || rest.starts_with('#')),
+                Some('[') => v.ends_with(']'),
+                Some('{') => v.ends_with('}'),
+                _ => true,
+            };
+            if !closed {
+                return bad();
+            }
+            continue;
+        }
+        let value = match v.as_str() {
+            ">" | ">-" | "|" | "|-" => {
+                // One indent for every line, no empty line among them: then YAML's reading is this.
+                let Some(first) = content.first() else {
+                    return bad();
+                };
+                let indent = first.len() - first.trim_start_matches(' ').len();
+                let last = more.iter().rposition(|m| !m.trim().is_empty()).unwrap_or(0);
+                if more[..=last].iter().any(|m| m.trim().is_empty())
+                    || content
+                        .iter()
+                        .any(|m| m.len() - m.trim_start_matches(' ').len() != indent)
+                {
+                    return bad();
+                }
+                let parts: Vec<&str> = content.iter().map(|m| &m[indent..]).collect();
+                let mut out = parts.join(if v.starts_with('>') { " " } else { "\n" });
+                if !v.ends_with('-') {
+                    out.push('\n');
+                }
+                out
+            }
+            _ if !content.is_empty() => return bad(),
+            _ => match v.chars().next() {
+                Some('"') => match quoted(&v, '"') {
+                    Some((inner, "")) if !inner.contains('\\') => inner,
+                    _ => return bad(),
+                },
+                Some('\'') => match quoted(&v, '\'') {
+                    Some((inner, "")) => inner,
+                    _ => return bad(),
+                },
+                None => return bad(),
+                Some(c) if "-?:,[]{}#&*!|>%@`".contains(c) => return bad(),
+                Some(_) => {
+                    let plain = v.split(" #").next().unwrap_or("").trim_end();
+                    let other_type = matches!(
+                        plain,
+                        "null"
+                            | "Null"
+                            | "NULL"
+                            | "~"
+                            | "true"
+                            | "True"
+                            | "TRUE"
+                            | "false"
+                            | "False"
+                            | "FALSE"
+                    ) || plain.parse::<f64>().is_ok()
+                        || plain.starts_with("0x")
+                        || plain.starts_with("0o")
+                        || plain.starts_with('.');
+                    if other_type || plain.contains(": ") || plain.ends_with(':') {
+                        return bad();
+                    }
+                    plain.to_owned()
+                }
+            },
+        };
+        if k == "name" {
+            name = Some(value);
+        } else {
+            description = Some(value);
+        }
+    }
+    let d = description.unwrap_or_default();
+    if d.trim().is_empty() || d.chars().count() > MAX_DESCRIPTION {
+        return Err(format!(
+            "SKILL.md: its front matter needs a description (at most {MAX_DESCRIPTION} characters)"
+        ));
+    }
+    Ok((name, d))
+}
+
+/// A one-line quoted value: what is inside, and what is after it (trimmed). `''` is a `'` in a
+/// single-quoted one; a double-quoted one ends at the first `"` not after a `\`.
+fn quoted(v: &str, q: char) -> Option<(String, &str)> {
+    let body = v.strip_prefix(q)?;
+    let mut inner = String::new();
+    let mut it = body.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        if q == '"' && c == '\\' {
+            inner.push(c);
+            if let Some((_, n)) = it.next() {
+                inner.push(n);
+            }
+        } else if c == q {
+            if q == '\'' && it.peek().is_some_and(|(_, n)| *n == '\'') {
+                it.next();
+                inner.push('\'');
+            } else {
+                return Some((inner, body[i + 1..].trim()));
+            }
+        } else {
+            inner.push(c);
+        }
+    }
+    None
+}
+
+/// A name made Clio's: lowercase letters and digits, anything else one `-` between them, at most
+/// 64 (Pi's rules). Empty when nothing of it is a letter or a digit.
+pub fn clio_name(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let cut: String = out.chars().take(64).collect();
+    cut.trim_end_matches('-').to_owned()
+}
+
+/// A skill the person adds, as found in its source (SKILL.md as written there, not composed):
+/// Clio's name, a description in its front matter, its paths, `MAX_ADDED_FILES` and
+/// `MAX_ADDED_BYTES`, and no character the box would not show as written. Checked when it is
+/// found and again by whoever registers it.
+pub fn check_added(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("{:?} is not a skill name", one_line(name)));
+    }
+    if skill_md.chars().any(hidden) {
+        return Err(
+            "SKILL.md: it has a control, invisible or tab character the box would not show as written"
+                .into(),
+        );
+    }
+    // The name Pi reads is the one registered: its own, or (none given) its folder's, Clio's.
+    if added_front_matter(skill_md)?.0.is_some_and(|n| n != name) {
+        return Err(format!(
+            "SKILL.md: the name in its front matter must be exactly «{name}» (lowercase letters, digits and single hyphens)"
+        ));
+    }
+    if files.len() + 1 > MAX_ADDED_FILES {
+        return Err(format!(
+            "{} files: a skill takes at most {MAX_ADDED_FILES}",
+            files.len() + 1
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = skill_md.len();
+    for f in files {
+        valid_path(&f.path)?;
+        if !seen.insert(f.path.as_str()) {
+            return Err(format!("file {:?} is given twice", one_line(&f.path)));
+        }
+        total += f.content.len();
+    }
+    if total > MAX_ADDED_BYTES {
+        let big = files
+            .iter()
+            .max_by_key(|f| f.content.len())
+            .map_or_else(String::new, |f| {
+                format!(
+                    " (the largest, {}, {} bytes)",
+                    one_line(&f.path),
+                    f.content.len()
+                )
+            });
+        return Err(format!(
+            "{total} bytes{big}: a skill takes at most {MAX_ADDED_BYTES} bytes in all"
+        ));
+    }
+    for (what, t) in std::iter::once(("SKILL.md", skill_md))
+        .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
+    {
+        if t.chars().any(hidden) {
+            return Err(format!(
+                "{}: it has a control, invisible or tab character the box would not show as written",
+                one_line(what)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// What the judge reads of a draft: SKILL.md and every file, whole, in one text.
 pub fn whole_text(skill_md: &str, files: &[SkillFile]) -> String {
     let mut t = skill_md.to_owned();
@@ -371,7 +686,13 @@ pub(crate) fn files_of(args: &Map<String, Value>) -> Result<Vec<SkillFile>, Stri
 }
 
 impl ToolHost {
-    fn skill_answer(&self, req: &Request, ok: bool, rule: &str, content: String) -> Response {
+    pub(crate) fn skill_answer(
+        &self,
+        req: &Request,
+        ok: bool,
+        rule: &str,
+        content: String,
+    ) -> Response {
         Response {
             id: req.id.clone(),
             ok,
@@ -646,7 +967,8 @@ impl ToolHost {
                     return refuse("not a file of the skill");
                 }
                 let text = match fs::read(&p) {
-                    Ok(b) if b.len() <= MAX_TOTAL => String::from_utf8_lossy(&b).into_owned(),
+                    // A skill the person added may be larger than one Clio wrote.
+                    Ok(b) if b.len() <= MAX_ADDED_BYTES => String::from_utf8_lossy(&b).into_owned(),
                     Ok(_) => return refuse("too large"),
                     Err(e) => return refuse(&e.to_string()),
                 };
@@ -795,6 +1117,111 @@ mod tests {
         // A description with YAML in it stays one quoted string.
         let md = compose("x", "a: b # c \"q\"", "b", "v");
         assert!(md.contains("description: \"a: b # c \\\"q\\\"\"\n"));
+    }
+
+    // The front matter of skills as other harnesses write them: plain, quoted, folded.
+    #[test]
+    // S-68: an added skill's name and description are read only where Clio and YAML (Pi) read
+    // them the same; anything else refuses it. (Pi's own parser agrees on the accepted ones:
+    // `clio-brain/tests/skill_front_matter.rs`.)
+    fn an_added_skills_front_matter_is_read_only_where_yaml_agrees() {
+        let ok = |md: &str| added_front_matter(md).unwrap();
+        assert_eq!(
+            ok("---\nname: a-b\ndescription: Says hi # note\nlicense: MIT\n---\nbody"),
+            (Some("a-b".into()), "Says hi".into())
+        );
+        assert_eq!(
+            ok("---\ndescription: >\n  One\n  two.\nname: x\n---\n").1,
+            "One two.\n"
+        );
+        assert_eq!(
+            ok("---\ndescription: |-\n  One\n  two.\n---\n").1,
+            "One\ntwo."
+        );
+        assert_eq!(ok("---\ndescription: 'It''s'\n---\n").1, "It's");
+        assert_eq!(
+            ok("---\ndescription: \"Quoted: yes\"\n---\n").1,
+            "Quoted: yes"
+        );
+        assert_eq!(
+            ok("---\ndescription: d\nmeta:\n  name: inner\n---\n").0,
+            None
+        );
+        for bad in [
+            "no front matter",
+            "---\nname: &a skill-creator\ndescription: d\n---\n",
+            "---\nname: *a\ndescription: d\n---\n",
+            "---\nname: !!str skill-creator\ndescription: d\n---\n",
+            "---\nname: [skill-creator]\ndescription: d\n---\n",
+            "---\nname: {a: b}\ndescription: d\n---\n",
+            "---\nname: \"skill-creator\ndescription: d\n---\n",
+            "---\ndescription: \"a\\x41\"\n---\n",
+            "---\ndescription: >2\n  d\n---\n",
+            "---\ndescription: >\n  d\n    more\n---\n",
+            "---\ndescription: >\n  d\n\n  e\n---\n",
+            "---\ndescription: plain\n  continued\n---\n",
+            "---\ndescription: a: b\n---\n",
+            "---\ndescription: true\n---\n",
+            "---\ndescription: 12\n---\n",
+            "---\ndescription: d\ndescription: e\n---\n",
+            "---\n\"name\": x\ndescription: d\n---\n",
+            "---\nname : x\ndescription: d\n---\n",
+            "---\n<<: *base\ndescription: d\n---\n",
+            "---\n name: x\n description: d\n---\n",
+            "---\nx: \"open\nname: evil\ndescription: d\n---\n",
+            "---\nx: [a,\nname: evil]\ndescription: d\n---\n",
+            "---\ndescription: d\n---x\n",
+            "---\ndescription: d\n",
+            "---\nname: x\n---\n",
+        ] {
+            assert!(added_front_matter(bad).is_err(), "{bad:?}");
+        }
+        // The name, when given, is exactly the one registered.
+        let md = "---\nname: other\ndescription: d\n---\n";
+        assert!(
+            check_added("mine", md, &[])
+                .unwrap_err()
+                .contains("exactly «mine»")
+        );
+        assert!(check_added("other", md, &[]).is_ok());
+    }
+
+    #[test]
+    fn the_front_matter_is_read_as_its_harnesses_write_it() {
+        let fm = |y: &str| front_matter(&format!("---\n{y}\n---\nbody\n"));
+        assert_eq!(
+            fm("name: tdd\ndescription: Use when testing. Really # not this"),
+            (Some("tdd".into()), Some("Use when testing. Really".into()))
+        );
+        assert_eq!(
+            fm("name: \"a b\"\ndescription: \"Say \\\"hi\\\" - now\"").1,
+            Some("Say \"hi\" - now".into())
+        );
+        assert_eq!(
+            fm("description: >\n  Lazy mode: the\n  smallest change.\nlicense: MIT").1,
+            Some("Lazy mode: the smallest change.".into())
+        );
+        assert_eq!(
+            fm("description: |\n  one\n  two\n").1,
+            Some("one\ntwo".into())
+        );
+        assert_eq!(fm("description: 'it''s'").1, Some("it's".into()));
+        assert_eq!(fm("names: x\ndescription:").0, None);
+        assert_eq!(fm("descriptions: x").1, None);
+        assert_eq!(
+            front_matter("no front matter\ndescription: x"),
+            (None, None)
+        );
+        // Clio's own SKILL.md (a JSON string) reads the same way.
+        let md = compose("x", "a: b # c \"q\"", "b", "v");
+        assert_eq!(front_matter(&md).1.as_deref(), Some("a: b # c \"q\""));
+        assert_eq!(
+            clio_name("Test Driven_Development!"),
+            "test-driven-development"
+        );
+        assert_eq!(clio_name("--ünï--"), "n");
+        assert_eq!(clio_name(&"a".repeat(70)), "a".repeat(64));
+        assert_eq!(clio_name("..."), "");
     }
 
     #[test]
