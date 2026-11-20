@@ -163,12 +163,13 @@ fn a_shown_program_outside_the_masks_is_read_only_and_a_multiplexer_is_hidden() 
     let mut j = job(d.path(), "true");
     j.shows = vec![prog.clone()];
     let p = prog.to_string_lossy();
-    let tmux = PathBuf::from(format!("/tmp/tmux-{}", uid()));
-    let tmux = tmux
-        .symlink_metadata()
-        .is_ok()
-        .then(|| tmux.canonicalize().unwrap());
     if let Some(h) = with(Launcher::Bwrap) {
+        // Linux only, as bwrap is (`uid` reads `/proc`).
+        let tmux = PathBuf::from(format!("/tmp/tmux-{}", uid()));
+        let tmux = tmux
+            .symlink_metadata()
+            .is_ok()
+            .then(|| tmux.canonicalize().unwrap());
         let (_, a) = h.args(&j).unwrap();
         assert_eq!(after(&a, "--ro-bind"), [p.as_ref()], "{a:?}");
         if let Some(t) = &tmux {

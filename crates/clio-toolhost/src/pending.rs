@@ -500,14 +500,21 @@ fn hash_of(tool: &str, args: &Value) -> String {
 
 /// `date` in the local time zone: there is no date crate here.
 pub fn local(ms: i64, fmt: &str) -> Option<String> {
-    let o = std::process::Command::new("/usr/bin/date")
-        .arg(format!("--date=@{}", ms.div_euclid(1000)))
-        .arg(format!("+{fmt}"))
-        .output()
-        .ok()?;
-    o.status
-        .success()
-        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    let secs = ms.div_euclid(1000).to_string();
+    // GNU `date` (Linux) takes `--date=@<secs>`, BSD's (macOS) `-r <secs>`; `/bin/date` is on both.
+    [vec![format!("--date=@{secs}")], vec!["-r".to_owned(), secs]]
+        .iter()
+        .find_map(|args| {
+            let o = std::process::Command::new("/bin/date")
+                .args(args)
+                .arg(format!("+{fmt}"))
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            o.status
+                .success()
+                .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        })
 }
 
 fn dir(state: &Path) -> PathBuf {
