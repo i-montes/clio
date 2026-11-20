@@ -92,10 +92,16 @@ fn call(e: &Env, tool: &str, args: Value) -> Response {
     })
 }
 
+/// The jail runs here; without it a test that needs it is skipped, and fails under
+/// `CLIO_REQUIRE_JAIL`.
 fn exec_ok(e: &Env) -> bool {
     match e.host.exec_available() {
         Ok(()) => true,
         Err(why) => {
+            assert!(
+                std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+                "CLIO_REQUIRE_JAIL is set and the jail is not available: {why}"
+            );
             eprintln!("SKIPPED (the host launcher cannot run here, exec was not tested): {why}");
             false
         }

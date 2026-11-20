@@ -465,7 +465,7 @@ impl Chat {
         if silent && !self.judge_said {
             self.judge_said = true;
             self.items.push(Item::Note(
-                "the judge did not answer: outside text reached the model unjudged, marked as data"
+                "the judge did not answer: outside text reached the model unjudged, marked as data; from now on nothing in this conversation runs under bypass or a permission window, it asks you"
                     .into(),
             ));
         }

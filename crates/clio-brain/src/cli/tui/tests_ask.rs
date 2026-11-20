@@ -1428,7 +1428,7 @@ fn bypass_on_is_its_box_under_the_approval_timing() {
     std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
     let ask = || {
         Input::Bg(Bg::Confirm(Ok(Box::new(
-            crate::cli::pending::bypass_ask(&d).unwrap(),
+            crate::cli::pending::bypass_ask(&d, false).unwrap(),
         ))))
     };
     let mut a = chat();

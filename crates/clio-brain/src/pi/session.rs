@@ -713,8 +713,9 @@ mod tests {
         }
     }
     // S-72: `clio-agent@28` and `clio-host@12` are `@27` and `@11` with only the approval
-    // sentences changed: with bypass on Clio does not wait (she acts and says what she did), and
-    // what bypass never answers (a secret, a block change, Clio's own setup) still waits.
+    // sentences changed: with bypass on Clio does not wait (she acts and says what she did), what
+    // bypass never answers (a secret, a block change, Clio's own setup) still waits, and Clio never
+    // asks the person to turn it on.
     #[test]
     fn the_bypass_prompts_only_change_the_approval_sentences() {
         let old = |f: &str| {
@@ -743,6 +744,9 @@ mod tests {
         }
         assert!(HOST_PROMPT.contains("approvals: bypass on"));
         assert!(HOST_PROMPT.contains("never say you are waiting for it"));
+        for p in [PROMPT, HOST_PROMPT] {
+            assert!(p.contains("nor to turn bypass on (that is theirs alone)"));
+        }
         assert!(crate::pi::envelope::BYPASS_ON.starts_with("approvals: bypass on"));
     }
 }

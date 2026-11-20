@@ -44,6 +44,15 @@ pub(crate) const LOGGED: [&str; 3] = ["exec", "fs_write", "fs_mkdir"];
 /// The longest time limit a command may ask for; without one it has none.
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
 
+/// Clio's programs where the installer puts them: shown read-only in a command's jail, which may
+/// run them and never change them (S-72).
+pub(crate) fn programs(home: &Path) -> Vec<PathBuf> {
+    ["clio", "clio-vault", "clio-memory"]
+        .iter()
+        .map(|n| home.join(".local/bin").join(n))
+        .collect()
+}
+
 pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -418,7 +427,7 @@ impl ToolHost {
                 masks: h.cfg.control.clone(),
                 read_only: self.review || self.unattended,
                 sockets: self.unattended,
-                shows: self.windows(),
+                shows: [self.windows(), programs(&h.cfg.home)].concat(),
             };
             let out = jail.run_until(&job, &stop)?;
             return Ok(ops::exec_result(&out, secs));

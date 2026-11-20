@@ -1400,7 +1400,10 @@ impl Ctx {
                 let session = self.current_chat();
                 if arg == "on" {
                     self.spawn(
-                        move |d, _| super::pending::bypass_ask(d),
+                        move |d, _| {
+                            let suspect = session.as_ref().is_some_and(|s| s.suspect());
+                            super::pending::bypass_ask(d, suspect)
+                        },
                         |r| Bg::Confirm(r.and_then(|x| x).map(Box::new)),
                     );
                     return;
@@ -1425,7 +1428,7 @@ impl Ctx {
                 let session = self.current_chat();
                 self.spawn(
                     move |d, tx| {
-                        super::pending::bypass_on(d)?;
+                        super::pending::bypass_on(d, session.as_ref().is_some_and(|s| s.suspect()))?;
                         if let Some(s) = &session {
                             send_grant(d, &id, s.as_ref(), tx);
                         }
@@ -1742,13 +1745,13 @@ impl Ctx {
                                 session: session.clone(),
                             }));
                         }
-                        // Under bypass or an open window (the judge on, the session not suspect)
-                        // what it may answer is approved by it, through the same path as the
-                        // person's yes; the rest, and a round's items, keep their box.
+                        // Under bypass or an open window (the judge on, the session not suspect,
+                        // its judge not silent) what it may answer is approved by it, through the
+                        // same path as the person's yes; the rest keeps its box.
                         let suspect = s.suspect();
                         if !suspect {
                             for p in s.waiting() {
-                                if !super::round::is_round(d, &p.run)
+                                if !super::pending::unjudged_run(d, &p.run)
                                     && super::pending::answering(d, &p).is_some()
                                 {
                                     // An act on what Clio created goes on by itself (`Acted`).

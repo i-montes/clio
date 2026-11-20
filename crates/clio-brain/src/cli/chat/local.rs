@@ -675,6 +675,12 @@ impl HostSide {
                 "{id}: this session read content that tried to give orders, so it waits for you"
             ));
         }
+        // Nor one whose judge did not answer for what it read (S-72): it asks from then on.
+        if pending::unjudged_run(&self.dirs, &p.run) {
+            return Err(format!(
+                "{id}: the judge did not answer for what this session read, so it waits for you"
+            ));
+        }
         // Nor does a round, which nobody watched (S-71, S-72): only the person's yes in the box.
         if crate::cli::round::is_round(&self.dirs, &p.run) {
             return Err(format!("{id}: a round's item always asks you"));
@@ -1328,7 +1334,10 @@ impl Session for ChatSession {
         };
         // Whether bypass acts for this session goes in front of the message, read by the brain.
         self.pre.set_bypass(self.host.as_ref().is_some_and(|h| {
-            !self.suspect() && !self.round && pending::bypass_now(&h.dirs).is_some()
+            !self.suspect()
+                && !self.round
+                && !pending::unjudged_run(&h.dirs, &h.run)
+                && pending::bypass_now(&h.dirs).is_some()
         }));
         let r = run_assessed_with(
             &self.pi.client,
@@ -2116,6 +2125,20 @@ mod tests {
         assert_eq!(held(SkillNext::Register, None), SkillNext::Register);
     }
 
+    // S-72: a `clio run` is the person's own request, so bypass covers it: its source is not a
+    // round, so its tool host is not `--unattended` (`unattended: self.round`) and bypass answers
+    // there as in a chat. A round is not covered: nobody asked for that session.
+    #[test]
+    fn a_clio_run_is_the_persons_and_bypass_covers_it() {
+        let t = tempfile::tempdir().unwrap();
+        let d = host_side(t.path()).dirs;
+        let run = LocalSource::new(d.clone())
+            .one_shot()
+            .with_mode(Some(Mode::Host));
+        assert!(!run.round && !run.presentation);
+        assert!(LocalSource::new(d).round().round);
+    }
+
     /// A conversation's host side on its own folders (run `r1`), the judge on.
     fn host_side(root: &Path) -> HostSide {
         let data = root.join("data");
@@ -2265,7 +2288,8 @@ mod tests {
 
     // S-72: the chat's bypass answers what waited from before it was turned on, control on the
     // machine, and records each with a fixed outcome; never Clio's own guards (control without
-    // the machine's mark), a block change, a suspect session's item or a round's; `granted_news`
+    // the machine's mark), a block change, a secret, a suspect session's item, one of a session
+    // whose judge did not answer, or a round's; `granted_news`
     // says what the tool host did under it; the judge off turns it off at the next act.
     #[test]
     fn the_chats_bypass_answers_what_waits_but_never_clios_own_guards() {
@@ -2284,6 +2308,7 @@ mod tests {
         item("mch1", "control", Some(clio_toolhost::ask::MACHINE), "r1");
         item("own1", "control", None, "r1");
         item("mem1", "memory", None, "r1");
+        item("sec1", "secret", None, "r1");
         let err = h
             .grant("s1", false, "old1", |_| ran(&h, "old1", 0))
             .unwrap_err();
@@ -2295,7 +2320,7 @@ mod tests {
         assert!(said.starts_with("approved under bypass: "), "{said}");
         assert!(!said.contains("left"), "{said}");
         assert!(h.grant("s1", false, "mch1", |_| ran(&h, "mch1", 0)).is_ok());
-        for id in ["own1", "mem1"] {
+        for id in ["own1", "mem1", "sec1"] {
             let err = h.grant("s1", false, id, |_| ran(&h, id, 0)).unwrap_err();
             assert!(err.contains("always asks you"), "{id}: {err}");
         }
@@ -2335,10 +2360,26 @@ mod tests {
             news,
             ["approved under bypass: «delete» rm -r /srv/inl1.bak"]
         );
+        // The judge did not answer for what this conversation read: its items ask from then on,
+        // and bypass stays on for the others.
+        let marks = h.dirs.runs.join("r1/toolhost");
+        std::fs::create_dir_all(&marks).unwrap();
+        std::fs::write(
+            marks.join("tainted.json"),
+            json!({"sources": ["web", clio_toolhost::UNJUDGED]}).to_string(),
+        )
+        .unwrap();
+        item("unj1", "delete", None, "r1");
+        let err = h
+            .grant("s1", false, "unj1", |_| ran(&h, "unj1", 0))
+            .unwrap_err();
+        assert!(err.contains("judge did not answer"), "{err}");
+        assert!(pending::bypass_now(&h.dirs).is_some());
         // The judge turned off: bypass turns off at the next act, which waits.
         let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
         cfg.jev.enabled = false;
         std::fs::write(h.dirs.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        std::fs::remove_file(marks.join("tainted.json")).unwrap();
         assert!(
             h.grant("s1", false, "new1", |_| ran(&h, "new1", 0))
                 .is_err()

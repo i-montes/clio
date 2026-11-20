@@ -53,6 +53,14 @@ fn after<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// `v` without a terminal multiplexer's socket folders, which the jail hides too when this
+/// machine has them (`/tmp/tmux-<uid>`, `/run/screen/S-<user>`).
+fn no_mux(v: Vec<&str>) -> Vec<&str> {
+    v.into_iter()
+        .filter(|x| !x.contains("/tmux-") && !x.contains("/screen/S-"))
+        .collect()
+}
+
 fn uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata("/proc/self").unwrap().uid()
@@ -71,8 +79,8 @@ fn bwrap_args_mask_existing_folders_cut_the_network_and_clear_the_environment() 
     let (prog, a) = h.args(&j).unwrap();
     assert!(prog.ends_with("bwrap"), "{prog:?}");
     let m = mask.to_string_lossy();
-    assert_eq!(after(&a, "--tmpfs"), [m.as_ref()]);
-    assert_eq!(after(&a, "--remount-ro"), [m.as_ref()]);
+    assert_eq!(no_mux(after(&a, "--tmpfs")), [m.as_ref()]);
+    assert_eq!(no_mux(after(&a, "--remount-ro")), [m.as_ref()]);
     assert!(!a.iter().any(|x| x.contains("missing")), "{a:?}");
     for flag in [
         "--unshare-net",
@@ -119,12 +127,14 @@ fn a_shown_folder_is_a_read_only_window_inside_its_mask_in_both_launchers() {
     let (m, w) = (mask.to_string_lossy(), live.to_string_lossy());
     if let Some(h) = with(Launcher::Bwrap) {
         let (_, a) = h.args(&j).unwrap();
-        let at = |x: &str| a.iter().position(|y| y == x).unwrap();
+        let at = |x: &str, v: &str| a.windows(2).position(|y| y[0] == x && y[1] == v).unwrap();
         assert_eq!(after(&a, "--ro-bind"), [w.as_ref()]);
         assert_eq!(after(&a, "--bind"), ["/"], "{a:?}");
         // After the empty mask is made, before it becomes read-only.
-        assert!(at("--tmpfs") < at("--ro-bind") && at("--ro-bind") < at("--remount-ro"));
-        assert_eq!(after(&a, "--remount-ro"), [m.as_ref()]);
+        assert!(
+            at("--tmpfs", &m) < at("--ro-bind", &w) && at("--ro-bind", &w) < at("--remount-ro", &m)
+        );
+        assert_eq!(no_mux(after(&a, "--remount-ro")), [m.as_ref()]);
         assert!(!a.iter().any(|x| x.contains("missing")), "{a:?}");
     }
     if let Some(h) = with(Launcher::Systemd) {
@@ -139,6 +149,63 @@ fn a_shown_folder_is_a_read_only_window_inside_its_mask_in_both_launchers() {
             "{props:?}"
         );
     }
+}
+
+// S-72: Clio's programs (outside every mask) are bound read-only over themselves, and a
+// terminal multiplexer's sockets, when there are any, are hidden like Clio's folders.
+#[test]
+fn a_shown_program_outside_the_masks_is_read_only_and_a_multiplexer_is_hidden() {
+    let d = TempDir::new().unwrap();
+    let bin = d.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("clio"), "#!/bin/sh\necho from-clio\n").unwrap();
+    let prog = bin.join("clio").canonicalize().unwrap();
+    let mut j = job(d.path(), "true");
+    j.shows = vec![prog.clone()];
+    let p = prog.to_string_lossy();
+    let tmux = PathBuf::from(format!("/tmp/tmux-{}", uid()));
+    let tmux = tmux
+        .symlink_metadata()
+        .is_ok()
+        .then(|| tmux.canonicalize().unwrap());
+    if let Some(h) = with(Launcher::Bwrap) {
+        let (_, a) = h.args(&j).unwrap();
+        assert_eq!(after(&a, "--ro-bind"), [p.as_ref()], "{a:?}");
+        if let Some(t) = &tmux {
+            assert!(
+                after(&a, "--tmpfs").contains(&t.to_string_lossy().as_ref()),
+                "{a:?}"
+            );
+        }
+    }
+    if let Some(h) = with(Launcher::Systemd) {
+        let (_, a) = h.args(&j).unwrap();
+        let props = after(&a, "-p");
+        assert!(
+            props.contains(&format!("ReadOnlyPaths={p}").as_str()),
+            "{props:?}"
+        );
+    }
+    let Some(h) = bwrap() else { return };
+    std::fs::write(d.path().join("x"), "other").unwrap();
+    let tries = format!(
+        "sh {p}; echo x > {p} 2>/dev/null && echo WROTE; \
+         cp /bin/true {p} 2>/dev/null && echo COPIED; \
+         mv {d}/x {p} 2>/dev/null && echo MOVED; \
+         rm -f {p} 2>/dev/null; test -e {p} || echo DELETED; true",
+        d = d.path().display()
+    );
+    let mut j = job(d.path(), &tries);
+    j.shows = vec![prog.clone()];
+    let o = h.run(&j).unwrap();
+    assert_eq!(o.stdout, "from-clio\n", "{o:?}");
+    assert_eq!(
+        std::fs::read_to_string(&prog).unwrap(),
+        "#!/bin/sh\necho from-clio\n"
+    );
+    // Without the show the same command changes it: what held above is the jail's doing.
+    let o = h.run(&job(d.path(), &tries)).unwrap();
+    assert!(o.stdout.contains("WROTE"), "{o:?}");
 }
 
 #[test]
@@ -171,11 +238,14 @@ fn systemd_args_run_as_this_user_with_masks_no_network_a_deadline_and_a_fixed_en
     let props = after(&a, "-p");
     let ro = format!("TemporaryFileSystem={}:ro", mask.display());
     assert_eq!(
-        props
-            .iter()
-            .filter(|p| p.starts_with("TemporaryFileSystem="))
-            .collect::<Vec<_>>(),
-        [&ro.as_str()]
+        no_mux(
+            props
+                .iter()
+                .copied()
+                .filter(|p| p.starts_with("TemporaryFileSystem="))
+                .collect()
+        ),
+        [ro.as_str()]
     );
     assert!(props.contains(&"PrivateNetwork=yes"));
     assert!(props.contains(&"KillMode=control-group"));

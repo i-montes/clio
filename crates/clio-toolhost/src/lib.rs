@@ -624,7 +624,10 @@ impl ToolHost {
         };
         for kind in [grant::Kind::Window, grant::Kind::Bypass] {
             if let Err(e) = kind.close(st, grant::FLAGGED) {
-                eprintln!("clio-toolhost: the {kind:?} could not be closed: {e}");
+                eprintln!(
+                    "clio-toolhost: the {} could not be closed: {e}",
+                    kind.name()
+                );
             }
         }
     }

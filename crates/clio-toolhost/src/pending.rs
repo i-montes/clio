@@ -824,8 +824,13 @@ impl ToolHost {
                     Err(None) => (aside_text(&p), "host/aside"),
                     Err(Some(why)) => (
                         format!(
-                            "{} (It could not run under the person's permission: {why}.)",
-                            aside_text(&p)
+                            "{} (It could not run under the person's {}: {why}.)",
+                            aside_text(&p),
+                            if crate::grant::Kind::Bypass.current(state).is_some() {
+                                "bypass"
+                            } else {
+                                "permission window"
+                            }
                         ),
                         "host/aside",
                     ),
@@ -869,14 +874,22 @@ impl ToolHost {
         p: &Pending,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
-        if self.review || self.unattended || self.is_suspect(&req.session) {
+        // A session whose judge did not answer acts under neither: it asks (S-72).
+        if self.review
+            || self.unattended
+            || self.is_suspect(&req.session)
+            || self.is_unjudged(&req.session)
+        {
             return Err(None);
         }
         let w = crate::grant::answering(state, p).ok_or(None)?;
         let kind = crate::grant::Kind::of(&w);
         if !self.memory.as_ref().is_some_and(|m| m.judge_on()) {
             if let Err(e) = kind.close(state, crate::grant::JUDGE_OFF) {
-                eprintln!("clio-toolhost: the {kind:?} could not be closed: {e}");
+                eprintln!(
+                    "clio-toolhost: the {} could not be closed: {e}",
+                    kind.name()
+                );
             }
             return Err(None);
         }

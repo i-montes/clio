@@ -22,10 +22,11 @@
 //!
 //! Bypass (`2026-11-20-bypass-design.md`) is the person's standing yes, kept the same way in
 //! `<state>/bypass.json` and recorded in `<state>/bypass/<id>.jsonl` (`Kind::Bypass`): a window
-//! with no end that outlives restarts, turned on only by the chat's box (`bypass_on`), off by the
-//! person or the judge. It answers what a window does and more (`bypass_answers`), never what
-//! would change Clio's own guards, a change to the person's blocks, a secret or a suspect
-//! session's act. While it is on no window opens.
+//! with no end or clock that outlives restarts, on only while its record starts with it (a file
+//! written by hand is off), turned on only by the chat's box (`bypass_on`), off by the person or
+//! the judge. It answers what a window does and more (`bypass_answers`), never what would change
+//! Clio's own guards or run new code outside the jail, a change to the person's blocks, a secret
+//! or a suspect session's act. While it is on no window opens.
 
 use std::fs;
 use std::io::Write;
@@ -160,9 +161,10 @@ pub fn may_answer(w: &Window, p: &Pending) -> bool {
 /// May bypass answer `p` by itself: what a window answers and what a window never does (`control`
 /// on the machine, a new service or MCP server or a new version, `on` of what the person turned
 /// off, `remove` or `undo` of a shipped skill, a service's `undo`, a changed MCP tool, what waited
-/// from before). Never what would change Clio's own guards (a `control` the list did not mark
-/// `ask::MACHINE` when it classified it), a secret, a change to the person's blocks (only a marked
-/// session's waits), a suspect session's act or a round's reach out: those always ask.
+/// from before). Never what would change Clio's own guards or run new code outside the jail (a
+/// `control` the list did not mark `ask::MACHINE` when it classified it), a secret, a change to
+/// the person's blocks (only a marked session's waits), a suspect session's act or a round's
+/// reach out: those always ask.
 pub fn bypass_answers(p: &Pending) -> bool {
     match p.class {
         Class::Control => p.reason.as_deref() == Some(crate::ask::MACHINE),
@@ -214,6 +216,14 @@ impl Kind {
         if w.bypass { Self::Bypass } else { Self::Window }
     }
 
+    /// What the person calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Window => "permission window",
+            Self::Bypass => "bypass",
+        }
+    }
+
     pub fn file(self, state: &Path) -> PathBuf {
         state.join(match self {
             Self::Window => "grant.json",
@@ -233,15 +243,30 @@ impl Kind {
     }
 
     /// The last one as written, on or not; `None` for a missing or damaged file, or one that
-    /// holds the other kind.
+    /// holds the other kind. Bypass is trusted only with its record: a file whose record does not
+    /// start with this same bypass (a file written by hand) is none.
     pub fn read(self, state: &Path) -> Option<Window> {
         let w: Window = serde_json::from_str(&fs::read_to_string(self.file(state)).ok()?).ok()?;
-        (Self::of(&w) == self).then_some(w)
+        let recorded = || {
+            let first = fs::read_to_string(self.record_file(state, &w.id)).ok()?;
+            let first: Value = serde_json::from_str(first.lines().next()?).ok()?;
+            serde_json::from_value::<Window>(first.get("window")?.clone()).ok()
+        };
+        let as_started = Window {
+            closed_ms: None,
+            why: None,
+            ..w.clone()
+        };
+        (Self::of(&w) == self && (self == Self::Window || recorded() == Some(as_started)))
+            .then_some(w)
     }
 
-    /// The one open (on) now, if any.
+    /// The one open (on) now, if any. Bypass has no end and no clock: on until it is closed.
     pub fn current(self, state: &Path) -> Option<Window> {
-        self.read(state).filter(Window::open_now)
+        self.read(state).filter(|w| match self {
+            Self::Window => w.open_now(),
+            Self::Bypass => w.closed_ms.is_none(),
+        })
     }
 
     fn write(self, state: &Path, w: &Window) -> Result<(), String> {
@@ -292,7 +317,12 @@ impl Kind {
         let now = now_ms();
         w.closed_ms = Some(now);
         w.why = Some(why.to_owned());
-        self.write(state, &w)?;
+        if let Err(e) = self.write(state, &w) {
+            // Bypass that cannot be written closed still ends: without its file it is off.
+            if self == Self::Window || fs::remove_file(self.file(state)).is_err() {
+                return Err(e);
+            }
+        }
         self.append(state, &w.id, &json!({ "at": now, "closed": why }))?;
         Ok(Some(w))
     }
@@ -426,34 +456,36 @@ pub fn bypass_on(state: &Path) -> Result<Window, String> {
     Ok(w)
 }
 
-/// What bypass `id` approved that the person has not looked at yet: after the last act they saw
-/// (`bypass_seen`).
+/// What bypass `id` approved that the person has not been shown yet (`bypass_seen`).
 pub fn bypass_unseen(state: &Path, id: &str) -> Vec<Act> {
-    let seen = fs::read_to_string(Kind::Bypass.dir(state).join(format!("{id}.seen")))
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(i64::MIN);
+    let seen =
+        fs::read_to_string(Kind::Bypass.dir(state).join(format!("{id}.seen"))).unwrap_or_default();
+    let seen: Vec<&str> = seen.lines().collect();
     Kind::Bypass
         .record(state, id)
-        .map(|(_, acts)| acts.into_iter().filter(|a| a.at > seen).collect())
+        .map(|(_, acts)| {
+            acts.into_iter()
+                .filter(|a| !seen.contains(&a.pending.as_str()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
-/// The person was shown `acts` of bypass `id` (`/bypass`, `/bypass off`, `clio bypass`): the
-/// next count starts after them.
+/// The person was shown `acts` of bypass `id` (`/bypass`, `/bypass off`, `clio bypass`): those,
+/// and only those, are no longer counted.
 pub fn bypass_seen(state: &Path, id: &str, acts: &[Act]) {
-    let Some(last) = acts.iter().map(|a| a.at).max() else {
+    if acts.is_empty() {
         return;
-    };
+    }
     let path = Kind::Bypass.dir(state).join(format!("{id}.seen"));
+    let text: String = acts.iter().map(|a| format!("{}\n", a.pending)).collect();
     let r = private_dir(&Kind::Bypass.dir(state)).and_then(|()| {
         fs::OpenOptions::new()
-            .write(true)
             .create(true)
-            .truncate(true)
+            .append(true)
             .mode(0o600)
             .open(&path)
-            .and_then(|mut f| f.write_all(last.to_string().as_bytes()))
+            .and_then(|mut f| f.write_all(text.as_bytes()))
     });
     if let Err(e) = r {
         eprintln!("clio: {}: {e}", path.display());
@@ -563,9 +595,18 @@ pub fn left_text(ms: i64) -> String {
 /// What the window approved, one line per act, for the person (`clio grant`) and for the model's
 /// summary: the local time, the class, what it was and what came of it.
 pub fn act_lines(acts: &[Act]) -> Vec<String> {
+    lines_at(acts, "%H:%M")
+}
+
+/// `act_lines` with the date: bypass has no end, its acts span days.
+pub fn bypass_act_lines(acts: &[Act]) -> Vec<String> {
+    lines_at(acts, "%Y-%m-%d %H:%M")
+}
+
+fn lines_at(acts: &[Act], fmt: &str) -> Vec<String> {
     acts.iter()
         .map(|a| {
-            let at = crate::pending::local(a.at, "%H:%M").unwrap_or_else(|| a.at.to_string());
+            let at = crate::pending::local(a.at, fmt).unwrap_or_else(|| a.at.to_string());
             let outcome = a
                 .outcome
                 .as_deref()

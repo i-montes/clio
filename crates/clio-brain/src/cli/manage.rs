@@ -288,7 +288,7 @@ fn tell(
         eprintln!("clio: the action log lost a line: {e}");
     }
     let why = sanitize::line(&r.why);
-    // Done while a window is open: in its record, so its summary has it.
+    // Done while a window is open or bypass is on: in its record, so its summary or list has it.
     let act = Pending {
         id: format!("{FREE_ACT}{}", r.at_ms),
         class: k.class,
@@ -305,12 +305,14 @@ fn tell(
         reason: None,
         granted: None,
     };
-    if let Some(w) = grant::begin(
-        &st,
-        &act,
-        &format!("Clio did this by herself: {what} · Clio's reason: {why}"),
-    ) {
-        grant::done(&st, &w, &act.id, &grant::outcome(done.is_ok(), None));
+    for kind in [grant::Kind::Window, grant::Kind::Bypass] {
+        if let Some(w) = kind.begin(
+            &st,
+            &act,
+            &format!("Clio did this by herself: {what} · Clio's reason: {why}"),
+        ) {
+            grant::done(&st, &w, &act.id, &grant::outcome(done.is_ok(), None));
+        }
     }
     let (chat, model) = match done {
         Ok(done) => (
@@ -743,6 +745,26 @@ mod tests {
                 && acts[0].outcome.as_deref() == Some("done"),
             "{acts:?}"
         );
+    }
+
+    // S-72: a free act done while bypass is on is in bypass's record, so `/bypass` lists it and
+    // counts it until the person looks.
+    #[test]
+    fn a_free_act_under_bypass_is_in_its_record() {
+        let t = tmp();
+        let d = dirs_in(t.path());
+        approve(&d, &manifest("disk", "true"), &[]);
+        let st = super::super::pending::state(&d);
+        let b = grant::bypass_on(&st).unwrap();
+        let h = host(&d);
+        ask(&h, "service_manage", "disk", "off");
+        take_requests(&d, &d.runs.join("r1/toolhost"), ("r1", "s"), false);
+        let (_, acts) = grant::Kind::Bypass.record(&st, &b.id).unwrap();
+        assert_eq!(acts.len(), 1, "{acts:?}");
+        assert!(acts[0].pending.starts_with(FREE_ACT));
+        assert_eq!(acts[0].outcome.as_deref(), Some("done"), "{acts:?}");
+        assert_eq!(grant::bypass_unseen(&st, &b.id).len(), 1);
+        assert!(grant::windows(&st).is_empty());
     }
 
     // S-69: a service's `undo` always asks, and its box shows what the version it goes back to
