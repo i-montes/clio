@@ -179,6 +179,43 @@ fn doctor_finds_a_value_of_the_vault_in_what_clio_wrote_and_never_prints_it() {
     );
 }
 
+// S-18: the vault scans what Clio wrote, leaving out only Chromium and npm's store, a server's
+// or a service's own data folder and the copies, each at its place from the data root: the same
+// names deeper (a skill's files) are read.
+#[test]
+fn the_vault_scan_leaves_out_only_the_places_at_the_data_root() {
+    let e = Env::new();
+    let data = e.tmp.path().join("home/.local/share/clio");
+    let read = [
+        "skills/s/browsers/x",
+        "skills/s/node/x",
+        "mcp/servers/n/x",
+        "mcp/npm-cache/_cacache/index-v5/x",
+    ];
+    let left = [
+        "browsers/x",
+        "mcp/data/n/x",
+        "mcp/npm-cache/_cacache/content-v2/x",
+        "services/state/s/x",
+        "node/x",
+        "runs/r1/sandbox/x",
+    ];
+    for f in read.iter().chain(&left) {
+        put(&data, f, &format!("v={VAULT_VALUE}\n"));
+    }
+    serve_vault(&e, true);
+    let (_, out) = doctor(&e);
+    let line = vault_line(&out);
+    assert!(line.starts_with("FAIL"), "{out}");
+    let said = |f: &str| line.contains(&format!(" {f} (")) || line.contains(&format!(": {f} ("));
+    for f in read {
+        assert!(said(f), "{f} was not scanned: {line}");
+    }
+    for f in left {
+        assert!(!said(f), "{f} was scanned: {line}");
+    }
+}
+
 // S-18
 #[test]
 fn doctor_says_the_vault_is_clean_when_none_of_its_values_was_written() {

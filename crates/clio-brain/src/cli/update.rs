@@ -55,11 +55,13 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     opts.update = true;
     opts.reexec = reexec;
     opts.release_required = true;
-    // No questions here: the vault and the model are the wizard's (`clio setup`).
+    // No questions here: the vault and the model are the wizard's (`clio setup`). The new binary
+    // an update started does not show the binaries again: the old one did.
     let steps: Vec<_> = Action::Update
         .steps()
         .into_iter()
         .filter(|s| !matches!(s, Step::Vault | Step::Model))
+        .filter(|s| !(reexec && *s == Step::Binaries))
         .collect();
     let mut ui = Plain::new(
         lang,

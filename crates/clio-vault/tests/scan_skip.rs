@@ -88,19 +88,3 @@ fn scan_dir_skips_the_folders_it_is_told_to_at_any_depth() {
         ["a.txt", "deep/d.txt"]
     );
 }
-
-// An absolute path skips that one folder: the same name elsewhere is still read.
-#[test]
-fn scan_dir_skips_an_absolute_path_only_there() {
-    let d = tempfile::tempdir().unwrap();
-    for rel in ["browsers/chrome", "skills/s/browsers/notes.md", "a.txt"] {
-        let p = d.path().join(rel);
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, format!("key={VALUE}\n")).unwrap();
-    }
-    let at = d.path().join("browsers").display().to_string();
-    assert_eq!(
-        files(&vault(), d.path(), &[&at]),
-        ["a.txt", "skills/s/browsers/notes.md"]
-    );
-}
