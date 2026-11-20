@@ -715,6 +715,7 @@ fn a_skill_draft_is_reviewed_and_its_outcome_reaches_the_person_and_the_model() 
             SkillOutcome::Waits {
                 id: "e5f6".into(),
                 ask: Box::new(Some(b.clone())),
+                by: None,
             },
         )],
     );
@@ -786,4 +787,178 @@ fn a_skill_that_passed_with_notes_is_registered_and_its_notes_reach_the_model_on
     let (a, cmds) = feed(a, vec![settled(Some(1000))]);
     assert!(reviews(&cmds).is_empty(), "{cmds:?}");
     assert!(a.reviews_at.is_empty() && !a.chat.review.judging);
+}
+
+/// Turns Clio starts by herself with no words of the person (the approvals' and acts' turns).
+fn own_turns(cmds: &[Cmd]) -> usize {
+    cmds.iter()
+        .filter(|c| {
+            **c == Cmd::ChatSend {
+                text: String::new(),
+            }
+        })
+        .count()
+}
+
+/// The chat's notes, in order.
+fn said(a: &App) -> Vec<String> {
+    a.chat
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Note(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// S-72 (bypass's first day): a service the person's bypass registers after its review is said as
+// it happens (never "waits for your approval"), and the model gets ONE turn that tells it what
+// came of it once the chat is idle, through the turn acts already start; then nothing more. Bypass
+// off, the notes are as before.
+#[test]
+fn a_service_registered_under_bypass_is_said_so_and_the_model_gets_one_turn() {
+    use super::approvals::MANAGE_TURN;
+    use crate::cli::chat::SkillOutcome;
+    let mut a = idle();
+    a.chat.approvals.bypass = true;
+    let news = Input::Bg(Bg::SkillNews(
+        vec![("s1a2b3c4".into(), "prueba-bypass".into())],
+        vec![],
+    ));
+    let (a, _) = feed(a, vec![news]);
+    assert!(
+        said(&a).contains(
+            &"reviewing the service «prueba-bypass»: if it passes, your bypass registers it…"
+                .to_owned()
+        ),
+        "{:?}",
+        said(&a)
+    );
+    let (a, cmds) = feed(
+        a,
+        vec![skill_reviewed(
+            PASSES,
+            SkillOutcome::Waits {
+                id: "e0603b54".into(),
+                ask: Box::new(None),
+                by: Some("bypass"),
+            },
+        )],
+    );
+    assert!(
+        said(&a)
+            .contains(&"a skill is approved by your bypass (e0603b54) · review: passes".to_owned()),
+        "{:?}",
+        said(&a)
+    );
+    assert!(
+        !said(&a)
+            .iter()
+            .any(|n| n.contains("waits for your approval"))
+    );
+    assert!(cmds.iter().any(|c| matches!(c, Cmd::CheckApprovals { .. })));
+    // The check: bypass registered it; ONE turn tells the model.
+    let outcome = "approved under bypass: «service» register the service «prueba-bypass»: x\nthe service «prueba-bypass» is registered (version 1): it runs every 6h";
+    let (a, cmds) = feed(a, vec![Input::Bg(Bg::Acted(vec![outcome.into()]))]);
+    assert_eq!(own_turns(&cmds), 1, "{cmds:?}");
+    assert_eq!(said(&a).last().map(String::as_str), Some(MANAGE_TURN));
+    assert!(said(&a).iter().any(|n| n == outcome));
+    let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+    assert_eq!(own_turns(&cmds), 0, "once");
+
+    // A marked conversation (flagged, or the judge said something): bypass does not act in it.
+    for judge_said in [false, true] {
+        let mut m = idle();
+        m.chat.approvals.bypass = true;
+        m.chat.approvals.suspect = !judge_said;
+        m.chat.judge_said = judge_said;
+        let news = Input::Bg(Bg::SkillNews(
+            vec![("s1a2b3c4".into(), "marked".into())],
+            vec![],
+        ));
+        let (m, _) = feed(m, vec![news]);
+        assert!(
+            said(&m).contains(
+                &"reviewing the service «marked» before you are asked to approve it…".to_owned()
+            ),
+            "{:?}",
+            said(&m)
+        );
+    }
+
+    // Bypass off: as before.
+    let news = Input::Bg(Bg::SkillNews(
+        vec![("s1a2b3c4".into(), "prueba".into())],
+        vec![],
+    ));
+    let (a, _) = feed(idle(), vec![news]);
+    assert!(said(&a).contains(
+        &"reviewing the service «prueba» before you are asked to approve it…".to_owned()
+    ));
+    let (a, _) = feed(
+        a,
+        vec![skill_reviewed(
+            PASSES,
+            SkillOutcome::Waits {
+                id: "e0603b54".into(),
+                ask: Box::new(None),
+                by: None,
+            },
+        )],
+    );
+    assert!(
+        said(&a)
+            .contains(&"a skill waits for your approval (e0603b54) · review: passes".to_owned())
+    );
+}
+
+// S-72: a service its review refuses is told to the model in ONE turn, with the findings, as a
+// review's; one the person approves in the box is told in ONE turn too, as the approvals'.
+#[test]
+fn a_refused_or_box_approved_service_is_told_to_the_model_once() {
+    use super::approvals::APPROVALS_TURN;
+    use crate::cli::chat::SkillOutcome;
+    let mut a = idle();
+    a.chat.approvals.bypass = true;
+    let (a, cmds) = feed(
+        a,
+        vec![skill_reviewed(
+            FAILS,
+            SkillOutcome::ServiceRejected {
+                name: "prueba-bypass".into(),
+                attempt: 1,
+                dropped: false,
+                to_model: "Your draft s1 of the service «prueba-bypass» was not offered".into(),
+            },
+        )],
+    );
+    assert!(
+        matches!(
+            reviews(&cmds).as_slice(),
+            [Cmd::ReviewTurn { findings, .. }] if findings.starts_with("Your draft s1")
+        ),
+        "{cmds:?}"
+    );
+    assert!(
+        said(&a)
+            .iter()
+            .any(|n| n.contains("service «prueba-bypass» not registered"))
+    );
+    let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+    assert!(reviews(&cmds).is_empty(), "once: {cmds:?}");
+    // Approved in the box: the answer's outcome gets one turn of the approvals.
+    let mut a = idle();
+    a.answering = 1;
+    let (a, cmds) = feed(
+        a,
+        vec![Input::Bg(Bg::ChatAnswered(
+            Ok("approved e0603b54: the service «prueba» is registered (version 1)".into()),
+            true,
+        ))],
+    );
+    assert_eq!(own_turns(&cmds), 1, "{cmds:?}");
+    assert_eq!(said(&a).last().map(String::as_str), Some(APPROVALS_TURN));
+    let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
+    assert_eq!(own_turns(&cmds), 0, "once");
 }

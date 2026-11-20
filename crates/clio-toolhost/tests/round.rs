@@ -139,6 +139,7 @@ fn a_round_only_reads_and_what_reaches_out_waits() {
             json!({"name": "time", "action": "on", "reason": "r"}),
         ),
         ("skill_write", json!({"name": "x"})),
+        ("skill_add", json!({"source": "a/b", "reason": "r"})),
         ("skill_report", json!({"name": "x", "ok": false})),
         ("service_write", json!({"name": "x"})),
         ("mcp_propose", json!({"package": "x"})),
@@ -146,6 +147,11 @@ fn a_round_only_reads_and_what_reaches_out_waits() {
             "memory_block_edit",
             json!({"block": "reglas", "action": "add", "content": "x"}),
         ),
+        ("memory_update", json!({"id": 1, "text": "x"})),
+        ("memory_consolidate", json!({"ids": "1, 2", "text": "x"})),
+        ("memory_forget", json!({"id": 1})),
+        ("memory_pin", json!({"id": 1})),
+        ("memory_revert", json!({"change": 1})),
         ("request_secret", json!({"name": "x"})),
     ] {
         let r = call(&e, tool, args);

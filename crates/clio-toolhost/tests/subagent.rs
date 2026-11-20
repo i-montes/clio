@@ -317,9 +317,9 @@ fn a_writers_commands_cannot_reach_the_parents_socket_bypass_pending_or_journal(
     assert!(r.ok && !r.content.contains("THERE"), "{r:?}");
 }
 
-// S-73: neither kind of child gets the memory, a secret, a skill or service written, an MCP call,
-// a block change, a manage act or a child of its own, whoever sends the request; a reader cannot
-// write either
+// S-73: neither kind of child gets the memory, a secret, a skill written or added, a service
+// written, an MCP call, a block change, a manage act or a child of its own, whoever sends the
+// request; a reader cannot write either
 #[test]
 fn neither_child_gets_memory_secrets_skills_mcp_or_children_and_a_reader_cannot_write() {
     let e = env();
@@ -350,6 +350,11 @@ fn neither_child_gets_memory_secrets_skills_mcp_or_children_and_a_reader_cannot_
             ("service_write", json!({"name": "a"})),
             ("mcp_call", json!({"server": "a", "tool": "b"})),
             ("skill_manage", json!({"name": "a", "action": "off"})),
+            // A skill from outside is the person's to approve: a child never proposes one.
+            (
+                "skill_add",
+                json!({"source": "https://github.com/a/b", "reason": "x"}),
+            ),
             ("job_output", json!({"id": "j1"})),
             (
                 "subagent",

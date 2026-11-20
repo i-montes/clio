@@ -555,10 +555,40 @@ fn send_grant(d: &Dirs, session: &str, s: &dyn Session, tx: &Sender<Input>) {
     }));
 }
 
+/// The check's part for bypass and the window: each item of `s` they may answer and never tried
+/// (`pending::answers_later`) is approved by them through the person's path, once. What came of
+/// them is Clio's to tell: ONE `Bg::Acted` (one turn she starts by herself once the chat is
+/// idle) for all of this check's outcomes, a failure too; `None` when nothing was tried.
+pub(crate) fn grant_waiting(d: &Dirs, s: &dyn Session) -> Option<Bg> {
+    let suspect = s.suspect();
+    let mut acted: Option<Vec<String>> = None;
+    for p in s.waiting() {
+        if super::pending::answers_later(d, &p, suspect).is_none() {
+            continue;
+        }
+        let note = match s.grant(&p.id) {
+            Ok(n) => n,
+            // Tried and failed: it asks the person from now on (`pending::tried`).
+            Err(e) if super::pending::tried(d, &p) => {
+                format!("could not be done by itself: {e}; it asks you now")
+            }
+            // Never tried (turned off meanwhile): no outcome to tell.
+            Err(_) => continue,
+        };
+        acted.get_or_insert_with(Vec::new).push(note);
+    }
+    acted.map(Bg::Acted)
+}
+
 /// Clio asks about everything that waits: the secrets each in their own box, the rest in ONE
 /// box (a block change, a skill, a service, an MCP server or a call shown whole).
 /// `suspect`: the chat's mark; an item a flagged round set aside is asked as `suspect` too.
-fn offer(d: &Dirs, waiting: &[clio_toolhost::pending::Pending], suspect: bool, tx: &Sender<Input>) {
+pub(crate) fn offer(
+    d: &Dirs,
+    waiting: &[clio_toolhost::pending::Pending],
+    suspect: bool,
+    tx: &Sender<Input>,
+) {
     let (secrets, aside): (Vec<_>, Vec<_>) = waiting
         .iter()
         .partition(|p| clio_toolhost::pending::secret_of(p).is_some());
@@ -571,6 +601,17 @@ fn offer(d: &Dirs, waiting: &[clio_toolhost::pending::Pending], suspect: bool, t
         .collect();
     if !secrets.is_empty() {
         let _ = tx.send(Input::Bg(Bg::ChatSecrets(secrets, suspect)));
+    }
+    // Why bypass leaves each to the person, from the facts it decided on: the box says it.
+    let keeps: Vec<_> = aside
+        .iter()
+        .filter_map(|p| {
+            let why = super::pending::bypass_keeps(d, p, suspect)?;
+            Some((p.id.clone(), why.to_owned()))
+        })
+        .collect();
+    if !keeps.is_empty() {
+        let _ = tx.send(Input::Bg(Bg::BypassKeeps(keeps)));
     }
     let asks: Vec<_> = aside
         .into_iter()
@@ -1750,25 +1791,12 @@ impl Ctx {
                         // Under bypass or an open window (the judge on, the session not suspect,
                         // its judge not silent) what it may answer is approved by it, through the
                         // same path as the person's yes; the rest keeps its box.
-                        let suspect = s.suspect();
-                        if !suspect {
-                            for p in s.waiting() {
-                                if !super::pending::unjudged_run(d, &p.run)
-                                    && super::pending::answering(d, &p).is_some()
-                                {
-                                    // An act on what Clio created goes on by itself (`Acted`).
-                                    let _ = tx.send(Input::Bg(match s.grant(&p.id) {
-                                        Ok(n) if clio_toolhost::manage::is_manage(&p) => {
-                                            Bg::Acted(vec![n])
-                                        }
-                                        r => Bg::Granted(r),
-                                    }));
-                                }
-                            }
+                        if let Some(acted) = grant_waiting(d, s.as_ref()) {
+                            let _ = tx.send(Input::Bg(acted));
                         }
                         send_grant(d, &session, s.as_ref(), tx);
                         let waiting = s.waiting();
-                        offer(d, &waiting, suspect, tx);
+                        offer(d, &waiting, s.suspect(), tx);
                         Bg::Approvals {
                             session,
                             waiting: waiting.len(),

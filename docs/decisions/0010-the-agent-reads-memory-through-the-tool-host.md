@@ -2,6 +2,8 @@
 
 Status: accepted (2026-11-03). Stage 1 (reading) and stage 2 (`memory_propose`, into quarantine only) are built. Design: `docs/specs/2026-11-03-memory-tools-design.md`.
 
+Superseded in part (2026-11-20, 0.3.1): the budget per session below (20 calls, 24 KiB) and the caps of saves and changes that followed it were removed at the person's request. What holds now is in S-60, S-61 and S-65 of `docs/security.md`.
+
 ## Context
 
 The chat with Pi, the main path, did not use memory: the guard's `memoryLayer()` was empty, and `memory_link` served only `clio run` (the own loop) and the memory screen. The person asked for "a tool that connects clio agent with clio memory", made "the best way for the security and integrity of the data". Reading cannot hurt the data; writing can drown the person's review (S-25), and a hostile text that reaches memory persists (`docs/threat-model.md`, "Memory as an attack surface").

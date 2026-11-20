@@ -39,10 +39,11 @@ const MAX_NOTES: usize = 4;
 /// The name the judge (Jev) signs its relations with, as the engine names its actor.
 const JUDGE_NAME: &str = "jev";
 
+/// Refusals a close lists one by one.
+const MAX_REJECTED: usize = 20;
+
 pub const SCOPE: &str = "clio";
 pub const DB_FILE: &str = "memory.db";
-/// Most proposals a run may make through its final message; the rest are counted and dropped.
-pub const MAX_AGENT_PROPOSALS: usize = 5;
 /// Tokens for what is recalled (each fixed block has its own budget).
 pub const RECALL_BUDGET: usize = 400;
 const BLOCKS: [(&str, usize); 3] = [("identidad", 150), ("reglas", 200), ("preferencias", 150)];
@@ -162,8 +163,6 @@ pub struct CloseReport {
     pub saved: Vec<Saved>,
     /// Why something was not saved, one line each.
     pub rejected: Vec<String>,
-    /// Proposals of the model beyond the per-run cap.
-    pub dropped: usize,
 }
 
 impl CloseReport {
@@ -182,8 +181,8 @@ impl CloseReport {
             .filter(|s| s.state == State::Active)
             .count();
         let mut s = format!("memory: {active} saved, {} in quarantine", self.pending());
-        if !self.rejected.is_empty() || self.dropped > 0 {
-            s += &format!(", {} rejected", self.rejected.len() + self.dropped);
+        if !self.rejected.is_empty() {
+            s += &format!(", {} rejected", self.rejected.len());
         }
         s
     }
@@ -196,12 +195,6 @@ impl CloseReport {
             .map(|s| format!("m{} {:?} {:?}: {}", s.id, s.kind, s.state, s.preview))
             .collect();
         v.extend(self.rejected.iter().cloned());
-        if self.dropped > 0 {
-            v.push(format!(
-                "{} proposal(s) from the model ignored for going over the limit",
-                self.dropped
-            ));
-        }
         if v.is_empty() {
             v.push("nothing was proposed to save".into());
         }
@@ -665,7 +658,6 @@ impl MemoryLink {
         );
 
         // What the model asks to keep: active, always marked as from outside.
-        let mut asked = 0usize;
         for line in f.final_message.as_deref().unwrap_or_default().lines() {
             let t = line.trim();
             let (kind, body) = if let Some(b) = strip_tag(t, "PROCEDIMIENTO:") {
@@ -675,11 +667,6 @@ impl MemoryLink {
             } else {
                 continue;
             };
-            asked += 1;
-            if asked > MAX_AGENT_PROPOSALS {
-                rep.dropped += 1;
-                continue;
-            }
             self.propose_into(
                 &mut rep,
                 (self.actors.agente, kind, Origin::External),
@@ -731,6 +718,11 @@ impl MemoryLink {
                 state: o.state,
                 preview,
             }),
+            // A flood of lines past the quota is one line in the report, not thousands.
+            Err(_) if rep.rejected.len() == MAX_REJECTED => {
+                rep.rejected.push("more were refused, not listed".into());
+            }
+            Err(_) if rep.rejected.len() > MAX_REJECTED => {}
             Err(e) => rep.rejected.push(format!("{kind:?}: {}", explain(&e))),
         }
     }

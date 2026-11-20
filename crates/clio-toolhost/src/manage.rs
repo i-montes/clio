@@ -29,7 +29,7 @@ use serde_json::{Map, Value, json};
 use crate::ask::Class;
 use crate::host::{log_line, now_ms, private_dir};
 use crate::judge::one_line;
-use crate::pending::{Pending, State, aside_text, set_aside};
+use crate::pending::{Pending, State, set_aside};
 use crate::{
     DecisionOut, Request, Response, SUSPECT_REASON, ToolHost, lock, mcp, services, skills,
 };
@@ -613,12 +613,26 @@ impl ToolHost {
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
-                let window = if reason.is_none() {
-                    " If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after."
-                } else {
-                    ""
-                };
-                format!("{}{window}", aside_text(&p))
+                let st = &h.cfg.state;
+                let bypass = crate::grant::Kind::Bypass;
+                match self.answered_later(st, &p) {
+                    // Bypass does it when this turn ends: said as it will happen.
+                    Some(crate::grant::Kind::Bypass) => format!(
+                        "set aside {}: «{}» is done by Clio by herself when this turn ends, under the person's bypass; you hear what came of it right after, in a turn she starts by herself. Do not ask the person for it.",
+                        p.id, p.class
+                    ),
+                    // A window may end before the turn does: said as a condition.
+                    _ if reason.is_none()
+                        && bypass.current(st).is_none()
+                        && self.acts_unasked(&p.session) =>
+                    {
+                        format!(
+                            "{} If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after.",
+                            self.kept_text(st, &p)
+                        )
+                    }
+                    _ => self.kept_text(st, &p),
+                }
             }
             Err(e) => format!(
                 "[toolhost] {} was not done: it needs the person's approval and could not be set aside ({e})",

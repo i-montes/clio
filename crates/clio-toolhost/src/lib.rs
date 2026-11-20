@@ -38,6 +38,7 @@ pub mod pending;
 mod sanitize;
 mod server;
 pub mod services;
+pub mod skill_add;
 pub mod skills;
 pub mod subagent;
 
@@ -48,7 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use clio_core::{Clock, Level, SystemClock};
+use clio_core::{Level, SystemClock};
 use clio_gateway::{
     ActionRequest, ArgKind, ArgSpec, Budget, Decision, Egress, Gateway, Outcome, Rules,
     SessionInfo, Source, Telemetry, ToolDecl, wrap_untrusted,
@@ -60,7 +61,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use host::HostCfg;
-pub use judge::{SUSPECT_REASON, UNJUDGED};
+pub use judge::{SUSPECT_REASON, UNJUDGED, verdict};
 pub use memory::{
     BLOCK_NAMES, BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
     NOT_WORTH_REMEMBERING, Near, Origin, ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict,
@@ -168,14 +169,22 @@ pub(crate) const ROUND_REACHES: &str = "a round reaches nothing outside by itsel
 /// Why a round's change to a unit waits for the person.
 const ROUND_UNITS: &str = "a round changes no service";
 /// The tools a round never uses: each changes something, or needs the person.
-const ROUND_REFUSED: [&str; 8] = [
+const ROUND_REFUSED: [&str; 14] = [
     "fs_write",
     "fs_mkdir",
     "skill_write",
+    "skill_add",
     "skill_report",
     "service_write",
     "mcp_propose",
     "memory_block_edit",
+    // A round may save memories; correcting, merging, forgetting, pinning and undoing change
+    // what is there, with nobody watching and no quota counting three of them.
+    "memory_update",
+    "memory_consolidate",
+    "memory_forget",
+    "memory_pin",
+    "memory_revert",
     "request_secret",
 ];
 
@@ -220,8 +229,6 @@ pub struct Config {
     pub host: Option<HostCfg>,
     /// Where `request_secret` keeps what it asks the person. `None`: nobody can be asked.
     pub secrets: Option<pending::SecretCfg>,
-    /// The time the memory's hourly saves and changes are counted by (S-47).
-    pub clock: Arc<dyn Clock>,
     /// A review (`--review`): nobody can be asked, so what would wait for the person is refused
     /// outright and nothing is stored as pending; no background commands either.
     pub review: bool,
@@ -246,6 +253,8 @@ pub struct Config {
     pub child: Option<subagent::Child>,
     /// A chat's tool host (`--subagents`, S-73): it holds `subagent` calls for the brain.
     pub subagents: bool,
+    /// How `skill_add` downloads a repository's archive (`skill_add::curl`; a test serves it).
+    pub archive_get: fn(&str, &Path) -> bool,
 }
 
 impl Config {
@@ -262,7 +271,6 @@ impl Config {
             said_token: None,
             host: None,
             secrets: None,
-            clock: Arc::new(SystemClock),
             review: false,
             unattended: false,
             skills: None,
@@ -271,6 +279,7 @@ impl Config {
             mcp_unavailable: None,
             child: None,
             subagents: false,
+            archive_get: skill_add::curl,
         }
     }
 }
@@ -308,12 +317,12 @@ pub struct ToolHost {
     memory: Option<Arc<dyn MemoryPort>>,
     memory_timeout: Duration,
     said_token: Option<String>,
-    /// Where the memory tools keep their budget and their log.
+    /// Where the memory tools keep their log.
     run_dir: PathBuf,
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,
-    clock: Arc<dyn Clock>,
     review: bool,
+    archive_get: fn(&str, &Path) -> bool,
     unattended: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
@@ -514,9 +523,9 @@ impl ToolHost {
             run_dir: cfg.run_dir,
             host,
             secrets: cfg.secrets,
-            clock: cfg.clock,
             review: cfg.review,
             unattended: cfg.unattended,
+            archive_get: cfg.archive_get,
             to_judge: Mutex::new(HashMap::new()),
             stopping: std::sync::atomic::AtomicBool::new(false),
             jobs: jobs::Jobs::default(),
@@ -869,6 +878,7 @@ impl ToolHost {
         }
         match req.tool.as_str() {
             "skill_write" => return self.skill_write(&req, &map),
+            "skill_add" => return self.skill_add(&req, &map),
             "skill_report" => return self.skill_report(&req, &map),
             "service_write" => return self.service_write(&req, &map),
             "service_status" => return self.service_status(&req, &map),

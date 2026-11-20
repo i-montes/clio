@@ -165,7 +165,7 @@ pub struct Chat {
     /// How many of the judge's withheld results the chat has already said.
     withheld_seen: usize,
     /// The chat said the judge did not answer (once per session).
-    judge_said: bool,
+    pub judge_said: bool,
     pub raw: VecDeque<String>,
     /// Bytes of text taken from Pi's events so far (see `MAX_HELD`).
     held: usize,

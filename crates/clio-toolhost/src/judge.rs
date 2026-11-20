@@ -6,13 +6,16 @@
 //! the model and marks the session `suspect`; no answer leaves it as without a judge.
 
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use crate::host::{now_ms, private_dir};
-use crate::{DecisionOut, MAX_RAW_BYTES, Request, Response, TextVerdict, ToolHost, lock};
+use crate::{
+    DecisionOut, MAX_RAW_BYTES, MemoryPort, Request, Response, TextVerdict, ToolHost, lock,
+};
 
 /// How long a tool result waits for the judge: past this it goes on as if there were none.
 pub(crate) const JUDGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +76,56 @@ pub(crate) fn windows(text: &str) -> Vec<&str> {
         }
         start = floor(text, end - OVERLAP);
     }
+}
+
+/// How long a skill from outside may take the judge in all (`verdict`): past it, not judged.
+pub const WHOLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the judge of `port` says of the whole text of a skill from outside (`skill_add`), however
+/// long: every window, asked `MAX_WINDOWS` at once (`JUDGE_TIMEOUT` each batch), the next batch
+/// only while all so far are clean, within `WHOLE_TIMEOUT` in all. One window flagged is an
+/// injection; one unanswered, or the time out, leaves it unjudged; a port with no judge says so
+/// (`NoJudge`). A tool result keeps `verdict_of`'s rule.
+pub fn verdict(port: &Arc<dyn MemoryPort>, text: &str, source: &str) -> TextVerdict {
+    let end = std::time::Instant::now() + WHOLE_TIMEOUT;
+    for batch in windows(text).chunks(MAX_WINDOWS) {
+        if std::time::Instant::now() >= end {
+            return TextVerdict::NoAnswer;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        for part in batch {
+            let (tx, port, part, source) = (
+                tx.clone(),
+                Arc::clone(port),
+                (*part).to_owned(),
+                source.to_owned(),
+            );
+            std::thread::spawn(move || {
+                let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    port.judge_text(&part, &source)
+                }));
+                let _ = tx.send(v.unwrap_or(TextVerdict::NoAnswer));
+            });
+        }
+        let until = (std::time::Instant::now() + JUDGE_TIMEOUT).min(end);
+        let verdicts: Vec<TextVerdict> = (0..batch.len())
+            .map(|_| {
+                rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(TextVerdict::NoAnswer)
+            })
+            .collect();
+        if let Some(v) = [
+            TextVerdict::Injection,
+            TextVerdict::NoAnswer,
+            TextVerdict::NoJudge,
+        ]
+        .into_iter()
+        .find(|v| verdicts.contains(v))
+        {
+            return v;
+        }
+    }
+    TextVerdict::Clean
 }
 
 /// The source as the model and the person are told it: one line, cut.

@@ -108,6 +108,14 @@ did, and still asks for what the list above keeps; and that she never asks the p
 bypass on. New prompt versions (`clio-agent`, `clio-host`), only those sentences changed. Whether bypass is on is told to the model with the session's other
 state, not by the model's own reading of files.
 
+What the tool host answers is what will happen (0.3.1): under bypass a service draft, an MCP
+proposal and an act on what Clio created say Clio does them by herself when the turn ends (a
+service once its review passes), never that they wait for the person; what still asks says why,
+in plain words (`grant::bypass_keeps`, the same facts the decision reads, also shown in the box and
+in `clio pending`). What bypass or a window answers after the turn ended is told to the model in
+ONE turn Clio starts by herself once the chat is idle (the acts' turn, under the same cap), and
+the status line shows `bypass on`, not an open window's countdown.
+
 ## What reaches Clio's files from outside the jail, with bypass on or off
 
 Hardening that bypass made pressing, for every session: what makes code run as the owner outside
@@ -133,4 +141,4 @@ does not need Clio's own folders: delete, send, spend, install).
 
 ## Version
 
-0.3.0.
+0.3.0; what the model and the person are told, the outcome turn and why an item still asks: 0.3.1.

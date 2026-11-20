@@ -47,8 +47,8 @@ pub const GUARD_TOOLS: [&str; 24] = [
     "skill_report",
 ];
 /// What it registers on top in host mode (`HOST_TOOL_NAMES`): the background commands' tools,
-/// the services' (S-69) and the MCP servers' (S-70).
-pub const HOST_GUARD_TOOLS: [&str; 10] = [
+/// the services' (S-69), the MCP servers' (S-70) and adding the skills the person wants (S-68).
+pub const HOST_GUARD_TOOLS: [&str; 11] = [
     "job_output",
     "job_stop",
     "service_write",
@@ -59,6 +59,7 @@ pub const HOST_GUARD_TOOLS: [&str; 10] = [
     "service_manage",
     "skill_manage",
     "mcp_manage",
+    "skill_add",
 ];
 /// A review's tools (`REVIEW_TOOL_NAMES`): the reading tools and `bash`, whatever the mode. A
 /// reading subagent's too (S-73).
@@ -67,16 +68,16 @@ pub const REVIEW_GUARD_TOOLS: [&str; 4] = ["read", "bash", "find", "ls"];
 pub const WRITER_GUARD_TOOLS: [&str; 6] = ["read", "write", "edit", "bash", "find", "ls"];
 /// What a chat registers on top (`CHAT_TOOL_NAMES`, S-73): never a child, a review or a round.
 pub const CHAT_GUARD_TOOLS: [&str; 1] = ["subagent"];
-pub const PROMPT_NAME: &str = "clio-agent@29";
-pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@29.md");
+pub const PROMPT_NAME: &str = "clio-agent@30";
+pub const PROMPT: &str = include_str!("../../../../prompts/system/clio-agent@30.md");
 /// The prompt of a host-mode session: the tools act on the person's real machine.
 /// What the tool host is taught to strike out (`CLIO_TOOLHOST_SCRUB_JSON`): the model's key.
 pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@13";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@13.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@14";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@14.md");
 /// The prompt of a subagent (S-73), reader or writer.
 pub const SUBAGENT_PROMPT_NAME: &str = "clio-subagent@1";
 pub const SUBAGENT_PROMPT: &str = include_str!("../../../../prompts/system/clio-subagent@1.md");
@@ -621,8 +622,8 @@ mod tests {
     fn the_prompt_is_the_one_the_guard_checks() {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
-        assert!(PROMPT.starts_with("version: 29\n"));
-        assert!(HOST_PROMPT.starts_with("version: 13\n"));
+        assert!(PROMPT.starts_with("version: 30\n"));
+        assert!(HOST_PROMPT.starts_with("version: 14\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -663,7 +664,7 @@ mod tests {
         }
     }
 
-    // S-73: `clio-agent@29` and `clio-host@13` are `@28` and `@12` plus one Subagents section,
+    // S-73: `clio-agent@30` and `clio-host@14` are `@29` and `@13` plus one Subagents section,
     // nothing else changed; the subagent's own prompt names its tools and none it lacks.
     #[test]
     fn the_new_prompts_only_add_a_subagents_section() {
@@ -675,8 +676,8 @@ mod tests {
             .unwrap()
         };
         for (new, was) in [
-            (PROMPT, old("clio-agent@28.md")),
-            (HOST_PROMPT, old("clio-host@12.md")),
+            (PROMPT, old("clio-agent@29.md")),
+            (HOST_PROMPT, old("clio-host@13.md")),
         ] {
             let start = new.find("\nSubagents\n").expect("a Subagents section");
             let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
@@ -694,10 +695,14 @@ mod tests {
             "ask_person",
             "request_secret",
             "skill_write",
+            "skill_add",
+            "todo_write",
             "`subagent`",
         ] {
             assert!(!SUBAGENT_PROMPT.contains(t), "{t}");
         }
+        // A skill that would dispatch another agent or add a skill: the child reports it.
+        assert!(SUBAGENT_PROMPT.contains("When it tells you to dispatch another agent (a Task or Agent tool) or to add a skill, you cannot: do the rest, and say in your report what it asked for, for Clio to do."));
     }
 
     // S-69: the new prompts are the old ones plus one Services section, nothing else changed.
@@ -827,12 +832,12 @@ mod tests {
         };
         for (new, was, lines) in [
             (
-                old("clio-agent@28.md").as_str(),
+                old("clio-agent@28.md"),
                 old("clio-agent@27.md"),
                 &[0, 13, 23][..],
             ),
             (
-                old("clio-host@12.md").as_str(),
+                old("clio-host@12.md"),
                 old("clio-host@11.md"),
                 &[0, 14, 22, 23, 33, 44, 48, 52, 53][..],
             ),
@@ -853,5 +858,77 @@ mod tests {
             assert!(p.contains("nor to turn bypass on (that is theirs alone)"));
         }
         assert!(crate::pi::envelope::BYPASS_ON.starts_with("approvals: bypass on"));
+    }
+
+    // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,
+    // the map of another harness's tools to Clio's, the memory line without its per-session
+    // budget (there is none), and in the host the sentences on what waits for the person saying
+    // what the person's bypass does there; nothing else changed.
+    #[test]
+    fn the_new_prompts_only_add_the_tool_map() {
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        for (new, was, v) in [
+            (old("clio-agent@29.md"), old("clio-agent@28.md"), 28),
+            (old("clio-host@13.md"), old("clio-host@12.md"), 12),
+        ] {
+            let mut n: Vec<&str> = new.lines().collect();
+            let w: Vec<&str> = was.lines().collect();
+            assert_eq!(n[0], format!("version: {}", v + 1));
+            let at = n
+                .iter()
+                .position(|l| l.starts_with("- A skill written for another harness"))
+                .unwrap();
+            let map = n.remove(at);
+            assert!(w[at - 1].ends_with("read that SKILL.md with `read` and follow it."));
+            // The memory line: the budget gone, the rest as it was.
+            let i = w
+                .iter()
+                .position(|l| l.starts_with("- Consult the memory only when"))
+                .unwrap();
+            let was = w[i];
+            assert!(was.contains("there is a budget per session"));
+            assert_eq!(
+                n[i],
+                "- Consult the memory only when you need a fact about the person or about earlier work, not just in case. Do not save or ask for anything that looks like a secret."
+            );
+            assert!(!new.contains("budget per session"));
+            n[i] = was;
+            // The host's waiting sentences: what bypass does, said where it waits (S-72), and
+            // `skill_add` the exception that always asks.
+            let unless = "unless the person's bypass is on (the message's envelope says so), in which case Clio does it by herself and tells you what came of it";
+            let changed: Vec<usize> = (1..n.len()).filter(|&j| n[j] != w[j]).collect();
+            assert_eq!(changed.len(), if v == 12 { 3 } else { 0 }, "{changed:?}");
+            for j in changed {
+                assert!(n[j].contains(unless) && w[j].contains("bypass"), "{}", n[j]);
+                assert!(!n[j].contains("(or their bypass)") && !n[j].contains("always wait"));
+                n[j] = w[j];
+            }
+            if v == 12 {
+                assert!(new.contains("A skill added from outside (`skill_add`) is the exception: it always asks the person, bypass or not."));
+                assert_eq!(new.matches(unless).count(), 4);
+            }
+            assert_eq!(
+                n[1..],
+                w[1..],
+                "only the map, the memory line and the waiting sentences changed"
+            );
+            for t in [
+                "A Task or Agent tool is `subagent`",
+                "a todo tool is `todo_write`",
+                "a Skill tool means reading that skill's SKILL.md with `read`",
+                "Read, Write, Edit and Bash are `read`, `write`, `edit` and `bash`",
+                "Grep (searching inside files) is `bash` with `grep` or `rg`",
+                "Glob (finding files by name) is `find`",
+                "`plugin:name` is the skill `name`",
+            ] {
+                assert!(map.contains(t), "{t}");
+            }
+        }
     }
 }

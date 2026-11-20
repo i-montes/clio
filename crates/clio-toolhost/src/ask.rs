@@ -89,6 +89,25 @@ static LAUNCH_PATHS: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
+/// `text` without quotes and backslashes (`c'l'io` is `clio`).
+fn bare(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect()
+}
+
+/// A `control` command (or a write's path) that would make code run outside the jail: a launcher
+/// (`LAUNCHERS`), the person's own service manager (`systemctl --user`), a unit folder, a shell
+/// start-up file or Clio's programs (`LAUNCH_PATHS`). Never `MACHINE` (`machine_only`); why bypass
+/// leaves it to the person (`grant::bypass_keeps`).
+pub fn starts_outside(text: &str) -> bool {
+    [text, bare(text).as_str()].iter().any(|t| {
+        LAUNCHERS.is_match(t)
+            || LAUNCH_PATHS.is_match(t)
+            || (t.contains("systemctl") && t.contains("--user"))
+    })
+}
+
 /// Programs that only read what they are given: naming a start-up file or a unit folder with
 /// one of these alone, and no `>`, is not writing it.
 const READERS: [&str; 18] = [
@@ -152,7 +171,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -402,19 +421,13 @@ impl HostRules {
     /// (`.ssh`). Quotes and backslashes are dropped first (`c'l'io` is `clio`); it is a word
     /// match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
     pub fn machine_only(&self, text: &str) -> bool {
-        let bare: String = text
-            .chars()
-            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-            .collect();
-        ![text, bare.as_str()].iter().any(|t| {
-            self.control.as_ref().is_some_and(|r| r.is_match(t))
-                || t.to_lowercase().contains("clio")
-                || t.contains("authorized_keys")
-                || t.contains(".ssh")
-                || LAUNCHERS.is_match(t)
-                || LAUNCH_PATHS.is_match(t)
-                || (t.contains("systemctl") && t.contains("--user"))
-        })
+        !starts_outside(text)
+            && ![text, bare(text).as_str()].iter().any(|t| {
+                self.control.as_ref().is_some_and(|r| r.is_match(t))
+                    || t.to_lowercase().contains("clio")
+                    || t.contains("authorized_keys")
+                    || t.contains(".ssh")
+            })
     }
 
     /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
@@ -1506,6 +1519,39 @@ mod tests {
             assert_eq!(r.classify_command(c), Some(Control), "{c}");
         }
         assert_eq!(r.classify_command("systemctl status nginx"), None);
+    }
+
+    // S-68: adding a skill from outside is the person's (`clio skills add` asks them at their
+    // terminal): the model running it is `control`, never answered by a window or bypass.
+    #[test]
+    fn adding_a_skill_at_the_terminal_is_control() {
+        let r = HostRules::factory();
+        for c in [
+            "clio skills add obra/superpowers",
+            "clio skills add ./skills hello",
+            "cd /tmp && clio skills add https://github.com/a/b@v1",
+        ] {
+            assert_eq!(r.classify_command(c), Some(Control), "{c}");
+            // The item as the tool host makes it (`lib.rs`): the machine mark only when
+            // `machine_only` gives it, and then bypass would answer it.
+            assert!(!r.machine_only(c), "{c}");
+            assert!(!crate::grant::bypass_answers(&crate::pending::Pending {
+                id: "x".into(),
+                class: Control,
+                tool: "exec".into(),
+                args: serde_json::json!({ "command": c }),
+                hash: String::new(),
+                what: c.into(),
+                run: "r".into(),
+                session: "s".into(),
+                created_ms: 0,
+                seq: 0,
+                expires_ms: 1,
+                state: crate::pending::State::Waiting,
+                reason: r.machine_only(c).then(|| MACHINE.into()),
+                granted: None,
+            }));
+        }
     }
 
     // S-71: a round sees the service manager's sockets: what changes a unit is told apart from

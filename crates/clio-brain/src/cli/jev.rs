@@ -327,7 +327,8 @@ pub fn judged_for_model(
     source: &str,
 ) -> Option<(String, bool)> {
     let req = json!({"id": "judge", "tool": "judge", "args": {"text": text, "source": source}, "session": session, "call_id": "judge"});
-    // The judge has 5 s per window, all windows at once.
+    // The host asks the judge every window at once, 5 s for all (more than 16 windows, about
+    // 350 KiB, is not judged): well within this wait.
     let r = ask_host_for(socket, &req, Duration::from_secs(15)).filter(|r| r["ok"] == true)?;
     let shown = r["content"].as_str()?.to_owned();
     Some((shown, r["data"].get("withheld").is_some()))

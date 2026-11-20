@@ -11,9 +11,7 @@
 //! marked as tainted only when a memory is not the person's own (S-05): marking on every read
 //! would tire the person and be ignored, never marking would make S-05 mean nothing.
 //!
-//! A session may spend 20 calls and 24 KiB of returned text in a rolling hour (S-47). The count
-//! lives in a file of the run folder, so a restarted service of the same run does not give a fresh
-//! budget (the MCP server has a folder per process, so its budget is per process), and what is
+//! A session reads, saves and changes as often as it needs: there is no cap per session. What is
 //! logged are facts (ids, counts, a short hash of the query), never the text of a query or of a
 //! memory.
 
@@ -28,7 +26,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clio_core::Effect;
 use clio_gateway::{ArgKind, ArgSpec, Egress, Source, ToolDecl, wrap_untrusted};
 use clio_vault::count_masks;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{DecisionOut, Request, Response, ToolHost, digest_hex};
@@ -96,8 +93,6 @@ const BLOCK_EDIT_DESCRIPTION: &str = "Change one of the person's blocks as the p
 /// or with the person's approval (S-05).
 pub const BLOCK_TAINTED: &str = "this session read content from outside: identity and what is watched are only changed in a clean session. Open a new session and ask for it there.";
 
-/// Changes a session may make in an hour through forget, pin, revert and consolidate (S-47, S-65).
-pub(crate) const MAX_CHANGES: u32 = 10;
 const NO_CHANGES: &str =
     "this memory cannot make that change: the person can do it with `clio memory`";
 
@@ -124,12 +119,6 @@ pub const CATEGORIES: [&str; 9] = [
 const MAX_AROUND: usize = 5;
 /// A memory read in full (`memory_get`) may be this long; a search shows a preview.
 const MAX_FULL_LINE_CHARS: usize = 1600;
-/// Proposals a TAINTED session may make in an hour (S-47, S-61): what it read may be hostile, and
-/// what it proposes is the model's own words after reading it.
-pub(crate) const MAX_PROPOSALS: u32 = 5;
-/// Proposals in an hour of a session that has read nothing hostile. The memory's own quota per hour
-/// is the real rate limit; this only stops a loop that proposes without end.
-pub(crate) const MAX_PROPOSALS_CLEAN: u32 = 30;
 
 const MAX_QUERY_CHARS: usize = 200;
 const DEFAULT_LIMIT: usize = 5;
@@ -140,11 +129,6 @@ const MAX_LINE_CHARS: usize = 600;
 const MAX_ANSWER_BYTES: usize = 4096;
 /// Room kept for the line that says how many memories did not fit (the note is counted apart).
 const OMITTED_ROOM: usize = 96;
-const MAX_CALLS: u32 = 20;
-const MAX_BUDGET_BYTES: u64 = 24 * 1024;
-/// With less than this left the budget counts as spent: an answer needs room for its delimiters
-/// and its notes, and the cap on returned text is hard.
-const MIN_ROOM: u64 = 1024;
 const MAX_ERROR_CHARS: usize = 300;
 const MAX_NOTE_CHARS: usize = 200;
 /// Last night's line of the sleep, at most.
@@ -641,108 +625,6 @@ fn cut(s: &str, max: usize) -> String {
     out
 }
 
-/// What a session has spent of the memory budget. A hard cap (S-47): the file is read before
-/// every call and written before the port is asked, so a call is counted even if the host dies
-/// in the middle of it.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Budget {
-    calls: u32,
-    bytes: u64,
-    /// The calls: when each was counted (ms), for the rolling hour.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    at: Vec<i64>,
-    /// The reads' text: when (ms) and how many bytes, for the rolling hour.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    sent: Vec<(i64, u64)>,
-}
-
-/// The reads, saves and changes count over this rolling window, not the session's whole life: a
-/// conversation that never ends would otherwise run out for good. Not reset by a compaction: Pi
-/// reports those, and Pi is inside the jail.
-const BUDGET_WINDOW_MS: i64 = 60 * 60 * 1000;
-
-impl Budget {
-    /// How many calls counted in the hour before `now`. A file of an older version has only the
-    /// count: its calls are taken as made now, the strict reading.
-    fn in_hour(&mut self, now: i64) -> u32 {
-        let old = usize::try_from(self.calls)
-            .unwrap_or(usize::MAX)
-            .saturating_sub(self.at.len());
-        self.at.extend(std::iter::repeat_n(now, old));
-        self.at
-            .retain(|t| now.saturating_sub(*t) < BUDGET_WINDOW_MS);
-        self.calls = u32::try_from(self.at.len()).unwrap_or(u32::MAX);
-        self.calls
-    }
-
-    /// One more call, made at `now`.
-    fn count(&mut self, now: i64) {
-        self.at.push(now);
-        self.calls = self.calls.saturating_add(1);
-    }
-
-    /// `in_hour` for the bytes the reads returned: an older file's bytes are taken as sent now.
-    fn bytes_in_hour(&mut self, now: i64) -> u64 {
-        let known: u64 = self.sent.iter().map(|s| s.1).sum();
-        let old = self.bytes.saturating_sub(known);
-        if old > 0 {
-            self.sent.push((now, old));
-        }
-        self.sent
-            .retain(|(t, _)| now.saturating_sub(*t) < BUDGET_WINDOW_MS);
-        self.bytes = self.sent.iter().map(|s| s.1).sum();
-        self.bytes
-    }
-
-    /// `n` more bytes returned, by a call made at `now`.
-    fn spend(&mut self, now: i64, n: u64) {
-        if n > 0 {
-            self.sent.push((now, n));
-            self.bytes = self.bytes.saturating_add(n);
-        }
-    }
-
-    /// No file is a fresh budget; a file that cannot be read or understood is an error, never a
-    /// fresh budget.
-    fn load(path: &Path) -> Result<Self, String> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("it is not valid: {e}")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.to_string()),
-        }
-    }
-
-    /// Whole or not at all: a temp file, then `rename`. `create_new`, so a planted link is not
-    /// followed.
-    fn save(&self, path: &Path) -> Result<(), String> {
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::remove_file(&tmp);
-        let text = serde_json::to_string(self).map_err(|e| e.to_string())?;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
-        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
-    }
-}
-
-/// The refusal once the hour's saves are made.
-fn saves_spent(cap: u32) -> String {
-    format!("this session made its memory saves for this hour ({cap} an hour): try again later")
-}
-
-/// The refusal once the hour's changes are made.
-fn changes_spent() -> String {
-    format!(
-        "this session made its memory changes for this hour ({MAX_CHANGES} an hour); the person can use `clio memory`"
-    )
-}
-
 /// What one call leaves in `memory.jsonl`. No text of the query or of a memory, ever.
 #[derive(Default)]
 struct Facts {
@@ -816,15 +698,18 @@ impl ToolHost {
         )
     }
 
-    /// `memory_search` / `memory_get`, after the gateway let the call through: the budget first
-    /// (S-47), then the call, then the facts. Anything that goes wrong with the budget or the log
-    /// denies the call: no read goes uncounted or unlogged.
+    /// `memory_search` / `memory_get`, after the gateway let the call through: the call, then the
+    /// facts. A log that cannot be kept denies the call: no read goes unlogged.
     pub(crate) fn memory_call(
         &self,
         req: &Request,
         args: &Map<String, Value>,
         out: DecisionOut,
     ) -> Response {
+        // Before the memory is asked: a write that could not be logged must not happen.
+        if let Err(why) = self.open_log() {
+            return self.budget_denied(req, &format!("the memory log cannot be kept: {why}"));
+        }
         if matches!(
             req.tool.as_str(),
             "memory_save" | "memory_session_summary" | "memory_update" | "memory_consolidate"
@@ -840,50 +725,23 @@ impl ToolHost {
         if req.tool == "memory_block_edit" {
             return self.block_edit_call(req, args, out);
         }
-        let path = self.run_dir.join("memory-budget.json");
-        let mut budget = match Budget::load(&path) {
-            Ok(b) => b,
-            Err(why) => return self.budget_denied(req, &format!("the memory budget: {why}")),
-        };
-        let now = self.clock.now_ms();
-        let calls = budget.in_hour(now);
-        let left = MAX_BUDGET_BYTES.saturating_sub(budget.bytes_in_hour(now));
-        if calls >= MAX_CALLS || left < MIN_ROOM {
-            // Kept even so: an older file's count starts its hour now, not at every call.
-            let _ = budget.save(&path);
-            return self.budget_denied(
-                req,
-                "this session spent its memory budget for this hour (20 calls or 24 KiB of text an hour): try again later",
-            );
-        }
-        // Counted before the port is asked: failed and rejected calls spend it too.
-        budget.count(now);
-        if let Err(why) = budget.save(&path) {
-            return self.budget_denied(req, &format!("the memory budget cannot be kept: {why}"));
-        }
-        // A block is read whole (up to what is left of the session's budget): what Clio watches
-        // can be longer than one answer of the others.
-        let most = if req.tool == "memory_block" {
+        // A block is read whole: what Clio watches can be longer than one answer of the others.
+        let cap = if req.tool == "memory_block" {
             usize::MAX
         } else {
             MAX_ANSWER_BYTES
         };
-        let cap = usize::try_from(left).map_or(MAX_ANSWER_BYTES, |l| l.min(most));
         let mut facts = Facts::default();
         let resp = self.memory_answer(req, args, out, cap, &mut facts);
         // Only what a memory said counts: an error or a refusal is not text of the memory.
         let bytes = if resp.ok { resp.content.len() } else { 0 };
-        budget.spend(now, bytes as u64);
-        let logged = budget
-            .save(&path)
-            .and_then(|()| self.log_facts(req, &facts, bytes));
-        match logged {
+        match self.log_facts(req, &facts, bytes) {
             Ok(()) => resp,
             Err(why) => self.budget_denied(req, &format!("the memory log cannot be kept: {why}")),
         }
     }
 
-    /// `memory_forget`, `memory_pin` and `memory_revert`: the agent's own changes, counted (S-65).
+    /// `memory_forget`, `memory_pin` and `memory_revert`: the agent's own changes (S-65).
     fn change_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
         let Some(port) = self.memory.clone() else {
             return self.memory_failed(req, out, "there is no memory");
@@ -896,21 +754,6 @@ impl ToolHost {
         let Some(n) = args.get(key).and_then(Value::as_i64).filter(|n| *n > 0) else {
             return self.memory_failed(req, out, &format!("{key} must be a positive number"));
         };
-        let path = self.run_dir.join("memory-changes.json");
-        let mut budget = match Budget::load(&path) {
-            Ok(b) => b,
-            Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
-        };
-        let now = self.clock.now_ms();
-        if budget.in_hour(now) >= MAX_CHANGES {
-            // Kept even so: an older file's count starts its hour now, not at every call.
-            let _ = budget.save(&path);
-            return self.budget_denied(req, &changes_spent());
-        }
-        budget.count(now);
-        if let Err(why) = budget.save(&path) {
-            return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
-        }
         let judging = Judging {
             tainted: self.is_tainted(&req.session),
             session: req.session.clone(),
@@ -960,9 +803,8 @@ impl ToolHost {
         }
     }
 
-    /// `memory_save` and the other writes, after the gateway let the call through: the saves a
-    /// session may make (S-47) are counted in a file before the port is asked, as the reads are,
-    /// and the log has to be kept or the call is denied. A save never marks the session: it carries
+    /// `memory_save` and the other writes, after the gateway let the call through: a session
+    /// saves as often as it needs (the memory's hourly quota is the brake on a loop), and the log has to be kept or the call is denied. A save never marks the session: it carries
     /// what the model decided to say, not what a memory said.
     fn propose_call(&self, req: &Request, args: &Map<String, Value>, out: DecisionOut) -> Response {
         // What the model got wrong in its own arguments is refused before anything is counted: it
@@ -971,44 +813,6 @@ impl ToolHost {
             Ok(a) => a,
             Err(why) => return self.memory_failed(req, out, &why),
         };
-        // A merge forgets memories: it is also one of the hour's ten changes (S-65).
-        if req.tool == "memory_consolidate" {
-            let path = self.run_dir.join("memory-changes.json");
-            let mut changes = match Budget::load(&path) {
-                Ok(b) => b,
-                Err(why) => return self.budget_denied(req, &format!("the change count: {why}")),
-            };
-            let now = self.clock.now_ms();
-            if changes.in_hour(now) >= MAX_CHANGES {
-                // Kept even so: an older file's count starts its hour now, not at every call.
-                let _ = changes.save(&path);
-                return self.budget_denied(req, &changes_spent());
-            }
-            changes.count(now);
-            if let Err(why) = changes.save(&path) {
-                return self.budget_denied(req, &format!("the change count cannot be kept: {why}"));
-            }
-        }
-        let path = self.run_dir.join("memory-proposals.json");
-        let mut budget = match Budget::load(&path) {
-            Ok(b) => b,
-            Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
-        };
-        let cap = if self.is_tainted(&req.session) {
-            MAX_PROPOSALS
-        } else {
-            MAX_PROPOSALS_CLEAN
-        };
-        let now = self.clock.now_ms();
-        if budget.in_hour(now) >= cap {
-            // Kept even so: an older file's count starts its hour now, not at every call.
-            let _ = budget.save(&path);
-            return self.budget_denied(req, &saves_spent(cap));
-        }
-        budget.count(now);
-        if let Err(why) = budget.save(&path) {
-            return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
-        }
         let mut facts = Facts::default();
         let resp = self.propose_answer(req, args, asked, out, &mut facts);
         match self.log_facts(req, &facts, 0) {
@@ -1184,8 +988,7 @@ impl ToolHost {
     /// `memory_block_edit`: the person's words. A clean session writes them at once; a session
     /// that read outside content (`tainted`, `suspect`) sets them aside for the person, who sees
     /// the exact change and approves it (`pending::approve_block`), and the port never hears of it
-    /// here; with nobody to ask, it is refused. Its arguments are checked before it is counted, and
-    /// it counts as one of the session's saves.
+    /// here; with nobody to ask, it is refused. Its arguments are checked first.
     fn block_edit_call(
         &self,
         req: &Request,
@@ -1249,21 +1052,6 @@ impl ToolHost {
                 .any(|c| (c.is_control() && !c.is_whitespace()) || crate::is_deceptive(c))
         {
             return self.memory_failed(req, out, HIDDEN_CHARS);
-        }
-        let path = self.run_dir.join("memory-proposals.json");
-        let mut budget = match Budget::load(&path) {
-            Ok(b) => b,
-            Err(why) => return self.budget_denied(req, &format!("the proposal count: {why}")),
-        };
-        let now = self.clock.now_ms();
-        if budget.in_hour(now) >= MAX_PROPOSALS_CLEAN {
-            // Kept even so: an older file's count starts its hour now, not at every call.
-            let _ = budget.save(&path);
-            return self.budget_denied(req, &saves_spent(MAX_PROPOSALS_CLEAN));
-        }
-        budget.count(now);
-        if let Err(why) = budget.save(&path) {
-            return self.budget_denied(req, &format!("the proposal count cannot be kept: {why}"));
         }
         let edit = match edit {
             BlockEdit::Add(t) => self.text_to_keep(&t).map(BlockEdit::Add),
@@ -1375,6 +1163,15 @@ impl ToolHost {
         self.aside_at(at, req, args, (crate::ask::Class::Memory, None), &|| false)
     }
 
+    fn open_log(&self) -> Result<std::fs::File, String> {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(self.run_dir.join("memory.jsonl"))
+            .map_err(|e| e.to_string())
+    }
+
     fn log_facts(&self, req: &Request, facts: &Facts, bytes: usize) -> Result<(), String> {
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1390,13 +1187,7 @@ impl ToolHost {
             "tainted": facts.marked,
             "query_hash": facts.query_hash,
         });
-        let path = self.run_dir.join("memory.jsonl");
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| e.to_string())?;
+        let mut f = self.open_log()?;
         let mut line = row.to_string();
         line.push('\n');
         f.write_all(line.as_bytes()).map_err(|e| e.to_string())
@@ -1514,8 +1305,8 @@ impl ToolHost {
             };
         }
 
-        // Saturating all the way: `cap` can be the 1 KiB floor and a port's note can be longer than
-        // that, and a wrapped `room` would lift the hard cap.
+        // Saturating all the way: a port's note can be longer than `cap`, and a wrapped `room`
+        // would lift it.
         let mut room = cap
             .saturating_sub(wrap_untrusted(Source::Memory, "").len())
             .saturating_sub(OMITTED_ROOM);
