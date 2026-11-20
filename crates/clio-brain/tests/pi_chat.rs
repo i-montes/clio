@@ -2362,19 +2362,25 @@ fn a_flag_in_a_child_stops_it_withholds_its_report_and_closes_the_window_and_byp
         return;
     }
     for bypass in [false, true] {
+        // In host mode the person's own files are theirs: a download is outside text, judged.
+        // Not in the test's home: that is under the temp folder, often `/tmp`, and a reader's
+        // jail has a `/tmp` of its own (the host's holds other programs' sockets).
+        let dl = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        assert!(!dl.path().starts_with("/tmp"), "{}", dl.path().display());
+        let evil = dl.path().join("Downloads/evil.txt");
+        std::fs::create_dir_all(evil.parent().unwrap()).unwrap();
+        std::fs::write(&evil, EVIL).unwrap();
         let (w, _vault, _jev) = subagent_jev_world(
             &json!([
                 {"tool_calls": [{"name": "subagent", "arguments": {"reason": "repartir",
                     "tasks": [{"name": "c", "task": "Read evil.txt.", "mode": "read"}]}}]},
-                {"tool_calls": [{"name": "bash", "arguments": {"reason": "leer", "command": "cat Downloads/evil.txt"}}]},
+                {"tool_calls": [{"name": "bash", "arguments": {"reason": "leer",
+                    "command": format!("cat {}", evil.display())}}]},
                 {"text": "todo terminado"},
             ]),
             true,
             if bypass { "bypass" } else { "window" },
         );
-        // In host mode the person's own files are theirs: a download is outside text, judged.
-        std::fs::create_dir_all(w.home().join("Downloads")).unwrap();
-        std::fs::write(w.home().join("Downloads/evil.txt"), EVIL).unwrap();
         let state = w.home().join(".local/share/clio/host");
         if bypass {
             clio_toolhost::grant::bypass_on(&state).unwrap();
@@ -2390,6 +2396,26 @@ fn a_flag_in_a_child_stops_it_withholds_its_report_and_closes_the_window_and_byp
             &[],
             &decoy(),
         );
+        if v["note"] != json!(true) {
+            // What the child's tool host saw and what its model was given, to tell why.
+            let d = the_run(&w).join("subagents/1");
+            let read =
+                |f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_else(|e| e.to_string());
+            let child: Vec<String> = w
+                ._provider
+                .requests()
+                .iter()
+                .filter(|r| is_child(r))
+                .map(|r| r["body"]["messages"].to_string())
+                .collect();
+            eprintln!(
+                "{bypass}: subagent.json {}\ntainted {}\nwithheld {:?}\ntoolhost.log {}\nchild {child:#?}",
+                read("subagent.json"),
+                read("toolhost/tainted.json"),
+                std::fs::read_dir(d.join("toolhost/withheld")).map(|r| r.count()),
+                read("toolhost.log"),
+            );
+        }
         ok(&v, &["opened", "answered", "note", "usage", "listed"]);
         assert_eq!(v["code"], json!(0), "{bypass}: {v:#}");
         assert_eq!(v["procs_after_quit"], json!(0), "{bypass}: {v:#}");
