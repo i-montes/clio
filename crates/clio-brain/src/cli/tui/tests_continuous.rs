@@ -32,6 +32,7 @@ pub(super) fn opened(id: &str, history: Vec<Value>) -> Box<ChatInfo> {
         refresh: None,
         presentation: false,
         notes: vec![],
+        subagents: vec![],
     })
 }
 

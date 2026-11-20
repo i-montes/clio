@@ -40,6 +40,7 @@ mod server;
 pub mod services;
 pub mod skill_add;
 pub mod skills;
+pub mod subagent;
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -247,6 +248,11 @@ pub struct Config {
     /// Host mode: why the MCP servers could not be set up (no bwrap, no npm beside Node): the
     /// chat starts anyway, and the three tools say this.
     pub mcp_unavailable: Option<String>,
+    /// A chat's child (`--child`, S-73): a reader is a review's tool host (`review` is set too),
+    /// a writer serves only the file tools and `exec`; neither ever sets anything aside.
+    pub child: Option<subagent::Child>,
+    /// A chat's tool host (`--subagents`, S-73): it holds `subagent` calls for the brain.
+    pub subagents: bool,
     /// How `skill_add` downloads a repository's archive (`skill_add::curl`; a test serves it).
     pub archive_get: fn(&str, &Path) -> bool,
 }
@@ -271,6 +277,8 @@ impl Config {
             shows: Vec::new(),
             mcp: None,
             mcp_unavailable: None,
+            child: None,
+            subagents: false,
             archive_get: skill_add::curl,
         }
     }
@@ -332,6 +340,9 @@ pub struct ToolHost {
     mcp_pool: mcp::Pool,
     /// When each session called a manage tool (the brake on `manage`).
     manages: Mutex<HashMap<String, Vec<std::time::Instant>>>,
+    child: Option<subagent::Child>,
+    /// A chat's: the `subagent` calls it holds (S-73).
+    calls: Option<subagent::Calls>,
 }
 
 /// The folders host-mode commands see read-only inside Clio's masked ones: the skills' `live/`
@@ -525,6 +536,8 @@ impl ToolHost {
             mcp_off: cfg.mcp_unavailable,
             mcp_pool: pool,
             manages: Mutex::new(HashMap::new()),
+            child: cfg.child,
+            calls: cfg.subagents.then(subagent::Calls::default),
         })
     }
 
@@ -540,6 +553,35 @@ impl ToolHost {
     pub fn with_asker(mut self, a: Box<dyn Asker>) -> Self {
         self.asker = a;
         self
+    }
+
+    /// A writing child (`--child write`, S-73).
+    pub(crate) fn writer(&self) -> bool {
+        self.child == Some(subagent::Child::Write)
+    }
+
+    /// A refusal's rule in a review or a child: `review/<what>` or `subagent/<what>`.
+    pub(crate) fn rule(&self, what: &str) -> &'static str {
+        let child = self.child.is_some();
+        match what {
+            "tool" if child => "subagent/tool",
+            "tool" => "review/tool",
+            "network" if child => "subagent/network",
+            "network" => "review/network",
+            "background" if child => "subagent/background",
+            "background" => "review/background",
+            _ if child => "subagent/aside",
+            _ => "review/aside",
+        }
+    }
+
+    /// What a review or a child is told instead of an action being set aside for the person.
+    pub(crate) fn cannot_ask(&self) -> &'static str {
+        if self.child.is_some() {
+            subagent::CHILD_CANNOT_ASK
+        } else {
+            REVIEW_CANNOT_ASK
+        }
     }
 
     /// `Ok` when `exec` (bash, in the jail) is offered; otherwise why it is not.
@@ -757,8 +799,20 @@ impl ToolHost {
                 .host
                 .as_ref()
                 .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()));
-            let why = "a review only reads and runs commands: this is not one of its tools";
-            return self.refuse_in_review(at, &req, &req.args, "review/tool", why);
+            let why = if self.child.is_some() {
+                "a reading subagent only reads and runs commands: this is not one of its tools"
+            } else {
+                "a review only reads and runs commands: this is not one of its tools"
+            };
+            return self.refuse_in_review(at, &req, &req.args, self.rule("tool"), why);
+        }
+        if self.writer() && !subagent::WRITER_OPS.contains(&req.tool.as_str()) {
+            let at = self
+                .host
+                .as_ref()
+                .map(|h| (h.cfg.state.as_path(), h.cfg.run.as_str()));
+            let why = "a subagent only reads, writes, edits and runs commands: this is not one of its tools";
+            return self.refuse_in_review(at, &req, &req.args, "subagent/tool", why);
         }
         if self.unattended && round_refuses(&req.tool, &map) {
             let at = self
@@ -783,6 +837,13 @@ impl ToolHost {
             // (or the session's close) waiting (S-70).
             "mcp_tools" if !closing() => return self.mcp_tools(&req, &map),
             "mcp_call" if !closing() => return self.mcp_call(&req, &map),
+            // A call that waits for its children holds no lock: the brain's marks and the
+            // guard's filter are answered meanwhile (S-73).
+            "subagent" | "subagent_take" | "subagent_alive" | "subagent_done" if !closing() => {
+                if let Some(calls) = &self.calls {
+                    return self.subagent_op(calls, &req, &map, cancel);
+                }
+            }
             _ => {}
         }
         let _one_at_a_time = lock(&self.busy);
@@ -955,8 +1016,8 @@ impl ToolHost {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
             }
-            let why = if d.outcome == Outcome::Ask && self.review {
-                format!("{REVIEW_CANNOT_ASK} ({})", out.reason)
+            let why = if d.outcome == Outcome::Ask && (self.review || self.writer()) {
+                format!("{} ({})", self.cannot_ask(), out.reason)
             } else if d.outcome == Outcome::Ask {
                 format!(
                     "it needs a person's approval and nobody is available ({})",
@@ -1000,16 +1061,31 @@ impl ToolHost {
                 let rules = &h.cfg.rules;
                 network || rules.reaches_out(command) || rules.uses_sudo(command)
             };
-            // A review, which nobody watches, never does (S-67).
-            if reaches && self.review {
+            // A writing child never uses `sudo` (S-73): what needs it is its parent's to do.
+            if self.writer()
+                && req.tool == "exec"
+                && h.cfg
+                    .rules
+                    .uses_sudo(map.get("command").and_then(Value::as_str).unwrap_or(""))
+            {
                 let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
                 return self.refuse_in_review(
                     Some(at),
                     &req,
                     &req.args,
-                    "review/network",
-                    REVIEW_NO_NETWORK,
+                    "subagent/sudo",
+                    subagent::CHILD_NO_SUDO,
                 );
+            }
+            // A review, which nobody watches, never does (S-67).
+            if reaches && self.review {
+                let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
+                let why = if self.child.is_some() {
+                    subagent::CHILD_NO_NETWORK
+                } else {
+                    REVIEW_NO_NETWORK
+                };
+                return self.refuse_in_review(Some(at), &req, &req.args, self.rule("network"), why);
             }
             // The list, not the model, says what waits for the person.
             let what = match req.tool.as_str() {
@@ -1053,14 +1129,18 @@ impl ToolHost {
                 return self.aside(h, &req, ask::Class::Control, Some(ROUND_UNITS), cancel);
             }
             if req.tool == "exec" && map.get("background").and_then(Value::as_bool) == Some(true) {
-                if self.review {
+                if self.review || self.writer() {
                     let at = (h.cfg.state.as_path(), h.cfg.run.as_str());
-                    let why = "a review has no background commands: run it in the foreground";
+                    let why = if self.child.is_some() {
+                        "a subagent has no background commands: run it in the foreground"
+                    } else {
+                        "a review has no background commands: run it in the foreground"
+                    };
                     return self.refuse_in_review(
                         Some(at),
                         &req,
                         &req.args,
-                        "review/background",
+                        self.rule("background"),
                         why,
                     );
                 }

@@ -26,7 +26,8 @@ use clio_brain::pi::launch::{Launch, SessionTarget, start};
 use clio_brain::pi::review::{self, Answer};
 use clio_brain::pi::rpc::{Cancel, Event, Usage};
 use clio_brain::pi::session::{
-    HostOpts, REVIEW_GUARD_TOOLS, Toolhost, ToolhostOpts, ensure_guard, review_guard_env,
+    HostOpts, REVIEW_GUARD_TOOLS, Toolhost, ToolhostOpts, WRITER_GUARD_TOOLS, child_guard_env,
+    ensure_guard, review_guard_env,
 };
 use clio_brain::pi::{PiPaths, text};
 use clio_core::SystemClock;
@@ -87,9 +88,9 @@ fn model_for(d: &Dirs, cfg: &Config, session: &str) -> (String, Option<String>) 
     }
 }
 
-/// A new, empty folder for the review: `<run>/reviews/<n>`.
-fn new_folder(run_dir: &Path) -> Result<(u32, PathBuf), String> {
-    let base = run_dir.join("reviews");
+/// A new, empty folder for a review or a subagent: `<run>/<kind>/<n>` (`reviews`, `subagents`).
+pub(super) fn new_folder(run_dir: &Path, kind: &str) -> Result<(u32, PathBuf), String> {
+    let base = run_dir.join(kind);
     crate::cli::mkdir_private(&base)?;
     for n in 1..10_000 {
         let dir = base.join(n.to_string());
@@ -102,7 +103,7 @@ fn new_folder(run_dir: &Path) -> Result<(u32, PathBuf), String> {
             Err(e) => return Err(format!("{}: {e}", dir.display())),
         }
     }
-    Err("too many reviews in this run".into())
+    Err(format!("too many {kind} in this run"))
 }
 
 /// A skill's request may carry the whole skill (SKILL.md and every file, at most 128 KiB).
@@ -318,7 +319,7 @@ fn started(
     let (model, fallback) = model_for(d, &cfg, &p.model.model);
     out.model.clone_from(&model);
     out.fallback = fallback;
-    let (n, dir) = new_folder(p.run_dir).map_err(|e| (None, e))?;
+    let (n, dir) = new_folder(p.run_dir, "reviews").map_err(|e| (None, e))?;
     let fail = |e: String| (Some(dir.clone()), e);
     let staged = match what {
         Subject::Skill(d) => {
@@ -340,74 +341,22 @@ fn started(
     };
     let show = staged.as_deref().and_then(Path::parent).filter(|_| p.host);
     let id = format!("{}.review-{n}", p.run);
-    let main = crate::cli::pi::paths(d);
-    let node =
-        install::find_node(&crate::cli::pi::node_path(d)).map_err(|e| fail(e.to_string()))?;
-    let install = install::locate(&main).map_err(|e| fail(e.to_string()))?;
-    let connector = clio_brain::connector::by_provider(&cfg.model.provider)
-        .ok_or_else(|| fail("no connector".into()))?;
-    let key = crate::cli::vault::model_key(d, connector).map_err(fail)?;
-    // Its own Pi folders: its session file is not the conversation's, nor its `models.json`.
-    let paths = PiPaths { root: dir.clone() };
-    let exe = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
-    let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
-    let service_env = jev::toolhost_env(d, &cfg.jev);
-    let toolhost = Toolhost::start(
-        &exe,
-        d.need_runtime().map_err(fail)?,
-        &paths,
-        &dir,
-        &work,
-        &key,
-        ToolhostOpts {
-            memory: None,
-            extra_env: &service_env,
-            host: p.host.then(|| HostOpts {
-                home: &d.home,
-                state: &state,
-                control: &control,
-                rules: rules.as_deref(),
-                run: &id,
-            }),
-            secrets: None,
-            review: true,
-            unattended: false,
-            skills: None,
-            show,
-            mcp: None,
-        },
-    )
-    .map_err(fail)?;
     let mut rc = cfg.clone();
     rc.model.model.clone_from(&model);
     rc.model.thinking.clone_from(&cfg.review.thinking);
-    let launch = Launch {
-        guard: Some(ensure_guard(&install).map_err(fail)?),
-        guard_tools: REVIEW_GUARD_TOOLS.map(String::from).to_vec(),
-        extra_env: review_guard_env(&paths, &toolhost, p.host).map_err(fail)?,
-        provider: provider_of(d, &rc),
-        api_key: Some(key),
-        cwd: work.clone(),
-        name: None,
-        install,
-        node,
-        paths,
-        session: SessionTarget::New {
-            id: Some(id.clone()),
+    let (toolhost, pi) = second_agent(
+        &Second {
+            dirs: d,
+            cfg: &rc,
+            dir: &dir,
+            id: &id,
+            work: &work,
+            host: p.host,
+            marked: p.marked,
         },
-        helper: exe,
-        skills: None,
-    };
-    let pi = start(&launch).map_err(|e| fail(e.to_string()))?;
-    pi.client.set_interactive(false);
-    // The session's marks: a reviewer of a marked session asks before what a marked one asks.
-    if let Some(suspect) = p.marked
-        && !jev::taint_session(&toolhost.socket, &pi.session_id, suspect)
-    {
-        return Err(fail(
-            "it could not be marked like the session that asked for it".into(),
-        ));
-    }
+        Kind::Review { show },
+    )
+    .map_err(fail)?;
     let mut guard = RunGuard::new(
         Arc::new(SystemClock),
         &id,
@@ -476,9 +425,134 @@ fn started(
     Ok(dir)
 }
 
+/// Where and how a second agent (a reviewer, a subagent) starts.
+pub(super) struct Second<'a> {
+    pub dirs: &'a Dirs,
+    /// The session's config with the model (and thinking) it runs on.
+    pub cfg: &'a Config,
+    /// Its own folder: its Pi folders and its tool host's run folder.
+    pub dir: &'a Path,
+    /// Its run id in the action log.
+    pub id: &'a str,
+    pub work: &'a Path,
+    pub host: bool,
+    /// The marks of the session that started it (`Some(suspect)`).
+    pub marked: Option<bool>,
+}
+
+/// What kind of second agent.
+#[derive(Clone, Copy)]
+pub(super) enum Kind<'a> {
+    /// A reviewer, with a skill draft's stage shown to its commands (host mode).
+    Review { show: Option<&'a Path> },
+    /// A subagent (S-73): a reader is a reviewer's setup with its own prompt and the registered
+    /// skills to read; a writer has the file tools too. Both get the judge (the memory port),
+    /// never the memory's tools.
+    Child(clio_toolhost::subagent::Child),
+}
+
+/// Starts a second agent as the session's own Pi is started (the same jail, connector and
+/// launcher rules, the guard), with its own Pi folders and tool host under `s.dir`, a fixed tool
+/// list, its own prompt, and the session's marks. Its Pi and tool host stop when dropped.
+pub(super) fn second_agent(
+    s: &Second<'_>,
+    kind: Kind<'_>,
+) -> Result<(Toolhost, clio_brain::pi::launch::PiProcess), String> {
+    use clio_toolhost::subagent::Child;
+    let (d, cfg) = (s.dirs, s.cfg);
+    let main = crate::cli::pi::paths(d);
+    let node = install::find_node(&crate::cli::pi::node_path(d)).map_err(|e| e.to_string())?;
+    let install = install::locate(&main).map_err(|e| e.to_string())?;
+    let connector = clio_brain::connector::by_provider(&cfg.model.provider)
+        .ok_or_else(|| "no connector".to_owned())?;
+    let key = crate::cli::vault::model_key(d, connector)?;
+    // Its own Pi folders: its session file is not the conversation's, nor its `models.json`.
+    let paths = PiPaths {
+        root: s.dir.to_path_buf(),
+    };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (state, control, rules) = (d.data.join("host"), d.control(), d.host_rules());
+    let service_env = jev::toolhost_env(d, &cfg.jev);
+    let (child, show) = match kind {
+        Kind::Review { show } => (None, show),
+        Kind::Child(c) => (Some(c), None),
+    };
+    // A child reads Clio's registered skills, as its parent does (never writes one), and is
+    // judged as its parent is: the memory port is the judge's way in.
+    let skills = child.is_some().then(|| crate::cli::skills::root(d));
+    let models = clio_brain::memory_link::MemoryLink::model_dirs(&d.home);
+    let toolhost = Toolhost::start(
+        &exe,
+        d.need_runtime()?,
+        &paths,
+        s.dir,
+        s.work,
+        &key,
+        ToolhostOpts {
+            memory: child.map(|_| (d.data.as_path(), models.as_slice())),
+            extra_env: &service_env,
+            host: s.host.then(|| HostOpts {
+                home: &d.home,
+                state: &state,
+                control: &control,
+                rules: rules.as_deref(),
+                run: s.id,
+            }),
+            secrets: None,
+            review: child.is_none(),
+            unattended: false,
+            skills: skills.as_deref(),
+            show,
+            mcp: None,
+            child,
+            subagents: false,
+        },
+    )?;
+    let (guard_tools, extra_env) = match child {
+        None => (
+            REVIEW_GUARD_TOOLS.map(String::from).to_vec(),
+            review_guard_env(&paths, &toolhost, s.host)?,
+        ),
+        Some(c) => (
+            if c == Child::Write {
+                WRITER_GUARD_TOOLS.map(String::from).to_vec()
+            } else {
+                REVIEW_GUARD_TOOLS.map(String::from).to_vec()
+            },
+            child_guard_env(&paths, &toolhost, s.host, c == Child::Write)?,
+        ),
+    };
+    let launch = Launch {
+        guard: Some(ensure_guard(&install)?),
+        guard_tools,
+        extra_env,
+        provider: provider_of(d, cfg),
+        api_key: Some(key),
+        cwd: s.work.to_path_buf(),
+        name: None,
+        install,
+        node,
+        paths,
+        session: SessionTarget::New {
+            id: Some(s.id.to_owned()),
+        },
+        helper: exe,
+        skills: skills.is_some().then(|| crate::cli::skills::live(d)),
+    };
+    let pi = start(&launch).map_err(|e| e.to_string())?;
+    pi.client.set_interactive(false);
+    // The session's marks: a second agent of a marked session asks before what a marked one asks.
+    if let Some(suspect) = s.marked
+        && !jev::taint_session(&toolhost.socket, &pi.session_id, suspect)
+    {
+        return Err("it could not be marked like the session that started it".into());
+    }
+    Ok((toolhost, pi))
+}
+
 /// The config a review starts from: the file's, with the session's connector and model (the
 /// file may name another since `/connector` or `/model`).
-fn session_cfg(d: &Dirs, model: &ModelCfg) -> Result<Config, String> {
+pub(super) fn session_cfg(d: &Dirs, model: &ModelCfg) -> Result<Config, String> {
     let mut cfg = Config::load(d)?;
     cfg.model = model.clone();
     Ok(cfg)

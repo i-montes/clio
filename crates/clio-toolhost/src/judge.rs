@@ -333,7 +333,7 @@ impl ToolHost {
     }
 
     /// Asks the judge about `out[wrapped]` (see `judge_result`), read from `w`.
-    fn judge_texts(
+    pub(crate) fn judge_texts(
         &self,
         req: &Request,
         out: &mut [Value],

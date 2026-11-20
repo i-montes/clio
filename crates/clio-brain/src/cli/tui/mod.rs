@@ -26,6 +26,7 @@ pub mod review;
 pub mod sanitize;
 pub mod sessions;
 pub mod status;
+pub mod subagents;
 pub mod text;
 pub mod theme;
 pub mod todo;
@@ -1338,6 +1339,7 @@ impl Ctx {
                         let (drafts, notes) = opened.session.skill_news();
                         let mut info = ChatInfo::from(&opened);
                         info.notes.extend(notes);
+                        info.subagents = opened.session.subagents();
                         // Done as the chat opens: its notes; the model hears them with the next
                         // message.
                         info.notes.extend(manage_news(&opened.session, &slot, tx));

@@ -250,6 +250,39 @@ fn ask_host_for(socket: &Path, req: &Value, wait: Duration) -> Option<Value> {
     serde_json::from_str(&line).ok()
 }
 
+/// The arguments of the model's `subagent` call `call` in `session`, once its tool host holds
+/// it (S-73): taken once, with the brain's token. `None`: not (yet) there, or already taken.
+pub fn subagent_take(socket: &Path, session: &str, token: &str, call: &str) -> Option<Value> {
+    let req = json!({"id": "subagent_take", "tool": "subagent_take", "session": session, "call_id": "subagent_take", "args": {"token": token, "call": call}});
+    ask_host(socket, &req)
+        .filter(|a| a["ok"] == true)
+        .map(|a| a["data"].clone())
+}
+
+/// The children's answer to `call` (S-73): the tool host judges and wraps it for the model.
+/// Tried a few times (the host may be busy); `false`: not delivered, or the call was not waiting
+/// any more (its caller left). Undelivered, the call ends by itself once the brain stops saying
+/// it is alive (`clio_toolhost::subagent::SILENCE`).
+pub fn subagent_done(socket: &Path, session: &str, token: &str, call: &str, done: &Value) -> bool {
+    let mut args = done.clone();
+    args["token"] = json!(token);
+    args["call"] = json!(call);
+    let req = json!({"id": "subagent_done", "tool": "subagent_done", "session": session, "call_id": "subagent_done", "args": args});
+    for _ in 0..3 {
+        match ask_host(socket, &req) {
+            Some(a) => return a["ok"] == true,
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+    false
+}
+
+/// The brain still runs `call`'s children (S-73): without this the tool host ends the call.
+pub fn subagent_alive(socket: &Path, session: &str, token: &str, call: &str) -> bool {
+    let req = json!({"id": "subagent_alive", "tool": "subagent_alive", "session": session, "call_id": "subagent_alive", "args": {"token": token, "call": call}});
+    ask_host(socket, &req).is_some_and(|a| a["ok"] == true)
+}
+
 /// Tells the tool host that this session now holds something the person did not write. Tried a
 /// few times (the host answers one request at a time and may be busy with a tool); `true` only if
 /// the host said it was done. A mark that could not be made means what is not the person's is not

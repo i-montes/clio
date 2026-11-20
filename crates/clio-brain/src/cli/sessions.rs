@@ -847,6 +847,9 @@ mod tests {
             assert_eq!(delete(&p).unwrap_err(), OPEN_ELSEWHERE);
             assert!(p.file.exists() && dirs.runs.join(id).join("sandbox").exists());
             assert_eq!(entries(&dirs).len(), kept);
+            // Unlocked, not only closed: a process another test forks meanwhile shares this
+            // descriptor until it execs, and a close releases the lock only with the last copy.
+            rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).unwrap();
             drop(held);
             delete(&p).unwrap();
             assert!(!p.file.exists());

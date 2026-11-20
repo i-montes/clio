@@ -215,6 +215,8 @@ pub struct Chat {
     pub(super) parsed: Cell<usize>,
     /// The reviews of this session.
     pub review: super::review::Review,
+    /// The model's subagents (S-73).
+    pub subagents: super::subagents::Subagents,
     /// What of this session waits for the person, and when Clio asks.
     pub approvals: super::approvals::Approvals,
 }
@@ -273,6 +275,7 @@ impl Chat {
             resume: false,
             parsed: Cell::new(0),
             review: super::review::Review::default(),
+            subagents: super::subagents::Subagents::default(),
             approvals: super::approvals::Approvals::default(),
         }
     }
@@ -514,6 +517,7 @@ impl Chat {
         {
             self.todo.clear();
         }
+        self.subagents.stop();
         for i in &mut self.items {
             if let Item::Tool { state, .. } = i
                 && *state == ToolState::Running
@@ -581,6 +585,9 @@ impl Chat {
                 state: ToolState::Running,
                 ms: None,
             }),
+            Event::ToolUpdate { id, name, partial } if name == "subagent" => {
+                super::subagents::on_update(self, id, partial);
+            }
             Event::ToolEnd {
                 id,
                 name,
@@ -673,10 +680,12 @@ impl Chat {
         let t = self.meter.total();
         let c = self.meter.context;
         let window = c.map(|c| c.window).filter(|w| *w > 0);
+        // The subagents' spending is the session's (S-73).
+        let (sub_cost, sub_in, sub_out) = self.subagents.spent();
         Snapshot {
-            tokens_in: t.input + t.cache_read,
-            tokens_out: t.output,
-            cost_micro: (t.cost * 1e6).round().max(0.0) as u64,
+            tokens_in: t.input + t.cache_read + sub_in,
+            tokens_out: t.output + sub_out,
+            cost_micro: ((t.cost * 1e6).round().max(0.0) as u64).saturating_add(sub_cost),
             steps: self.turns,
             secs: now_ms.saturating_sub(self.started_ms) / 1000,
             limits: RunLimits::default(),
@@ -1360,6 +1369,12 @@ fn status_line(app: &App, w: usize) -> Line<'static> {
         ));
         spans.push(Span::styled(r, t.dim()));
     }
+    if let Some(s) = super::subagents::status(app) {
+        if spans.len() > 1 {
+            spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
+        }
+        spans.push(Span::styled(s, t.accent_line()));
+    }
     if app.chat.approvals.bypass {
         if spans.len() > 1 {
             spans.push(Span::styled(format!(" {} ", t.dot()), t.dim()));
@@ -1511,6 +1526,12 @@ pub fn draw_screen(f: &mut Frame, area: Rect, app: &App) {
             t.dim(),
         )));
     }
+    // The children of a `subagent` call, under its row while it runs.
+    tail.extend(
+        super::subagents::lines(app)
+            .into_iter()
+            .map(|l| Line::from(Span::styled(text::fit(&l, w, t.ellipsis()), t.dim()))),
+    );
     let h = usize::from(conv.height);
     let (shown_rows, start, max) = conversation(app, t, w, tail, h);
     c.scroll_max.set(max);
@@ -2134,6 +2155,7 @@ mod tests {
                 refresh: None,
                 presentation,
                 notes: vec![],
+                subagents: vec![],
             };
             update(
                 app,
@@ -2802,6 +2824,7 @@ mod tests {
             refresh: None,
             presentation: true,
             notes: vec![],
+            subagents: vec![],
         };
         let (app, cmds) = update(
             app,

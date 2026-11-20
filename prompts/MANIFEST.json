@@ -22,6 +22,7 @@
   "clio-agent@28.md": "7e99b473ffbaf9e04c2e2d553bbcc3c0c5456e4ed0f226079cbcd715c026110b",
   "clio-agent@29.md": "837f9955e3d97b577df8d7c34d97a3ea2d10f22d561637cccb383dc71ab4ad0c",
   "clio-agent@3.md": "09d9474a4fd335b0ad10ae6d344bbf39d79a9b27f8d32dc4a4159b758521aedf",
+  "clio-agent@30.md": "7f89ed01f24cb7332989bc73057c4eadecc49a3aa448e9dcac388f5c0260a653",
   "clio-agent@4.md": "c48e195ba243689ad59b61640f86fc1b6cfb65fefd5402b3c48059f0a355087e",
   "clio-agent@5.md": "6450dd9fec41fab47d72df3d9310b5adf2f40315edfebb8de676bfec91300891",
   "clio-agent@6.md": "06fc9d3078d6bc866d7cf09cc20d4a06e7b2a600aae9ff1ad1e3341956550074",
@@ -33,6 +34,7 @@
   "clio-host@11.md": "2b689ea952e8a1c272a88ea46abd568a7bbba964401e1800d2d3fbdf21ee3a30",
   "clio-host@12.md": "46702d2744e5162212e67235d90825e94307453cda25592e7086313e25b87d1f",
   "clio-host@13.md": "08b84080de94f95b9ec2a138f74a42b4f350348745139b73074bc62ce61f23f7",
+  "clio-host@14.md": "56bf7b018ac7a895cd563f817ebcde7dc7708f3045e34c92426415b77c7fe5ad",
   "clio-host@2.md": "112cccbb4a8232c0fd5bf78bfdd19349d28711ed8d34cf783575bda2a5deaca5",
   "clio-host@3.md": "6fce2fdaeacbf847b19258fb7169ea16abed3a437f02c3bd699ccbb549a27b11",
   "clio-host@4.md": "c322efc51dc166d6d5b39304b85a03b3a8f1508c25519edd5c79584a772e0d4a",
@@ -45,5 +47,6 @@
   "clio-reviewer@2.md": "177cc6c073a3e18858aadeda3bcfba5ae4e993e5ad89b12fab1e017f1dff9e21",
   "clio-reviewer@3.md": "4ed84b6b883302ab8116ad2d92b4e1d460231e89add7fe25b01333864d3ad40d",
   "clio-round@1.md": "a4ae19571bfe13387e8f190bc8627e8bbf274be0ab03149b07fe53928350eeac",
+  "clio-subagent@1.md": "fa4c8279735d6f4a636397f26d8c3f06d9cec58585c77e4fa0f870929a7e82b2",
   "clio@1.md": "ae3682df1b5b14ab72cd7c87f7d531b2fa6854121a4174ab2238c6601dc1512c"
 }
