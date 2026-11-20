@@ -321,6 +321,8 @@ pub struct Plain {
     pub rows: Vec<String>,
     /// The line a terminal shows while a step works, which its end replaces.
     shown: String,
+    /// The row whose start was said and whose end was not yet.
+    started: Option<usize>,
 }
 
 impl Plain {
@@ -329,6 +331,7 @@ impl Plain {
             lang,
             rows,
             shown: String::new(),
+            started: None,
         }
     }
 }
@@ -355,6 +358,8 @@ impl Ui for Plain {
                         format!(" · {} MB", screen::mb(got))
                     }
                 }));
+                // One row: a wrapped line would not be replaced.
+                let now = super::ui::clip(s, &now, super::ui::columns().saturating_sub(1));
                 // Only when it changed: a download calls this for every piece it gets.
                 if now != self.shown {
                     print!(
@@ -367,8 +372,11 @@ impl Ui for Plain {
                 }
                 return;
             }
+            // Once per step (a download's end sets its row working again).
             St::Working(None) => {
-                println!("{}", working(""));
+                if self.started.replace(i) != Some(i) {
+                    println!("{}", working(""));
+                }
                 return;
             }
             St::Working(Some(_)) => return,
@@ -381,6 +389,7 @@ impl Ui for Plain {
                 s.arrow()
             ),
         };
+        self.started = None;
         if !self.shown.is_empty() {
             print!(
                 "\r{}\r",

@@ -173,6 +173,11 @@ pub fn width() -> usize {
         .map_or(80, |w| w.min(120))
 }
 
+/// The columns of the terminal standard output is on (80 when it does not say).
+pub fn columns() -> usize {
+    crossterm::terminal::size().map_or(80, |(c, _)| usize::from(c))
+}
+
 /// Pads to `n` columns by characters (the text is already printable, no escapes).
 pub fn pad(s: &str, n: usize) -> String {
     let w = s.chars().count();

@@ -493,6 +493,7 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
     ] {
         let (start, end) = (at(&format!("...  {step}\n")), at(&format!("  {step} · ")));
         assert!(last <= start && start < end, "{step}: {out}");
+        assert_eq!(out.matches(&format!("...  {step}\n")).count(), 1, "{out}");
         last = end;
     }
     assert!(
@@ -518,6 +519,8 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
             && out.contains("Final check · "),
         "{out}"
     );
+    // The old binary already showed the binaries step.
+    assert!(!out.contains("clio and clio-vault"), "{out}");
     let o = f.clio(&["update", "--check"]);
     assert!(all(&o).contains("already up to date"), "{}", all(&o));
     f.release("9.9.9", &[]);
