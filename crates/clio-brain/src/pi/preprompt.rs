@@ -28,7 +28,7 @@ const MAX_MESSAGE_CHARS: usize = 4000;
 const MAX_CANDIDATES: usize = 8;
 const MAX_LINE_CHARS: usize = 300;
 const MAX_BLOCK_CHARS: usize = 1600;
-/// Everything put in front of the model over a whole session (the tools' own cap is 24 KiB): a
+/// Everything put in front of the model over a whole session: a
 /// session that has had this much stops getting more.
 const SESSION_CHARS: usize = 16_000;
 const NEEDS: &str = "needs_memory";

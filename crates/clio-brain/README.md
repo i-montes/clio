@@ -71,7 +71,7 @@ The brain. It runs on the user's own machine by default (a VPS is optional, ADR 
   lock, so `clio memory remember` is not blocked; a failed open is not remembered (the person may
   create the memory while a session runs). Tests: `tests/memory_port.rs` (real database, the real
   service over its socket) and `tests/pi_stack/memory.rs` (the real Pi in its jail: a smoke test and
-  attacks 56 to 61, which `tests/attacks.rs` leaves out through `MEMORY_CASES`; ADR 0010).
+  attacks 56 and 58 to 61, which `tests/attacks.rs` leaves out through `MEMORY_CASES`; ADR 0010).
 - `sleep_merger`: the model step of the memory's sleep (`clio memory sleep`, `src/cli/sleep.rs`;
   S-66). `ModelMerger` implements `clio_memory::sleep::Merger` with the person's configured model
   (`config.model`, whatever connector, through `CommandModel`), the memories cleaned by the vault
