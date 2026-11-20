@@ -61,7 +61,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use host::HostCfg;
-pub use judge::{SUSPECT_REASON, UNJUDGED, verdict};
+pub use judge::{REFUSING, SUSPECT_REASON, UNJUDGED, verdict};
 pub use memory::{
     BLOCK_NAMES, BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
     NOT_WORTH_REMEMBERING, Near, Origin, ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict,
@@ -878,7 +878,7 @@ impl ToolHost {
         }
         match req.tool.as_str() {
             "skill_write" => return self.skill_write(&req, &map),
-            "skill_add" => return self.skill_add(&req, &map),
+            "skill_add" => return self.skill_add(&req, &map, cancel),
             "skill_report" => return self.skill_report(&req, &map),
             "service_write" => return self.service_write(&req, &map),
             "service_status" => return self.service_status(&req, &map),

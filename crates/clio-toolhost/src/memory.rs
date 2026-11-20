@@ -362,6 +362,16 @@ pub trait MemoryPort: Send + Sync {
     fn judge_text(&self, _text: &str, _source: &str) -> TextVerdict {
         TextVerdict::NoJudge
     }
+    /// `judge_text` for a caller that waits up to `timeout` (a skill from outside, read window by
+    /// window by a judge that may be slow): the judge's own limit for the call is that long.
+    fn judge_text_for(&self, text: &str, source: &str, _timeout: Duration) -> TextVerdict {
+        self.judge_text(text, source)
+    }
+    /// The judge makes no call now, whatever is asked (its breaker is open, its day's budget is
+    /// spent): asking again at once is no use.
+    fn judge_refusing(&self) -> bool {
+        false
+    }
     /// The person turned a judge on for this service (Jev): without one no permission window or
     /// bypass acts (`grant`), and an open one closes.
     fn judge_on(&self) -> bool {

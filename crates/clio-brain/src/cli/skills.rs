@@ -951,20 +951,46 @@ fn add(d: &Dirs, args: &[String]) -> Res<()> {
             Some(v) => v.scrub(&t).ok(),
         }
     };
+    let tty = std::io::stdout().is_terminal();
+    let judge = |t: &str, from: &str| {
+        // No judge: nothing is read, and no line says it is.
+        if !port.judge_on() {
+            return Ok(clio_toolhost::TextVerdict::NoJudge);
+        }
+        let v = clio_toolhost::verdict(&port, t, from, &|| false, &|read, n| {
+            judging(tty, from, read, n);
+        });
+        if tty {
+            print!("\r\x1b[K");
+        }
+        v
+    };
     add_with(
         d,
         args,
-        (
-            &|t, from| clio_toolhost::verdict(&port, t, from),
-            &clean,
-            &clio_toolhost::skill_add::curl,
-        ),
+        (&judge, &clean, &clio_toolhost::skill_add::curl),
         std::io::stdin().is_terminal(),
         super::apply::confirm,
     )
 }
 
-type Judge<'a> = &'a dyn Fn(&str, &str) -> clio_toolhost::TextVerdict;
+/// While the judge reads a skill (`from`): a plain line when it starts; at a terminal, one more
+/// line kept up to date with how many of its `n` parts were read, cleared when it ends.
+fn judging(tty: bool, from: &str, read: usize, n: usize) {
+    use std::io::Write;
+    if read == 0 {
+        println!(
+            "the judge is reading {} ({n} part{})…",
+            super::tui::sanitize::line(from),
+            if n == 1 { "" } else { "s" }
+        );
+    } else if tty {
+        print!("\r\x1b[K  {read} of {n} read");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+type Judge<'a> = &'a dyn Fn(&str, &str) -> Result<clio_toolhost::TextVerdict, String>;
 /// What `add_with` asks of the world: the judge, the vault's filter and the download.
 type AddIo<'a> = (
     Judge<'a>,
@@ -1005,6 +1031,7 @@ fn add_with(
             root: &root,
             staging: &d.data.join("staging"),
             judge,
+            most: None,
             clean,
             get,
         },
@@ -1689,11 +1716,11 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         fs::create_dir_all(src.join("hooks")).unwrap();
         fs::write(src.join("hooks/hooks.json"), "{}").unwrap();
         let judge = |t: &str, _: &str| {
-            if t.contains("FLAG") {
+            Ok(if t.contains("FLAG") {
                 TextVerdict::Injection
             } else {
                 TextVerdict::Clean
-            }
+            })
         };
         let clean = |t: &str| Some(t.to_owned());
         let get = |_: &str, _: &Path| false;
