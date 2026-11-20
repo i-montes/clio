@@ -166,12 +166,19 @@ fn read_folder(top: &Path) -> Result<Tree, String> {
         .map_err(|e| format!("{}: {e}", one_line(&top.display().to_string())))?;
     let whole = statat(&fd, "SKILL.md", AtFlags::SYMLINK_NOFOLLOW)
         .is_ok_and(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_file());
+    walk(&fd, whole, false)
+}
+
+/// Every entry under `fd` (`pi`: as Pi finds skills, every name but those that start with a dot
+/// and `node_modules`; else `relevant`), no link followed.
+fn walk(fd: &rustix::fd::OwnedFd, whole: bool, pi: bool) -> Result<Tree, String> {
     let mut w = Walk {
         tree: Tree::new(),
         bytes: 0,
         whole,
+        pi,
     };
-    w.dir(&fd, "", 0)?;
+    w.dir(fd, "", 0)?;
     Ok(w.tree)
 }
 
@@ -184,6 +191,7 @@ struct Walk {
     tree: Tree,
     bytes: usize,
     whole: bool,
+    pi: bool,
 }
 
 impl Walk {
@@ -217,7 +225,13 @@ impl Walk {
             } else {
                 format!("{dir}/{n}")
             };
-            if !relevant(&rel, self.whole) {
+            let keep = if self.pi {
+                !rel.split('/')
+                    .any(|p| p.starts_with('.') || p == "node_modules")
+            } else {
+                relevant(&rel, self.whole)
+            };
+            if !keep {
                 continue;
             }
             if self.tree.len() >= MAX_ENTRIES {
@@ -771,7 +785,13 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             )
         }
     };
-    let origin = src.origin();
+    // A skill of the shared folder is recorded as the look records it (`~/.agents/skills/<dir>`).
+    let origin = match &src {
+        Source::Folder(p) => {
+            shared_dir(cx.home, p).map_or_else(|| src.origin(), |d| shared_origin(&d))
+        }
+        Source::GitHub { .. } => src.origin(),
+    };
     let (dirs, layouts) = skill_dirs(&tree);
     if dirs.is_empty() {
         return Err(format!("no skill in {origin}: Clio looks for {WHERE}"));
@@ -798,28 +818,13 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             return Err(format!("{origin} has two skills named «{}»", shown(&name)));
         }
         let f = build(&tree, dir, &name)?;
-        for t in
-            std::iter::once(f.skill_md.as_str()).chain(f.files.iter().map(|x| x.content.as_str()))
-        {
-            match (cx.clean)(t) {
-                None => return Err("the vault could not filter the text: nothing was added".into()),
-                Some(c) if c != t || clio_vault::count_masks(&c) > clio_vault::count_masks(t) => {
-                    return Err(format!("the skill «{}»: {SECRET}", shown(&f.name)));
-                }
-                Some(_) => {}
-            }
-        }
-        let update = match owner(cx.root, &f.name) {
-            None => false,
-            Some(o) if o.as_deref() == Some(origin.as_str()) => true,
-            Some(o) => {
-                return Err(format!(
-                    "the name «{}» is taken by {}: a skill of another origin is not added under it (remove that one first, or name the others)",
-                    f.name,
-                    o.unwrap_or_else(|| "a skill of Clio's own".into())
-                ));
-            }
-        };
+        no_secret(&f, cx)?;
+        let update = update_of(cx.root, &f.name, &origin).map_err(|o| {
+            format!(
+                "the name «{}» is taken by {o}: a skill of another origin is not added under it (remove that one first, or name the others)",
+                f.name
+            )
+        })?;
         let whole = skills::whole_text(&f.skill_md, &f.files);
         let verdict = (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name));
         // Where the person reads exactly what would be installed: the repository at that commit.
@@ -853,6 +858,318 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
         }));
     }
     Ok(out)
+}
+
+/// Every text of `f` is as the vault's filter leaves it: a secret's shape refuses it.
+fn no_secret(f: &Found, cx: &Ctx) -> Result<(), String> {
+    for t in std::iter::once(f.skill_md.as_str()).chain(f.files.iter().map(|x| x.content.as_str()))
+    {
+        match (cx.clean)(t) {
+            None => return Err("the vault could not filter the text: nothing was added".into()),
+            Some(c) if c != t || clio_vault::count_masks(&c) > clio_vault::count_masks(t) => {
+                return Err(format!("the skill «{}»: {SECRET}", shown(&f.name)));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is a new version of a skill of `origin` (`false`: nobody holds it). `Err`: who
+/// holds it, another origin or Clio's own.
+fn update_of(root: &Path, name: &str, origin: &str) -> Result<bool, String> {
+    match owner(root, name) {
+        None => Ok(false),
+        Some(o) if o.as_deref() == Some(origin) => Ok(true),
+        Some(o) => Err(o.unwrap_or_else(|| "a skill of Clio's own".into())),
+    }
+}
+
+/// The folder other agents read their skills from (Agent Skills), under the home. Clio looks at
+/// it when a person's chat opens (design `2026-11-20-shared-skills-design.md`, S-74).
+pub const SHARED: &str = ".agents/skills";
+/// The judged text of one look, at most: past it, the rest is "not read yet".
+// shortcut: its own cap until the add's cap (#84) is on main, then that one.
+pub const MAX_LOOK_JUDGED: usize = 2 << 20;
+
+/// What a skill of the shared folder is recorded as coming from: `~/.agents/skills/<dir>`.
+pub fn shared_origin(dir: &str) -> String {
+    format!("~/{SHARED}/{dir}")
+}
+
+/// `p` (canonical) is a folder under the home's own `~/.agents/skills` (not through a link):
+/// its path under it.
+fn shared_dir(home: &Path, p: &Path) -> Option<String> {
+    let rest = p
+        .strip_prefix(home.canonicalize().ok()?.join(SHARED))
+        .ok()?;
+    let rest = rest.to_str()?;
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// What a look at the shared folder found.
+#[derive(Debug, Default)]
+pub struct Look {
+    /// New or changed since the person's last yes, read clean by the judge: each the arguments
+    /// of its item (as `prepare`'s), with `change` (what changed since that yes).
+    pub ask: Vec<Value>,
+    /// Not part of the yes, each one line with why: flagged, not judged, refused, not read yet,
+    /// a link not followed.
+    pub apart: Vec<String>,
+    /// What is listed apart for what is there (`(origin, seen)`): the judge flagged it, or it is
+    /// refused (its checks, a name another origin holds, a link): not said again for that.
+    pub told: Vec<(String, String)>,
+    /// Every skill folder there (`origin`), with its digest when it was read whole.
+    pub found: Vec<(String, Option<String>)>,
+}
+
+/// The digest and version of the last yes to `origin` in the record of `name`.
+pub fn last_yes(root: &Path, name: &str, origin: &str) -> Option<(u64, String)> {
+    let r = skills::record(root, name)?;
+    r["versions"]
+        .as_array()?
+        .iter()
+        .filter(|v| v["origin"].as_str() == Some(origin))
+        .filter_map(|v| Some((v["n"].as_u64()?, v["sha256"].as_str()?.to_owned())))
+        .max_by_key(|(n, _)| *n)
+}
+
+/// `~/.agents/skills` opened from the home, neither `.agents` nor `skills` followed if a link:
+/// `None` when there is none.
+fn open_shared(home: &Path) -> Result<Option<rustix::fd::OwnedFd>, String> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+    let mut fd = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| format!("the home: {e}"))?;
+    let mut at = String::from("~");
+    for part in [".agents", "skills"] {
+        at = format!("{at}/{part}");
+        match statat(&fd, part, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(e) if e == rustix::io::Errno::NOENT => return Ok(None),
+            Err(e) => return Err(format!("{at}: {e}")),
+            Ok(st) => match FileType::from_raw_mode(st.st_mode) {
+                FileType::Directory => {}
+                FileType::Symlink => {
+                    return Err(format!(
+                        "{at} is a link: Clio does not follow it, so she loads nothing from it"
+                    ));
+                }
+                _ => return Err(format!("{at} is not a folder")),
+            },
+        }
+        fd = openat(&fd, part, dir_flags(), Mode::empty())
+            .map_err(|_| format!("{at} changed while it was read: nothing was taken"))?;
+    }
+    Ok(Some(fd))
+}
+
+/// What changed in `f` since version `n` of `name` (its folder in the skills folder): files
+/// added, removed and changed, by name and size.
+fn change(root: &Path, name: &str, n: u64, f: &Found) -> Vec<String> {
+    let dir = root.join(skills::VERSIONS).join(name).join(n.to_string());
+    let old = match rustix::fs::open(&dir, dir_flags(), rustix::fs::Mode::empty())
+        .map_err(|e| e.to_string())
+        .and_then(|fd| walk(&fd, true, true))
+    {
+        Ok(t) => t,
+        Err(_) => return vec!["changed (the files of your last yes could not be read)".into()],
+    };
+    let new: BTreeMap<&str, &str> = std::iter::once(("SKILL.md", f.skill_md.as_str()))
+        .chain(
+            f.files
+                .iter()
+                .map(|x| (x.path.as_str(), x.content.as_str())),
+        )
+        .collect();
+    let mut out = vec![];
+    for (path, text) in &new {
+        match old.get(*path) {
+            Some(Item::File(b)) if b == text.as_bytes() => {}
+            Some(Item::File(b)) => out.push(format!(
+                "changed: {path} ({} bytes, was {})",
+                text.len(),
+                b.len()
+            )),
+            _ => out.push(format!("added: {path} ({} bytes)", text.len())),
+        }
+    }
+    for (path, item) in &old {
+        if matches!(item, Item::File(_)) && !new.contains_key(path.as_str()) {
+            out.push(format!("removed: {path}"));
+        }
+    }
+    out
+}
+
+/// The skill in folder `dir` of `tree` as `clio skills add` reads that folder: only what is
+/// relevant to a folder that is one skill, by its path under it.
+fn sub_tree(tree: &Tree, dir: &str) -> Tree {
+    let prefix = format!("{dir}/");
+    tree.range(prefix.clone()..)
+        .map_while(|(k, v)| Some((k.strip_prefix(&prefix)?, v)))
+        .filter(|(rel, _)| relevant(rel, true))
+        .map(|(rel, v)| (rel.to_owned(), v.clone()))
+        .collect()
+}
+
+/// One value for what is in a skill's folder as read (every path, every file's bytes): the
+/// content the person said no to, or was told of, is known again by it.
+fn tree_digest(tree: &Tree) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for (k, v) in tree {
+        let body: &[u8] = match v {
+            Item::File(b) => b,
+            Item::Dir => b"\0dir",
+            Item::Link => b"\0link",
+        };
+        for part in [k.as_bytes(), body] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part);
+        }
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Looks at the shared folder (`~/.agents/skills`): every folder with a `SKILL.md` (as Pi finds
+/// them: not under another skill, no name that starts with a dot, no `node_modules`; no link
+/// followed), each read as `clio skills add <that folder>` reads it, checked and compared by
+/// digest with the person's last yes to it. Unchanged, or `quiet` for what is there (the person
+/// said no to it, or was told why it is not asked), it is left alone; new or changed, the judge
+/// reads it (at most `MAX_LOOK_JUDGED` in all, and as many as can wait) and it is asked (`ask`,
+/// each with `seen`: what is there) or listed apart. Nothing is written. A home without the
+/// folder: an empty look. `Err`: it could not be read, and nothing is known of it.
+pub fn look_shared(cx: &Ctx, quiet: &dyn Fn(&str, &str) -> bool) -> Result<Look, String> {
+    let mut look = Look::default();
+    let Some(fd) = open_shared(cx.home)? else {
+        return Ok(look);
+    };
+    let tree = walk(&fd, false, true)?;
+    let mut dirs: Vec<&str> = tree
+        .iter()
+        .filter(|(_, v)| matches!(v, Item::File(_)))
+        .filter_map(|(k, _)| k.strip_suffix("/SKILL.md"))
+        .collect();
+    // Pi does not look under a skill's folder for another.
+    let tops: Vec<String> = dirs.iter().map(|d| format!("{d}/")).collect();
+    dirs.retain(|d| !tops.iter().any(|t| d.starts_with(t.as_str())));
+    let under = |k: &str| dirs.iter().any(|d| k.starts_with(&format!("{d}/")));
+    for (k, v) in &tree {
+        let origin = shared_origin(k);
+        if *v == Item::Link && !under(k) && !quiet(&origin, "link") {
+            look.told.push((origin, "link".into()));
+            look.apart.push(format!(
+                "{} is a link: Clio does not follow links there",
+                shared_origin(&shown(k))
+            ));
+        }
+    }
+    let (mut judged, mut names) = (0usize, Vec::<String>::new());
+    for dir in dirs {
+        let origin = shared_origin(dir);
+        let sub = sub_tree(&tree, dir);
+        let seen = tree_digest(&sub);
+        if quiet(&origin, &seen) {
+            look.found.push((origin, None));
+            continue;
+        }
+        let told = |look: &mut Look, line: String| {
+            look.told.push((origin.clone(), seen.clone()));
+            look.apart.push(line);
+        };
+        let name = name_in(&sub, "", dir.rsplit('/').next().unwrap_or(dir));
+        let f = match build(&sub, "", &name).and_then(|f| no_secret(&f, cx).map(|()| f)) {
+            Ok(f) => f,
+            Err(why) => {
+                look.found.push((origin.clone(), None));
+                told(&mut look, format!("{origin}: {why}"));
+                continue;
+            }
+        };
+        let digest = skills::digest(&f.skill_md, &f.files);
+        look.found.push((origin.clone(), Some(digest.clone())));
+        if names.contains(&f.name) {
+            look.apart.push(format!(
+                "{origin}: another folder there has a skill named «{}» too: neither is asked",
+                f.name
+            ));
+            look.ask.retain(|a| a["name"] != f.name.as_str());
+            continue;
+        }
+        names.push(f.name.clone());
+        let update = match update_of(cx.root, &f.name, &origin) {
+            Ok(u) => u,
+            Err(holder) => {
+                told(
+                    &mut look,
+                    format!(
+                        "{origin}: the name «{}» is taken by {holder}, which keeps it",
+                        f.name
+                    ),
+                );
+                continue;
+            }
+        };
+        let last = last_yes(cx.root, &f.name, &origin);
+        if last.as_ref().is_some_and(|(_, d)| *d == digest) {
+            continue;
+        }
+        let by_name = format!("`clio skills add {origin}` adds it on its own");
+        let whole = skills::whole_text(&f.skill_md, &f.files);
+        if judged + whole.len() > MAX_LOOK_JUDGED || look.ask.len() >= crate::pending::MAX_WAITING {
+            look.apart
+                .push(format!("{origin}: not read yet: {by_name}"));
+            continue;
+        }
+        judged += whole.len();
+        match (cx.judge)(&whole, &format!("skill «{}» from {origin}", f.name)) {
+            TextVerdict::Clean => {}
+            TextVerdict::Injection => {
+                told(
+                    &mut look,
+                    format!(
+                        "{origin}: the judge found text in it that tries to give Clio orders, so it is not asked; {by_name} if you know why that text is there"
+                    ),
+                );
+                continue;
+            }
+            v => {
+                look.apart.push(format!(
+                    "{origin}: not judged ({}), so it is not asked; {by_name}",
+                    if v == TextVerdict::NoJudge {
+                        "the judge is off"
+                    } else {
+                        "the judge did not answer"
+                    }
+                ));
+                continue;
+            }
+        }
+        let change = last.map_or_else(Vec::new, |(n, _)| change(cx.root, &f.name, n, &f));
+        look.ask.push(json!({
+            "name": f.name,
+            "description": f.description,
+            "skill_md": f.skill_md,
+            "files": f.files,
+            "sha256": digest,
+            "update": update,
+            "origin": origin,
+            "commit": null,
+            "ref": null,
+            "from": "",
+            "url": null,
+            "layout": format!("~/{SHARED}"),
+            "judge": judge_word(TextVerdict::Clean),
+            "skipped": f.skipped,
+            "left": plugin_parts(&sub),
+            "change": change,
+            "seen": seen,
+        }));
+    }
+    Ok(look)
 }
 
 /// The model's reason, at most.

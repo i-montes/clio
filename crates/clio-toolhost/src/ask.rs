@@ -171,7 +171,7 @@ const FACTORY: &[(Class, &str)] = &[
     // `approve`/`reject`/`apply`/`undo` are the person's answers: the model must not give them.
     (
         Control,
-        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add)\b",
+        r"^clio (init|vault|connect|memory|approve|reject|apply|undo|services|mcp|round|bypass|skills add|skills sync)\b",
     ),
     (Control, r"^clio-memory (purge|import)\b"),
     (
@@ -225,6 +225,96 @@ fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
         }
     }
     out
+}
+
+/// The home's `~/.agents` (S-74: the shared skills folder is in it), as a command may name it:
+/// absolute, `~/`, `$HOME/`, `${HOME}/`, `./` or bare (a command runs in the home), after a `..`,
+/// or by a glob a shell would expand to it (`~/.age*`, `~/.[a]gents`, `~/.{agents,x}`).
+#[derive(Debug, Clone)]
+struct Agents {
+    dirs: Vec<PathBuf>,
+    exact: Regex,
+    globbed: Regex,
+}
+
+impl Agents {
+    fn new(home: &Path) -> Self {
+        let mut dirs = vec![home.join(".agents")];
+        if let Ok(c) = home.canonicalize() {
+            dirs.push(c.join(".agents"));
+        }
+        dirs.dedup();
+        let any = spellings(home, &dirs).join("|");
+        let homes: Vec<String> = dirs
+            .iter()
+            .filter_map(|d| d.parent())
+            .map(|h| format!("{}/", regex::escape(&h.to_string_lossy())))
+            .collect();
+        let pre = r"(^|[^\w.~/$-]|\.\./)";
+        Self {
+            dirs,
+            exact: Regex::new(&format!(r"{pre}({any})($|[^\w.-])")).expect("escaped paths"),
+            globbed: Regex::new(&format!(
+                r"{pre}(~/|\$HOME/|\$\{{HOME\}}/|\./|{})?(\.[^\s/;&|<>()]*[*?\[{{][^\s/;&|<>()]*)",
+                homes.join("|")
+            ))
+            .expect("escaped paths"),
+        }
+    }
+
+    /// `text` names `~/.agents` (quotes and backslashes dropped too).
+    fn named(&self, text: &str) -> bool {
+        [text, bare(text).as_str()].iter().any(|t| {
+            self.exact.is_match(t)
+                || self
+                    .globbed
+                    .captures_iter(t)
+                    .filter_map(|c| c.get(3))
+                    .any(|g| glob_matches(g.as_str(), ".agents"))
+        })
+    }
+}
+
+/// Whether the shell glob `pattern` (`*`, `?`, `[…]`, `{a,b}`) would expand to `name`; one it
+/// cannot read counts as one that would.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let (mut re, mut depth) = (String::from("^"), 0usize);
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            '[' => {
+                re.push('[');
+                if chars.peek() == Some(&'!') {
+                    chars.next();
+                    re.push('^');
+                }
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                    if c == '\\' || c == '[' {
+                        re.push('\\');
+                    }
+                    re.push(c);
+                }
+                re.push(']');
+            }
+            '{' => {
+                depth += 1;
+                re.push_str("(?:");
+            }
+            ',' if depth > 0 => re.push('|'),
+            '}' if depth > 0 => {
+                depth -= 1;
+                re.push(')');
+            }
+            c => re.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    re.push('$');
+    Regex::new(&re).map_or(true, |r| r.is_match(name))
 }
 
 /// Absolute folders match by prefix; a bare name matches a folder of that name anywhere.
@@ -361,6 +451,8 @@ pub struct HostRules {
     /// A registered skill's file in the read-only window of Clio's skills (S-68): naming it does
     /// not make a command `control`.
     window: Option<Regex>,
+    /// The shared skills folder's parent, `~/.agents` (S-74): what writes under it is `control`.
+    agents: Option<Agents>,
     backup: Regex,
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
@@ -395,6 +487,7 @@ impl HostRules {
             foreign: FOREIGN.iter().map(PathBuf::from).collect(),
             control: None,
             window: None,
+            agents: None,
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
@@ -409,6 +502,7 @@ impl HostRules {
             let any = spellings.join("|");
             Regex::new(&format!(r"(^|[^\w.~/$-])({any})($|[^\w.-])")).expect("escaped paths")
         });
+        self.agents = Some(Agents::new(home));
         self
     }
 
@@ -422,6 +516,7 @@ impl HostRules {
     /// match, not a parse: whatever is not caught here bypass answers, so it errs on asking.
     pub fn machine_only(&self, text: &str) -> bool {
         !starts_outside(text)
+            && !self.agents.as_ref().is_some_and(|a| a.named(text))
             && ![text, bare(text).as_str()].iter().any(|t| {
                 self.control.as_ref().is_some_and(|r| r.is_match(t))
                     || t.to_lowercase().contains("clio")
@@ -487,6 +582,15 @@ impl HostRules {
         if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) {
             return Some(Control);
         }
+        // The shared skills folder (S-74), named by anything but a reader or `cd`.
+        if self.agents.as_ref().is_some_and(|a| a.named(command))
+            && (command.contains('>')
+                || simple_commands(command)
+                    .iter()
+                    .any(|w| w[0] != "cd" && !READERS.contains(&w[0].as_str())))
+        {
+            return Some(Control);
+        }
         // A start-up file, a unit folder or Clio's programs, named by anything but a reader.
         if LAUNCH_PATHS.is_match(command)
             && (command.contains('>')
@@ -514,6 +618,10 @@ impl HostRules {
         if p.starts_with("/etc/sudoers")
             || p.contains("authorized_keys")
             || LAUNCH_PATHS.is_match(&p)
+            || self
+                .agents
+                .as_ref()
+                .is_some_and(|a| a.dirs.iter().any(|d| path.starts_with(d)))
         {
             Some(Control)
         } else if path.exists()

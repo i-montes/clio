@@ -766,6 +766,9 @@ fn register_skill(dirs: &Dirs, p: &Pending) -> Res<String> {
 
 pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
     let p = pending::reject(&state(dirs), id)?;
+    // A skill of the shared folder: not asked again for what is there now (S-74). The no is
+    // already kept; failing to remember it only means the chat asks again, so it is not an error.
+    let _ = super::skills::said_no(dirs, &p);
     Ok(p)
 }
 

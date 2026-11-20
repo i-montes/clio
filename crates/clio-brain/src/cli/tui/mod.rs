@@ -1747,7 +1747,11 @@ impl Ctx {
                         let now = crate::cli::now_ms();
                         let others = super::pending::waiting(d)
                             .iter()
-                            .filter(|p| p.session != session && !super::round::is_round(d, &p.run))
+                            .filter(|p| {
+                                p.session != session
+                                    && !super::round::is_round(d, &p.run)
+                                    && p.run != super::skills::SHARED_RUN
+                            })
                             .count();
                         let Some(s) = open.filter(|_| !session.is_empty()) else {
                             return (vec![], vec![], others);

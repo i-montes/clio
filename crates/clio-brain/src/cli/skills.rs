@@ -930,38 +930,326 @@ pub fn register_found(root: &Path, a: &Value) -> Res<String> {
 /// its skills.
 fn add(d: &Dirs, args: &[String]) -> Res<()> {
     use std::io::IsTerminal;
-    let cfg = super::home::Config::load(d)?;
+    let (port, clean) = outside(d, &super::home::Config::load(d)?);
+    add_with(
+        d,
+        args,
+        (
+            &|t, from| clio_toolhost::verdict(&port, t, from),
+            &*clean,
+            &clio_toolhost::skill_add::curl,
+        ),
+        std::io::stdin().is_terminal(),
+        super::apply::confirm,
+    )
+}
+
+/// The judge of the person's `clio` for a skill from outside, and the same filter as the tool
+/// host's (`try_clean`): what it would change is a secret's shape.
+fn outside(d: &Dirs, cfg: &super::home::Config) -> Outside {
     let models = clio_brain::memory_link::MemoryLink::model_dirs(&d.home);
     let port: std::sync::Arc<dyn clio_toolhost::MemoryPort> =
         std::sync::Arc::new(super::mcp::judged(
             d,
-            &cfg,
+            cfg,
             clio_brain::memory_port::LinkPort::new(&d.data, &models),
         ));
-    // The same filter as the tool host's (`try_clean`): what it would change is a secret's shape.
     let scrubber = super::debug::scrubber(d);
     let vault = super::vault::gateway_socket(d)
         .ok()
         .filter(|s| s.exists())
         .map(|s| clio_vault::VaultClient::new(&s).with_timeout(std::time::Duration::from_secs(2)));
-    let clean = |t: &str| {
+    let clean = move |t: &str| {
         let t = scrubber.scrub(&clio_toolhost::sanitize(t));
         match &vault {
             None => Some(t),
             Some(v) => v.scrub(&t).ok(),
         }
     };
-    add_with(
+    (port, Box::new(clean))
+}
+
+/// The judge, and the filter that owns what it needs.
+type Outside = (
+    std::sync::Arc<dyn clio_toolhost::MemoryPort>,
+    Box<dyn Fn(&str) -> Option<String>>,
+);
+/// The judge and the vault's filter a look uses.
+type Look<'a> = (Judge<'a>, &'a dyn Fn(&str) -> Option<String>);
+
+/// The run and session every item of the shared folder waits under (S-74): any person's chat
+/// asks it (`HostSide::mine`), and nothing else does.
+pub const SHARED_RUN: &str = "shared-skills";
+/// Why a skill of the shared folder is off: it is gone from there.
+pub const GONE: &str = "gone from ~/.agents/skills";
+
+/// What of the shared folder the person said no to, or was told why it is not asked: by origin,
+/// what was there then (`seen`). That is not asked or said again until it changes.
+fn quiet_file(root: &Path) -> PathBuf {
+    root.join("shared.json")
+}
+
+fn quiet(root: &Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(quiet_file(root))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn keep_quiet(root: &Path, add: &[(String, String)]) -> Res<()> {
+    if add.is_empty() {
+        return Ok(());
+    }
+    let _l = lock(root)?;
+    let mut q = quiet(root);
+    q.extend(add.iter().cloned());
+    let p = quiet_file(root);
+    let tmp = p.with_extension("json.tmp");
+    write_private(
+        &tmp,
+        &serde_json::to_vec_pretty(&q).map_err(|e| e.to_string())?,
+    )?;
+    fs::rename(&tmp, &p).map_err(|e| io_err(&p, &e))
+}
+
+/// The person said no to `p`: one of the shared folder's (S-74) is not asked again for what was
+/// there.
+pub fn said_no(d: &Dirs, p: &clio_toolhost::pending::Pending) -> Res<()> {
+    let s = |k: &str| p.args[k].as_str().unwrap_or("").to_owned();
+    if p.run != SHARED_RUN || s("seen").is_empty() {
+        return Ok(());
+    }
+    keep_quiet(&root(d), &[(s("origin"), s("seen"))])
+}
+
+/// The shared folder looked at (S-74) with `judge` and `clean` (`ignore`: what the person said
+/// no to is asked again). A copy gone from the folder is turned off, one back unchanged is on
+/// again, what is told apart is remembered; the notes for the person and what is left to ask
+/// (`None`: the folder could not be read, so nothing of it changed).
+fn shared_look(d: &Dirs, (judge, clean): Look, ignore: bool) -> (Vec<String>, Option<Vec<Value>>) {
+    use clio_toolhost::skill_add::{self as sa, Ctx};
+    let root = root(d);
+    let q = quiet(&root);
+    let cx = Ctx {
+        home: &d.home,
+        base: &d.home,
+        root: &root,
+        staging: &d.data.join("staging"),
+        judge,
+        clean,
+        get: &|_, _| false,
+    };
+    let look = match sa::look_shared(&cx, &|o, seen| {
+        !ignore && q.get(o).is_some_and(|x| x == seen)
+    }) {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                vec![super::tui::sanitize::line(&format!(
+                    "shared skills: {e}; nothing of it changed"
+                ))],
+                None,
+            );
+        }
+    };
+    let mut notes = vec![];
+    for r in records(&root) {
+        let Some(origin) = r
+            .versions
+            .iter()
+            .min_by_key(|v| v.n)
+            .and_then(|v| v.origin.clone())
+            .filter(|o| o.starts_with(&sa::shared_origin("")))
+        else {
+            continue;
+        };
+        let here = look.found.iter().find(|(o, _)| *o == origin);
+        let note = match here {
+            None if r.enabled => set_enabled(&root, &r.name, false, GONE).map(|_| {
+                format!(
+                    "the skill «{}» is gone from ~/.agents/skills: Clio turned her copy off (from the next session); /skills on {} turns it back on",
+                    r.name, r.name
+                )
+            }),
+            Some((_, Some(now)))
+                if !r.enabled
+                    && r.off.as_deref() == Some(GONE)
+                    && sa::last_yes(&root, &r.name, &origin).is_some_and(|(_, d)| d == *now) =>
+            {
+                set_enabled(&root, &r.name, true, "").map(|_| {
+                    format!(
+                        "the skill «{}» is back in ~/.agents/skills as you added it: it is on again (from the next session)",
+                        r.name
+                    )
+                })
+            }
+            _ => continue,
+        };
+        notes.push(note.unwrap_or_else(|e| format!("shared skills: {e}")));
+    }
+    if let Err(e) = keep_quiet(&root, &look.told) {
+        notes.push(format!("shared skills: {e}"));
+    }
+    notes.extend(
+        look.apart
+            .iter()
+            .map(|l| super::tui::sanitize::line(&format!("not asked: {l}"))),
+    );
+    (notes, Some(look.ask))
+}
+
+/// When a person's chat opens (S-74): the shared folder looked at, what is new or changed set
+/// aside for the chat's box (what waited for what is no longer there is dropped), and the notes
+/// to show. Nothing when `skills.shared` is off.
+pub fn shared_open(d: &Dirs) -> Vec<String> {
+    let Ok(cfg) = super::home::Config::load(d) else {
+        return vec![];
+    };
+    if !cfg.skills.shared {
+        return vec![];
+    }
+    let (port, clean) = outside(d, &cfg);
+    shared_open_with(
+        d,
+        (&|t, from| clio_toolhost::verdict(&port, t, from), &*clean),
+    )
+}
+
+fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
+    let st = super::pending::state(d);
+    let waiting: Vec<clio_toolhost::pending::Pending> = super::pending::waiting(d)
+        .into_iter()
+        .filter(|p| p.run == SHARED_RUN)
+        .collect();
+    // What waits was judged already: its text is not judged again.
+    let texts: Vec<String> = waiting
+        .iter()
+        .filter_map(|p| {
+            let (_, _, md, files) = clio_toolhost::pending::skill_of(p)?;
+            let files: Vec<SkillFile> = files
+                .into_iter()
+                .map(|(path, content)| SkillFile {
+                    path: path.into(),
+                    content: content.into(),
+                })
+                .collect();
+            Some(th::whole_text(md, &files))
+        })
+        .collect();
+    let judge = |t: &str, from: &str| {
+        if texts.iter().any(|w| w == t) {
+            clio_toolhost::TextVerdict::Clean
+        } else {
+            (io.0)(t, from)
+        }
+    };
+    let (mut notes, ask) = shared_look(d, (&judge, io.1), false);
+    // The folder could not be read: what waits keeps waiting.
+    let Some(ask) = ask else {
+        return notes;
+    };
+    for p in &waiting {
+        let same = |a: &Value| a["origin"] == p.args["origin"] && a["sha256"] == p.args["sha256"];
+        if !ask.iter().any(same) {
+            let _ = clio_toolhost::pending::reject(&st, &p.id);
+        }
+    }
+    for a in ask {
+        let name = a["name"].as_str().unwrap_or("").to_owned();
+        if let Err(e) = clio_toolhost::pending::set_aside_added(&st, SHARED_RUN, SHARED_RUN, a) {
+            notes.push(super::tui::sanitize::line(&format!(
+                "the skill «{name}» of ~/.agents/skills could not wait for your answer: {e}"
+            )));
+        }
+    }
+    notes
+}
+
+/// `clio skills sync [--yes]`: the shared folder looked at now, at a terminal (S-74): every skill
+/// new or changed shown as its box shows it, and added only on ONE yes (`[y/N]`, no is the
+/// default); what the person said no to before is asked again, and a no is remembered.
+fn sync(d: &Dirs, args: &[String]) -> Res<()> {
+    use std::io::IsTerminal;
+    let cfg = super::home::Config::load(d)?;
+    if !cfg.skills.shared {
+        println!("the look at ~/.agents/skills is off (skills.shared in config.json)");
+        return Ok(());
+    }
+    let (port, clean) = outside(d, &cfg);
+    sync_with(
         d,
         args,
-        (
-            &|t, from| clio_toolhost::verdict(&port, t, from),
-            &clean,
-            &clio_toolhost::skill_add::curl,
-        ),
+        (&|t, from| clio_toolhost::verdict(&port, t, from), &*clean),
         std::io::stdin().is_terminal(),
         super::apply::confirm,
     )
+}
+
+fn sync_with(
+    d: &Dirs,
+    args: &[String],
+    io: Look,
+    tty: bool,
+    confirm: impl Fn(&str) -> bool,
+) -> Res<()> {
+    let yes = args.iter().any(|a| a == "--yes");
+    if let Some(a) = args.iter().find(|a| *a != "--yes") {
+        return Err(format!("clio skills sync [--yes]: unknown {a:?}"));
+    }
+    if !tty && !yes {
+        return Err("clio skills sync asks you at a terminal, and standard input is not one: nothing was added (run it at a terminal, or give --yes to add them without asking)".into());
+    }
+    println!("reading ~/.agents/skills…");
+    let (notes, ask) = shared_look(d, io, true);
+    let ask = ask.unwrap_or_default();
+    for n in &notes {
+        println!("{n}");
+    }
+    if ask.is_empty() {
+        println!("nothing new or changed in ~/.agents/skills to add");
+        return Ok(());
+    }
+    println!();
+    for a in &ask {
+        for (part, row) in super::tui::ask::added_rows(a) {
+            match part {
+                super::tui::ask::Part::Text => println!("  {row}"),
+                _ => println!("{row}"),
+            }
+        }
+        println!();
+    }
+    let n = ask.len();
+    let root = root(d);
+    if yes
+        || confirm(&format!(
+            "add {} as shown above?",
+            if n == 1 {
+                "this skill".to_owned()
+            } else {
+                format!("these {n} skills")
+            }
+        ))
+    {
+        for a in &ask {
+            match register_found(&root, a) {
+                Ok(l) => println!("{l}"),
+                Err(e) => println!("{e}"),
+            }
+        }
+        return Ok(());
+    }
+    let s = |a: &Value, k: &str| a[k].as_str().unwrap_or("").to_owned();
+    keep_quiet(
+        &root,
+        &ask.iter()
+            .map(|a| (s(a, "origin"), s(a, "seen")))
+            .collect::<Vec<_>>(),
+    )?;
+    println!(
+        "nothing was added, and a chat does not ask again for these as they are now (`clio skills add ~/.agents/skills/<name>` adds one)"
+    );
+    Ok(())
 }
 
 type Judge<'a> = &'a dyn Fn(&str, &str) -> clio_toolhost::TextVerdict;
@@ -1083,13 +1371,16 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
             for l in lines(&root) {
                 println!("{l}");
             }
-            println!("\nclio skills off|on|undo|remove <name> · clio skills add <source> [name…]");
+            println!(
+                "\nclio skills off|on|undo|remove <name> · clio skills add <source> [name…] · clio skills sync"
+            );
             Ok(())
         }
         Some("off") => say(set_enabled(&root, &name()?, false, OFF_BY_PERSON)),
         Some("on") => say(set_enabled(&root, &name()?, true, "")),
         Some("undo") => say(undo(&root, &name()?)),
         Some("add") => add(d, &args[1..]),
+        Some("sync") => sync(d, &args[1..]),
         Some("remove") => {
             let n = name()?;
             known(&root, &n)?;
@@ -1104,7 +1395,7 @@ pub fn cmd(d: &Dirs, args: &[String]) -> Res<()> {
             say(remove(&root, &n))
         }
         Some(other) => Err(format!(
-            "clio skills: unknown {other:?} (list, add, off, on, undo, remove)"
+            "clio skills: unknown {other:?} (list, add, sync, off, on, undo, remove)"
         )),
     }
 }
@@ -1604,6 +1895,223 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             .output()
             .unwrap();
         assert!(out.status.success(), "{cmd}: {out:?}");
+    }
+
+    /// A person's `clio` on `t` (home `t/home`), with the place items wait.
+    fn shared_dirs(t: &Path) -> Dirs {
+        let data = t.join("data");
+        let d = Dirs {
+            config: t.join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home: t.join("home"),
+        };
+        fs::create_dir_all(super::super::pending::state(&d).join("pending")).unwrap();
+        d
+    }
+
+    fn put(p: &Path, text: &str) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    }
+
+    fn shared_md(name: &str, body: &str) -> String {
+        format!("---\nname: {name}\ndescription: Says {name}.\n---\n\n{body}\n")
+    }
+
+    /// A chat opens with a judge that flags `FLAG` and counts what it read: its notes, the
+    /// shared folder's items now waiting, and how many texts the judge read.
+    fn open_chat(d: &Dirs) -> (Vec<String>, Vec<clio_toolhost::pending::Pending>, usize) {
+        let read = std::cell::Cell::new(0);
+        let judge = |t: &str, _: &str| {
+            read.set(read.get() + 1);
+            if t.contains("FLAG") {
+                clio_toolhost::TextVerdict::Injection
+            } else {
+                clio_toolhost::TextVerdict::Clean
+            }
+        };
+        let notes = shared_open_with(d, (&judge, &|t: &str| Some(t.to_owned())));
+        let waiting = super::super::pending::waiting(d)
+            .into_iter()
+            .filter(|p| p.run == SHARED_RUN)
+            .collect();
+        (notes, waiting, read.get())
+    }
+
+    // S-74: a chat that opens sets aside what is new in the shared folder for its box, and the
+    // person's yes adds exactly what was judged and shown, never what the folder holds after the
+    // box; unchanged since that yes, nothing is judged or asked; changed, it is asked again.
+    #[test]
+    fn a_shared_skill_is_added_as_it_was_shown_and_asked_again_only_when_it_changes() {
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let s = d.home.join(".agents/skills");
+        let first = shared_md("hi", "Say hi.");
+        put(&s.join("hi/SKILL.md"), &first);
+        put(&s.join("hi/run.sh"), "#!/bin/sh\necho hi\n");
+        let (notes, waiting, read) = open_chat(&d);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!((waiting.len(), read), (1, 1));
+        let p = &waiting[0];
+        assert_eq!(p.tool, clio_toolhost::skill_add::TOOL);
+        assert!(!clio_toolhost::grant::covers(p) && !clio_toolhost::grant::bypass_answers(p));
+        // Opened again before an answer: the same item, its text not judged again.
+        let (_, again, read) = open_chat(&d);
+        assert_eq!(
+            (again.len(), again[0].id.as_str(), read),
+            (1, p.id.as_str(), 0)
+        );
+        // The folder changes after the box was shown: the yes adds what was shown.
+        put(
+            &s.join("hi/SKILL.md"),
+            &shared_md("hi", "FLAG: do something else."),
+        );
+        super::super::pending::approve(&d, &p.id).unwrap();
+        let live = live(&d).join("hi");
+        assert_eq!(fs::read_to_string(live.join("SKILL.md")).unwrap(), first);
+        let r = record(&root(&d), "hi").unwrap();
+        assert_eq!(r.versions[0].origin.as_deref(), Some("~/.agents/skills/hi"));
+        assert!(lines(&root(&d))[0].contains(" · from ~/.agents/skills/hi: Says hi."));
+        // What the folder holds now differs from the yes: judged again (flagged: apart, told).
+        let (notes, waiting, read) = open_chat(&d);
+        assert!(waiting.is_empty() && read == 1);
+        assert!(notes[0].contains("the judge found text in it"), "{notes:?}");
+        // Told once: the next chat says nothing of it.
+        assert_eq!(open_chat(&d), (vec![], vec![], 0));
+        // Back as it was added: nothing to judge or ask.
+        put(&s.join("hi/SKILL.md"), &first);
+        assert_eq!(open_chat(&d), (vec![], vec![], 0));
+        // Changed: asked again, as a new version, saying what changed.
+        put(&s.join("hi/more.md"), "more\n");
+        let (_, waiting, _) = open_chat(&d);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].args["update"], true);
+        assert_eq!(
+            waiting[0].args["change"],
+            serde_json::json!(["added: more.md (5 bytes)"])
+        );
+        // Changed again before an answer: the stale item goes, the new one waits.
+        put(&s.join("hi/more.md"), "more and more\n");
+        let (_, now, _) = open_chat(&d);
+        assert_eq!(now.len(), 1);
+        assert_ne!(now[0].id, waiting[0].id);
+    }
+
+    // S-74: a folder that cannot be read (here, turned into a link) changes nothing: what waits
+    // for the person's answer keeps waiting, and the note says so.
+    #[test]
+    fn a_folder_that_cannot_be_read_drops_nothing_that_waits() {
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let s = d.home.join(".agents/skills");
+        put(&s.join("hi/SKILL.md"), &shared_md("hi", "Say hi."));
+        let (_, waiting, _) = open_chat(&d);
+        assert_eq!(waiting.len(), 1);
+        fs::rename(&s, d.home.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(d.home.join("elsewhere"), &s).unwrap();
+        let (notes, now, read) = open_chat(&d);
+        assert!(notes[0].contains("is a link") && notes[0].contains("nothing of it changed"));
+        assert_eq!(
+            (now.len(), now[0].id.as_str(), read),
+            (1, waiting[0].id.as_str(), 0)
+        );
+    }
+
+    // S-74: the person's no is kept for that content (the box does not come back at every chat);
+    // a skill gone from the folder turns Clio's copy off with a note, back unchanged it is on
+    // again without asking, back changed it is asked; a name another origin holds keeps it.
+    #[test]
+    fn a_no_is_kept_and_a_skill_gone_from_the_folder_is_turned_off() {
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let s = d.home.join(".agents/skills");
+        put(&s.join("hi/SKILL.md"), &shared_md("hi", "Say hi."));
+        let (_, waiting, _) = open_chat(&d);
+        super::super::pending::reject(&d, &waiting[0].id).unwrap();
+        assert_eq!(open_chat(&d), (vec![], vec![], 0), "a no is kept");
+        put(&s.join("hi/SKILL.md"), &shared_md("hi", "Say hi twice."));
+        let (_, waiting, _) = open_chat(&d);
+        assert_eq!(waiting.len(), 1, "changed, it asks again");
+        super::super::pending::approve(&d, &waiting[0].id).unwrap();
+        let live = live(&d).join("hi");
+        assert!(live.is_dir());
+        // Gone: off (not deleted), with a note.
+        let kept = t.path().join("kept");
+        fs::rename(s.join("hi"), &kept).unwrap();
+        let (notes, ..) = open_chat(&d);
+        assert!(
+            notes[0].contains("«hi» is gone from ~/.agents/skills"),
+            "{notes:?}"
+        );
+        let r = record(&root(&d), "hi").unwrap();
+        assert_eq!((r.enabled, r.off.as_deref()), (false, Some(GONE)));
+        assert!(!live.exists() && root(&d).join("versions/hi/1").is_dir());
+        assert!(open_chat(&d).0.is_empty(), "said once");
+        // Back as it was: on again, nothing asked.
+        fs::rename(&kept, s.join("hi")).unwrap();
+        let (notes, waiting, read) = open_chat(&d);
+        assert!(notes[0].contains("is back") && waiting.is_empty() && read == 0);
+        assert!(record(&root(&d), "hi").unwrap().enabled && live.is_dir());
+        // Gone, then back changed: still off, and asked.
+        fs::rename(s.join("hi"), &kept).unwrap();
+        open_chat(&d);
+        put(&kept.join("SKILL.md"), &shared_md("hi", "Other."));
+        fs::rename(&kept, s.join("hi")).unwrap();
+        let (_, waiting, _) = open_chat(&d);
+        assert_eq!(waiting.len(), 1);
+        assert!(!record(&root(&d), "hi").unwrap().enabled);
+        // The yes turns it on with that version.
+        super::super::pending::approve(&d, &waiting[0].id).unwrap();
+        assert!(record(&root(&d), "hi").unwrap().enabled && live.is_dir());
+        // A name Clio's own skill holds: refused, said once.
+        register(&root(&d), &new("mine", &md("mine", "Mine."), &[])).unwrap();
+        put(&s.join("mine/SKILL.md"), &shared_md("mine", "Theirs."));
+        let (notes, waiting, _) = open_chat(&d);
+        assert!(waiting.is_empty());
+        assert!(
+            notes[0].contains("the name «mine» is taken by a skill of Clio's own"),
+            "{notes:?}"
+        );
+        assert!(open_chat(&d).0.is_empty());
+    }
+
+    // S-74: `clio skills sync` asks once, at a terminal, for everything new or changed (what the
+    // person said no to in a chat too), adds only on that yes, and a no is kept for the chats.
+    #[test]
+    fn sync_asks_once_and_adds_only_on_the_yes() {
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let s = d.home.join(".agents/skills");
+        put(&s.join("a/SKILL.md"), &shared_md("a", "A."));
+        put(&s.join("b/SKILL.md"), &shared_md("b", "B."));
+        let judge = |_: &str, _: &str| clio_toolhost::TextVerdict::Clean;
+        let clean = |t: &str| Some(t.to_owned());
+        let io = || -> Look { (&judge, &clean) };
+        let e = sync_with(&d, &[], io(), false, |_| true).unwrap_err();
+        assert!(e.contains("at a terminal"), "{e}");
+        let asked = std::cell::RefCell::new(vec![]);
+        sync_with(&d, &[], io(), true, |q| {
+            asked.borrow_mut().push(q.to_owned());
+            false
+        })
+        .unwrap();
+        assert_eq!(
+            asked.borrow().as_slice(),
+            ["add these 2 skills as shown above?"]
+        );
+        assert!(records(&root(&d)).is_empty());
+        assert!(open_chat(&d).1.is_empty(), "the no is kept for the chats");
+        sync_with(&d, &[], io(), true, |_| true).unwrap();
+        let names: Vec<String> = records(&root(&d)).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["a", "b"]);
+        sync_with(&d, &["--yes".into()], io(), false, |_| false).unwrap();
+        assert_eq!(
+            record(&root(&d), "a").unwrap().versions.len(),
+            1,
+            "unchanged"
+        );
     }
 
     fn added(name: &str, origin: &str, body: &str) -> Value {
