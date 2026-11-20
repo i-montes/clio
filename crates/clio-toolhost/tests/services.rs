@@ -56,6 +56,12 @@ struct Env {
 
 /// Host mode (`host`) or copy mode, with `<data>/services` holding `backup` (version 1, two runs).
 fn env_with(host: bool, judge_on: bool) -> Env {
+    env_at(host, judge_on, false)
+}
+
+/// `env_with`, in a person's chat (`chat`: a person can be asked, `Config.secrets`) or not (a
+/// `clio run`).
+fn env_at(host: bool, judge_on: bool, chat: bool) -> Env {
     let t = tempfile::tempdir().unwrap();
     let r = t.path().canonicalize().unwrap();
     let (home, data) = (r.join("home"), r.join("clio/data"));
@@ -108,6 +114,13 @@ fn env_with(host: bool, judge_on: bool) -> Env {
     // The judge off: no port at all, as `jev.enabled: false` leaves it.
     c.memory = judge_on.then(|| judge.clone() as Arc<dyn MemoryPort>);
     c.skills = Some(data.join("skills"));
+    if chat {
+        c.secrets = Some(clio_toolhost::pending::SecretCfg {
+            state: data.join("host"),
+            run: "r1".into(),
+            person: r.join("vault.sock"),
+        });
+    }
     if host {
         c.host = Some(HostCfg {
             home: home.clone(),
@@ -607,32 +620,61 @@ fn a_suspect_session_asks_for_all_but_status_and_the_brake_holds() {
     assert!(manage(&b, "t", "service_manage", "backup", "status").ok);
 }
 
+/// The id an answer starts with: `draft <id> …` or `set aside <id>: …`.
+fn id_in(content: &str, word: usize) -> String {
+    content
+        .split_whitespace()
+        .nth(word)
+        .unwrap()
+        .trim_end_matches(':')
+        .to_owned()
+}
+
+/// The whole waiting answers, as on main.
+fn waits_text(id: &str) -> String {
+    format!(
+        "draft {id} of the new service «disk-check» stored. It is not registered: a reviewer checks it now, in the background, and then it waits for the person's approval (always, for a service). The result comes by itself with a later message. Go on with the rest; do not write it again until then."
+    )
+}
+
+fn aside_text(id: &str, class: &str) -> String {
+    format!(
+        "set aside {id}: «{class}» needs the person's approval. Do not try it another way. Go on with the rest and say so at the end."
+    )
+}
+
+const IF_WINDOW: &str = " If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after.";
+
 // S-72: what the model is told is what will happen. Bypass off: a service waits for the person
-// and an act on what Clio created needs their approval, word for word as before. Bypass on: a
-// service is registered by Clio by herself if its review passes, and an act on what Clio created
-// is done when the turn ends, under bypass, and the model hears what came of it.
+// and an act on what Clio created needs their approval, word for word as before; under a window
+// the act stays a condition (a window may end first). Bypass on in a chat: a service is
+// registered by Clio by herself if its review passes, and an act is done when the turn ends; the
+// model hears what came of it. In a `clio run` (no chat checks what waits) nothing is promised.
 #[test]
 fn under_bypass_a_service_and_an_act_are_said_as_they_will_happen() {
-    let e = env_with(true, true);
+    let e = env_at(true, true, true);
     with_kinds(&e);
+    let state = e.data.join("host");
     let r = call(&e, "s", "service_write", draft_args("disk-check"));
-    assert!(
-        r.ok && r.content.contains(
-            "a reviewer checks it now, in the background, and then it waits for the person's approval (always, for a service). The result comes by itself with a later message."
-        ),
-        "{}",
-        r.content
-    );
+    assert_eq!(r.content, waits_text(&id_in(&r.content, 1)));
     let r = manage(&e, "s", "service_manage", "backup", "remove");
-    assert!(
-        r.content.contains("«service» needs the person's approval")
-            && r.content.ends_with(
-                "If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after."
-            ),
-        "{}",
-        r.content
+    let id = id_in(&r.content, 2);
+    assert_eq!(
+        r.content,
+        format!("{}{IF_WINDOW}", aside_text(&id, "service"))
     );
-    clio_toolhost::grant::bypass_on(&e.data.join("host")).unwrap();
+    // A window: still the condition, never the promise.
+    clio_toolhost::grant::open(&state, 4, &["x".into()])
+        .unwrap()
+        .unwrap();
+    let r = manage(&e, "s", "skill_manage", "notes", "undo");
+    let id = id_in(&r.content, 2);
+    assert_eq!(
+        r.content,
+        format!("{}{IF_WINDOW}", aside_text(&id, "skill"))
+    );
+    clio_toolhost::grant::close(&state, clio_toolhost::grant::BY_PERSON).unwrap();
+    clio_toolhost::grant::bypass_on(&state).unwrap();
     let r = call(&e, "s", "service_write", draft_args("disk-two"));
     assert!(
         r.ok && r.content.contains(
@@ -641,18 +683,32 @@ fn under_bypass_a_service_and_an_act_are_said_as_they_will_happen() {
         "{}",
         r.content
     );
-    for (tool, name, action) in [
-        ("skill_manage", "notes", "undo"),
-        ("mcp_manage", "time", "on"),
+    for (tool, name, action, class) in [
+        ("skill_manage", "notes", "undo", "skill"),
+        ("mcp_manage", "time", "on", "mcp"),
     ] {
         let r = manage(&e, "s", tool, name, action);
         assert_eq!(r.decision.outcome, "ask", "{r:?}");
-        assert!(
-            r.content.contains(
-                "is done by Clio by herself when this turn ends, under the person's bypass; you hear what came of it right after, in a turn she starts by herself."
-            ) && !r.content.contains("needs the person's approval"),
-            "{tool} {action}: {}",
-            r.content
+        let id = id_in(&r.content, 2);
+        assert_eq!(
+            r.content,
+            format!(
+                "set aside {id}: «{class}» is done by Clio by herself when this turn ends, under the person's bypass; you hear what came of it right after, in a turn she starts by herself. Do not ask the person for it."
+            )
         );
     }
+
+    // A `clio run`: bypass on, but nothing will check what waits: no promise.
+    let run = env_at(true, true, false);
+    with_kinds(&run);
+    clio_toolhost::grant::bypass_on(&run.data.join("host")).unwrap();
+    let r = call(&run, "s", "service_write", draft_args("disk-check"));
+    assert_eq!(r.content, waits_text(&id_in(&r.content, 1)));
+    let r = manage(&run, "s", "skill_manage", "notes", "undo");
+    let id = id_in(&r.content, 2);
+    assert_eq!(
+        r.content,
+        aside_text(&id, "skill"),
+        "no window opens under bypass"
+    );
 }

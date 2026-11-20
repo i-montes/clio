@@ -867,6 +867,26 @@ fn a_service_registered_under_bypass_is_said_so_and_the_model_gets_one_turn() {
     let (_, cmds) = feed(a, vec![settled(Some(1000)), key(KeyCode::Down)]);
     assert_eq!(own_turns(&cmds), 0, "once");
 
+    // A marked conversation (flagged, or the judge said something): bypass does not act in it.
+    for judge_said in [false, true] {
+        let mut m = idle();
+        m.chat.approvals.bypass = true;
+        m.chat.approvals.suspect = !judge_said;
+        m.chat.judge_said = judge_said;
+        let news = Input::Bg(Bg::SkillNews(
+            vec![("s1a2b3c4".into(), "marked".into())],
+            vec![],
+        ));
+        let (m, _) = feed(m, vec![news]);
+        assert!(
+            said(&m).contains(
+                &"reviewing the service «marked» before you are asked to approve it…".to_owned()
+            ),
+            "{:?}",
+            said(&m)
+        );
+    }
+
     // Bypass off: as before.
     let news = Input::Bg(Bg::SkillNews(
         vec![("s1a2b3c4".into(), "prueba".into())],

@@ -171,6 +171,12 @@ fn env() -> Option<Env> {
     c.jail = JailMode::Off;
     c.memory = Some(judge.clone() as Arc<dyn MemoryPort>);
     c.mcp = Some(port.clone() as Arc<dyn McpPort>);
+    // A chat: a person is there to be asked (MCP servers exist only in one).
+    c.secrets = Some(pending::SecretCfg {
+        state: data.join("host"),
+        run: "r1".into(),
+        person: r.join("vault.sock"),
+    });
     c.host = Some(HostCfg {
         home,
         state: data.join("host"),
@@ -1331,10 +1337,17 @@ fn a_host_without_its_mcp_side_starts_and_says_why() {
 fn mcp_propose_says_what_bypass_will_do() {
     let Some(e) = env() else { return };
     let r = call(&e, "s", "c1", "mcp_propose", propose_args());
-    assert!(
-        r.ok && r.content.contains("waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does)"),
-        "{}",
-        r.content
+    let id = r
+        .content
+        .split_whitespace()
+        .nth(2)
+        .unwrap()
+        .trim_end_matches(':');
+    assert_eq!(
+        r.content,
+        format!(
+            "set aside {id}: the MCP server «github» (@example/github-mcp@1.2.3) waits for the person's approval. Nothing was downloaded. If they approve (a permission window never does), Clio installs it, lists its tools and turns it on; then mcp_tools shows it. Do not propose it again meanwhile; go on with the rest and say so at the end."
+        )
     );
     clio_toolhost::grant::bypass_on(&e.data.join("host")).unwrap();
     let mut other = propose_args();

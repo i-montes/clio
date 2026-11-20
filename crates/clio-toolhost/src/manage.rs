@@ -613,19 +613,25 @@ impl ToolHost {
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
-                match self.answered_later(&h.cfg.state, &p) {
-                    // What will answer it when this turn ends, said as it will happen.
-                    Some(k) => format!(
-                        "set aside {}: «{}» is done by Clio by herself when this turn ends, under the person's {}; you hear what came of it right after, in a turn she starts by herself. Do not ask the person for it.",
-                        p.id,
-                        p.class,
-                        k.name()
+                let st = &h.cfg.state;
+                let bypass = crate::grant::Kind::Bypass;
+                match self.answered_later(st, &p) {
+                    // Bypass does it when this turn ends: said as it will happen.
+                    Some(crate::grant::Kind::Bypass) => format!(
+                        "set aside {}: «{}» is done by Clio by herself when this turn ends, under the person's bypass; you hear what came of it right after, in a turn she starts by herself. Do not ask the person for it.",
+                        p.id, p.class
                     ),
-                    None if reason.is_none() => format!(
-                        "{} If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after.",
-                        self.kept_text(&h.cfg.state, &p)
-                    ),
-                    None => self.kept_text(&h.cfg.state, &p),
+                    // A window may end before the turn does: said as a condition.
+                    _ if reason.is_none()
+                        && bypass.current(st).is_none()
+                        && self.acts_unasked(&p.session) =>
+                    {
+                        format!(
+                            "{} If the person's permission window is open, Clio does it when this turn ends, and you hear what came of it right after.",
+                            self.kept_text(st, &p)
+                        )
+                    }
+                    _ => self.kept_text(st, &p),
                 }
             }
             Err(e) => format!(

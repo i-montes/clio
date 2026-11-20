@@ -618,7 +618,8 @@ struct ChatSession {
 struct HostSide {
     dirs: Arc<Dirs>,
     run: String,
-    /// A chat: what a round set aside is asked here too (`round::is_round`).
+    /// A person's chat: what a round set aside is asked here too (`round::is_round`), and bypass
+    /// acts (a `clio run` has no check to act in).
     rounds: bool,
     /// The pending actions already put to the person: each is asked once.
     asked: Mutex<HashSet<String>>,
@@ -644,6 +645,16 @@ impl HostSide {
     fn mine(&self, p: &Pending, session: &str) -> bool {
         (p.run == self.run && p.session == session)
             || (self.rounds && crate::cli::round::is_round(&self.dirs, &p.run))
+    }
+
+    /// Bypass acts for this conversation now: a person's chat (nothing checks what waits in a
+    /// `clio run`), not flagged, not a round, its judge answering, bypass on.
+    fn bypass_acts(&self, suspect: bool, round: bool) -> bool {
+        self.rounds
+            && !suspect
+            && !round
+            && !pending::unjudged_run(&self.dirs, &self.run)
+            && pending::bypass_now(&self.dirs).is_some()
     }
 
     /// What waits for this session.
@@ -984,7 +995,7 @@ impl ChatSession {
     /// What answers `p`, just set aside, by itself at the chat's next check: bypass or the
     /// window (`pending::answers_later`), by name; `None`: it waits for the person.
     fn answered_by(&self, p: &Pending) -> Option<&'static str> {
-        pending::answers_later(&self.dirs, p, self.suspect()).map(|w| grant::Kind::of(&w).name())
+        answered_by(&self.dirs, p, self.suspect())
     }
 
     /// The mark the session's tool host left in the run folder: `Some(suspect)` when marked.
@@ -1100,16 +1111,7 @@ impl ChatSession {
         )?;
         locked(&h.asked).insert(p.id.clone());
         let by = self.answered_by(&p);
-        locked(&h.notes).push(match by {
-            Some(k) => format!(
-                "your skill «{name}» was not registered by the review alone: {reason}. The person's {k} approves it by itself ({}); what came of it follows.",
-                p.id
-            ),
-            None => format!(
-                "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({}); do not write it again meanwhile.",
-                p.id
-            ),
-        });
+        locked(&h.notes).push(skill_note(&name, &reason, &p.id, by));
         Ok(super::SkillOutcome::Waits {
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
@@ -1188,22 +1190,50 @@ impl ChatSession {
         )?;
         locked(&h.asked).insert(p.id.clone());
         let by = self.answered_by(&p);
-        locked(&h.notes).push(match by {
-            Some(k) => format!(
-                "your service «{name}» passed its review ({}): the person's {k} registers it by itself; what came of it follows.",
-                p.id
-            ),
-            None => format!(
-                "your service «{name}» passed to the person: it waits for their approval ({}); do not write it again meanwhile.",
-                p.id
-            ),
-        });
+        locked(&h.notes).push(service_note(&name, &p.id, by));
         Ok(super::SkillOutcome::Waits {
             ask: Box::new(crate::cli::tui::ask::BlockAsk::new(&p, suspect)),
             id: p.id,
             by,
         })
     }
+}
+
+/// Which of bypass or the window approves `p` by itself when the chat's check runs
+/// (`pending::answers_later`), by name; `None` when it waits for the person.
+fn answered_by(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<&'static str> {
+    pending::answers_later(dirs, p, suspect).map(|w| grant::Kind::of(&w).name())
+}
+
+/// What the model is told of a skill draft its review set aside (`id`), answered `by` bypass or
+/// the window, or waiting for the person.
+fn skill_note(name: &str, reason: &str, id: &str, by: Option<&str>) -> String {
+    match by {
+        Some(k) => format!(
+            "your skill «{name}» was not registered by the review alone: {reason}. The person's {k} approves it by itself ({id}); what came of it follows."
+        ),
+        None => format!(
+            "your skill «{name}» was not registered by itself: {reason}. It waits for the person's approval ({id}); do not write it again meanwhile."
+        ),
+    }
+}
+
+/// `skill_note` for a service draft that passed its review.
+fn service_note(name: &str, id: &str, by: Option<&str>) -> String {
+    match by {
+        Some(k) => format!(
+            "your service «{name}» passed its review ({id}): the person's {k} registers it by itself; what came of it follows."
+        ),
+        None => format!(
+            "your service «{name}» passed to the person: it waits for their approval ({id}); do not write it again meanwhile."
+        ),
+    }
+}
+
+/// Whether the person answered something among these lines (a box, `clio approve`), not only
+/// bypass or a window: then the turn goes with their answers (`own_ask`).
+fn by_person<'a>(mut lines: impl Iterator<Item = &'a String>) -> bool {
+    lines.any(|l| l.starts_with("the person "))
 }
 
 /// A turn with no words of the person, no findings and no presentation is one the approvals
@@ -1308,10 +1338,7 @@ impl Session for ChatSession {
             .as_ref()
             .is_some_and(|h| h.acted.swap(false, Ordering::SeqCst));
         // The person answered something (a box, `clio approve`): not only bypass or a window.
-        let person = approved
-            .iter()
-            .chain(&notes)
-            .any(|l| l.starts_with("the person "));
+        let person = by_person(approved.iter().chain(&notes));
         let told = summary.as_ref().map(|(id, _)| id.clone());
         let summary = summary.map(|(_, record)| record);
         if !approved.is_empty() || summary.is_some() {
@@ -1364,12 +1391,11 @@ impl Session for ChatSession {
             on_event(e);
         };
         // Whether bypass acts for this session goes in front of the message, read by the brain.
-        self.pre.set_bypass(self.host.as_ref().is_some_and(|h| {
-            !self.suspect()
-                && !self.round
-                && !pending::unjudged_run(&h.dirs, &h.run)
-                && pending::bypass_now(&h.dirs).is_some()
-        }));
+        self.pre.set_bypass(
+            self.host
+                .as_ref()
+                .is_some_and(|h| h.bypass_acts(self.suspect(), self.round)),
+        );
         let r = run_assessed_with(
             &self.pi.client,
             &self.assessor,
@@ -2213,6 +2239,173 @@ mod tests {
         let st = pending::state(&h.dirs);
         std::fs::write(st.join(format!("pending/{id}.json")), v.to_string()).unwrap();
         serde_json::from_value(v).unwrap()
+    }
+
+    /// The chat's side of a conversation (`s1`) for the approvals' check: what waits and the
+    /// bypass/window path, an act that runs (`ran`) or fails.
+    struct Hosted {
+        h: HostSide,
+        fails: bool,
+    }
+
+    impl Session for Hosted {
+        fn run_prompt(
+            &self,
+            _: &str,
+            _: &Cancel,
+            _: &mut dyn FnMut(&Event),
+        ) -> Result<RunSummary, PiError> {
+            Err(PiError::Protocol("no".into()))
+        }
+        fn steer(&self, _: &str) -> Result<(), PiError> {
+            Ok(())
+        }
+        fn refresh(&self) -> Result<Refresh, PiError> {
+            Err(PiError::Protocol("no".into()))
+        }
+        fn waiting(&self) -> Vec<Pending> {
+            self.h.waiting("s1")
+        }
+        fn grant(&self, id: &str) -> Result<String, String> {
+            self.h.grant("s1", false, id, |_| {
+                if self.fails {
+                    Err(format!("{id}: npm could not fetch the package"))
+                } else {
+                    ran(&self.h, id, 0)
+                }
+            })
+        }
+        fn shutdown(&self) {}
+    }
+
+    // S-72: the chat's check tries what bypass may answer once, and tells what came of it as
+    // Clio's own news (`Bg::Acted`: one turn she starts by herself), a failure too; a failed
+    // item is never tried again, and the box says bypass did not do it. Nothing tried: no news.
+    #[test]
+    fn the_check_tries_what_bypass_answers_once_and_tells_it_as_clios_own() {
+        use crate::cli::tui::app::{Bg, Input};
+        use crate::cli::tui::{grant_waiting, offer};
+        let t = tempfile::tempdir().unwrap();
+        let s = Hosted {
+            h: host_side(t.path()),
+            fails: true,
+        };
+        let st = pending::state(&s.h.dirs);
+        let now = crate::cli::now_ms();
+        let mcp = waits(&s.h, "mcp1", "mcp", "s1", now);
+        assert!(grant_waiting(&s.h.dirs, &s).is_none(), "bypass off");
+        grant::bypass_on(&st).unwrap();
+        let Some(Bg::Acted(notes)) = grant_waiting(&s.h.dirs, &s) else {
+            panic!("the outcome is Clio's own news");
+        };
+        assert_eq!(
+            notes,
+            ["could not be done by itself: mcp1: npm could not fetch the package; it asks you now"]
+        );
+        // Once: it waits for the person, and the box says bypass did not do it.
+        assert!(grant_waiting(&s.h.dirs, &s).is_none());
+        assert!(pending::tried(&s.h.dirs, &mcp));
+        assert!(pending::answers_later(&s.h.dirs, &mcp, false).is_none());
+        assert!(pending::bypass_keeps(&s.h.dirs, &mcp, false).is_none());
+        assert!(s.waiting().iter().any(|p| p.id == "mcp1"));
+        // One that runs is told the same way.
+        let ok = Hosted {
+            h: host_side(t.path()),
+            fails: false,
+        };
+        waits(&ok.h, "del1", "delete", "s1", now);
+        let Some(Bg::Acted(notes)) = grant_waiting(&ok.h.dirs, &ok) else {
+            panic!("the outcome is Clio's own news");
+        };
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with("approved under bypass: «delete» rm -r /srv/del1.bak"),
+            "{notes:?}"
+        );
+        // What bypass leaves to the person: the box hears why, before it asks.
+        let v = json!({"id": "own1", "class": "control", "tool": "exec",
+            "args": {"command": "systemctl reboot"}, "hash": "", "what": "", "run": "r1",
+            "session": "s1", "created_ms": now, "expires_ms": now + 3_600_000,
+            "state": "waiting"});
+        std::fs::write(st.join("pending/own1.json"), v.to_string()).unwrap();
+        assert!(grant_waiting(&ok.h.dirs, &ok).is_none(), "never tried");
+        let (tx, rx) = std::sync::mpsc::channel();
+        offer(&ok.h.dirs, &ok.waiting(), false, &tx);
+        drop(tx);
+        let got: Vec<Input> = rx.iter().collect();
+        let keeps: Vec<_> = got
+            .iter()
+            .filter_map(|i| match i {
+                Input::Bg(Bg::BypassKeeps(k)) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keeps,
+            [vec![(
+                "own1".to_owned(),
+                "it touches Clio's own setup".to_owned()
+            )]]
+        );
+        assert!(matches!(got.last(), Some(Input::Bg(Bg::ChatAsks(_)))));
+    }
+
+    // S-72: a draft bypass will approve is told to the model as such; otherwise as it waits, word
+    // for word as before. A flagged conversation, or bypass off, waits.
+    #[test]
+    fn a_draft_bypass_approves_is_told_to_the_model_as_it_will_happen() {
+        let t = tempfile::tempdir().unwrap();
+        let h = host_side(t.path());
+        let st = pending::state(&h.dirs);
+        let p = waits(&h, "svc1", "service", "s1", crate::cli::now_ms());
+        assert_eq!(answered_by(&h.dirs, &p, false), None);
+        grant::bypass_on(&st).unwrap();
+        assert_eq!(answered_by(&h.dirs, &p, false), Some("bypass"));
+        assert_eq!(answered_by(&h.dirs, &p, true), None, "flagged");
+        assert_eq!(
+            service_note("disk-check", "svc1", Some("bypass")),
+            "your service «disk-check» passed its review (svc1): the person's bypass registers it by itself; what came of it follows."
+        );
+        assert_eq!(
+            service_note("disk-check", "svc1", None),
+            "your service «disk-check» passed to the person: it waits for their approval (svc1); do not write it again meanwhile."
+        );
+        assert_eq!(
+            skill_note("notes", "its check could not run", "sk1", Some("bypass")),
+            "your skill «notes» was not registered by the review alone: its check could not run. The person's bypass approves it by itself (sk1); what came of it follows."
+        );
+        assert_eq!(
+            skill_note("notes", "its check could not run", "sk1", None),
+            "your skill «notes» was not registered by itself: its check could not run. It waits for the person's approval (sk1); do not write it again meanwhile."
+        );
+    }
+
+    // S-72: a turn with only bypass's or the window's outcomes goes on with the person's request
+    // (`MANAGE_ASK`); any answer of the person's own makes it the approvals' (`APPROVALS_ASK`).
+    #[test]
+    fn only_bypass_outcomes_go_with_clios_own_request() {
+        let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
+        let bypass = lines(&["bypass approved a1: rm -r /srv/a1.bak (exit 0)"]);
+        let person = lines(&["the person rejected b2: it is not run"]);
+        assert_eq!(own_ask(true, by_person(bypass.iter())), MANAGE_ASK);
+        assert_eq!(
+            own_ask(true, by_person(bypass.iter().chain(&person))),
+            APPROVALS_ASK
+        );
+    }
+
+    // S-72: the model's envelope says bypass acts only in a person's chat, not flagged, not a
+    // round: a `clio run` has nothing that checks what waits, so it is promised nothing.
+    #[test]
+    fn bypass_is_said_to_act_only_in_a_persons_chat() {
+        let t = tempfile::tempdir().unwrap();
+        let mut h = host_side(t.path());
+        grant::bypass_on(&pending::state(&h.dirs)).unwrap();
+        assert!(h.bypass_acts(false, false));
+        assert!(!h.bypass_acts(true, false), "flagged");
+        assert!(!h.bypass_acts(false, true), "a round");
+        h.rounds = false;
+        assert!(!h.bypass_acts(false, false), "a clio run");
     }
 
     // S-71: what a round set aside waits for the person and is asked in the next chat; never in

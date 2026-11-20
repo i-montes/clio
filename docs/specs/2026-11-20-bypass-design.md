@@ -141,4 +141,4 @@ does not need Clio's own folders: delete, send, spend, install).
 
 ## Version
 
-0.3.0.
+0.3.0; what the model and the person are told, the outcome turn and why an item still asks: 0.3.1.
