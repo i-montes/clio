@@ -861,11 +861,14 @@ const MAX_REASON: usize = 300;
 impl crate::ToolHost {
     /// `skill_add {source, names?, reason}`: finds, checks and judges the skills of `source` and
     /// sets each aside for the person (class `skill`, tool `skill_add`). Nothing is registered:
-    /// only the person's own yes does that, never a permission window or bypass.
+    /// only the person's own yes does that, never a permission window or bypass. The guard waits
+    /// for it with no limit: once `cancel` says the caller went away, no skill is judged further
+    /// and nothing is set aside.
     pub(crate) fn skill_add(
         &self,
         req: &crate::Request,
         args: &serde_json::Map<String, Value>,
+        cancel: &dyn Fn() -> bool,
     ) -> crate::Response {
         let fail = |why: &str| {
             self.skill_answer(
@@ -926,7 +929,8 @@ impl crate::ToolHost {
         }
         // `verdict`, not `verdict_of`: a port without a judge is "not judged" here, never clean.
         let judge = |t: &str, from: &str| match &self.memory {
-            Some(port) => crate::judge::verdict(port, t, from),
+            _ if cancel() => TextVerdict::NoAnswer,
+            Some(port) => crate::judge::verdict(port, t, from, &|_, _| {}),
             None => TextVerdict::NoJudge,
         };
         let staging = self.run_dir.join("skills/staging");
@@ -941,6 +945,7 @@ impl crate::ToolHost {
             get: &self.archive_get,
         };
         let items = match prepare(s("source"), &names, &cx) {
+            Ok(_) if cancel() => return fail("the call was stopped before every skill was judged"),
             Ok(i) => i,
             Err(why) => return fail(&why),
         };

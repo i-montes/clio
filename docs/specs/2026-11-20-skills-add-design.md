@@ -28,8 +28,11 @@ ponytail], so I expect Clio to be able to use them." Clio ships none of them; it
   answers it, since a skill is text the model will read as Clio's own. `clio skills add` prints
   the same and asks only at a terminal (piped input adds nothing unless `--yes`); `--show` prints
   every file of the skills and adds nothing.
-- **Checks.** Every file is read by the judge before the box (long text in batches, a minute in
-  all; past it, not judged); a flag is shown in the box in plain words and the default answer is
+- **Checks.** Every file is read by the judge before the box, each skill on its own: long text in
+  windows, two at a time (a judge on a CPU reads one at a time), 30 s a call, a window without an
+  answer asked once more, within 60 s plus 10 s a window for the skill (past it, not judged; a
+  flag stops it at once); `clio skills add` says which skill the judge is reading and how far it
+  is; a flag is shown in the box in plain words and the default answer is
   no, and so is a skill the judge could not read. No reviewer run: the person chose this text.
   Every file goes through the vault's filter, as `skill_write`'s do: a secret's shape refuses the
   skill. The front matter must read the same to Clio and to Pi's YAML parser: plain `key: value`

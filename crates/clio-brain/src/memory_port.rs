@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use clio_memory::{
     Category, MemoryId, MemoryRow, MemoryType, OpId, OpKind, Origin as Written, Relation, State,
@@ -256,6 +257,20 @@ impl LinkPort {
             }
         }
     }
+
+    /// The judge's verdict on outside text, within `timeout` (`None`: Jev's own).
+    fn judged(&self, text: &str, source: &str, timeout: Option<Duration>) -> TextVerdict {
+        match self
+            .judge
+            .as_ref()
+            .map(|j| j.injection_for(text, source, timeout))
+        {
+            None => TextVerdict::NoJudge,
+            Some(Some(true)) => TextVerdict::Injection,
+            Some(Some(false)) => TextVerdict::Clean,
+            Some(None) => TextVerdict::NoAnswer,
+        }
+    }
 }
 
 impl MemoryPort for LinkPort {
@@ -439,12 +454,11 @@ impl MemoryPort for LinkPort {
     }
 
     fn judge_text(&self, text: &str, source: &str) -> TextVerdict {
-        match self.judge.as_ref().map(|j| j.injection(text, source)) {
-            None => TextVerdict::NoJudge,
-            Some(Some(true)) => TextVerdict::Injection,
-            Some(Some(false)) => TextVerdict::Clean,
-            Some(None) => TextVerdict::NoAnswer,
-        }
+        self.judged(text, source, None)
+    }
+
+    fn judge_text_for(&self, text: &str, source: &str, timeout: Duration) -> TextVerdict {
+        self.judged(text, source, Some(timeout))
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {

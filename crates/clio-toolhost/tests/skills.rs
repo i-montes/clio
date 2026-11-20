@@ -928,6 +928,34 @@ fn skill_add_sets_each_skill_aside_judged_and_writes_nothing() {
     );
 }
 
+// S-68: the guard waits for `skill_add` with no limit (the judge reads at its own pace): when
+// the caller goes away, the judge reads no more and nothing is set aside.
+#[test]
+fn a_skill_add_whose_caller_went_away_sets_nothing_aside() {
+    let e = env(true);
+    let (repo, _) = publish(&source(&e));
+    let asked = std::cell::Cell::new(0);
+    // Still there when the call starts, gone from then on.
+    let gone = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let r = e.host.handle_until(
+        Request {
+            id: "i1".into(),
+            tool: "skill_add".into(),
+            args: json!({"source": repo, "reason": "the person asked"}),
+            session: "s".into(),
+            call_id: "c1".into(),
+            tainted: false,
+        },
+        &gone,
+    );
+    assert!(!r.ok && r.content.contains("stopped"), "{r:?}");
+    assert!(e.judge.asked.lock().unwrap().is_empty());
+    assert!(clio_toolhost::pending::list(&e.data.join("host")).is_empty());
+}
+
 // S-68: a name held by a skill of another origin (one of Clio's, or another source's) is
 // refused; the same origin again is a new version. A silent judge leaves the text unjudged, and
 // it says so; only in a host-mode chat.

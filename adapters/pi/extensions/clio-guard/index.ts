@@ -227,13 +227,14 @@ export default function clioGuard(pi: ExtensionAPI) {
 		return { block: true as const, reason: `clio-guard: ${why}` };
 	}
 
-	/** One request to the tool host. A failure of any kind is a failed tool. */
+	/** One request to the tool host. A failure of any kind is a failed tool. `timeoutMs` null: no
+	 * limit (`undefined` would take the default). */
 	async function host(
 		op: string,
 		args: Record<string, unknown>,
 		callId: string,
 		signal: AbortSignal | undefined,
-		timeoutMs: number | undefined = 15_000,
+		timeoutMs: number | null = 15_000,
 	): Promise<HostResponse> {
 		const socket = process.env.CLIO_TOOLHOST_SOCKET;
 		if (!socket) throw new Error("the tool host is not configured: nothing was run");
@@ -241,7 +242,7 @@ export default function clioGuard(pi: ExtensionAPI) {
 		const res = await callHost(
 			socket,
 			{ id: randomUUID(), tool: op, args, session: state.session, call_id: callId, tainted: state.tainted },
-			timeoutMs,
+			timeoutMs ?? undefined,
 			signal,
 		);
 		if (res.tainted) mark("toolhost");
@@ -995,8 +996,10 @@ export default function clioGuard(pi: ExtensionAPI) {
 				required: ["source", "reason"],
 				additionalProperties: false,
 			},
+			// No limit: the judge reads every skill at its own pace (a minute and more for a large
+			// one); the person's abort still ends it.
 			execute: async (id: string, params: Record<string, unknown>, signal?: AbortSignal) => ({
-				content: [{ type: "text" as const, text: (await host("skill_add", params, id, signal, 420_000)).content }],
+				content: [{ type: "text" as const, text: (await host("skill_add", params, id, signal, null)).content }],
 				details: {},
 			}),
 		});

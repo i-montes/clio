@@ -206,6 +206,17 @@ impl Jev {
     /// Asks `questions` about `state`. Any error means "no answer": the caller goes on with its
     /// own rules.
     pub fn ask(&self, state: &Clean, questions: &Questions) -> Result<Answers, JevError> {
+        self.ask_for(state, questions, self.cfg.timeout)
+    }
+
+    /// `ask` with its own time limit, for a caller that waits that long (a skill from outside,
+    /// read window by window by a judge that may be slow): breaker and budget as `ask`'s.
+    pub fn ask_for(
+        &self,
+        state: &Clean,
+        questions: &Questions,
+        timeout: Duration,
+    ) -> Result<Answers, JevError> {
         let state = state.as_value();
         if questions.is_empty() {
             return Err(JevError::Bad("no questions".into()));
@@ -241,7 +252,7 @@ impl Jev {
             // settled below with what it really cost.
             s.tokens = s.tokens.saturating_add(cost);
         }
-        let result = self.call(state, questions);
+        let result = self.call(state, questions, timeout);
         let mut s = self.st();
         s.probing = false;
         // Charged: the input of an answer, or the estimate when it does not say or when Jev
@@ -269,7 +280,12 @@ impl Jev {
         result
     }
 
-    fn call(&self, state: &Value, questions: &Questions) -> Result<Answers, JevError> {
+    fn call(
+        &self,
+        state: &Value,
+        questions: &Questions,
+        timeout: Duration,
+    ) -> Result<Answers, JevError> {
         let key = (self.key)().map_err(JevError::Key)?;
         let body = json!({
             "model": self.cfg.model,
@@ -278,7 +294,7 @@ impl Jev {
         });
         let reply = self
             .transport
-            .call(&key, &body, self.cfg.timeout)
+            .call(&key, &body, timeout)
             .map_err(|e| JevError::Call(clean_line(&e.replace(&key, "***"))))?;
         Answers::parse(questions, &reply).map_err(JevError::Bad)
     }
@@ -307,11 +323,13 @@ mod tests {
         calls: Arc<AtomicU32>,
         model: Arc<Mutex<String>>,
         fail: Arc<Mutex<bool>>,
+        limits: Arc<Mutex<Vec<Duration>>>,
     }
 
     impl Transport for Fake {
-        fn call(&self, key: &str, body: &Value, _t: Duration) -> Result<Value, String> {
+        fn call(&self, key: &str, body: &Value, t: Duration) -> Result<Value, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.limits.lock().unwrap().push(t);
             assert_eq!(body["model"], "jev-latest");
             if *self.fail.lock().unwrap() {
                 return Err(format!("HTTP 500 with the key {key}"));
@@ -328,6 +346,7 @@ mod tests {
         calls: Arc<AtomicU32>,
         model: Arc<Mutex<String>>,
         fail: Arc<Mutex<bool>>,
+        limits: Arc<Mutex<Vec<Duration>>>,
     }
 
     fn rig(cfg: Config, key: Result<String, String>) -> Rig {
@@ -337,10 +356,12 @@ mod tests {
             Arc::new(Mutex::new(false)),
         );
         let clock = Arc::new(FixedClock::new(1_000));
+        let limits = Arc::new(Mutex::new(vec![]));
         let fake = Fake {
             calls: calls.clone(),
             model: model.clone(),
             fail: fail.clone(),
+            limits: limits.clone(),
         };
         let jev = Jev::new(
             cfg,
@@ -354,6 +375,7 @@ mod tests {
             calls,
             model,
             fail,
+            limits,
         }
     }
 
@@ -375,6 +397,16 @@ mod tests {
         assert_eq!(ask(&r).unwrap().noul("x"), Some(0.7));
         assert_eq!(r.jev.model().as_deref(), Some("jev-1.14.0"));
         assert!(!r.jev.model_changed());
+    }
+
+    // A caller that waits longer gives the call that long; `ask` keeps the configured limit.
+    #[test]
+    fn a_call_can_have_its_own_time_limit() {
+        let r = rig(Config::default(), Ok("KEY".into()));
+        let long = Duration::from_secs(30);
+        assert!(ask(&r).is_ok());
+        assert!(r.jev.ask_for(&clean(json!({"t": "x"})), &q(), long).is_ok());
+        assert_eq!(*r.limits.lock().unwrap(), [Config::default().timeout, long]);
     }
 
     #[test]

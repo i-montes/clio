@@ -582,7 +582,10 @@ fn the_whole_verdict_says_when_nobody_judged() {
         TextVerdict::Injection,
         TextVerdict::Clean,
     ] {
-        assert_eq!(clio_toolhost::verdict(&port(v), "some text", "s"), v);
+        assert_eq!(
+            clio_toolhost::verdict(&port(v), "some text", "s", &|_, _| {}),
+            v
+        );
     }
     // Far past one batch of windows: every window is asked, the last one flagged.
     let j = Arc::new(Judge {
@@ -594,7 +597,7 @@ fn the_whole_verdict_says_when_nobody_judged() {
     let text = format!("{}FLAG", "a line of text\n".repeat(60_000));
     let port: Arc<dyn MemoryPort> = j.clone();
     assert_eq!(
-        clio_toolhost::verdict(&port, &text, "s"),
+        clio_toolhost::verdict(&port, &text, "s", &|_, _| {}),
         TextVerdict::Injection
     );
     assert!(j.asked.lock().unwrap().len() > 16);

@@ -817,7 +817,7 @@ impl ToolHost {
         }
         match req.tool.as_str() {
             "skill_write" => return self.skill_write(&req, &map),
-            "skill_add" => return self.skill_add(&req, &map),
+            "skill_add" => return self.skill_add(&req, &map, cancel),
             "skill_report" => return self.skill_report(&req, &map),
             "service_write" => return self.service_write(&req, &map),
             "service_status" => return self.service_status(&req, &map),

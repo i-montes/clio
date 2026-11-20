@@ -78,54 +78,131 @@ pub(crate) fn windows(text: &str) -> Vec<&str> {
     }
 }
 
-/// How long a skill from outside may take the judge in all (`verdict`): past it, not judged.
-pub const WHOLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How a skill from outside is put to the judge (`verdict`). A judge on a CPU reads one window
+/// at a time, a few seconds each: asked many at once it answers each later, past its limit.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pace {
+    /// Windows asked at once: one read while the next waits, so the adapter's start and the
+    /// round trip are hidden, and no queue so long that a call outlasts its limit.
+    pub at_once: usize,
+    /// How long one call may take, the judge's own limit included: a window may wait behind its
+    /// sibling and the calls a skill that stopped left running (2 + 2 windows of a busy judge).
+    pub call: Duration,
+    /// A skill's deadline is `base` plus `per_window` for each of its windows.
+    pub base: Duration,
+    pub per_window: Duration,
+}
+
+/// For a CPU judge that reads a 24 KiB window in a few seconds: a window has about twice
+/// that; a skill of 1 MiB (about 47 windows) has under 9 minutes, one of a few KiB 70 s.
+pub(crate) const PACE: Pace = Pace {
+    at_once: 2,
+    call: Duration::from_secs(30),
+    base: Duration::from_secs(60),
+    per_window: Duration::from_secs(10),
+};
 
 /// What the judge of `port` says of the whole text of a skill from outside (`skill_add`), however
-/// long: every window, asked `MAX_WINDOWS` at once (`JUDGE_TIMEOUT` each batch), the next batch
-/// only while all so far are clean, within `WHOLE_TIMEOUT` in all. One window flagged is an
-/// injection; one unanswered, or the time out, leaves it unjudged; a port with no judge says so
-/// (`NoJudge`). A tool result keeps `verdict_of`'s rule.
-pub fn verdict(port: &Arc<dyn MemoryPort>, text: &str, source: &str) -> TextVerdict {
-    let end = std::time::Instant::now() + WHOLE_TIMEOUT;
-    for batch in windows(text).chunks(MAX_WINDOWS) {
-        if std::time::Instant::now() >= end {
-            return TextVerdict::NoAnswer;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        for part in batch {
+/// long: every window, `PACE.at_once` at a time, within a deadline that grows with its windows.
+/// A window flagged is an injection at once; one unanswered is asked once more, and if it is
+/// still unanswered, or the deadline passes, the skill is unjudged (the rest is still read: a
+/// flag wins); a port with no judge says so (`NoJudge`). `progress` hears how many windows of
+/// how many were read clean (first `0`). A tool result keeps `verdict_of`'s rule.
+pub fn verdict(
+    port: &Arc<dyn MemoryPort>,
+    text: &str,
+    source: &str,
+    progress: &dyn Fn(usize, usize),
+) -> TextVerdict {
+    verdict_paced(port, text, source, PACE, progress)
+}
+
+pub(crate) fn verdict_paced(
+    port: &Arc<dyn MemoryPort>,
+    text: &str,
+    source: &str,
+    pace: Pace,
+    progress: &dyn Fn(usize, usize),
+) -> TextVerdict {
+    use std::time::Instant;
+    let parts = windows(text);
+    let n = parts.len();
+    let end = Instant::now()
+        + pace.base
+        + pace
+            .per_window
+            .saturating_mul(u32::try_from(n).unwrap_or(u32::MAX));
+    // A little past the judge's own limit, so it reports its own time out first.
+    let give_up = pace.call + pace.call / 10;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (mut next, mut retry, mut tries) = (0, Vec::new(), vec![0u8; n]);
+    // The windows asked and not answered yet, with when they are given up.
+    let mut flying: Vec<(usize, Instant)> = Vec::new();
+    let (mut read, mut unanswered) = (0, false);
+    progress(0, n);
+    loop {
+        while flying.len() < pace.at_once.max(1) {
+            let i = if let Some(i) = retry.pop() {
+                i
+            } else if next < n {
+                next += 1;
+                next - 1
+            } else {
+                break;
+            };
+            tries[i] += 1;
             let (tx, port, part, source) = (
                 tx.clone(),
                 Arc::clone(port),
-                (*part).to_owned(),
+                parts[i].to_owned(),
                 source.to_owned(),
             );
+            // shortcut: a call is never cancelled; past its time it is only no longer waited
+            // for (the judge's own limit ends it).
             std::thread::spawn(move || {
                 let v = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    port.judge_text(&part, &source)
+                    port.judge_text_for(&part, &source, pace.call)
                 }));
-                let _ = tx.send(v.unwrap_or(TextVerdict::NoAnswer));
+                let _ = tx.send((i, v.unwrap_or(TextVerdict::NoAnswer)));
             });
+            flying.push((i, Instant::now() + give_up));
         }
-        let until = (std::time::Instant::now() + JUDGE_TIMEOUT).min(end);
-        let verdicts: Vec<TextVerdict> = (0..batch.len())
-            .map(|_| {
-                rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
-                    .unwrap_or(TextVerdict::NoAnswer)
-            })
-            .collect();
-        if let Some(v) = [
-            TextVerdict::Injection,
-            TextVerdict::NoAnswer,
-            TextVerdict::NoJudge,
-        ]
-        .into_iter()
-        .find(|v| verdicts.contains(v))
-        {
-            return v;
+        let Some(first) = flying.iter().map(|f| f.1).min() else {
+            return if unanswered {
+                TextVerdict::NoAnswer
+            } else {
+                TextVerdict::Clean
+            };
+        };
+        let now = Instant::now();
+        if now >= end {
+            return TextVerdict::NoAnswer;
+        }
+        let answered = match rx.recv_timeout(first.min(end) - now) {
+            // A late answer to a window asked again counts for it: it is the same text.
+            Ok((i, v)) => flying
+                .iter()
+                .position(|f| f.0 == i)
+                .map(|at| (flying.remove(at).0, v)),
+            Err(_) => {
+                let now = Instant::now();
+                flying
+                    .iter()
+                    .position(|f| f.1 <= now)
+                    .map(|at| (flying.remove(at).0, TextVerdict::NoAnswer))
+            }
+        };
+        match answered {
+            None => {}
+            Some((_, v @ (TextVerdict::Injection | TextVerdict::NoJudge))) => return v,
+            Some((i, TextVerdict::NoAnswer)) if tries[i] < 2 => retry.push(i),
+            Some((_, TextVerdict::NoAnswer)) => unanswered = true,
+            Some((_, TextVerdict::Clean)) => {
+                read += 1;
+                progress(read, n);
+            }
         }
     }
-    TextVerdict::Clean
 }
 
 /// The source as the model and the person are told it: one line, cut.
@@ -415,6 +492,7 @@ impl ToolHost {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -458,6 +536,201 @@ mod tests {
                 .iter()
                 .all(|p| serde_json::to_string(p).unwrap().len() <= JUDGE_JSON_MAX)
         );
+    }
+
+    use crate::{Found, Judging, MemoryItem, ProposalDraft, Proposed};
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    /// One window's read, scaled down from a CPU judge's few seconds.
+    const READ: Duration = Duration::from_millis(20);
+    /// `PACE` scaled down, with room for a loaded machine.
+    const FAST: Pace = Pace {
+        at_once: 2,
+        call: Duration::from_secs(1),
+        base: Duration::from_secs(1),
+        per_window: Duration::from_millis(200),
+    };
+
+    /// A judge like a CPU one: it reads one window at a time, `READ` each (a window asked
+    /// meanwhile waits its turn), and a call that took longer than its limit is lost, as the
+    /// adapter's own time out. It flags `FLAG`, never answers `FAIL`, answers `FLAKY` from its
+    /// second ask on, and the first ask of `HANG` hangs past any limit (without taking the turn).
+    #[derive(Default)]
+    struct Slow {
+        turn: Mutex<()>,
+        flying: AtomicUsize,
+        most: AtomicUsize,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl MemoryPort for Slow {
+        fn propose(&self, _: &ProposalDraft, _: &str, _: &Judging) -> Result<Proposed, String> {
+            Err("no".into())
+        }
+        fn search(&self, _: &str, _: usize) -> Result<Found, String> {
+            Err("no".into())
+        }
+        fn get(&self, _: i64) -> Result<MemoryItem, String> {
+            Err("no".into())
+        }
+        fn judge_text(&self, text: &str, source: &str) -> TextVerdict {
+            self.judge_text_for(text, source, JUDGE_TIMEOUT)
+        }
+        fn judge_text_for(&self, text: &str, _: &str, limit: Duration) -> TextVerdict {
+            let start = Instant::now();
+            let before = {
+                let mut a = self.asked.lock().unwrap();
+                a.push(text.to_owned());
+                a.iter().filter(|t| *t == text).count() - 1
+            };
+            if text.contains("HANG") && before == 0 {
+                std::thread::sleep(limit * 3);
+                return TextVerdict::Clean;
+            }
+            let now = self.flying.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            {
+                let _turn = self.turn.lock().unwrap();
+                std::thread::sleep(READ);
+            }
+            self.flying.fetch_sub(1, Ordering::SeqCst);
+            if start.elapsed() > limit || text.contains("FAIL") {
+                TextVerdict::NoAnswer
+            } else if text.contains("FLAG") {
+                TextVerdict::Injection
+            } else if text.contains("FLAKY") && before == 0 {
+                TextVerdict::NoAnswer
+            } else {
+                TextVerdict::Clean
+            }
+        }
+    }
+
+    /// A skill's whole text: SKILL.md and `files - 1` files, `kib` KiB in all.
+    fn skill(files: usize, kib: usize) -> String {
+        let each = kib * 1024 / files;
+        let mut t = format!("---\nname: s\n---\n{}", "w".repeat(each));
+        for f in 1..files {
+            t.push_str(&format!("\n--- file f{f}.md ---\n{}", "w".repeat(each)));
+        }
+        t
+    }
+
+    fn judged(port: &Arc<Slow>, text: &str, pace: Pace) -> TextVerdict {
+        let port: Arc<dyn MemoryPort> = port.clone();
+        verdict_paced(&port, text, "skill «s» from o/r", pace, &|_, _| {})
+    }
+
+    // A judge that reads one window at a time answered few of the windows asked at once in
+    // time, and one lost answer left the skill unjudged; asked two at a time, it reads them all.
+    #[test]
+    fn a_large_skill_is_judged_by_a_slow_judge_two_windows_at_a_time() {
+        let j = Arc::new(Slow::default());
+        let text = skill(15, 64);
+        let seen = Mutex::new(vec![]);
+        let port: Arc<dyn MemoryPort> = j.clone();
+        let v = verdict_paced(&port, &text, "s", FAST, &|r, n| {
+            seen.lock().unwrap().push((r, n))
+        });
+        assert_eq!(v, TextVerdict::Clean);
+        let n = windows(&text).len();
+        assert_eq!(j.asked.lock().unwrap().len(), n);
+        assert!(j.most.load(Ordering::SeqCst) <= 2);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.first(), Some(&(0, n)));
+        assert_eq!(seen.last(), Some(&(n, n)));
+        // The largest skill the design takes, 100 files and 1 MiB.
+        let j = Arc::new(Slow::default());
+        assert_eq!(judged(&j, &skill(100, 1024), FAST), TextVerdict::Clean);
+        // What the batch did: sixteen at once, each past its limit.
+        let j = Arc::new(Slow::default());
+        let batch = Pace {
+            at_once: 16,
+            call: READ * 5,
+            ..FAST
+        };
+        assert_eq!(judged(&j, &skill(100, 1024), batch), TextVerdict::NoAnswer);
+    }
+
+    // Fifteen skills of the sizes of a real repository, judged one after the other by the same
+    // slow judge: each is judged, and one the judge does not answer leaves the others judged.
+    #[test]
+    fn each_skill_is_judged_on_its_own() {
+        let j = Arc::new(Slow::default());
+        let sizes = [4, 106, 9, 17, 64, 10, 25, 6, 40, 12, 30, 8, 50, 20, 49];
+        for (i, kib) in sizes.into_iter().enumerate() {
+            let mut text = skill(1 + i % 15, kib);
+            if i == 4 {
+                text.push_str("FAIL");
+            }
+            let want = if i == 4 {
+                TextVerdict::NoAnswer
+            } else {
+                TextVerdict::Clean
+            };
+            assert_eq!(judged(&j, &text, FAST), want, "skill {i} ({kib} KiB)");
+        }
+    }
+
+    // A flag in the 9th window flags that skill at once: nothing after it is asked but what was
+    // already on its way, and the next skill is judged as ever.
+    #[test]
+    fn a_flag_stops_the_skill_and_flags_only_it() {
+        let j = Arc::new(Slow::default());
+        let mut text: String = (0..40_000).map(|k| format!("line {k}\n")).collect();
+        text.insert_str(8 * (JUDGE_WHOLE - OVERLAP) + 3000, "FLAG");
+        let w = windows(&text);
+        assert_eq!(w.iter().position(|p| p.contains("FLAG")), Some(8));
+        assert_eq!(judged(&j, &text, FAST), TextVerdict::Injection);
+        // At most the window asked beside it and the one after that (whichever got the turn).
+        let asked = j.asked.lock().unwrap().clone();
+        assert!(w[11..].iter().all(|p| !asked.contains(&(*p).to_owned())));
+        assert_eq!(judged(&j, &skill(3, 30), FAST), TextVerdict::Clean);
+    }
+
+    // A skill gets a deadline that grows with its windows: past it, not judged, and the next
+    // skill is judged within its own.
+    #[test]
+    fn a_skill_past_its_deadline_is_not_judged_and_the_next_one_is() {
+        let j = Arc::new(Slow::default());
+        let short = Pace {
+            base: Duration::from_millis(10),
+            per_window: Duration::from_millis(5),
+            ..FAST
+        };
+        let text = skill(10, 1024);
+        let n = windows(&text).len();
+        assert_eq!(judged(&j, &text, short), TextVerdict::NoAnswer);
+        // It stopped at its deadline, long before the judge could read it all.
+        assert!(j.asked.lock().unwrap().len() < n / 2);
+        assert_eq!(judged(&j, &skill(5, 40), FAST), TextVerdict::Clean);
+    }
+
+    // A window that got no answer, or whose call hung, is asked once more; twice unanswered, the
+    // skill is not judged, and the rest of it is still read.
+    #[test]
+    fn an_unanswered_window_is_asked_once_more() {
+        let j = Arc::new(Slow::default());
+        let mut text = skill(1, 30);
+        text.push_str("FLAKY");
+        assert_eq!(judged(&j, &text, FAST), TextVerdict::Clean);
+        assert_eq!(j.asked.lock().unwrap().len(), windows(&text).len() + 1);
+        let j = Arc::new(Slow::default());
+        let hang = Pace {
+            call: READ * 10,
+            ..FAST
+        };
+        assert_eq!(judged(&j, "a HANG", hang), TextVerdict::Clean);
+        assert_eq!(j.asked.lock().unwrap().len(), 2);
+        let j = Arc::new(Slow::default());
+        let mut text = "FAIL".to_owned();
+        text.push_str(&skill(1, 100));
+        assert_eq!(judged(&j, &text, FAST), TextVerdict::NoAnswer);
+        let asked = j.asked.lock().unwrap();
+        assert_eq!(asked.iter().filter(|t| t.contains("FAIL")).count(), 2);
+        assert_eq!(asked.len(), windows(&text).len() + 1);
     }
 
     #[test]
