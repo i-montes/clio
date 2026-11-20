@@ -388,6 +388,8 @@ pub struct ChatInfo {
     pub presentation: bool,
     /// Quiet notes for the chat, from opening it.
     pub notes: Vec<String>,
+    /// The subagents of its run so far (`subagent.json` each, oldest first), for `/subagents`.
+    pub subagents: Vec<serde_json::Value>,
 }
 
 impl From<&Opened> for ChatInfo {
@@ -399,6 +401,7 @@ impl From<&Opened> for ChatInfo {
             refresh: o.refresh.clone(),
             presentation: o.presentation,
             notes: o.notes.clone(),
+            subagents: vec![],
         }
     }
 }
@@ -1364,6 +1367,7 @@ fn background(app: &mut App, bg: Bg) -> Vec<Cmd> {
                     };
                     app.chat
                         .opened(info.id, info.workspace, history, info.refresh, app.now_ms);
+                    app.chat.subagents.past = info.subagents;
                     app.chat
                         .items
                         .extend(info.notes.into_iter().map(super::chat::Item::Note));

@@ -36,6 +36,7 @@ pub enum Run {
     Actions,
     Undo,
     Review,
+    Subagents,
     Skills,
     Services,
     Round,
@@ -183,6 +184,14 @@ pub const COMMANDS: &[Command] = &[
         "have a second agent check the last change (or what you say)",
         false,
         Run::Review,
+    ),
+    c(
+        "subagents",
+        &[],
+        "",
+        "the tasks Clio handed to subagents, newest first, and where their reports are",
+        false,
+        Run::Subagents,
     ),
     c(
         "skills",
@@ -658,6 +667,10 @@ pub fn start(app: &mut App, target: Target, args: &str) -> Vec<Cmd> {
             }
         },
         Run::Review => super::review::command(app, args),
+        Run::Subagents => {
+            app.modal = Some(super::subagents::modal(app));
+            vec![]
+        }
         Run::Skills => match args.split_whitespace().collect::<Vec<_>>().as_slice() {
             ["remove", name] => {
                 app.confirm = Some(Confirm::new(
@@ -810,6 +823,7 @@ fn numbers(app: &App, context: bool) -> Modal {
         ]
         .into_iter()
         .chain(super::review::usage_line(app))
+        .chain(super::subagents::usage_line(app))
         .collect()
     };
     Modal::text(if context { "Context" } else { "Usage" }, lines)

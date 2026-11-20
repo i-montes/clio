@@ -842,13 +842,15 @@ impl ToolHost {
         (class, reason): (Class, Option<&str>),
         cancel: &dyn Fn() -> bool,
     ) -> Response {
-        if self.review {
+        // Nobody can be asked by a review or a child (S-67, S-73), with or without a window or
+        // bypass: refused, never stored.
+        if self.review || self.writer() {
             return self.refuse_in_review(
                 Some((state, run)),
                 req,
                 &args,
-                "review/aside",
-                crate::REVIEW_CANNOT_ASK,
+                self.rule("aside"),
+                self.cannot_ask(),
             );
         }
         let now = now_ms();
@@ -990,10 +992,14 @@ impl ToolHost {
         })
     }
 
-    /// Bypass or a window may act for `session` at all: never in a review or a round, nor in a
-    /// session the judge flagged or did not answer for (S-72).
+    /// Bypass or a window may act for `session` at all: never in a review, a round or a child
+    /// (S-73), nor in a session the judge flagged or did not answer for (S-72).
     pub(crate) fn acts_unasked(&self, session: &str) -> bool {
-        !(self.review || self.unattended || self.is_suspect(session) || self.is_unjudged(session))
+        !(self.review
+            || self.writer()
+            || self.unattended
+            || self.is_suspect(session)
+            || self.is_unjudged(session))
     }
 
     /// What answers `p` by itself once this turn ends (the chat checks what waits): bypass or the

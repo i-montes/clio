@@ -917,22 +917,35 @@ pub fn action_log(dirs: &Dirs, run: Option<&str>) -> Res<Vec<Value>> {
         .collect())
 }
 
-/// The entry is of `run` itself or of one of its reviews (`<run>.review-<n>`).
+/// A second agent's run ids: `<run>.review-<n>` and a subagent's `<run>.sub-<n>` (S-73), with
+/// the word the person sees before their entries.
+const SECONDS: [(&str, &str); 2] = [(".review-", "review"), (".sub-", "subagent")];
+
+/// The entry is of `run` itself, or of one of its reviews or subagents.
 fn of_run(v: &Value, run: &str) -> bool {
     v["run"].as_str().is_some_and(|r| {
         r == run
-            || r.strip_prefix(run)
-                .and_then(|x| x.strip_prefix(".review-"))
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            || r.strip_prefix(run).is_some_and(|x| {
+                SECONDS.iter().any(|(sep, _)| {
+                    x.strip_prefix(sep)
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                })
+            })
     })
 }
 
-/// `review N · ` before an entry of a review, so it is never taken for the session's own.
+/// `review N · ` (`subagent N · `) before an entry of a review (a subagent), so it is never taken
+/// for the session's own.
 fn review_mark(v: &Value) -> String {
-    v["run"]
-        .as_str()
-        .and_then(|r| r.rsplit_once(".review-"))
-        .map(|(_, n)| format!("review {} · ", sanitize::line(n)))
+    let Some(r) = v["run"].as_str() else {
+        return String::new();
+    };
+    SECONDS
+        .iter()
+        .find_map(|(sep, word)| {
+            r.rsplit_once(sep)
+                .map(|(_, n)| format!("{word} {} · ", sanitize::line(n)))
+        })
         .unwrap_or_default()
 }
 
@@ -1061,14 +1074,19 @@ mod tests {
             row("r10", "other"),
             row("r1.review-x", "odd"),
             row("r2.review-1", "theirs"),
+            row("r1.sub-3", "cargo test"),
+            row("r1.sub-", "odd"),
         ]
         .join("\n");
         std::fs::write(state(&d).join("actions.jsonl"), log).unwrap();
         let got = action_log(&d, Some("r1")).unwrap();
         let whats: Vec<String> = got.iter().map(|v| action_cells(v, 0)[3].clone()).collect();
-        assert_eq!(whats, ["make", "review 2 · cat a"]);
+        assert_eq!(
+            whats,
+            ["make", "review 2 · cat a", "subagent 3 · cargo test"]
+        );
         assert!(action_line(&got[1], false).contains("review 2 · cat a"));
-        assert_eq!(action_log(&d, None).unwrap().len(), 5);
+        assert_eq!(action_log(&d, None).unwrap().len(), 7);
     }
 
     // `clio pending` shows the entry a replace or a remove would change, before `clio approve`.

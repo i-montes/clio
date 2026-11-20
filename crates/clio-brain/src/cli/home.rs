@@ -249,6 +249,8 @@ pub struct Config {
     pub approvals: ApprovalsCfg,
     #[serde(default)]
     pub round: RoundCfg,
+    #[serde(default)]
+    pub subagent: SubagentCfg,
 }
 
 /// The round: Clio looks by herself at what she was asked to watch (`round.rs`).
@@ -416,6 +418,71 @@ impl Default for ReviewCfg {
     }
 }
 
+/// Subagents (S-73): the chat's model hands tasks to child agents (`subagent`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentCfg {
+    /// Their model when the call names none. Unset: the session's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Readers running at once.
+    #[serde(default = "subagent_parallel")]
+    pub max_parallel: u32,
+    /// Tasks in one call.
+    #[serde(default = "subagent_per_call")]
+    pub max_per_call: u32,
+    /// Per child: steps, time and cost (micro-dollars), its own caps.
+    #[serde(default = "subagent_steps")]
+    pub max_steps: u32,
+    #[serde(default = "subagent_seconds")]
+    pub max_seconds: u64,
+    #[serde(default = "review_cost")]
+    pub max_cost_micro_usd: u64,
+    /// Children one conversation may launch in an hour.
+    #[serde(default = "subagent_per_hour")]
+    pub max_per_hour: u32,
+}
+
+fn subagent_parallel() -> u32 {
+    4
+}
+fn subagent_per_call() -> u32 {
+    8
+}
+fn subagent_steps() -> u32 {
+    100
+}
+fn subagent_seconds() -> u64 {
+    1800
+}
+fn subagent_per_hour() -> u32 {
+    40
+}
+
+impl SubagentCfg {
+    /// As `ReviewCfg::clamp`; a call never holds more than 8 tasks (the tool's own schema).
+    fn clamp(&mut self) {
+        self.max_per_call = self.max_per_call.clamp(1, 8);
+        self.max_parallel = self.max_parallel.clamp(1, 8);
+        self.max_steps = self.max_steps.clamp(1, 500);
+        self.max_seconds = self.max_seconds.clamp(30, 7200);
+        self.max_per_hour = self.max_per_hour.min(200);
+    }
+}
+
+impl Default for SubagentCfg {
+    fn default() -> Self {
+        Self {
+            model: None,
+            max_parallel: subagent_parallel(),
+            max_per_call: subagent_per_call(),
+            max_steps: subagent_steps(),
+            max_seconds: subagent_seconds(),
+            max_cost_micro_usd: review_cost(),
+            max_per_hour: subagent_per_hour(),
+        }
+    }
+}
+
 /// One continuous conversation (`docs/specs/2026-11-18-continuous-conversation-design.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCfg {
@@ -526,6 +593,7 @@ impl Config {
             ui: UiCfg::default(),
             approvals: ApprovalsCfg::default(),
             round: RoundCfg::default(),
+            subagent: SubagentCfg::default(),
         }
     }
 
@@ -552,6 +620,7 @@ impl Config {
         cfg.model.check(&p)?;
         cfg.review.clamp();
         cfg.round.clamp();
+        cfg.subagent.clamp();
         Ok(cfg)
     }
 

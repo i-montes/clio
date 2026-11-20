@@ -581,6 +581,8 @@ pub struct RpcClient {
     allowed_tools: Mutex<Option<(Vec<String>, bool)>>,
     /// A person answers `select` and `input` dialogs (`ui_respond`); otherwise they are cancelled.
     interactive: Arc<AtomicBool>,
+    /// Events of Clio's own for the run in progress (`inject`): how a call's subagents stand.
+    injected: Mutex<std::collections::VecDeque<Event>>,
 }
 
 /// Kills a whole process group (Pi and anything it started). Only called while the leader has
@@ -655,6 +657,7 @@ impl RpcClient {
             timeouts: Timeouts::default(),
             allowed_tools: Mutex::new(None),
             interactive,
+            injected: Mutex::default(),
         })
     }
 
@@ -764,9 +767,28 @@ impl RpcClient {
         }
     }
 
+    /// An event of Clio's own for the run in progress, handed out by `next_event` before Pi's
+    /// (a `ToolUpdate` of a call Clio serves, S-73). It never comes from Pi, and is not checked.
+    pub fn inject(&self, e: Event) {
+        if let Ok(mut q) = self.injected.lock() {
+            q.push_back(e);
+        }
+    }
+
+    /// What `inject` left that no run handed out (it came after the run ended).
+    pub fn take_injected(&self) -> Vec<Event> {
+        self.injected
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default()
+    }
+
     /// The next event, or `None` if none came within `timeout`. Err when Pi is gone (after the
     /// queue is drained) or when the allowed-tools rule is broken (Pi is killed first).
     pub fn next_event(&self, timeout: Duration) -> Result<Option<Event>, PiError> {
+        if let Some(e) = self.injected.lock().ok().and_then(|mut q| q.pop_front()) {
+            return Ok(Some(e));
+        }
         let r = self
             .events
             .lock()

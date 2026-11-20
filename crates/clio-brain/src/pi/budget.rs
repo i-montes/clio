@@ -27,6 +27,9 @@ const UNREPORTED_MESSAGE_MICRO: u64 = 10_000;
 pub struct RunGuard {
     ctl: Controller<Arc<dyn Clock>>,
     day: Arc<Mutex<DayBudget>>,
+    /// Inside a `subagent` call since then: its time is its children's, under their own caps
+    /// (S-73), and does not count toward this task's time.
+    paused: Option<i64>,
 }
 
 impl RunGuard {
@@ -39,6 +42,16 @@ impl RunGuard {
         Self {
             ctl: Controller::new(clock, task_id, Level::Simple, budget),
             day,
+            paused: None,
+        }
+    }
+
+    /// The time inside a `subagent` call so far, taken off the task's.
+    fn exclude_paused(&mut self) {
+        if let Some(t) = self.paused {
+            let now = self.ctl.now_ms();
+            self.ctl.exclude_ms(now - t);
+            self.paused = Some(now);
         }
     }
 
@@ -47,6 +60,14 @@ impl RunGuard {
     pub fn observe(&mut self, event: &Event) -> Option<Stop> {
         if let Some(s) = self.ctl.halted() {
             return Some(s);
+        }
+        self.exclude_paused();
+        match event {
+            Event::ToolStart { name, .. } if name == "subagent" => {
+                self.paused = Some(self.ctl.now_ms());
+            }
+            Event::ToolEnd { name, .. } if name == "subagent" => self.paused = None,
+            _ => {}
         }
         let mut day = self.day.lock().unwrap_or_else(|e| e.into_inner());
         let stop = match event {
@@ -72,6 +93,7 @@ impl RunGuard {
 
     /// The caps that move without events (time). Call it on every pass of the wait loop.
     pub fn tick(&mut self) -> Option<Stop> {
+        self.exclude_paused();
         let mut day = self.day.lock().unwrap_or_else(|e| e.into_inner());
         self.ctl.check_limits(0, &mut day).err()
     }
@@ -125,6 +147,32 @@ mod tests {
             }),
             ..MessageInfo::default()
         })
+    }
+
+    // S-73: the time inside a `subagent` call is its children's, under their own caps: it does
+    // not count toward the turn's time; the time before and after it does.
+    #[test]
+    fn the_time_inside_a_subagent_call_does_not_count_toward_the_turns() {
+        let clock = Arc::new(FixedClock::new(0));
+        let day = Arc::new(Mutex::new(DayBudget::new(u64::MAX)));
+        let mut g = guard_with(budget(), clock.clone(), day);
+        clock.advance(20_000);
+        assert_eq!(g.observe(&tool("subagent", "a")), None);
+        clock.advance(500_000);
+        assert_eq!(g.tick(), None);
+        clock.advance(500_000);
+        let end = Event::ToolEnd {
+            id: "c".into(),
+            name: "subagent".into(),
+            result: json!({}),
+            is_error: false,
+            duration_ms: None,
+        };
+        assert_eq!(g.observe(&end), None);
+        clock.advance(39_000);
+        assert_eq!(g.tick(), None);
+        clock.advance(1_000);
+        assert_eq!(g.tick(), Some(Stop::Time));
     }
 
     // Second audit, batch D: a message with no usage is not free.

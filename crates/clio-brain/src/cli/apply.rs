@@ -477,7 +477,12 @@ pub fn undo_lines(dirs: &Dirs, id: &str, force: bool) -> Res<(bool, Vec<String>)
     // A host session changed the machine itself: its own journal says what to give back.
     let run = runs::resolve(dirs, id)?;
     if run.meta().is_ok_and(|m| m.host) {
-        let said = clio_toolhost::host::undo(&run.path.join("toolhost"))?;
+        // A writing subagent's changes are joined to the run's when it ends, or when the chat
+        // opens the run again (S-73); one still apart is joined now. What cannot be is said, and
+        // the rest is undone anyway.
+        let unjoined = clio_toolhost::host::fold_children(&run.path);
+        let mut said = clio_toolhost::host::undo(&run.path.join("toolhost"))?;
+        said.extend(unjoined);
         if said.is_empty() {
             return Ok((
                 false,
