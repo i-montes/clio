@@ -2144,7 +2144,7 @@ pub(crate) mod tests {
     // S-69, with `bwrap`: a run sees nothing of the home but what it declared. A socket in the
     // home (a process manager's, a terminal multiplexer's: the way out of the jail) cannot be
     // connected to; a file outside `reads` and a credentials folder cannot be read; a declared
-    // read path is read and not written; what it writes is private (`umask 077`).
+    // read path is read and not written; what it writes and makes is private (`umask 077`).
     #[test]
     fn a_run_sees_nothing_of_the_home_but_what_it_declared() {
         let Some(jail) = bwrap() else { return };
@@ -2172,6 +2172,7 @@ pub(crate) mod tests {
              cat {notes}/a.txt\n\
              echo x > {notes}/new 2>/dev/null && echo LEAK wrote-a-read-path\n\
              echo s > \"$CLIO_STATE_DIR/s\"\n\
+             mkdir \"$CLIO_STATE_DIR/d\"\n\
              echo o > {out}/o\n",
             sock = q(&sock),
             secret = q(&d.home.join("secret.txt")),
@@ -2204,6 +2205,11 @@ pub(crate) mod tests {
                 f.display()
             );
         }
+        let dir = root(&d).join("state/reader/d");
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         // Outside the jail the socket does connect: the check above is a real one.
         assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
     }

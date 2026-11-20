@@ -49,18 +49,25 @@ impl Report {
     }
 }
 
-/// A service's state folder (`services/state/<name>`, or one kept with a removed service): what
-/// the service wrote, not Clio. Its own mode is checked; what is inside is the service's.
-fn service_state(p: &Path) -> bool {
-    p.parent().is_some_and(|q| q.ends_with("services/state"))
-        || (p.ends_with("state")
-            && p.parent()
-                .and_then(Path::parent)
-                .is_some_and(|q| q.ends_with("services/removed")))
+/// The folder a jailed program writes: a service's state (`services/state/<name>`) or an MCP
+/// server's data, its `HOME` (`mcp/data/<name>`), live or kept with a removed one
+/// (`skills::remove_in`). What the program wrote, not Clio: its own mode is checked, what is
+/// inside is the program's (Chromium makes its caches 755).
+fn jailed_data(p: &Path) -> bool {
+    [("services", "state"), ("mcp", "data")]
+        .iter()
+        .any(|(root, kept)| {
+            p.parent()
+                .is_some_and(|q| q.ends_with(Path::new(root).join(kept)))
+                || (p.ends_with(kept)
+                    && p.parent()
+                        .and_then(Path::parent)
+                        .is_some_and(|q| q.ends_with(Path::new(root).join("removed"))))
+        })
 }
 
 /// Every file and folder under `dir`: folders must be 0700, files and sockets without access for
-/// group and others. A service's state folder is checked, not walked.
+/// group and others. A jailed program's own folder is checked, not walked.
 fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -82,7 +89,7 @@ fn check_tree(o: &mut Report, dir: &Path, depth: usize) {
                     Some(format!("chmod 700 {}", p.display())),
                 );
             }
-            if depth < 8 && !service_state(&p) {
+            if depth < 8 && !jailed_data(&p) {
                 check_tree(o, &p, depth + 1);
             }
         } else if md & 0o077 != 0 {
@@ -175,7 +182,7 @@ fn audit_walk(dir: &Path, depth: usize, f: &Scrubber, out: &mut (usize, Vec<Path
                 .file_name()
                 .to_str()
                 .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
-            if !skip && depth < 8 && !service_state(&p) {
+            if !skip && depth < 8 && !jailed_data(&p) {
                 audit_walk(&p, depth + 1, f, out);
             }
         } else if t.is_file() {
@@ -1126,6 +1133,52 @@ mod tests {
         let mut found = (0, Vec::new(), 0);
         audit_walk(&data, 0, &Scrubber::default(), &mut found);
         assert!(found.1.is_empty(), "{:?}", found.1);
+    }
+
+    // S-70: an MCP server's data folder is its `HOME` in the jail, where Chromium makes its caches
+    // 755: the folder's own mode is checked, what the server wrote inside is not (live or removed).
+    // A 755 folder anywhere else in Clio's data still fails.
+    #[test]
+    fn an_mcp_servers_data_folder_is_checked_but_not_walked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let live = data.join("mcp/data/playwright");
+        let kept = data.join("mcp/removed/playwright-1/data");
+        let open = data.join("mcp/data/notion");
+        let other = data.join("mcp/servers/stray");
+        for d in [&live, &kept, &open, &other] {
+            std::fs::create_dir_all(d.join(".cache/fontconfig")).unwrap();
+        }
+        let mode = |d: &Path, m| std::fs::set_permissions(d, PermissionsExt::from_mode(m)).unwrap();
+        for d in [&data, &data.join("mcp")] {
+            mode(d, 0o700);
+        }
+        for d in [
+            "mcp/data",
+            "mcp/removed",
+            "mcp/removed/playwright-1",
+            "mcp/servers",
+        ] {
+            mode(&data.join(d), 0o700);
+        }
+        for d in [&live, &kept, &open, &other] {
+            mode(d, 0o700);
+            mode(&d.join(".cache"), 0o755);
+            mode(&d.join(".cache/fontconfig"), 0o755);
+        }
+        mode(&open, 0o755);
+        mode(&other.join(".cache/fontconfig"), 0o700);
+        let mut o = Report::default();
+        check_tree(&mut o, &data, 0);
+        let mut said: Vec<_> = o.checks.iter().map(|c| c.msg.clone()).collect();
+        said.sort();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].contains("mcp/data/notion has mode 755"), "{said:?}");
+        assert!(
+            said[1].contains("servers/stray/.cache has mode 755"),
+            "{said:?}"
+        );
     }
 
     // The private Node is nodejs.org's files, not what Clio wrote: a key-looking string inside
