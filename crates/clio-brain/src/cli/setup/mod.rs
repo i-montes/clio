@@ -313,24 +313,67 @@ impl Found {
 
 // ---- plain lines (`--yes`, `clio update`) ------------------------------------------------------
 
-/// The steps as lines on standard output; questions only for a secret, at the terminal.
+/// The steps as lines on standard output, each when it starts and when it ends (on a terminal the
+/// first line, with a download's progress, is replaced by the second); questions only for a
+/// secret, at the terminal.
 pub struct Plain {
     pub lang: Lang,
     pub rows: Vec<String>,
-    /// Only failures and warnings are printed (`clio update` prints what changed itself).
-    pub quiet: bool,
+    /// The line a terminal shows while a step works, which its end replaces.
+    shown: String,
+}
+
+impl Plain {
+    pub fn new(lang: Lang, rows: Vec<String>) -> Self {
+        Self {
+            lang,
+            rows,
+            shown: String::new(),
+        }
+    }
 }
 
 impl Ui for Plain {
     fn set(&mut self, i: usize, st: St) {
         use super::ui::{Level, Style};
+        use std::io::Write;
         let s = Style::stdout();
         let label = self.rows.get(i).cloned().unwrap_or_default();
+        let working = |p: &str| {
+            text::say(&super::tui::sanitize::line(&format!(
+                "{}  {label}{p}",
+                s.ellipsis()
+            )))
+        };
         let line = match &st {
-            St::Waiting | St::Working(_) => return,
-            St::Done(n) if !self.quiet => format!("{}  {label} · {n}", s.mark(Level::Pass)),
-            St::Skip(n) if !self.quiet => format!("{}  {label} · {n}", s.dim("·")),
-            St::Done(_) | St::Skip(_) => return,
+            St::Waiting => return,
+            St::Working(p) if s.tty => {
+                let now = working(&p.map_or(String::new(), |(got, total)| {
+                    if total > 0 {
+                        format!(" · {}/{} MB", screen::mb(got), screen::mb(total))
+                    } else {
+                        format!(" · {} MB", screen::mb(got))
+                    }
+                }));
+                // Only when it changed: a download calls this for every piece it gets.
+                if now != self.shown {
+                    print!(
+                        "\r{}\r{}",
+                        " ".repeat(self.shown.chars().count()),
+                        s.dim(&now)
+                    );
+                    let _ = std::io::stdout().flush();
+                    self.shown = now;
+                }
+                return;
+            }
+            St::Working(None) => {
+                println!("{}", working(""));
+                return;
+            }
+            St::Working(Some(_)) => return,
+            St::Done(n) => format!("{}  {label} · {n}", s.mark(Level::Pass)),
+            St::Skip(n) => format!("{}  {label} · {n}", s.dim("·")),
             St::Warn(n) => format!("{}  {label} · {n}", s.mark(Level::Warn)),
             St::Failed(why, fix) => format!(
                 "{}  {label} · {why}\n   {} {fix}",
@@ -338,6 +381,12 @@ impl Ui for Plain {
                 s.arrow()
             ),
         };
+        if !self.shown.is_empty() {
+            print!(
+                "\r{}\r",
+                " ".repeat(std::mem::take(&mut self.shown).chars().count())
+            );
+        }
         println!("{}", text::say(&super::tui::sanitize::multiline(&line)));
     }
 
@@ -484,11 +533,7 @@ fn plain(
         .iter()
         .map(|s| s.label().get(lang).to_owned())
         .collect();
-    let mut ui = Plain {
-        lang,
-        rows,
-        quiet: false,
-    };
+    let mut ui = Plain::new(lang, rows);
     let (failed, replaced, left, blocked) = {
         let mut r = run_with(dirs, lang, sys, pins, opts.clone(), &mut ui);
         let steps = action.steps();
@@ -534,7 +579,6 @@ pub(crate) fn run_with<'a>(
         failed: false,
         changes: Vec::new(),
         replaced: false,
-        doctor: None,
     }
 }
 

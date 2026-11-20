@@ -130,7 +130,7 @@ impl Fx {
         std::fs::create_dir_all(f.home()).unwrap();
         place(Path::new(CLIO), &f.bin().join("clio"));
         place(&vault_bin(), &f.bin().join("clio-vault"));
-        f.release("0.2.1", &[]);
+        f.release("0.2.2", &[]);
         f.pins("22.23.5");
         f.system();
         write(&f.p("secrets/pass"), format!("{PASS}\n").as_bytes());
@@ -388,7 +388,7 @@ fn setup_installs_everything_and_a_second_run_changes_nothing() {
     );
     assert_eq!(
         std::fs::read_to_string(f.data().join("version")).unwrap(),
-        "0.2.1"
+        "0.2.2"
     );
 
     // No secret anywhere but the vault: not on the screen, in an argument or an environment
@@ -481,6 +481,20 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
     let out = all(&o);
     assert!(o.status.success(), "{out}");
     assert!(out.contains("Node 22.23.5 → 22.24.0"), "{out}");
+    // Each step as it runs: its name when it starts, its result when it ends, in order.
+    let at = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s}: {out}"));
+    let mut last = 0;
+    for step in [
+        "clio and clio-vault",
+        "Private Node 22",
+        "clio-memory and its model",
+        "Services timer",
+        "Final check",
+    ] {
+        let (start, end) = (at(&format!("...  {step}\n")), at(&format!("  {step} · ")));
+        assert!(last <= start && start < end, "{step}: {out}");
+        last = end;
+    }
     assert!(
         f.calls()
             .contains("systemctl --user restart clio-services.timer"),
@@ -491,10 +505,19 @@ fn update_keeps_the_persons_data_byte_for_byte_and_says_what_changed() {
     let o = f.clio(&["update"]);
     let out = all(&o);
     assert!(
-        o.status.success() && out.contains("Clio is already up to date (0.2.1)."),
+        o.status.success() && out.contains("Clio is already up to date (0.2.2)."),
         "{out}"
     );
     assert_eq!(tree(&f.home(), &skip), before);
+    // What the new binary runs after an update replaced it shows its steps the same way.
+    let o = f.clio(&["update", "--reexec"]);
+    let out = all(&o);
+    assert!(
+        o.status.success()
+            && out.contains("...  Private Node 22\n")
+            && out.contains("Final check · "),
+        "{out}"
+    );
     let o = f.clio(&["update", "--check"]);
     assert!(all(&o).contains("already up to date"), "{}", all(&o));
     f.release("9.9.9", &[]);
@@ -532,7 +555,7 @@ fn update_replaces_both_binaries_or_neither_and_goes_on_in_the_new_one() {
         all(&o)
     );
     assert_eq!((ino("clio"), ino("clio-vault")), (clio, vault));
-    assert!(text(&f.clio(&["--version"]).stdout).contains("0.2.1"));
+    assert!(text(&f.clio(&["--version"]).stdout).contains("0.2.2"));
     let left: Vec<String> = std::fs::read_dir(f.bin())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -701,7 +724,7 @@ fn an_update_killed_mid_download_leaves_a_working_install() {
     // The install works as it was.
     let o = f.clio(&["--version"]);
     assert!(
-        o.status.success() && text(&o.stdout).contains("0.2.1"),
+        o.status.success() && text(&o.stdout).contains("0.2.2"),
         "{}",
         all(&o)
     );

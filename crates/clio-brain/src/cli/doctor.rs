@@ -166,9 +166,22 @@ fn public_listeners() -> Vec<String> {
 }
 
 /// Folders inside the data folder that hold the person's own files, not what Clio wrote: the
-/// copy of a project, the originals `apply` saved, what npm installed for Pi, and the private Node
-/// the installer unpacked (`node`, nodejs.org's own files).
+/// copy of a project, the originals `apply` saved, what npm installed for Pi or an MCP server
+/// (each package checked against its lockfile's integrity when installed; a server's tree is
+/// hashed again before each start), and the private Node the installer unpacked (`node`,
+/// nodejs.org's files, checked against the SHA-256 the binary pins).
 const NOT_CLIO_OUTPUT: [&str; 5] = ["sandbox", "scratch", "backup", "node_modules", "node"];
+/// Trees from the data folder's root that others wrote, checked another way, and so not read for
+/// key shapes (S-18) by the doctor nor by the vault: Chromium (`browsers`: the archive whose
+/// SHA-256 the catalog pins, unpacked once, made private, shown read-only to the server that
+/// reads it) and npm's store of the registry's files (`content-v2`: each file named by its own
+/// SHA-512, which npm checks on every read). npm's index and logs beside it are still read; the
+/// modes of all of them are still checked (S-23).
+const NOT_READ: [&str; 2] = ["browsers", "mcp/npm-cache/_cacache/content-v2"];
+
+fn not_read(data: &Path, p: &Path) -> bool {
+    NOT_READ.iter().any(|r| p == data.join(r))
+}
 /// A file bigger than this is not read.
 const AUDIT_MAX_BYTES: u64 = 32 << 20;
 
@@ -190,7 +203,7 @@ fn audit_walk(
                 .file_name()
                 .to_str()
                 .is_some_and(|n| NOT_CLIO_OUTPUT.contains(&n));
-            if !skip && depth < 8 && !jailed_data(data, &p) {
+            if !skip && depth < 8 && !jailed_data(data, &p) && !not_read(data, &p) {
                 audit_walk(data, &p, depth + 1, f, out);
             }
         } else if t.is_file() {
@@ -630,7 +643,15 @@ fn vault_audit(o: &mut Report, dirs: &Dirs) {
     }
     let scan = Request::ScanDir {
         path: dirs.data.display().to_string(),
-        skip: NOT_CLIO_OUTPUT.map(String::from).to_vec(),
+        skip: NOT_CLIO_OUTPUT
+            .iter()
+            .map(|n| (*n).to_owned())
+            .chain(
+                NOT_READ
+                    .iter()
+                    .map(|r| dirs.data.join(r).display().to_string()),
+            )
+            .collect(),
     };
     let hits = match client.call(&scan) {
         Ok(r) if r.ok => r.data.unwrap_or_default(),
@@ -839,7 +860,38 @@ pub fn collect(dirs: &Dirs) -> Report {
 /// [`collect`]; without `host_self_test` host mode's console is not tried (that self-test runs
 /// commands, with `sudo` where there is passwordless `sudo`): what the installer shows.
 pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
+    collect_live(dirs, host_self_test, &mut |_| {})
+}
+
+/// What [`collect_live`] tells as it goes: the part it starts, and each check once it is made.
+pub enum Live<'a> {
+    Doing(&'static str),
+    Done(&'a Check),
+}
+
+/// Hands the checks made since the last call to `f`, then what comes next.
+struct Tell<'a> {
+    shown: usize,
+    f: &'a mut dyn FnMut(Live<'_>),
+}
+
+impl Tell<'_> {
+    fn next(&mut self, o: &Report, doing: Option<&'static str>) {
+        for c in &o.checks[self.shown..] {
+            (self.f)(Live::Done(c));
+        }
+        self.shown = o.checks.len();
+        if let Some(d) = doing {
+            (self.f)(Live::Doing(d));
+        }
+    }
+}
+
+/// [`collect_with`], telling `f` each part as it starts and each check as soon as it is made.
+pub fn collect_live(dirs: &Dirs, host_self_test: bool, f: &mut dyn FnMut(Live<'_>)) -> Report {
     let mut o = Report::default();
+    let mut t = Tell { shown: 0, f };
+    t.next(&o, Some("the private folders and the modes inside them"));
     let mut folders = vec![dirs.config.clone(), dirs.data.clone()];
     folders.extend(dirs.runtime.clone());
     for d in &folders {
@@ -869,15 +921,20 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
             Some("Log in through a normal session (XDG_RUNTIME_DIR), or remove the temporary clio-<uid> folder that is not yours.".into()),
         );
     }
+    t.next(&o, Some("what Clio wrote, for anything shaped like a key"));
     data_audit(&mut o, &dirs.data);
+    t.next(&o, Some("the timers"));
     if let Some(w) = super::services::timer_warning(dirs) {
         o.say(Level::Warn, w, Some("clio services enable".into()));
     }
     if let Some(w) = super::round::timer_warning(dirs) {
         o.say(Level::Warn, w, Some("clio services enable".into()));
     }
+    t.next(&o, Some("the memory"));
     memory_report(&mut o, dirs);
+    t.next(&o, Some("the vault's values in what Clio wrote"));
     vault_audit(&mut o, dirs);
+    t.next(&o, Some("the configuration and the model's key"));
     match Config::load(dirs) {
         Ok(c) => {
             o.say(
@@ -921,6 +978,7 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
         Err(e) => o.say(Level::Warn, e, Some("Run `clio init`.".into())),
     }
     old_key_file(&mut o, dirs);
+    t.next(&o, Some("the sockets and what listens"));
     if let Some(rt) = &dirs.runtime
         && let Ok(rd) = std::fs::read_dir(rt)
     {
@@ -960,19 +1018,25 @@ pub fn collect_with(dirs: &Dirs, host_self_test: bool) -> Report {
             Some("Stop that process: Clio must not listen on a public address.".into()),
         );
     }
+    t.next(&o, Some("Node and Pi"));
     for (level, msg, hint) in super::pi::checks(dirs) {
         o.say(level, msg, hint);
     }
+    t.next(&o, Some("the jail's self-test"));
     jail_lines(&mut o);
+    t.next(&o, Some("Pi's jail"));
     pi_jail_line(&mut o, dirs);
     if host_self_test {
+        t.next(&o, Some("host mode's console"));
         host_mode_lines(&mut o, dirs);
     }
     // Outside the repository the script is not there, and that is no problem: nothing is said.
     if let Some(script) = find_host_check() {
+        t.next(&o, Some("the machine"));
         o.host_script = Some(script.display().to_string());
         host_lines(&mut o, &script);
     }
+    t.next(&o, None);
     o
 }
 
@@ -984,11 +1048,25 @@ fn level_code(l: Level) -> &'static str {
     }
 }
 
+/// A check as the plain command prints it: its line, and the hint under a WARN or a FAIL.
+fn check_lines(st: Style, c: &Check) -> String {
+    let mut s = format!("{}  {}\n", st.mark(c.level), sanitize::line(&c.msg));
+    if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
+        s += &format!(
+            "{}{} {}\n",
+            " ".repeat(st.mark_width() + 2),
+            st.dim(st.arrow()),
+            st.dim(&sanitize::line(h))
+        );
+    }
+    s
+}
+
 /// The plain command. Returns true when nothing failed (WARN is the person's call).
 pub fn doctor(dirs: &Dirs, json: bool) -> bool {
     let st = Style::stdout();
-    let r = collect(dirs);
     if json {
+        let r = collect(dirs);
         let checks: Vec<_> = r
             .checks
             .iter()
@@ -1006,17 +1084,25 @@ pub fn doctor(dirs: &Dirs, json: bool) -> bool {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         return r.ok();
     }
-    for c in &r.checks {
-        println!("{}  {}", st.mark(c.level), sanitize::line(&c.msg));
-        if let (Some(h), true) = (&c.hint, c.level != Level::Pass) {
-            println!(
-                "{}{} {}",
-                " ".repeat(st.mark_width() + 2),
-                st.dim(st.arrow()),
-                st.dim(&sanitize::line(h))
-            );
+    // Each line as its check is made; on a terminal, what is being checked meanwhile, on a line
+    // the result replaces.
+    let mut shown = 0;
+    let r = collect_live(dirs, true, &mut |l| {
+        use std::io::Write;
+        if shown > 0 {
+            print!("\r{}\r", " ".repeat(std::mem::take(&mut shown)));
         }
-    }
+        match l {
+            Live::Doing(what) if st.tty => {
+                let line = format!("{} checking {what}", st.ellipsis());
+                shown = line.chars().count();
+                print!("{}", st.dim(&line));
+            }
+            Live::Doing(_) => {}
+            Live::Done(c) => print!("{}", check_lines(st, c)),
+        }
+        let _ = std::io::stdout().flush();
+    });
     println!();
     println!(
         "{}",
@@ -1227,6 +1313,48 @@ mod tests {
         .unwrap();
         audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
         assert_eq!(found.1.len(), 1, "{:?}", found.1);
+    }
+
+    // Chromium and npm's store of the registry's files are not read for key shapes, only there
+    // from the data root; npm's index beside the store and the same names elsewhere still are,
+    // and the modes inside the skipped trees are still checked (S-23).
+    #[test]
+    fn chromium_and_npms_content_store_are_not_read_but_their_modes_are_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let key = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let skipped = [
+            "browsers/chromium-1255/resources.pak",
+            "mcp/npm-cache/_cacache/content-v2/sha512/aa/bb",
+        ];
+        let read = [
+            "mcp/npm-cache/_cacache/index-v5/aa/bb",
+            "skills/live/s/browsers/notes.md",
+            "runs/r/mcp/npm-cache/_cacache/content-v2/x",
+        ];
+        for f in skipped.iter().chain(&read) {
+            let p = data.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, key).unwrap();
+        }
+        let mut found = (0, Vec::new(), 0);
+        audit_walk(&data, &data, 0, &Scrubber::default(), &mut found);
+        found.1.sort();
+        let mut want: Vec<PathBuf> = read.iter().map(|f| data.join(f)).collect();
+        want.sort();
+        assert_eq!(found.1, want);
+        let open = data.join("browsers/chromium-1255/resources.pak");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut o = Report::default();
+        check_tree(&mut o, &data, &data, 0);
+        assert!(
+            o.checks
+                .iter()
+                .any(|c| c.msg == format!("{} has mode 644, it must be 600 (S-23)", open.display())),
+            "{:?}",
+            o.checks.iter().map(|c| &c.msg).collect::<Vec<_>>()
+        );
     }
 
     // A trash with deleted conversations in it is private all through (S-23), even when the

@@ -104,7 +104,7 @@ fn wrap(text: &str, w: usize) -> Vec<String> {
     crate::cli::ui::wrap(text, w)
 }
 
-fn mb(n: u64) -> String {
+pub(super) fn mb(n: u64) -> String {
     format!("{:.0}", n as f64 / 1_000_000.0)
 }
 

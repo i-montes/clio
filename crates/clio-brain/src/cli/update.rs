@@ -61,16 +61,15 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
         .into_iter()
         .filter(|s| !matches!(s, Step::Vault | Step::Model))
         .collect();
-    let mut ui = Plain {
+    let mut ui = Plain::new(
         lang,
-        rows: Action::Update
+        Action::Update
             .shown()
             .iter()
             .filter(|s| steps.contains(s))
             .map(|s| s.label().get(lang).to_owned())
             .collect(),
-        quiet: true,
-    };
+    );
     let mut r =
         super::setup::run_with(dirs, lang, Sys::from_env(), Pins::from_env(), opts, &mut ui);
     r.all(&steps);
@@ -83,12 +82,6 @@ pub fn run(dirs: &Dirs, args: Vec<String>) -> Res<i32> {
     }
     if r.changes.is_empty() && !r.failed {
         println!("{}", say(&M::UpdateNone.fill(lang, &[here])));
-    }
-    if let Some(d) = &r.doctor {
-        println!(
-            "{}",
-            say(&format!("{} · {d}", Step::Doctor.label().get(lang)))
-        );
     }
     let failed = r.failed;
     if !failed {
