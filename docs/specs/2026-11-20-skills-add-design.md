@@ -30,9 +30,15 @@ ponytail], so I expect Clio to be able to use them." Clio ships none of them; it
   every file of the skills and adds nothing.
 - **Checks.** Every file is read by the judge before the box, each skill on its own: long text in
   windows, two at a time (a judge on a CPU reads one at a time), 30 s a call, a window without an
-  answer asked once more, within 60 s plus 10 s a window for the skill (past it, not judged; a
-  flag stops it at once); `clio skills add` says which skill the judge is reading and how far it
-  is; a flag is shown in the box in plain words and the default answer is
+  answer asked once more after a pause, within 60 s plus 10 s a window for the skill (past it, not
+  judged; a flag from any call stops it at once and wins, and it is clean only once no call it
+  made still runs). A judge that takes no call (its breaker open, its day's budget spent) stops
+  the add with one message. Before the judge reads anything, an add takes at most 20 skills (the
+  model's: as many as may wait) and 2 MiB of their text (about a third of Jev's daily budget);
+  past either it is refused, saying to name the skills wanted. Stopping the turn stops the judge
+  within half a second. `clio skills add` says which skill the judge is reading and how far it
+  is. A long add keeps the judge busy: a chat open meanwhile may see its own texts unjudged (its
+  judge waits a few seconds), which marks that conversation unjudged. A flag is shown in the box in plain words and the default answer is
   no, and so is a skill the judge could not read. No reviewer run: the person chose this text.
   Every file goes through the vault's filter, as `skill_write`'s do: a secret's shape refuses the
   skill. The front matter must read the same to Clio and to Pi's YAML parser: plain `key: value`

@@ -953,7 +953,13 @@ fn add(d: &Dirs, args: &[String]) -> Res<()> {
     };
     let tty = std::io::stdout().is_terminal();
     let judge = |t: &str, from: &str| {
-        let v = clio_toolhost::verdict(&port, t, from, &|read, n| judging(tty, from, read, n));
+        // No judge: nothing is read, and no line says it is.
+        if !port.judge_on() {
+            return Ok(clio_toolhost::TextVerdict::NoJudge);
+        }
+        let v = clio_toolhost::verdict(&port, t, from, &|| false, &|read, n| {
+            judging(tty, from, read, n);
+        });
         if tty {
             print!("\r\x1b[K");
         }
@@ -984,7 +990,7 @@ fn judging(tty: bool, from: &str, read: usize, n: usize) {
     }
 }
 
-type Judge<'a> = &'a dyn Fn(&str, &str) -> clio_toolhost::TextVerdict;
+type Judge<'a> = &'a dyn Fn(&str, &str) -> Result<clio_toolhost::TextVerdict, String>;
 /// What `add_with` asks of the world: the judge, the vault's filter and the download.
 type AddIo<'a> = (
     Judge<'a>,
@@ -1025,6 +1031,7 @@ fn add_with(
             root: &root,
             staging: &d.data.join("staging"),
             judge,
+            most: None,
             clean,
             get,
         },
@@ -1709,11 +1716,11 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         fs::create_dir_all(src.join("hooks")).unwrap();
         fs::write(src.join("hooks/hooks.json"), "{}").unwrap();
         let judge = |t: &str, _: &str| {
-            if t.contains("FLAG") {
+            Ok(if t.contains("FLAG") {
                 TextVerdict::Injection
             } else {
                 TextVerdict::Clean
-            }
+            })
         };
         let clean = |t: &str| Some(t.to_owned());
         let get = |_: &str, _: &Path| false;

@@ -461,6 +461,10 @@ impl MemoryPort for LinkPort {
         self.judged(text, source, Some(timeout))
     }
 
+    fn judge_refusing(&self) -> bool {
+        self.judge.as_ref().is_some_and(|j| j.refusing())
+    }
+
     fn search(&self, query: &str, limit: usize) -> Result<Found, String> {
         self.with_link(|link| {
             // The engine's own message may repeat the query; the model gets a fixed one.
@@ -658,6 +662,96 @@ fn civil_date(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::civil_date;
+
+    mod slow_judge {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use clio_core::FixedClock;
+        use clio_jev::{Config, Jev, Transport};
+        use clio_toolhost::{MemoryPort, TextVerdict};
+        use serde_json::{Value, json};
+
+        use crate::memory_judge::MemoryJudge;
+        use crate::memory_port::LinkPort;
+
+        /// One window's read, scaled down from a CPU judge's few seconds.
+        const READ: Duration = Duration::from_millis(50);
+
+        /// A judge on a CPU behind the adapter: one call at a time, `READ` each, and a call past
+        /// its limit fails as the adapter's own time out does.
+        struct Cpu(Mutex<()>);
+
+        impl Transport for Cpu {
+            fn call(&self, _: &str, _: &Value, limit: Duration) -> Result<Value, String> {
+                let start = Instant::now();
+                let _turn = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                std::thread::sleep(READ);
+                if start.elapsed() > limit {
+                    return Err("timed out".into());
+                }
+                Ok(
+                    json!({"model": "jev-t", "usage": {"input_tokens": 10}, "answers": {
+                        "injection": {"type": "noul", "noul": 0.0},
+                    }}),
+                )
+            }
+        }
+
+        /// The tool host's port with a real Jev client (its limit scaled down like `READ`) and
+        /// breaker over `Cpu`.
+        fn port(data: &std::path::Path) -> Arc<dyn MemoryPort> {
+            let jev = Arc::new(Jev::new(
+                Config {
+                    timeout: READ * 2,
+                    ..Config::default()
+                },
+                Box::new(Cpu(Mutex::new(()))),
+                Box::new(|| Ok("KEY".into())),
+                Arc::new(FixedClock::new(1_000)),
+            ));
+            Arc::new(
+                LinkPort::new(data, &[]).with_judge(Arc::new(MemoryJudge::new(
+                    jev,
+                    Arc::new(|s| Ok(s.to_owned())),
+                ))),
+            )
+        }
+
+        // The run that left every skill of a repository "not judged": the windows of a 106 KiB
+        // skill asked all at once, each with Jev's own short limit, fail but the first ones;
+        // three failures open the breaker, and a small skill after it is not judged either.
+        // Asked as `verdict` asks them, both are judged.
+        #[test]
+        fn a_slow_judge_reads_every_skill_through_jev_and_its_breaker() {
+            let t = tempfile::tempdir().unwrap();
+            let (big, small) = ("w".repeat(106 * 1024), "a skill of a few KiB".to_owned());
+            let before = port(t.path());
+            let windows: Vec<String> = (0..5).map(|k| format!("{k}{}", &big[..20_000])).collect();
+            let answers: Vec<TextVerdict> = std::thread::scope(|s| {
+                let asked: Vec<_> = windows
+                    .iter()
+                    .map(|w| s.spawn(|| before.judge_text(w, "skill")))
+                    .collect();
+                asked.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert!(answers.contains(&TextVerdict::NoAnswer), "{answers:?}");
+            assert!(before.judge_refusing());
+            assert_eq!(before.judge_text(&small, "skill"), TextVerdict::NoAnswer);
+            assert_eq!(
+                clio_toolhost::verdict(&before, &small, "skill", &|| false, &|_, _| {}),
+                Err(clio_toolhost::REFUSING.into())
+            );
+            let after = port(t.path());
+            for text in [&big, &small] {
+                assert_eq!(
+                    clio_toolhost::verdict(&after, text, "skill", &|| false, &|_, _| {}),
+                    Ok(TextVerdict::Clean)
+                );
+            }
+            assert!(!after.judge_refusing());
+        }
+    }
 
     #[test]
     fn dates_come_from_seconds_since_the_epoch() {

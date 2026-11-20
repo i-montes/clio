@@ -173,6 +173,11 @@ impl MemoryJudge {
         Some(p >= UNSAFE)
     }
 
+    /// Jev makes no call now (its breaker is open or its day's budget is spent).
+    pub fn refusing(&self) -> bool {
+        self.jev.refusing()
+    }
+
     /// How a new memory stands to the most similar one it does not replace; `None` when they have
     /// nothing to do with each other, Jev is not sure, or it cannot be asked.
     pub fn relation(&self, text: &str, other: &str) -> Option<(Relation, f32)> {

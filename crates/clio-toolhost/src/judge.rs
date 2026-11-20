@@ -102,19 +102,31 @@ pub(crate) const PACE: Pace = Pace {
     per_window: Duration::from_secs(10),
 };
 
+/// Why an add stops: the judge takes no call now, so every skill after would be "not judged".
+pub const REFUSING: &str = "Clio's judge is not taking calls for now (it failed several times in a row, or its budget for the day is spent): try again later";
+
+/// How often the judging of a skill looks whether its caller went away.
+const POLL: Duration = Duration::from_millis(500);
+
 /// What the judge of `port` says of the whole text of a skill from outside (`skill_add`), however
 /// long: every window, `PACE.at_once` at a time, within a deadline that grows with its windows.
-/// A window flagged is an injection at once; one unanswered is asked once more, and if it is
-/// still unanswered, or the deadline passes, the skill is unjudged (the rest is still read: a
-/// flag wins); a port with no judge says so (`NoJudge`). `progress` hears how many windows of
-/// how many were read clean (first `0`). A tool result keeps `verdict_of`'s rule.
+/// A flag (or no judge) from any call ends it at once and wins. An unanswered window is asked
+/// once more, after a pause; still unanswered, or past the deadline, the skill is not judged (the
+/// rest is still read). It is clean only once every window answered clean and no call it made is
+/// still running. `cancel` (the caller went away) ends it at once, not judged. `progress` hears
+/// how many windows of how many were read clean (first `0`). `Err(REFUSING)` when the judge
+/// takes no call now: the add stops there. A tool result keeps `verdict_of`'s rule.
 pub fn verdict(
     port: &Arc<dyn MemoryPort>,
     text: &str,
     source: &str,
+    cancel: &dyn Fn() -> bool,
     progress: &dyn Fn(usize, usize),
-) -> TextVerdict {
-    verdict_paced(port, text, source, PACE, progress)
+) -> Result<TextVerdict, String> {
+    match verdict_paced(port, text, source, PACE, cancel, progress) {
+        TextVerdict::NoAnswer if port.judge_refusing() && !cancel() => Err(REFUSING.into()),
+        v => Ok(v),
+    }
 }
 
 pub(crate) fn verdict_paced(
@@ -122,6 +134,7 @@ pub(crate) fn verdict_paced(
     text: &str,
     source: &str,
     pace: Pace,
+    cancel: &dyn Fn() -> bool,
     progress: &dyn Fn(usize, usize),
 ) -> TextVerdict {
     use std::time::Instant;
@@ -135,15 +148,22 @@ pub(crate) fn verdict_paced(
     // A little past the judge's own limit, so it reports its own time out first.
     let give_up = pace.call + pace.call / 10;
     let (tx, rx) = std::sync::mpsc::channel();
-    let (mut next, mut retry, mut tries) = (0, Vec::new(), vec![0u8; n]);
-    // The windows asked and not answered yet, with when they are given up.
-    let mut flying: Vec<(usize, Instant)> = Vec::new();
+    let (mut next, mut tries) = (0, vec![0u8; n]);
+    // Windows to ask again, and from when.
+    let mut retry: Vec<(usize, Instant)> = Vec::new();
+    // The windows asked and waited for, with when they are given up; and every call that has not
+    // answered yet, given up or not (a late flag still counts).
+    let (mut flying, mut running): (Vec<(usize, Instant)>, usize) = (Vec::new(), 0);
     let (mut read, mut unanswered) = (0, false);
     progress(0, n);
     loop {
+        let now = Instant::now();
+        if cancel() || now >= end {
+            return TextVerdict::NoAnswer;
+        }
         while flying.len() < pace.at_once.max(1) {
-            let i = if let Some(i) = retry.pop() {
-                i
+            let i = if let Some(k) = retry.iter().position(|r| r.1 <= now) {
+                retry.remove(k).0
             } else if next < n {
                 next += 1;
                 next - 1
@@ -166,40 +186,53 @@ pub(crate) fn verdict_paced(
                 let _ = tx.send((i, v.unwrap_or(TextVerdict::NoAnswer)));
             });
             flying.push((i, Instant::now() + give_up));
+            running += 1;
         }
-        let Some(first) = flying.iter().map(|f| f.1).min() else {
+        if running == 0 && retry.is_empty() {
             return if unanswered {
                 TextVerdict::NoAnswer
             } else {
                 TextVerdict::Clean
             };
-        };
-        let now = Instant::now();
-        if now >= end {
-            return TextVerdict::NoAnswer;
         }
-        let answered = match rx.recv_timeout(first.min(end) - now) {
-            // A late answer to a window asked again counts for it: it is the same text.
-            Ok((i, v)) => flying
-                .iter()
-                .position(|f| f.0 == i)
-                .map(|at| (flying.remove(at).0, v)),
+        let wake = flying
+            .iter()
+            .map(|f| f.1)
+            .chain(retry.iter().map(|r| r.1))
+            .fold(end.min(now + POLL), Instant::min);
+        match rx.recv_timeout(wake.saturating_duration_since(now)) {
+            Ok((i, v)) => {
+                running -= 1;
+                if matches!(v, TextVerdict::Injection | TextVerdict::NoJudge) {
+                    return v;
+                }
+                // A late answer of an attempt given up: only a flag counted.
+                let Some(at) = flying.iter().position(|f| f.0 == i) else {
+                    continue;
+                };
+                flying.remove(at);
+                if v == TextVerdict::Clean {
+                    read += 1;
+                    progress(read, n);
+                } else if port.judge_refusing() {
+                    return TextVerdict::NoAnswer;
+                } else if tries[i] < 2 {
+                    // Not at once: a call refused right away (a breaker making its one try)
+                    // would be refused again.
+                    retry.push((i, Instant::now() + pace.call / 10));
+                } else {
+                    unanswered = true;
+                }
+            }
             Err(_) => {
                 let now = Instant::now();
-                flying
-                    .iter()
-                    .position(|f| f.1 <= now)
-                    .map(|at| (flying.remove(at).0, TextVerdict::NoAnswer))
-            }
-        };
-        match answered {
-            None => {}
-            Some((_, v @ (TextVerdict::Injection | TextVerdict::NoJudge))) => return v,
-            Some((i, TextVerdict::NoAnswer)) if tries[i] < 2 => retry.push(i),
-            Some((_, TextVerdict::NoAnswer)) => unanswered = true,
-            Some((_, TextVerdict::Clean)) => {
-                read += 1;
-                progress(read, n);
+                for (i, _) in flying.extract_if(.., |f| f.1 <= now) {
+                    if tries[i] < 2 {
+                        retry.push((i, now));
+                    } else {
+                        unanswered = true;
+                    }
+                }
             }
         }
     }
@@ -553,16 +586,20 @@ mod tests {
         per_window: Duration::from_millis(200),
     };
 
-    /// A judge like a CPU one: it reads one window at a time, `READ` each (a window asked
-    /// meanwhile waits its turn), and a call that took longer than its limit is lost, as the
-    /// adapter's own time out. It flags `FLAG`, never answers `FAIL`, answers `FLAKY` from its
-    /// second ask on, and the first ask of `HANG` hangs past any limit (without taking the turn).
+    /// A judge like a CPU one: it reads one window at a time, `READ` each, in the order asked (a
+    /// window asked meanwhile waits its turn), and a call that took longer than its limit is lost,
+    /// as the adapter's own time out. It flags `FLAG`, never answers `FAIL`, answers `FLAKY` from
+    /// its second ask on; the first ask of `HANG` hangs past its limit and then answers clean, of
+    /// `LATE` the same but flags (neither takes the turn). `refusing`: as a breaker that is open.
     #[derive(Default)]
     struct Slow {
-        turn: Mutex<()>,
+        /// The next ticket, and the one being read.
+        turn: Mutex<(u64, u64)>,
+        next: std::sync::Condvar,
         flying: AtomicUsize,
         most: AtomicUsize,
         asked: Mutex<Vec<String>>,
+        refusing: std::sync::atomic::AtomicBool,
     }
 
     impl MemoryPort for Slow {
@@ -578,22 +615,39 @@ mod tests {
         fn judge_text(&self, text: &str, source: &str) -> TextVerdict {
             self.judge_text_for(text, source, JUDGE_TIMEOUT)
         }
+        fn judge_refusing(&self) -> bool {
+            self.refusing.load(Ordering::SeqCst)
+        }
         fn judge_text_for(&self, text: &str, _: &str, limit: Duration) -> TextVerdict {
             let start = Instant::now();
-            let before = {
+            let late = text.contains("HANG") || text.contains("LATE");
+            // The ticket is taken with the ask, so the turns go in the order asked.
+            let (before, ticket) = {
                 let mut a = self.asked.lock().unwrap();
                 a.push(text.to_owned());
-                a.iter().filter(|t| *t == text).count() - 1
+                let before = a.iter().filter(|t| *t == text).count() - 1;
+                let mut t = self.turn.lock().unwrap();
+                t.0 += u64::from(!(late && before == 0));
+                (before, t.0.wrapping_sub(1))
             };
-            if text.contains("HANG") && before == 0 {
-                std::thread::sleep(limit * 3);
-                return TextVerdict::Clean;
+            if late && before == 0 {
+                std::thread::sleep(limit * 2);
+                return if text.contains("LATE") {
+                    TextVerdict::Injection
+                } else {
+                    TextVerdict::Clean
+                };
             }
             let now = self.flying.fetch_add(1, Ordering::SeqCst) + 1;
             self.most.fetch_max(now, Ordering::SeqCst);
             {
-                let _turn = self.turn.lock().unwrap();
+                let mut t = self.turn.lock().unwrap();
+                while t.1 != ticket {
+                    t = self.next.wait(t).unwrap();
+                }
                 std::thread::sleep(READ);
+                t.1 += 1;
+                self.next.notify_all();
             }
             self.flying.fetch_sub(1, Ordering::SeqCst);
             if start.elapsed() > limit || text.contains("FAIL") {
@@ -620,7 +674,14 @@ mod tests {
 
     fn judged(port: &Arc<Slow>, text: &str, pace: Pace) -> TextVerdict {
         let port: Arc<dyn MemoryPort> = port.clone();
-        verdict_paced(&port, text, "skill «s» from o/r", pace, &|_, _| {})
+        verdict_paced(
+            &port,
+            text,
+            "skill «s» from o/r",
+            pace,
+            &|| false,
+            &|_, _| {},
+        )
     }
 
     // A judge that reads one window at a time answered few of the windows asked at once in
@@ -631,7 +692,7 @@ mod tests {
         let text = skill(15, 64);
         let seen = Mutex::new(vec![]);
         let port: Arc<dyn MemoryPort> = j.clone();
-        let v = verdict_paced(&port, &text, "s", FAST, &|r, n| {
+        let v = verdict_paced(&port, &text, "s", FAST, &|| false, &|r, n| {
             seen.lock().unwrap().push((r, n))
         });
         assert_eq!(v, TextVerdict::Clean);
@@ -684,9 +745,8 @@ mod tests {
         let w = windows(&text);
         assert_eq!(w.iter().position(|p| p.contains("FLAG")), Some(8));
         assert_eq!(judged(&j, &text, FAST), TextVerdict::Injection);
-        // At most the window asked beside it and the one after that (whichever got the turn).
-        let asked = j.asked.lock().unwrap().clone();
-        assert!(w[11..].iter().all(|p| !asked.contains(&(*p).to_owned())));
+        // Not the rest of it: what was asked after it waited behind it.
+        assert!(j.asked.lock().unwrap().len() < w.len());
         assert_eq!(judged(&j, &skill(3, 30), FAST), TextVerdict::Clean);
     }
 
@@ -731,6 +791,73 @@ mod tests {
         let asked = j.asked.lock().unwrap();
         assert_eq!(asked.iter().filter(|t| t.contains("FAIL")).count(), 2);
         assert_eq!(asked.len(), windows(&text).len() + 1);
+    }
+
+    // A flag is never lost: the first attempt of a window, given up, flags after its second
+    // attempt answered clean; the skill is clean only once no call it made still runs.
+    #[test]
+    fn a_late_flag_wins_over_a_clean_retry() {
+        let j = Arc::new(Slow::default());
+        let pace = Pace {
+            call: READ * 10,
+            ..FAST
+        };
+        assert_eq!(judged(&j, "a LATE order", pace), TextVerdict::Injection);
+        assert_eq!(j.asked.lock().unwrap().len(), 2);
+    }
+
+    // The judge takes no call (its breaker is open): no window is asked again, the skill is not
+    // judged and `verdict` says why, so the add stops. An answer it did not give is asked again
+    // only after a pause.
+    #[test]
+    fn a_judge_that_refuses_is_not_asked_again_at_once() {
+        let j = Arc::new(Slow::default());
+        j.refusing.store(true, Ordering::SeqCst);
+        let port: Arc<dyn MemoryPort> = j.clone();
+        let text = format!("FAIL{}", skill(1, 100));
+        assert_eq!(
+            verdict(&port, &text, "s", &|| false, &|_, _| {}),
+            Err(REFUSING.into())
+        );
+        assert!(
+            j.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|t| t.contains("FAIL"))
+                .count()
+                == 1
+        );
+        let j = Arc::new(Slow::default());
+        let start = Instant::now();
+        assert_eq!(judged(&j, "FLAKY", FAST), TextVerdict::Clean);
+        assert!(start.elapsed() >= FAST.call / 10);
+    }
+
+    // The caller went away in the middle of a skill: its judging ends at once, also while it
+    // waits on a call that hangs.
+    #[test]
+    fn a_skill_stops_being_judged_when_its_caller_goes_away() {
+        let j = Arc::new(Slow::default());
+        let port: Arc<dyn MemoryPort> = j.clone();
+        let text = skill(10, 1024);
+        let gone = || j.asked.lock().unwrap().len() >= 3;
+        assert_eq!(
+            verdict_paced(&port, &text, "s", FAST, &gone, &|_, _| {}),
+            TextVerdict::NoAnswer
+        );
+        assert!(j.asked.lock().unwrap().len() <= 5);
+        let start = Instant::now();
+        let gone = || start.elapsed() > READ * 5;
+        let hang = Pace {
+            call: Duration::from_secs(20),
+            ..FAST
+        };
+        assert_eq!(
+            verdict_paced(&port, "HANG", "s", hang, &gone, &|_, _| {}),
+            TextVerdict::NoAnswer
+        );
+        assert!(start.elapsed() < POLL * 3, "{:?}", start.elapsed());
     }
 
     #[test]

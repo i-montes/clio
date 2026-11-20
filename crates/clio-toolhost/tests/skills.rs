@@ -406,6 +406,17 @@ fn reports_are_kept_with_the_mark() {
 }
 
 /// `exec` only if the launcher passed its self-test here.
+/// `~/w.sh <dir>`: tries to write, delete and move in `<dir>` (the jail must stop it), saying
+/// `WROTE` or `MADE` when it could.
+fn write_script(e: &Env) {
+    std::fs::write(
+        e.home.join("w.sh"),
+        "echo x > \"$1/SKILL.md\" 2>/dev/null && echo WROTE; touch \"$1/new\" 2>/dev/null && echo MADE; \
+         rm -f \"$1/scripts/hello.sh\" 2>/dev/null; mv \"$1\" \"$1.x\" 2>/dev/null; true\n",
+    )
+    .unwrap();
+}
+
 fn exec_ok(e: &Env) -> bool {
     match e.host.exec_available() {
         Ok(()) => true,
@@ -453,11 +464,20 @@ fn a_skill_script_runs_read_only_and_its_command_line_is_classified_as_typed() {
         r.content
     );
     let before = tree(&e.skills);
+    // A command line that writes there is `control`; a program it runs that tries is stopped by
+    // the jail.
+    for write in [
+        format!("echo x > {}/SKILL.md", live.display()),
+        format!("rm -f {}/scripts/hello.sh", live.display()),
+    ] {
+        let r = call(&e, "s", "exec", json!({"command": write}));
+        assert_eq!(r.decision.outcome, "ask", "{write}: {r:?}");
+    }
+    write_script(&e);
     let cmd = format!(
-        "bash {s}/scripts/hello.sh; \
-         echo x > {s}/SKILL.md 2>/dev/null && echo WROTE; \
-         rm -f {s}/scripts/hello.sh 2>/dev/null; mv {s} {s}.x 2>/dev/null; true",
+        "bash {s}/scripts/hello.sh; sh {w} {s}",
         s = live.display(),
+        w = e.home.join("w.sh").display(),
     );
     let r = call(&e, "s", "exec", json!({"command": cmd}));
     assert!(r.ok, "{r:?}");
@@ -650,6 +670,7 @@ fn a_reviews_stage_is_shown_read_only_to_its_reviewer_and_to_nobody_else() {
         eprintln!("SKIPPED (the build folder is under /tmp, which a reviewer does not see)");
         return;
     }
+    write_script(&e);
     let before = tree(&st);
     // The chat: the path spelled so no rule sees it; there is nothing there to read or write.
     let parent = e.data.parent().unwrap().display().to_string();
@@ -675,7 +696,8 @@ fn a_reviews_stage_is_shown_read_only_to_its_reviewer_and_to_nobody_else() {
         id: "i1".into(),
         tool: "exec".into(),
         args: json!({"command": format!(
-            "cat {s}/SKILL.md; echo x > {s}/SKILL.md && echo WROTE; touch {s}/new && echo MADE; true"
+            "cat {s}/SKILL.md; sh {w} {s}; true",
+            w = e.home.join("w.sh").display(),
         )}),
         session: "rv".into(),
         call_id: "c1".into(),
@@ -954,6 +976,53 @@ fn a_skill_add_whose_caller_went_away_sets_nothing_aside() {
     assert!(!r.ok && r.content.contains("stopped"), "{r:?}");
     assert!(e.judge.asked.lock().unwrap().is_empty());
     assert!(clio_toolhost::pending::list(&e.data.join("host")).is_empty());
+}
+
+// S-68: what may wait for the person, and what the judge reads in one add, are counted before
+// the judge reads anything: past either, the add is refused in fixed words that say to name the
+// skills wanted.
+#[test]
+fn too_many_skills_or_too_much_text_is_refused_before_the_judge_reads() {
+    let e = env(true);
+    let src = e.home.join("src/many");
+    let skill = |name: &str, body: &str| {
+        let d = src.join("skills").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Does {name}.\n---\n{body}\n"),
+        )
+        .unwrap();
+    };
+    for k in 0..=clio_toolhost::pending::MAX_WAITING {
+        skill(&format!("s{k}"), "x");
+    }
+    let (repo, _) = publish(&src);
+    let r = add(&e, "s", json!({"source": repo, "reason": "r"}));
+    assert!(
+        !r.ok && r.content.contains("21 skills: at most 20") && r.content.contains("names"),
+        "{r:?}"
+    );
+    // Three skills of 900 KiB each: more than the judge reads in one add.
+    std::fs::remove_dir_all(&src).unwrap();
+    for k in 0..3 {
+        skill(&format!("big{k}"), &"y".repeat(900 * 1024));
+    }
+    let (repo, _) = publish(&src);
+    let r = add(&e, "s", json!({"source": repo, "reason": "r"}));
+    assert!(
+        !r.ok && r.content.contains("at most 2048 KiB") && r.content.contains("name the skills"),
+        "{r:?}"
+    );
+    assert!(e.judge.asked.lock().unwrap().is_empty());
+    assert!(clio_toolhost::pending::list(&e.data.join("host")).is_empty());
+    // Two of them, named, are judged.
+    let r = add(
+        &e,
+        "s",
+        json!({"source": repo, "names": ["big0", "big1"], "reason": "r"}),
+    );
+    assert!(r.ok, "{r:?}");
 }
 
 // S-68: a name held by a skill of another origin (one of Clio's, or another source's) is

@@ -131,6 +131,13 @@ const READERS: [&str; 18] = [
     "realpath",
 ];
 
+/// Besides `READERS`, programs that may name a file in a window (S-68) without writing it: they
+/// read it or run it (what a skill's script does is the jail's: the window is read-only to it).
+const WINDOW_USERS: [&str; 16] = [
+    "cd", "bash", "sh", "dash", "zsh", "python", "python3", "node", "source", ".", "jq", "sort",
+    "uniq", "cut", "tree", "du",
+];
+
 /// A name that looks like a backup. `{B}` in a factory pattern stands for it.
 const BACKUP: &str = r"(?i:backup|respaldo|snapshot|\.bak\b|\.dump\b|\.sql\b)";
 
@@ -361,6 +368,8 @@ pub struct HostRules {
     /// A registered skill's file in the read-only window of Clio's skills (S-68): naming it does
     /// not make a command `control`.
     window: Option<Regex>,
+    /// The windows' own paths, anywhere in a text: what a command names in them (`window_writes`).
+    window_any: Option<Regex>,
     backup: Regex,
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
@@ -395,6 +404,7 @@ impl HostRules {
             foreign: FOREIGN.iter().map(PathBuf::from).collect(),
             control: None,
             window: None,
+            window_any: None,
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
@@ -444,7 +454,64 @@ impl HostRules {
             ))
             .expect("escaped paths")
         });
+        self.window_any = (!spellings.is_empty())
+            .then(|| Regex::new(&format!("({})", spellings.join("|"))).expect("escaped paths"));
         self
+    }
+
+    /// `command` with each variable set to a path in a window (`S=<live>/demo; bash $S/run.sh`)
+    /// read where it is used (`$S`, `${S}`), and its assignment left as `S=SKILL`: what the
+    /// command names in the window is then judged where it is used. Other variables stay.
+    fn window_vars(&self, command: &str) -> String {
+        let Some(any) = &self.window_any else {
+            return command.to_owned();
+        };
+        static ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(^|[;&|\s(])([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|'"`$()<>\\]+)"#)
+                .expect("a fixed pattern")
+        });
+        let mut out = command.to_owned();
+        for c in ASSIGN.captures_iter(command) {
+            let (name, value) = (&c[2], &c[3]);
+            if any.find(value).is_none_or(|m| m.start() != 0) {
+                continue;
+            }
+            let used = Regex::new(&format!(r"\$(\{{{name}\}}|{name}\b)")).expect("a name");
+            out = used.replace_all(&out, regex::NoExpand(value)).into_owned();
+            out = out.replacen(&format!("{name}={value}"), &format!("{name}=SKILL"), 1);
+        }
+        out
+    }
+
+    /// Does `command` write in a window, or hand a path in one to something other than a program
+    /// that reads or runs it? A `>` onto it, a program not in `WINDOW_USERS`, `sed`/`awk` in
+    /// place, or `cp` onto it: then its paths there are not taken as the window's.
+    fn window_writes(&self, command: &str) -> bool {
+        let Some(any) = &self.window_any else {
+            return false;
+        };
+        let onto = Regex::new(&format!(r#">[>|]?\s*["']?\s*{}"#, any.as_str())).expect("escaped");
+        onto.is_match(command)
+            || simple_commands(command).iter().any(|w| {
+                let names = |x: &String| any.is_match(x);
+                if !w.iter().any(names) {
+                    return false;
+                }
+                let (p, args) = (w[0].as_str(), &w[1..]);
+                let in_place = args
+                    .iter()
+                    .any(|a| a.starts_with("-i") || a.starts_with("--in-place") || a == "inplace");
+                match p {
+                    "sed" | "awk" | "gawk" => in_place,
+                    "cp" => {
+                        w.last().is_some_and(names)
+                            || args
+                                .iter()
+                                .any(|a| a.starts_with("-t") || a.starts_with("--target"))
+                    }
+                    _ => !(READERS.contains(&p) || WINDOW_USERS.contains(&p)),
+                }
+            })
     }
 
     /// The person's `host.json`: it can only add (patterns are matched like the factory ones,
@@ -474,12 +541,16 @@ impl HostRules {
     }
 
     pub fn classify_command(&self, command: &str) -> Option<Class> {
+        let mut outside = self.window_vars(command);
+        // A `..` anywhere may climb out of a window (`cd <window>/demo && cat ../../records/x`):
+        // then no path counts as in it; nor does one a command writes or gives to a writer.
         // Each match takes the character after it, which the next one may start from: again until
         // nothing changes.
-        let mut outside = command.to_owned();
-        // A `..` anywhere may climb out of a window (`cd <window>/demo && cat ../../records/x`):
-        // then no path counts as in it.
-        if let Some(w) = self.window.as_ref().filter(|_| !command.contains("..")) {
+        if let Some(w) = self
+            .window
+            .as_ref()
+            .filter(|_| !command.contains("..") && !self.window_writes(&outside))
+        {
             while let std::borrow::Cow::Owned(o) = w.replace_all(&outside, "${pre}SKILL${post}") {
                 outside = o;
             }
@@ -1096,6 +1167,40 @@ mod tests {
             format!("cd {live}/demo; cat ../../../vault.key"),
         ] {
             assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+        }
+        // S-68: a skill's own steps (seen in a real run of superpowers' subagent-driven-development):
+        // a variable set to the window or a skill in it, used to read and run its files.
+        let home = "/home/u/proj";
+        for ok in [
+            format!(
+                "S={live}/subagent-driven-development; cd {home} && bash $S/scripts/task-brief {home}/PLAN.md 1"
+            ),
+            format!(
+                "S={live}; cd {home} && bash $S/subagent-driven-development/scripts/review-package {home}/PLAN.md 19727a9 HEAD; cat $S/requesting-code-review/code-reviewer.md"
+            ),
+            format!("S={live}; sed -n 1,40p ${{S}}/demo/SKILL.md"),
+            format!("cp {live}/demo/template.md {home}/x.md"),
+        ] {
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
+        }
+        for bad in [
+            // Writing in it, or giving a path in it to a writer.
+            format!("echo x > {live}/demo/SKILL.md"),
+            format!("S={live}; echo x >> $S/demo/SKILL.md"),
+            format!("S={live}/demo; cp {home}/x $S/new.md"),
+            format!("cp -t {live}/demo {home}/x"),
+            format!("sed -i s/a/b/ {live}/demo/SKILL.md"),
+            format!("S={live}; tee $S/demo/SKILL.md < x"),
+            format!("rm {live}/demo/SKILL.md"),
+            format!("mv {live}/demo/a.md {home}/a.md"),
+            // Leaving it, or the variable naming another folder of Clio's.
+            format!("S={live}; cat $S/../records/demo.json"),
+            format!("S={live}/demo; cd $S && cat ../../records/x"),
+            "S=/home/u/.local/share/clio/skills; cat $S/live/demo/SKILL.md".to_owned(),
+            format!("S={live}; cd $S && ls"),
+        ] {
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+            assert!(!r.machine_only(&bad), "{bad}");
         }
         // The other classes see the same command.
         assert_eq!(

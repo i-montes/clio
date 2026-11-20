@@ -12,6 +12,8 @@ use crate::wire::{Answers, Clean, Questions};
 const MAX_STATE_BYTES: usize = 32 * 1024;
 const MAX_REPLY_BYTES: u64 = 1 << 20;
 const DAY_MS: i64 = 86_400_000;
+/// The longest limit a call may be given (`ask_for`).
+const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -217,6 +219,8 @@ impl Jev {
         questions: &Questions,
         timeout: Duration,
     ) -> Result<Answers, JevError> {
+        // A limit past any wait a caller has (`Instant + Duration::MAX` would panic).
+        let timeout = timeout.min(MAX_TIMEOUT);
         let state = state.as_value();
         if questions.is_empty() {
             return Err(JevError::Bad("no questions".into()));
@@ -297,6 +301,15 @@ impl Jev {
             .call(&key, &body, timeout)
             .map_err(|e| JevError::Call(clean_line(&e.replace(&key, "***"))))?;
         Answers::parse(questions, &reply).map_err(JevError::Bad)
+    }
+
+    /// No call is made now, whatever is asked: the breaker is open (not one call making its try)
+    /// or the day's budget is spent.
+    pub fn refusing(&self) -> bool {
+        let now = self.clock.now_ms();
+        let s = self.st();
+        (s.open_until != 0 && now < s.open_until)
+            || (s.day == now.div_euclid(DAY_MS) && s.tokens >= self.cfg.daily_tokens)
     }
 
     /// The version of the model that answered last (`jev-1.14.0` when asked for `jev-latest`).
@@ -406,7 +419,12 @@ mod tests {
         let long = Duration::from_secs(30);
         assert!(ask(&r).is_ok());
         assert!(r.jev.ask_for(&clean(json!({"t": "x"})), &q(), long).is_ok());
-        assert_eq!(*r.limits.lock().unwrap(), [Config::default().timeout, long]);
+        let none = Duration::MAX;
+        assert!(r.jev.ask_for(&clean(json!({"t": "y"})), &q(), none).is_ok());
+        assert_eq!(
+            *r.limits.lock().unwrap(),
+            [Config::default().timeout, long, MAX_TIMEOUT]
+        );
     }
 
     #[test]
@@ -417,6 +435,7 @@ mod tests {
             assert!(matches!(ask(&r), Err(JevError::Call(_))));
         }
         assert_eq!(r.calls.load(Ordering::SeqCst), 3);
+        assert!(r.jev.refusing());
         assert_eq!(ask(&r), Err(JevError::Open));
         assert_eq!(r.calls.load(Ordering::SeqCst), 3, "no call while open");
         // After the pause one more try is made; a failure closes it again at once.
@@ -427,6 +446,7 @@ mod tests {
         // And a success after the pause closes it for good.
         r.clock.advance(60_000);
         *r.fail.lock().unwrap() = false;
+        assert!(!r.jev.refusing(), "past the pause one call may try");
         assert!(ask(&r).is_ok());
         assert!(ask(&r).is_ok());
     }
@@ -455,8 +475,10 @@ mod tests {
         assert!(ask(&r).is_ok());
         assert!(ask(&r).is_ok());
         assert_eq!(ask(&r), Err(JevError::Budget));
+        assert!(r.jev.refusing());
         assert_eq!(r.calls.load(Ordering::SeqCst), 2);
         r.clock.advance(DAY_MS);
+        assert!(!r.jev.refusing());
         assert!(ask(&r).is_ok());
     }
 
