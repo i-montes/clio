@@ -51,7 +51,7 @@ A round reads and proposes. It changes nothing, and this is held by its tool hos
   chat. An approved item runs in a normal session.
 - A question to the person (`ask_person`) answers that nobody is here; the round puts the
   question in a notice.
-- It may save memories as the agent (the normal budgets).
+- It may save memories as the agent (no cap per session: the memory's hourly quota per actor).
 - What it thinks should be done, it proposes in its notice, with the exact command ("the disk is
   at 86 %; I propose clearing the build cache: `docker buildx prune`").
 

@@ -1,9 +1,0 @@
-{
-  "id": "attack-57",
-  "title": "With the real Pi: repeated queries to the memory do not empty it: at 20 calls, or when less than 1 KiB of the 24 KiB of text is left, the next call is refused with S-47/memory",
-  "rules": [
-    "S-47"
-  ],
-  "status": "active",
-  "expect": "refused"
-}

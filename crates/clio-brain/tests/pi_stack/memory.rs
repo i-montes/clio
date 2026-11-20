@@ -190,11 +190,6 @@ fn jsonl(w: &World, name: &str) -> Vec<Value> {
         .collect()
 }
 
-fn budget(w: &World) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(w.run_dir.join("memory-budget.json")).unwrap())
-        .unwrap()
-}
-
 /// What the model was sent as tool results, all of it.
 fn sent_text(model: &FakeModel) -> String {
     serde_json::to_string(&model.requests()).unwrap()
@@ -320,107 +315,6 @@ fn attack_56() -> Option<bool> {
     Some(true)
 }
 
-// 57: repeated searches do not empty the memory: the budget runs out and the next call is denied
-
-/// A model that makes `n` calls, each the one `turn` builds, and then says "done".
-fn repeat(n: usize, turn: fn() -> Turn) -> FakeModel {
-    let mut left = n;
-    FakeModel::start(Box::new(move |_| {
-        if left == 0 {
-            return Turn::Text("done".into());
-        }
-        left -= 1;
-        turn()
-    }))
-}
-
-fn denied_by_budget(end: &(String, bool, String)) {
-    assert!(end.1 && end.2.contains("S-47/memory"), "{end:?}");
-}
-
-fn attack_57() -> Option<bool> {
-    let node = pi_available()?;
-    // Calls: twenty small answers, then the twenty-first is denied.
-    {
-        let w = world();
-        let data = data_dir(&w);
-        {
-            let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
-            link.remember(&format!("la persona prefiere el {WORD} de madera"), None)
-                .unwrap();
-        }
-        let model = repeat(21, || search(WORD, 1));
-        let host = Toolhost::start_with_memory(&w, false, None, Some(&data));
-        let mut pi = Pi::start(&node, &w, &model, Some(&host.socket), &Opts::default());
-        let ev = pi.prompt("keep searching");
-        let ends = tool_ends(&ev);
-        assert_eq!(
-            ends.len(),
-            21,
-            "all twenty-one calls were made: {}",
-            ends.len()
-        );
-        assert!(
-            ends[..20].iter().all(|e| !e.1 && e.2.contains(WORD)),
-            "{ends:?}"
-        );
-        denied_by_budget(&ends[20]);
-        assert_eq!(budget(&w)["calls"], 20, "the denied call is not counted");
-        let log = jsonl(&w, "memory.jsonl");
-        assert_eq!(log.len(), 20, "one line per call that went through");
-        let spent: u64 = log.iter().map(|l| l["bytes"].as_u64().unwrap()).sum();
-        assert_eq!(budget(&w)["bytes"], spent, "the file and the log agree");
-    }
-    // Bytes: eight memories of 600 characters. Each answer is 3 to 4 KiB (how many lines fit
-    // depends on what each line carries, its neighbors' ids too), so the cap of 24 KiB of memory
-    // text stops the session at the seventh or eighth call, long before the twentieth.
-    let w = world();
-    let data = data_dir(&w);
-    {
-        let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
-        for i in 0..8 {
-            let filler: Vec<String> = (0..80).map(|j| format!("p{i}q{j}")).collect();
-            let text = format!("{WORD} nota {i}: {}", filler.join(" "));
-            link.remember(&text.chars().take(600).collect::<String>(), None)
-                .unwrap();
-        }
-    }
-    let model = repeat(9, || search(WORD, 8));
-    let host = Toolhost::start_with_memory(&w, false, None, Some(&data));
-    let mut pi = Pi::start(&node, &w, &model, Some(&host.socket), &Opts::default());
-    let ev = pi.prompt("read everything you remember");
-    let ends = tool_ends(&ev);
-    assert_eq!(ends.len(), 9, "all nine calls were made: {}", ends.len());
-    let sizes: Vec<(bool, usize)> = ends.iter().map(|e| (e.1, e.2.len())).collect();
-    let served = ends.iter().position(|e| e.1).expect("the budget ran out");
-    assert!((6..=7).contains(&served), "{sizes:?}");
-    // Full answers, and the last one served may be cut to what was left of the budget.
-    assert!(ends[..served].iter().all(|e| !e.1), "{sizes:?}");
-    assert!(
-        ends[..served - 1].iter().all(|e| e.2.len() > 3 * 1024),
-        "{sizes:?}"
-    );
-    for e in &ends[served..] {
-        denied_by_budget(e);
-    }
-    let spent = budget(&w)["bytes"].as_u64().unwrap();
-    assert!(
-        spent <= 24 * 1024,
-        "{spent} bytes of memory text left in one session"
-    );
-    assert!(spent > 23 * 1024, "the cap was really reached: {spent}");
-    assert_eq!(budget(&w)["calls"], served);
-    let log = jsonl(&w, "memory.jsonl");
-    assert_eq!(log.len(), served, "one line per call that went through");
-    assert_eq!(
-        log.iter()
-            .map(|l| l["bytes"].as_u64().unwrap())
-            .sum::<u64>(),
-        spent
-    );
-    Some(true)
-}
-
 // 58: a value of the vault inside a memory
 
 fn attack_58() -> Option<bool> {
@@ -491,7 +385,7 @@ fn attack_58() -> Option<bool> {
         .iter()
         .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    for want in ["memory.jsonl", "effects.jsonl", "memory-budget.json"] {
+    for want in ["memory.jsonl", "effects.jsonl"] {
         assert!(names.iter().any(|n| n == want), "{want} missing: {names:?}");
     }
     assert!(w.canaries.scan_dir(&w.run_dir).unwrap().is_empty());
@@ -763,7 +657,7 @@ fn attack_60() -> Option<bool> {
 }
 
 // 61: what the model saves after reading outside content is memory at once, the agent's and
-// marked as from outside; a secret is not saved; a tainted session has five
+// marked as from outside; a secret is not saved; a tainted session has no cap of saves
 
 fn attack_61() -> Option<bool> {
     let node = pi_available()?;
@@ -798,14 +692,10 @@ fn attack_61() -> Option<bool> {
     let ok: Vec<bool> = ends.iter().map(|e| !e.1).collect();
     assert_eq!(
         ok,
-        [true, true, true, false, true, true, false, true],
+        [true, true, true, false, true, true, true, true],
         "{ends:?}"
     );
     assert!(ends[1].2.contains("saved"), "{ends:?}");
-    assert!(
-        ends[6].2.contains("S-47"),
-        "the sixth was refused by the budget: {ends:?}"
-    );
     // The key was never proposed, and no answer to the model repeats it (the model's own call
     // does carry it: that is what it wrote).
     assert!(
@@ -820,22 +710,17 @@ fn attack_61() -> Option<bool> {
     // The session was marked by the memory it read, and proposing did not clear that.
     let taint = std::fs::read_to_string(w.run_dir.join("tainted.json")).unwrap_or_default();
     assert!(taint.contains("memory"), "{taint}");
-    let used: Value = serde_json::from_str(
-        &std::fs::read_to_string(w.run_dir.join("memory-proposals.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(used["calls"], 5, "{used}");
     drop(pi);
     drop(host);
     let link = MemoryLink::open_write(&data, &EmbedModel::none()).unwrap();
-    assert_eq!(link.counts().unwrap(), (6, 0, 0), "{:?}", link.counts());
+    assert_eq!(link.counts().unwrap(), (7, 0, 0), "{:?}", link.counts());
     let saved: Vec<_> = link
         .list(clio_memory::State::Active)
         .unwrap()
         .into_iter()
         .filter(|r| r.actor == link.actors().agente)
         .collect();
-    assert_eq!(saved.len(), 4);
+    assert_eq!(saved.len(), 5);
     for row in &saved {
         assert_eq!(row.origin, MOrigin::External, "{row:?}");
         assert!(!row.content.contains(key), "{row:?}");
@@ -854,9 +739,8 @@ fn attack_61() -> Option<bool> {
 }
 // ---------------------------------------------------------------------------------------------
 
-const OURS: [&str; 6] = [
+const OURS: [&str; 5] = [
     "attack-56",
-    "attack-57",
     "attack-58",
     "attack-59",
     "attack-60",
@@ -871,7 +755,6 @@ impl Target for MemoryTarget {
     fn attack(&self, case: &Case) -> Observed {
         let r = match case.id.as_str() {
             "attack-56" => attack_56(),
-            "attack-57" => attack_57(),
             "attack-58" => attack_58(),
             "attack-59" => attack_59(),
             "attack-60" => attack_60(),
@@ -921,8 +804,6 @@ macro_rules! scenario {
 }
 // S-05 S-08 S-25
 scenario!(attack_56_an_order_inside_a_memory_is_data, attack_56);
-// S-47
-scenario!(attack_57_repeated_searches_run_out_of_budget, attack_57);
 // S-18
 scenario!(attack_58_a_vault_value_in_a_memory_is_struck_out, attack_58);
 // S-25 S-27

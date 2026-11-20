@@ -21,7 +21,7 @@ use clio_brain::agent::{
     AgentConfig, AgentLoop, AgentOutcome, Asker, Ending, Model, Msg, Reply, parse_turn,
 };
 use clio_brain::control::Stop;
-use clio_brain::memory_link::{CloseReport, EmbedModel, MAX_AGENT_PROPOSALS, MemoryLink, RunFacts};
+use clio_brain::memory_link::{CloseReport, EmbedModel, MemoryLink, RunFacts};
 use clio_brain::verify::{Checklist, Criterion, ExternalSignal, Scope, Signal, Status as CStatus};
 use clio_canaries::Canaries;
 use clio_contract::{Contract, State};
@@ -1235,9 +1235,8 @@ fn attack_11() -> bool {
     assert_eq!(tried.borrow().len(), 30, "the flood was really attempted");
     assert_eq!(out.denied, 30, "no memory tool exists in the loop");
     assert!(!memory_dir(&w).exists());
-    // The close: at most MAX_AGENT_PROPOSALS lines of the model count, the rest are dropped.
-    let (l, first) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
-    assert_eq!(first.dropped, 100 - MAX_AGENT_PROPOSALS);
+    // The close: every line of the model counts; the actor's quota is the brake.
+    let (l, _) = close_into_memory(&w, &a, &out, "resume el README", "atk-11-0");
     // The agent's hour holds 500 (a brake on a loop): filled up to the brim, as many runs would.
     {
         let lw = writer(&w);

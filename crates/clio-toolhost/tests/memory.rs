@@ -631,129 +631,26 @@ fn run_dir(e: &Env) -> PathBuf {
     e.t.path().canonicalize().unwrap().join("run")
 }
 
-/// A second service over the same folders, as after a restart.
-fn restarted(e: &Env, port: &Arc<FakePort>) -> ToolHost {
-    let r = e.t.path().canonicalize().unwrap();
-    let mut cfg = Config::new(&r.join("work"), &r.join("scratch"), &r.join("run"));
-    cfg.jail = JailMode::Off;
-    cfg.memory = Some(Arc::clone(port) as Arc<dyn MemoryPort>);
-    ToolHost::new(cfg).unwrap()
-}
-
 fn denied_by_budget(r: &Response) -> bool {
     !r.ok && r.decision.outcome == "deny" && r.decision.rule == "S-47/memory"
 }
 
-fn spend_twenty(e: &Env) {
-    for n in 0..20 {
-        assert!(search(e, "s1", "q").ok, "call {n}");
-    }
-}
-
-// S-47
+// A session reads as often as it needs: no cap of calls or of text.
 #[test]
-fn the_budget_runs_out_at_20_calls_or_24_kib() {
-    // Twenty calls, the twenty-first is denied and the port is not asked.
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env(&port);
-    spend_twenty(&e);
-    let r = search(&e, "s1", "q");
-    assert!(denied_by_budget(&r), "{r:?}");
-    assert!(!r.external, "{r:?}");
-    assert_eq!(port.calls(), 20);
-    let g = call(&e, "s1", "memory_get", json!({ "id": 1 }));
-    assert!(denied_by_budget(&g), "{g:?}");
-    assert_eq!(port.calls(), 20);
-
-    // Memories of about 1.2 KiB each: a full answer is about 4 KiB. The text returned never goes
-    // over 24 KiB, the last answers are cut short to what is left, and then the calls are denied.
+fn a_session_has_no_cap_of_reads() {
     let big: Vec<MemoryItem> = (1..=6)
         .map(|i| item(i, Origin::Person, &"é".repeat(600)))
         .collect();
     let port = FakePort::new(big, Mode::Items);
     let e = env(&port);
-    let (mut total, mut lens) = (0, Vec::new());
-    let denied_at = (1..=20).find(|n| {
-        let r = search(&e, "s1", "q");
-        if r.ok {
-            total += r.content.len();
-            lens.push(r.content.len());
-            false
-        } else {
-            assert!(denied_by_budget(&r), "call {n}: {r:?}");
-            true
-        }
-    });
-    assert!(denied_at.is_some_and(|n| n < 20), "{denied_at:?} {lens:?}");
-    assert!(total <= 24 * 1024, "{total} {lens:?}");
-    assert!(total > 24 * 1024 - 1024, "{total} {lens:?}");
-    assert!(
-        lens.last() < lens.first(),
-        "the last answer is cut: {lens:?}"
-    );
-    assert_eq!(port.calls(), lens.len());
-}
-
-// S-47
-#[test]
-fn a_note_that_does_not_fit_in_the_last_kib_never_breaks_the_cap() {
-    // 200 four-byte characters: a note of about 800 bytes, with exactly 1 KiB of budget left (the
-    // floor). The room for the items must not underflow (a panic in debug, a lifted cap in release).
-    let port = FakePort::saying(
-        vec![item(1, Origin::Person, "x")],
-        Some(&"😀".repeat(200)),
-        None,
-    );
-    let e = env(&port);
-    let left = 1024;
-    std::fs::write(
-        run_dir(&e).join("memory-budget.json"),
-        format!(r#"{{"calls":1,"bytes":{}}}"#, 24 * 1024 - left),
-    )
-    .unwrap();
-    let r = search(&e, "s1", "q");
-    assert!(r.ok, "{r:?}");
-    assert!(r.content.len() <= left, "{} bytes: {r:?}", r.content.len());
-    assert!(!r.content.contains("[note]"), "the note is dropped: {r:?}");
-}
-
-// S-47
-#[test]
-fn rejected_and_failed_calls_spend_the_budget() {
-    // Calls the gateway denied do not spend it (five, so the breaker is not reached).
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env(&port);
-    for _ in 0..5 {
-        let r = call(
-            &e,
-            "s1",
-            "memory_search",
-            json!({"query": "x", "scope": "all"}),
-        );
-        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
+    for n in 0..40 {
+        let r = match n % 3 {
+            0 => search(&e, "s1", "q"),
+            1 => call(&e, "s1", "memory_timeline", json!({"id": 1})),
+            _ => call(&e, "s1", "memory_context", json!({})),
+        };
+        assert!(r.ok, "call {n}: {r:?}");
     }
-    spend_twenty(&e);
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-
-    // Calls that fail validation do.
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env(&port);
-    for _ in 0..20 {
-        let r = search(&e, "s1", " ");
-        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
-    }
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-    assert_eq!(port.calls(), 0);
-
-    // And so do the ones that fail in the port.
-    let port = FakePort::new(vec![], Mode::Fail("boom".into()));
-    let e = env(&port);
-    for _ in 0..20 {
-        let r = search(&e, "s1", "q");
-        assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
-    }
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-    assert_eq!(port.calls(), 20);
 }
 
 #[test]
@@ -770,60 +667,9 @@ fn an_abstaining_memory_that_still_returns_items_says_so() {
     assert!(!r.content.contains("unsure"), "{r:?}");
 }
 
-// S-47
+// A read that cannot be logged is denied, not let through.
 #[test]
-fn the_budget_survives_a_new_host_on_the_same_run_dir() {
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env(&port);
-    spend_twenty(&e);
-    let again = restarted(&e, &port);
-    let r = again.handle(Request {
-        id: "i1".into(),
-        tool: "memory_search".into(),
-        args: json!({ "query": "q" }),
-        session: "s1".into(),
-        call_id: "c1".into(),
-        tainted: false,
-    });
-    assert!(denied_by_budget(&r), "{r:?}");
-    assert_eq!(port.calls(), 20);
-}
-
-// S-47
-#[test]
-fn a_denial_by_the_budget_does_not_count_for_the_breaker() {
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env(&port);
-    spend_twenty(&e);
-    for _ in 0..12 {
-        assert!(denied_by_budget(&search(&e, "s1", "q")));
-    }
-    let l = call(&e, "s1", "fs_list", json!({ "path": "." }));
-    assert!(l.ok && l.decision.outcome == "allow", "{l:?}");
-}
-
-// S-47
-#[test]
-fn a_broken_budget_file_fails_closed() {
-    type Break = (&'static str, fn(&Path));
-    let broken: [Break; 4] = [
-        ("garbage", |p| std::fs::write(p, "no es json").unwrap()),
-        ("wrong shape", |p| {
-            std::fs::write(p, r#"{"calls": "ninguna"}"#).unwrap();
-        }),
-        ("empty", |p| std::fs::write(p, "").unwrap()),
-        ("a folder", |p| std::fs::create_dir(p).unwrap()),
-    ];
-    for (what, make) in broken {
-        let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-        let e = env(&port);
-        make(&run_dir(&e).join("memory-budget.json"));
-        let r = search(&e, "s1", "q");
-        assert!(denied_by_budget(&r), "{what}: {r:?}");
-        assert_eq!(port.calls(), 0, "{what}");
-    }
-
-    // Nowhere to write the budget: denied, not let through without a count.
+fn a_read_whose_log_cannot_be_kept_is_denied() {
     let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
     let e = env(&port);
     let run = run_dir(&e);
@@ -833,7 +679,6 @@ fn a_broken_budget_file_fails_closed() {
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
     if probe.is_err() {
         assert!(denied_by_budget(&r), "{r:?}");
-        assert_eq!(port.calls(), 0);
     } else {
         eprintln!("SKIPPED the read-only folder case: permissions do not apply here");
     }
@@ -881,22 +726,15 @@ fn the_log_has_facts_never_text() {
     assert_eq!(rows[4]["results"], 0, "a call that failed is logged too");
     assert_eq!(rows[4]["bytes"], 0);
 
-    // Neither file has the query or what a memory said; both are private.
-    for name in ["memory.jsonl", "memory-budget.json"] {
-        let path = run.join(name);
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains(marker) && !text.contains(query) && !text.contains("otro texto"),
-            "{name}: {text}"
-        );
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "{name}");
-    }
-    let budget: Value =
-        serde_json::from_str(&std::fs::read_to_string(run.join("memory-budget.json")).unwrap())
-            .unwrap();
-    assert_eq!(budget["calls"], 5);
-    assert!(budget["bytes"].as_u64().unwrap() > 0);
+    // The log has neither the query nor what a memory said, and it is private.
+    let path = run.join("memory.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains(marker) && !text.contains(query) && !text.contains("otro texto"),
+        "{text}"
+    );
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 }
 
 // S-60
@@ -1032,103 +870,26 @@ fn if_the_vault_cannot_filter_the_proposal_nothing_is_proposed() {
     assert_eq!(port.proposals.lock().unwrap().len(), 0);
 }
 
-// S-47, S-61
+// A session saves and changes as often as it needs, also one that read outside content: the
+// memory's hourly quota per actor is the only brake.
 #[test]
-fn a_tainted_session_makes_five_proposals_a_clean_one_thirty_and_failed_ones_count() {
-    let port = FakePort::new(
-        vec![item(1, Origin::External, "x")],
-        Mode::Fail("la memoria está llena".into()),
-    );
-    let e = env(&port);
-    // The session that read something hostile: five.
-    assert!(call(&e, "s1", "taint", json!({})).tainted);
-    port.proposals.lock().unwrap().clear();
-    for n in 0..5 {
-        let r = propose(&e, "s1", &format!("p{n}"), "semantic");
-        assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
-    }
-    let r = propose(&e, "s1", "p5", "semantic");
-    assert!(denied_by_budget(&r), "{r:?}");
-    assert_eq!(port.proposals.lock().unwrap().len(), 5);
-    // The proposals have their own count: reading is not spent.
-    assert!(!search(&e, "s1", "q").content.contains("S-47"));
-    // One that has read nothing hostile (its own run folder, as in real use): thirty, and the
-    // failed ones count too.
-    let e = env(&port);
-    for n in 0..30 {
-        let r = propose(&e, "clean", &format!("p{n}"), "semantic");
-        assert!(r.decision.rule != "S-47/memory", "{n}: {r:?}");
-    }
-    assert!(denied_by_budget(&propose(&e, "clean", "p30", "semantic")));
-}
-
-// S-47, S-61, S-65: in a conversation that never ends the caps count over a rolling hour, by the
-// tool host's clock: a save or a change older than an hour no longer counts. A count written by an
-// older version (no times) is taken as made now.
-#[test]
-fn the_saves_and_changes_count_over_a_rolling_hour() {
-    let clock = Arc::new(clio_core::FixedClock::new(1_000_000_000));
+fn a_session_has_no_cap_of_saves_or_changes() {
     let port = FakePort::new(vec![], Mode::Items);
-    let e = env_with(Some(&port), |c| c.clock = clock.clone());
+    let e = env(&port);
     assert!(call(&e, "s1", "taint", json!({})).tainted);
-    for n in 0..5 {
+    for n in 0..40 {
         assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok, "{n}");
+        assert!(change(&e, "s1", "memory_pin", 7).ok, "{n}");
     }
-    let r = propose(&e, "s1", "p5", "semantic");
-    assert!(denied_by_budget(&r) && r.content.contains("hour"), "{r:?}");
-    for _ in 0..10 {
-        assert!(change(&e, "s1", "memory_pin", 7).ok);
-    }
-    let r = change(&e, "s1", "memory_pin", 7);
-    assert!(denied_by_budget(&r) && r.content.contains("hour"), "{r:?}");
-    // Still inside the hour: refused.
-    clock.advance(59 * 60 * 1000);
-    assert!(denied_by_budget(&propose(&e, "s1", "p6", "semantic")));
-    // Past it: the five saves and the ten changes are back, and the mark stays.
-    clock.advance(2 * 60 * 1000);
-    assert!(propose(&e, "s1", "p7", "semantic").ok);
-    assert!(change(&e, "s1", "memory_pin", 7).ok);
-    assert!(e.host.is_tainted("s1"));
-    // An older file has only the count: its saves count from now.
-    std::fs::write(
-        run_dir(&e).join("memory-proposals.json"),
-        r#"{"calls":5,"bytes":0}"#,
-    )
-    .unwrap();
-    assert!(denied_by_budget(&propose(&e, "s1", "p8", "semantic")));
-    clock.advance(59 * 60 * 1000);
-    assert!(denied_by_budget(&propose(&e, "s1", "p9", "semantic")));
-    clock.advance(2 * 60 * 1000);
-    let r = propose(&e, "s1", "p10", "semantic");
+    let r = summary(&e, "s1", json!({"goal": "g", "accomplished": "h"}));
     assert!(r.ok, "{r:?}");
-}
-
-// S-47, S-61
-#[test]
-fn the_proposal_count_survives_a_restart_and_a_broken_file_fails_closed() {
-    let port = FakePort::new(vec![item(1, Origin::External, "x")], Mode::Items);
-    let e = env(&port);
-    assert!(search(&e, "s1", "q").tainted);
-    for n in 0..5 {
-        assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok);
-    }
-    let again = restarted(&e, &port);
-    let r = again.handle(Request {
-        id: "i2".into(),
-        tool: "memory_save".into(),
-        args: json!({"text": "otra", "kind": "semantic"}),
-        session: "s1".into(),
-        call_id: "c2".into(),
-        tainted: true,
-    });
-    assert!(denied_by_budget(&r), "{r:?}");
-
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env(&port);
-    std::fs::write(run_dir(&e).join("memory-proposals.json"), "no es json").unwrap();
-    let r = propose(&e, "s1", "algo", "semantic");
-    assert!(denied_by_budget(&r), "{r:?}");
-    assert_eq!(port.proposals.lock().unwrap().len(), 0);
+    let r = call(
+        &e,
+        "s1",
+        "memory_consolidate",
+        json!({"ids": "1, 2", "text": "x"}),
+    );
+    assert!(r.ok, "{r:?}");
 }
 
 // S-61
@@ -1272,7 +1033,7 @@ fn cfg_dirs(r: &Path) -> PathBuf {
 }
 
 #[test]
-fn a_change_needs_a_positive_number_and_a_session_has_ten_of_them_and_the_refused_ones_count() {
+fn a_change_needs_a_positive_number() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     for bad in [
@@ -1289,20 +1050,6 @@ fn a_change_needs_a_positive_number_and_a_session_has_ten_of_them_and_the_refuse
         "revert takes `change`"
     );
     assert!(port.changes.lock().unwrap().is_empty());
-    // A bad number is refused before it is counted; ten good ones, then no more.
-    for n in 1..=10 {
-        assert!(change(&e, "s1", "memory_forget", n).ok, "{n}");
-    }
-    assert!(denied_by_budget(&change(&e, "s1", "memory_forget", 11)));
-    assert_eq!(port.changes.lock().unwrap().len(), 10);
-    // And the ones the memory refused count too.
-    let failing = FakePort::new(vec![], Mode::Fail("no".into()));
-    let e = env(&failing);
-    for n in 1..=10 {
-        let r = change(&e, "s1", "memory_pin", n);
-        assert!(!r.ok && r.decision.rule != "S-47/memory", "{n}: {r:?}");
-    }
-    assert!(denied_by_budget(&change(&e, "s1", "memory_pin", 11)));
 }
 
 #[test]
@@ -1494,28 +1241,6 @@ fn the_context_starts_with_last_nights_sleep() {
     );
 }
 
-// S-60: the timeline and the context spend the same 20 calls as a search.
-#[test]
-fn the_timeline_and_the_context_spend_the_session_budget() {
-    let port = FakePort::new(vec![item(1, Origin::Person, "dato")], Mode::Items);
-    let e = env(&port);
-    for i in 0..20 {
-        let r = if i % 2 == 0 {
-            call(&e, "s", "memory_timeline", json!({"id": 1}))
-        } else {
-            call(&e, "s", "memory_context", json!({}))
-        };
-        assert!(r.ok, "{i}: {r:?}");
-    }
-    assert!(denied_by_budget(&call(
-        &e,
-        "s",
-        "memory_context",
-        json!({})
-    )));
-    assert!(denied_by_budget(&search(&e, "s", "dato")));
-}
-
 // ---- memory_session_summary (stage 3) ----
 
 fn summary(e: &Env, session: &str, args: Value) -> Response {
@@ -1596,7 +1321,7 @@ fn a_summary_without_its_goal_or_what_was_done_or_too_long_is_refused_before_the
 }
 
 #[test]
-fn a_summary_with_a_secret_is_not_proposed_and_it_counts_as_a_proposal() {
+fn a_summary_with_a_secret_is_not_proposed() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     let key = concat!("sk-", "proj-0123456789abcdefghijklmnopqrstuv");
@@ -1607,12 +1332,6 @@ fn a_summary_with_a_secret_is_not_proposed_and_it_counts_as_a_proposal() {
     );
     assert!(!r.ok && r.content.contains("secret"), "{r:?}");
     assert_eq!(port.calls(), 0);
-    // Thirty in a clean session, summaries and proposals together (the refused one counted).
-    for i in 0..29 {
-        assert!(propose(&e, "s", &format!("dato {i}"), "semantic").ok, "{i}");
-    }
-    let r = summary(&e, "s", json!({"goal": "g", "accomplished": "h"}));
-    assert!(denied_by_budget(&r), "{r:?}");
 }
 
 // When the brain closes a session, its last turn may only save the summary: every other tool is
@@ -1644,10 +1363,9 @@ fn a_closed_session_only_saves_its_summary() {
 
 // ---- memory_pin and relations (stage 4) ----
 
-// S-65: pinning is one of the agent's changes: the answer is in fixed words and it counts among
-// the hour's ten changes.
+// S-65: pinning is one of the agent's changes: the answer is in fixed words.
 #[test]
-fn a_pin_reaches_the_port_and_counts_as_a_change() {
+fn a_pin_reaches_the_port() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     let r = change(&e, "s1", "memory_pin", 7);
@@ -1655,10 +1373,6 @@ fn a_pin_reaches_the_port_and_counts_as_a_change() {
     let seen = port.changes.lock().unwrap().last().unwrap().clone();
     assert_eq!((seen.0.as_str(), seen.1), ("pin", 7));
     assert!(!change(&e, "s1", "memory_pin", 0).ok);
-    for _ in 0..9 {
-        change(&e, "s1", "memory_pin", 7);
-    }
-    assert!(denied_by_budget(&change(&e, "s1", "memory_pin", 7)));
 }
 
 // What Jev judged about a memory's relations is shown in its line, cleaned like the rest.
@@ -1690,7 +1404,7 @@ fn a_memory_line_says_how_it_stands_to_others() {
 // An update is a proposal about one memory: checked like one (text, title, category, secrets),
 // counted like one, and handed to the port with its id.
 #[test]
-fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() {
+fn an_update_reaches_the_port_with_its_id_checked() {
     let port = FakePort::new(vec![], Mode::Items);
     let e = env(&port);
     let r = call(
@@ -1719,27 +1433,6 @@ fn an_update_reaches_the_port_with_its_id_checked_and_counted_like_a_proposal() 
         1,
         "nothing else reached the port"
     );
-    // Counted among the proposals (per run): a tainted session has five in all.
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env(&port);
-    call(&e, "t", "taint", json!({}));
-    for i in 0..5 {
-        assert!(
-            call(
-                &e,
-                "t",
-                "memory_update",
-                json!({"id": 7, "text": format!("t{i}")})
-            )
-            .ok
-        );
-    }
-    assert!(denied_by_budget(&call(
-        &e,
-        "t",
-        "memory_save",
-        json!({"text": "x", "kind": "semantic"})
-    )));
 }
 
 // ---- memory_consolidate ----
@@ -1791,24 +1484,6 @@ fn memory_propose_still_saves_and_memory_promote_is_not_declared() {
     let r = call(&e, "s1", "memory_promote", json!({"id": 3}));
     assert!(!r.ok && r.decision.rule == "S-02", "{r:?}");
     assert!(port.changes.lock().unwrap().is_empty());
-}
-
-// A merge is also one of the hour's ten changes.
-#[test]
-fn a_merge_counts_among_the_ten_changes() {
-    let port = FakePort::new(vec![], Mode::Items);
-    let e = env(&port);
-    for _ in 0..10 {
-        change(&e, "s", "memory_forget", 3);
-    }
-    let r = call(
-        &e,
-        "s",
-        "memory_consolidate",
-        json!({"ids": "1, 2", "text": "x"}),
-    );
-    assert!(denied_by_budget(&r), "{r:?}");
-    assert!(port.drafts.lock().unwrap().is_empty());
 }
 
 // `profile` is one of the categories a proposal may carry.
@@ -2045,7 +1720,7 @@ fn neighbor_ids_never_push_a_result_out() {
 
 // S-47, S-61
 #[test]
-fn a_write_refused_on_its_own_arguments_spends_no_save_but_one_with_a_secret_does() {
+fn a_write_is_refused_on_its_own_arguments_or_a_secret() {
     let value = "canario-del-baul-7f3a9c";
     let scrubber = Scrubber::new(Arc::new(SystemClock));
     scrubber.add("canario", value);
@@ -2090,13 +1765,9 @@ fn a_write_refused_on_its_own_arguments_spends_no_save_but_one_with_a_secret_doe
     // Too long as typed, fits once flattened: it is measured as it will be proposed.
     let spaced = format!("{}\n\n\n\n{}", "a".repeat(600), "b".repeat(599));
     assert!(propose(&e, "s1", &spaced, "semantic").ok);
-    // A secret is refused after the count: four of the five are left, so four more and no sixth.
+    // A secret is refused.
     let r = propose(&e, "s1", &format!("la llave es {value}"), "semantic");
     assert!(!r.ok && r.decision.rule != "S-47/memory", "{r:?}");
-    for n in 0..3 {
-        assert!(propose(&e, "s1", &format!("p{n}"), "semantic").ok, "{n}");
-    }
-    assert!(denied_by_budget(&propose(&e, "s1", "p3", "semantic")));
 }
 
 // ---------------------------------------------------------------- the person's blocks
@@ -2605,31 +2276,4 @@ fn nothing_the_model_can_call_approves_a_block_change() {
         waiting.iter().all(|p| p.state == State::Waiting),
         "{waiting:?}"
     );
-}
-
-// S-47: the reads' budget (20 calls, 24 KiB) counts over a rolling hour by the tool host's clock,
-// as the saves and changes do; a count written by an older version is taken as made now.
-#[test]
-fn the_memory_reads_count_over_a_rolling_hour() {
-    let clock = Arc::new(clio_core::FixedClock::new(1_000_000_000));
-    let port = FakePort::new(vec![item(1, Origin::Person, "x")], Mode::Items);
-    let e = env_with(Some(&port), |c| c.clock = clock.clone());
-    spend_twenty(&e);
-    let r = search(&e, "s1", "q");
-    assert!(denied_by_budget(&r) && r.content.contains("hour"), "{r:?}");
-    clock.advance(59 * 60 * 1000);
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-    clock.advance(2 * 60 * 1000);
-    assert!(search(&e, "s1", "q").ok);
-    // The bytes too: an older file with the text spent and no times counts from now.
-    std::fs::write(
-        run_dir(&e).join("memory-budget.json"),
-        format!(r#"{{"calls":1,"bytes":{}}}"#, 24 * 1024 - 100),
-    )
-    .unwrap();
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-    clock.advance(59 * 60 * 1000);
-    assert!(denied_by_budget(&search(&e, "s1", "q")));
-    clock.advance(2 * 60 * 1000);
-    assert!(search(&e, "s1", "q").ok);
 }
