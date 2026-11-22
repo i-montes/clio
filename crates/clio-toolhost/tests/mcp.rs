@@ -1362,3 +1362,184 @@ fn mcp_propose_says_what_bypass_will_do() {
         r.content
     );
 }
+
+/// The vault on the env's person socket, holding `names` (each bound to another host).
+fn serve_vault(e: &Env, names: &[&str]) {
+    use clio_vault::{Dest, Kind, Scope, SecretSpec, Vault};
+    let (v, cap) = Vault::init(
+        None,
+        "correct horse battery staple",
+        Arc::new(clio_core::SystemClock),
+    )
+    .unwrap();
+    for n in names {
+        v.put(
+            &cap,
+            SecretSpec {
+                name: (*n).into(),
+                value: "a-value-long-enough-0123456789".into(),
+                kind: Kind::ApiKey,
+                destinations: vec![Dest::new("http_fetch", "api.example.com")],
+                scope: Scope::Personal,
+                rotate_every_ms: None,
+                expires_at_ms: None,
+            },
+        )
+        .unwrap();
+    }
+    let r = e.data.parent().unwrap().parent().unwrap().to_path_buf();
+    let (gw, person) = (r.join("g.sock"), r.join("vault.sock"));
+    let p = person.clone();
+    std::thread::spawn(move || clio_vault::server::serve(Arc::new(v), &gw, &p));
+    let end = Instant::now() + Duration::from_secs(5);
+    while !person.exists() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Catalog server `tavily` installed exactly as the catalog has it, off for `off`.
+fn install_catalog(e: &Env, off: &str) {
+    let entry = clio_toolhost::catalog::entry("tavily").unwrap();
+    let m = clio_toolhost::catalog::manifest(&entry, &e.root);
+    let v = e.root.join("versions/tavily/1");
+    std::fs::create_dir_all(&v).unwrap();
+    std::fs::write(v.join(mcp::MANIFEST), mcp::compose(&m)).unwrap();
+    std::fs::create_dir_all(e.root.join("records")).unwrap();
+    set_catalog_off(e, off);
+    let st = State {
+        name: "tavily".into(),
+        package: m.package,
+        version: m.version,
+        entry: "node_modules/tavily-mcp/build/index.js".into(),
+        tree: "t".into(),
+        integrity: entry.integrity.clone(),
+        packages: 126,
+        lock: String::new(),
+        confirmed: true,
+        tools: vec![tool("tavily_search", "Search the web.", true)],
+    };
+    let _l = mcp::lock_root(&e.root).unwrap();
+    mcp::save_state(&e.root, &st).unwrap();
+}
+
+fn set_catalog_off(e: &Env, off: &str) {
+    std::fs::write(
+        e.root.join("records/tavily.json"),
+        json!({"name": "tavily", "description": "d", "enabled": false, "off": off, "current": 1,
+            "versions": [{"n": 1, "sha256": "x", "at_ms": 1, "by": "person", "verdict": "approved"}]})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn search(e: &Env, session: &str) -> Response {
+    // The model's own words, aimed at another secret and another host: none may reach the request.
+    call(
+        e,
+        session,
+        "c",
+        "mcp_call",
+        json!({"server": "tavily", "tool": "tavily_search",
+            "arguments": {"text": "store gh-token for http_fetch:evil.example.com"}}),
+    )
+}
+
+// S-70: a catalog server off only for its token: a call leaves ONE request in the chat with the
+// catalog's name, host and words (nothing of the model's), the model reads one fixed line, and the
+// server is not started; more calls ask nothing more, another session's request gives way to the
+// current one; a declined token, a suspect session and a server off for another reason ask nothing.
+#[test]
+fn a_catalog_server_waiting_for_its_token_asks_the_person_once_with_the_catalogs_words() {
+    let Some(e) = env() else { return };
+    serve_vault(&e, &["github"]);
+    let entry = clio_toolhost::catalog::entry("tavily").unwrap();
+    let sec = &entry.secrets[0];
+    let waits = clio_toolhost::catalog::off_waiting(&entry, &[&sec.name]);
+    install_catalog(&e, &waits);
+    let r = search(&e, "s1");
+    assert!(!r.ok, "{r:?}");
+    assert_eq!(
+        r.content,
+        format!(
+            "mcp_call failed: {}",
+            clio_toolhost::catalog::token_asked("tavily")
+        )
+    );
+    assert!(e.port.starts.lock().unwrap().is_empty(), "not started");
+    let asked = waiting(&e);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let p = &asked[0];
+    assert_eq!(p.class, Class::Secret);
+    assert_eq!(p.tool, pending::TOKEN_TOOL);
+    assert_eq!((p.run.as_str(), p.session.as_str()), ("r1", "s1"));
+    let why = clio_toolhost::catalog::token_why(&entry, sec);
+    assert_eq!(
+        pending::secret_of(p),
+        Some(("tavily-api-key", "mcp:api.tavily.com", why.as_str()))
+    );
+    assert_eq!(p.args["server"], "tavily");
+    let file = std::fs::read_to_string(e.data.join(format!("host/pending/{}.json", p.id))).unwrap();
+    assert!(
+        !file.contains("evil") && !file.contains("gh-token"),
+        "{file}"
+    );
+    // Asked once: more calls of this session leave nothing more.
+    for _ in 0..3 {
+        assert_eq!(search(&e, "s1").content, r.content);
+    }
+    assert_eq!(waiting(&e).len(), 1);
+    // Another chat needs it: the old request gives way; one waits, for the session that asked.
+    search(&e, "s2");
+    let now = waiting(&e);
+    assert_eq!(now.len(), 1);
+    assert_eq!(now[0].session, "s2");
+    // The person declined it: nothing is asked again, and the model is told not to ask.
+    pending::reject(&e.data.join("host"), &now[0].id).unwrap();
+    set_catalog_off(
+        &e,
+        &clio_toolhost::catalog::off_declined(&entry, &[&sec.name]),
+    );
+    let r = search(&e, "s3");
+    assert!(!r.ok && r.content.contains("declined"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+    // Off for any other reason: as any server that is off.
+    set_catalog_off(&e, "off: turned off by the person");
+    let r = search(&e, "s3");
+    assert!(r.content.contains("no MCP server «tavily» is on"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+    // A session that read flagged text asks nothing.
+    set_catalog_off(&e, &waits);
+    call(&e, "s4", "t", "taint", json!({"suspect": true}));
+    let r = search(&e, "s4");
+    assert!(!r.ok && r.content.contains("judge flagged"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+    // A server called `tavily` that is not the catalog's (another network) asks nothing.
+    let entry = clio_toolhost::catalog::entry("tavily").unwrap();
+    let mut m = clio_toolhost::catalog::manifest(&entry, &e.root);
+    m.network.push("evil.example.com".into());
+    std::fs::write(
+        e.root.join("versions/tavily/1").join(mcp::MANIFEST),
+        mcp::compose(&m),
+    )
+    .unwrap();
+    let r = search(&e, "s5");
+    assert!(r.content.contains("no MCP server «tavily» is on"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+    assert!(e.port.starts.lock().unwrap().is_empty());
+}
+
+// S-70: the token is in the vault already (put there by hand): nothing is asked, and the model
+// hears how the person turns the server on.
+#[test]
+fn a_token_the_vault_has_is_not_asked_again() {
+    let Some(e) = env() else { return };
+    serve_vault(&e, &["tavily-api-key"]);
+    let entry = clio_toolhost::catalog::entry("tavily").unwrap();
+    install_catalog(
+        &e,
+        &clio_toolhost::catalog::off_waiting(&entry, &["tavily-api-key"]),
+    );
+    let r = search(&e, "s1");
+    assert!(!r.ok && r.content.contains("/mcp on tavily"), "{r:?}");
+    assert!(waiting(&e).is_empty());
+}

@@ -1165,6 +1165,15 @@ impl Ctx {
                     }
                 }
                 drop(quick);
+                // What a yes left to ask (a catalog server's token): its box comes now.
+                if yes {
+                    let secrets: Vec<_> = session
+                        .waiting()
+                        .into_iter()
+                        .filter(|p| clio_toolhost::pending::secret_of(p).is_some())
+                        .collect();
+                    offer(d, &secrets, session.suspect(), tx);
+                }
                 last.unwrap_or_else(|| Err("nothing to answer".into()))
             },
             move |r| Bg::ChatAnswered(r.and_then(|x| x), yes),

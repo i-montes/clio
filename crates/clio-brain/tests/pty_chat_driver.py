@@ -358,6 +358,26 @@ elif scenario == "approve":
     send(fd, CTRL_C)  # idle: Ctrl-C leaves
     out["code"] = wait_exit(fd, pid)
     out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
+elif scenario == "token":
+    # Host mode: a turn calls web search, whose catalog server is off waiting for its token (cfg
+    # "ask" / "answer"); once the chat is idle its secret box asks for that token, the value
+    # (cfg "key") is typed and Enter stores it; the note says the server is on, and the turn the
+    # answer starts ends (cfg "after"); then leave.
+    out["opened"] = open_new_chat(fd)
+    out["answered"] = ask(fd, cfg["ask"], cfg["answer"])
+    out["box"] = wait_screen(fd, "Clio asks you to store the secret tavily-api-key", 30)
+    out["box_text"] = screen()
+    time.sleep(1.5)  # the box hears its first key after a quiet second
+    type_text(fd, cfg["key"])
+    send(fd, ENTER)
+    out["on"] = wait_screen(fd, "is on now", 30)
+    out["after"] = wait_screen(fd, cfg["after"], 60) and idle(fd)
+    if not out["after"]:
+        out["screen"] = screen()
+    time.sleep(0.5)
+    send(fd, CTRL_C)  # idle: Ctrl-C leaves
+    out["code"] = wait_exit(fd, pid)
+    out["procs_after_quit"] = 0 if gone(15) else len(pi_procs())
 elif scenario in ("review_quit", "review_new"):
     # A turn that writes a file, `/review`, and while the reviewer runs (its model has it run a
     # long command) the person leaves, or starts a new session: no reviewer Pi or tool host stays.

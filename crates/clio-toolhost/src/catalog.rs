@@ -22,6 +22,7 @@ const LOCKS: &[(&str, &str)] = &[
         include_str!("../../../mcp/locks/playwright.json"),
     ),
     ("notion", include_str!("../../../mcp/locks/notion.json")),
+    ("tavily", include_str!("../../../mcp/locks/tavily.json")),
 ];
 /// A browser older than this is said to be old when its server starts.
 pub const BROWSER_FRESH_DAYS: i64 = 12 * 7;
@@ -191,6 +192,42 @@ pub fn of(m: &Manifest, root: &Path) -> Option<Entry> {
     entry(&m.name).filter(|e| manifest(e, root) == *m)
 }
 
+/// How the record of a catalog server off for a token not in the vault starts: a call of it, or
+/// the person's yes to it in the chat, asks the person for the token (one request a secret).
+pub const OFF_TOKEN: &str = "off: waiting for its token";
+/// How it starts once the person declined that token: nothing asks for it again.
+pub const OFF_DECLINED: &str = "off: you declined its token";
+
+/// Why `e` is off while `missing` (its secrets' names) are not in the vault.
+pub fn off_waiting(e: &Entry, missing: &[&str]) -> String {
+    format!(
+        "{OFF_TOKEN} {} (the chat asks for it; clio mcp add {} too)",
+        missing.join(", "),
+        e.name
+    )
+}
+
+/// Why `e` is off once the person declined `names`.
+pub fn off_declined(e: &Entry, names: &[&str]) -> String {
+    format!(
+        "{OFF_DECLINED} {} (clio mcp add {} or clio setup asks for it again)",
+        names.join(", "),
+        e.name
+    )
+}
+
+/// What the person's box says the token of `e` is for: the catalog's words only.
+pub fn token_why(e: &Entry, s: &Secret) -> String {
+    format!("{} needs it to turn on. {}", e.title.en, s.where_.en)
+}
+
+/// The model's one line when a call reached `server`, off for its token, and the person is asked.
+pub fn token_asked(server: &str) -> String {
+    format!(
+        "«{server}» is off until the person gives its token: Clio asks them for it in the chat when this turn ends. Do not ask them yourself; go on with the rest without it. Once they type it the server turns on, and calling it again works."
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -231,6 +268,8 @@ mod tests {
             }
             for s in &e.secrets {
                 assert!(!s.where_.en.is_empty() && !s.where_.es.is_empty());
+                // The chat's box shows a request's why whole up to 200 characters.
+                assert!(token_why(e, s).chars().count() <= 200, "{}", e.name);
             }
             // A placeholder left over would reach the server as text.
             assert!(!crate::mcp::compose(&m).contains(BROWSER), "{}", e.name);

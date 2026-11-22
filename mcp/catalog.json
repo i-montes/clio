@@ -90,6 +90,32 @@
         "API-query-data-source",
         "API-list-data-source-templates"
       ]
+    },
+    {
+      "name": "tavily",
+      "title": { "en": "Web search (Tavily)", "es": "Búsqueda web (Tavily)" },
+      "description": {
+        "en": "Tavily's own server: searches the web and reads pages through Tavily's API, which sees each search and each page asked for.",
+        "es": "El servidor de Tavily: busca en la web y lee páginas con la API de Tavily, que ve cada búsqueda y cada página pedida."
+      },
+      "verified": "2026-11-22",
+      "package": "tavily-mcp",
+      "version": "0.2.22",
+      "integrity": "sha512-w2pmmmn/JKcNavylDoiNtNPflWt6SK2G1SVUvg0VvdvFJQUaOzEdanAm1VUWBOhUCqmVoBYVPstGcOoWvh8RQQ==",
+      "network": ["api.tavily.com"],
+      "secrets": [
+        {
+          "name": "tavily-api-key",
+          "env": "TAVILY_API_KEY",
+          "host": "api.tavily.com",
+          "where": {
+            "en": "app.tavily.com: sign in and copy your API key (it starts with tvly-). Free plan: 1,000 credits a month; a search costs 1 or 2.",
+            "es": "app.tavily.com: entra y copia tu API key (empieza por tvly-). Plan gratis: 1.000 créditos al mes; una búsqueda cuesta 1 o 2."
+          }
+        }
+      ],
+      "limits": { "cpu_percent": 50, "memory_mb": 1536, "seconds": 120 },
+      "modes": ["tavily_search", "tavily_extract"]
     }
   ]
 }

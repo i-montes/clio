@@ -456,14 +456,17 @@ pub fn answer_secret(dirs: &Dirs, id: &str, value: Option<&SecretValue>) -> Res<
     };
     let note = match value {
         None => {
-            pending::reject(&st, id)?;
+            reject(dirs, id)?;
             format!("the person declined {name}")
         }
         Some(v) => {
-            pending::answer_secret(&st, id, now_ms(), |_| {
+            let p = pending::answer_secret(&st, id, now_ms(), |_| {
                 super::vault::store_requested(dirs, name, dest, v)
             })?;
-            format!("secret {name} saved, bound to {dest}")
+            format!(
+                "secret {name} saved, bound to {dest}{}",
+                super::mcp_servers::token_given(dirs, &p)
+            )
         }
     };
     Ok(note)
@@ -700,7 +703,8 @@ pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> 
         // Downloaded, checked, probed and registered only here, by the person's own `clio`
         // (S-70): never from the jail, never on the model's say-so.
         pending::approve_mcp(&state(dirs), id, at, |p| {
-            super::mcp_servers::Port::new(dirs.clone(), None)?.install(p)
+            let text = super::mcp_servers::Port::new(dirs.clone(), None)?.install(p)?;
+            Ok(super::mcp_servers::after_install(dirs, p, text))
         })?
     } else if pending::skill_of(&p).is_some() {
         // Registered here, by the person's own `clio`: never from the jail (S-68).
@@ -769,6 +773,8 @@ pub fn reject(dirs: &Dirs, id: &str) -> Res<Pending> {
     // A skill of the shared folder: not asked again for what is there now (S-74). The no is
     // already kept; failing to remember it only means the chat asks again, so it is not an error.
     let _ = super::skills::said_no(dirs, &p);
+    // A catalog server's token: not asked again on every call or chat (S-70).
+    super::mcp_servers::token_declined(dirs, &p);
     Ok(p)
 }
 
@@ -1408,6 +1414,204 @@ mod tests {
         assert!(secret_waiting(&dirs, &id).is_none());
         // An action set aside is not a secret request.
         assert!(answer_secret(&dirs, "nope", None).is_err());
+    }
+
+    /// Catalog server `tavily` installed exactly as the catalog has it (no package files), off
+    /// waiting for its token, as `finish_catalog` leaves it.
+    fn catalog_tavily(dirs: &Dirs) -> clio_toolhost::catalog::Entry {
+        use crate::cli::{mcp_servers, skills};
+        let e = clio_toolhost::catalog::entry("tavily").unwrap();
+        let root = mcp_servers::root(dirs);
+        std::fs::create_dir_all(&root).unwrap();
+        let mf = clio_toolhost::catalog::manifest(&e, &root);
+        let text = clio_toolhost::mcp::compose(&mf);
+        let new = skills::New {
+            name: "tavily",
+            description: &mf.description,
+            skill_md: &text,
+            files: &[],
+            by: "person",
+            verdict: "approved",
+        };
+        skills::register_in(&root, skills::Kind::Mcp, &new).unwrap();
+        let st = clio_toolhost::mcp::State {
+            name: mf.name.clone(),
+            package: mf.package.clone(),
+            version: mf.version.clone(),
+            entry: "node_modules/tavily-mcp/build/index.js".into(),
+            tree: "t".into(),
+            integrity: e.integrity.clone(),
+            packages: 126,
+            lock: String::new(),
+            confirmed: true,
+            tools: vec![],
+        };
+        {
+            let _l = clio_toolhost::mcp::lock_root(&root).unwrap();
+            clio_toolhost::mcp::save_state(&root, &st).unwrap();
+        }
+        let waits = clio_toolhost::catalog::off_waiting(&e, &["tavily-api-key"]);
+        mcp_servers::set_on_by(dirs, "tavily", false, &waits).unwrap();
+        e
+    }
+
+    fn off_text(dirs: &Dirs) -> String {
+        crate::cli::skills::record(&crate::cli::mcp_servers::root(dirs), "tavily")
+            .and_then(|r| r.off)
+            .unwrap_or_default()
+    }
+
+    // S-70: a catalog server's token typed in the chat's box goes to the vault bound to
+    // `mcp:<its host>` and nowhere else, turns the server on (no restart: the next call reads
+    // it), and leaves no byte behind; declined, the server stays off saying so, and that no is
+    // kept: a call of it asks nothing again.
+    #[test]
+    fn a_catalog_token_typed_in_the_chat_turns_its_server_on_and_a_no_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let (dirs, _host) = setup(t.path());
+        let e = catalog_tavily(&dirs);
+        let root = crate::cli::mcp_servers::root(&dirs);
+        assert!(!clio_toolhost::mcp::is_on(&root, "tavily"));
+        let st = state(&dirs);
+        let sec = &e.secrets[0];
+        let p = pending::request_token(&st, ("r1", "s1"), &e, sec).unwrap();
+        let mut v = clio_vault::SecretValue::with_capacity(64);
+        VALUE.chars().for_each(|c| assert!(v.push(c)));
+        let note = answer_secret(&dirs, &p.id, Some(&v)).unwrap();
+        assert_eq!(
+            note,
+            "secret tavily-api-key saved, bound to mcp:api.tavily.com; the MCP server «tavily» is on now: call it again"
+        );
+        assert!(clio_toolhost::mcp::is_on(&root, "tavily"));
+        let gw = VaultClient::new(&dirs.runtime.clone().unwrap().join("vault-gateway.sock"));
+        let got = gw.resolve("tavily-api-key", "mcp", "api.tavily.com", "");
+        assert_eq!(got.unwrap().expose(), VALUE);
+        for (tool, host) in [
+            ("mcp", "evil.example.com"),
+            ("http_fetch", "api.tavily.com"),
+        ] {
+            assert!(gw.resolve("tavily-api-key", tool, host, "").is_err());
+        }
+        for (f, bytes) in all_files(t.path()) {
+            assert!(holds_none_of_the_value(&bytes), "{}", f.display());
+        }
+        // Waiting again (as if the token were revoked), then declined: off, said, kept.
+        let waits = clio_toolhost::catalog::off_waiting(&e, &["tavily-api-key"]);
+        crate::cli::mcp_servers::set_on_by(&dirs, "tavily", false, &waits).unwrap();
+        let p = pending::request_token(&st, ("r1", "s1"), &e, sec).unwrap();
+        assert_eq!(
+            answer_secret(&dirs, &p.id, None).unwrap(),
+            "the person declined tavily-api-key"
+        );
+        assert!(off_text(&dirs).starts_with(clio_toolhost::catalog::OFF_DECLINED));
+        assert!(!clio_toolhost::mcp::is_on(&root, "tavily"));
+        // Another catalog server's token (one not installed) turns nothing on, tavily least of
+        // all.
+        crate::cli::mcp_servers::set_on_by(&dirs, "tavily", false, &waits).unwrap();
+        let notion = clio_toolhost::catalog::entry("notion").unwrap();
+        let p = pending::request_token(&st, ("r1", "s1"), &notion, &notion.secrets[0]).unwrap();
+        let note = answer_secret(&dirs, &p.id, Some(&v)).unwrap();
+        assert!(!note.contains("is on now"), "{note}");
+        assert!(!clio_toolhost::mcp::is_on(&root, "tavily"));
+    }
+
+    // S-70: the person's yes to a catalog server whose token the vault lacks: it is turned off,
+    // waiting for it, and the chat of the session that proposed it is asked for it with the
+    // catalog's words; the person's own `clio mcp add` and setup (run `person`) leave no request
+    // (they ask for it themselves); a server that is not the catalog's leaves none either.
+    #[test]
+    fn a_yes_to_a_catalog_server_without_its_token_asks_for_it_in_that_chat() {
+        let t = tempfile::tempdir().unwrap();
+        let (dirs, _host) = setup(t.path());
+        let e = catalog_tavily(&dirs);
+        let root = crate::cli::mcp_servers::root(&dirs);
+        crate::cli::mcp_servers::set_on_by(&dirs, "tavily", true, "").unwrap();
+        let mf = clio_toolhost::catalog::manifest(&e, &root);
+        let proposal = |run: &str, mf: &clio_toolhost::mcp::Manifest| -> Pending {
+            serde_json::from_value(json!({"id": "p1", "class": "mcp", "tool": "mcp_propose",
+                "args": {"name": mf.name, "description": mf.description, "catalog": "tavily",
+                    "skill_md": clio_toolhost::mcp::compose(mf), "files": [], "update": false},
+                "hash": "", "what": "", "run": run, "session": "s1", "created_ms": 0,
+                "expires_ms": 1, "state": "waiting"}))
+            .unwrap()
+        };
+        let text = crate::cli::mcp_servers::after_install(
+            &dirs,
+            &proposal("person", &mf),
+            "installed".into(),
+        );
+        assert_eq!(text, "installed");
+        assert!(waiting(&dirs).is_empty());
+        let mut other = mf.clone();
+        other.limits.seconds = 60;
+        let text = crate::cli::mcp_servers::after_install(
+            &dirs,
+            &proposal("r1", &other),
+            "installed".into(),
+        );
+        assert_eq!(text, "installed");
+        assert!(waiting(&dirs).is_empty());
+        let text =
+            crate::cli::mcp_servers::after_install(&dirs, &proposal("r1", &mf), "installed".into());
+        assert!(
+            text.starts_with("installed\nbut «tavily» stays off"),
+            "{text}"
+        );
+        assert!(!clio_toolhost::mcp::is_on(&root, "tavily"));
+        assert!(off_text(&dirs).starts_with(clio_toolhost::catalog::OFF_TOKEN));
+        let asked = waiting(&dirs);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(
+            (asked[0].run.as_str(), asked[0].session.as_str()),
+            ("r1", "s1")
+        );
+        let why = clio_toolhost::catalog::token_why(&e, &e.secrets[0]);
+        assert_eq!(
+            pending::secret_of(&asked[0]),
+            Some(("tavily-api-key", "mcp:api.tavily.com", why.as_str()))
+        );
+    }
+
+    // S-70: an answer to a token request turns on, or marks as declined, only the catalog's own
+    // server, installed exactly as the catalog has it, waiting for that very token: not a request
+    // for another name, not a server the person turned off, not one installed from elsewhere.
+    #[test]
+    fn a_token_answer_touches_only_the_catalogs_own_server_waiting_for_it() {
+        let t = tempfile::tempdir().unwrap();
+        let (dirs, _host) = setup(t.path());
+        let e = catalog_tavily(&dirs);
+        let root = crate::cli::mcp_servers::root(&dirs);
+        let st = state(&dirs);
+        let waits = off_text(&dirs);
+        // Another name, same server and host: its no marks nothing.
+        let other = clio_toolhost::catalog::Secret {
+            name: "gh-token".into(),
+            ..e.secrets[0].clone()
+        };
+        let p = pending::request_token(&st, ("r1", "s1"), &e, &other).unwrap();
+        answer_secret(&dirs, &p.id, None).unwrap();
+        assert_eq!(off_text(&dirs), waits);
+        // Installed from elsewhere (not the catalog's manifest): a no marks nothing.
+        let file = root
+            .join("versions/tavily/1")
+            .join(clio_toolhost::mcp::MANIFEST);
+        let was = std::fs::read_to_string(&file).unwrap();
+        let mut mf = clio_toolhost::catalog::manifest(&e, &root);
+        mf.network.push("evil.example.com".into());
+        std::fs::write(&file, clio_toolhost::mcp::compose(&mf)).unwrap();
+        let p = pending::request_token(&st, ("r1", "s1"), &e, &e.secrets[0]).unwrap();
+        answer_secret(&dirs, &p.id, None).unwrap();
+        assert_eq!(off_text(&dirs), waits);
+        std::fs::write(&file, was).unwrap();
+        // Turned off by the person: the token is kept, the server stays off.
+        crate::cli::mcp_servers::set_on_by(&dirs, "tavily", false, "off: turned off by the person")
+            .unwrap();
+        let p = pending::request_token(&st, ("r1", "s1"), &e, &e.secrets[0]).unwrap();
+        let mut v = clio_vault::SecretValue::with_capacity(64);
+        VALUE.chars().for_each(|c| assert!(v.push(c)));
+        let note = answer_secret(&dirs, &p.id, Some(&v)).unwrap();
+        assert!(!note.contains("is on now"), "{note}");
+        assert!(!clio_toolhost::mcp::is_on(&root, "tavily"));
     }
 
     // S-05, S-36, S-60: a marked chat session's change to a block waits; `clio approve` (and the

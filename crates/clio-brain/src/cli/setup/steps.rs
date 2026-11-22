@@ -15,6 +15,10 @@ use crate::cli::home::{Config, Dirs};
 use crate::cli::tui::sanitize;
 use crate::cli::{Res, mkdir_private, vault};
 
+/// The catalog servers the setup's checklist ticks when they are not installed (the owner,
+/// 2026-11-22: web search comes ticked; the others stay the person's to tick).
+const TICKED: &[&str] = &["tavily"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Binaries,
@@ -204,7 +208,9 @@ impl Run<'_> {
         if steps.contains(&Step::Judge) {
             self.ask_judge();
         }
-        if steps.contains(&Step::Mcp) && !self.opts.update {
+        // An update the person started (`clio setup`) offers the catalog too; `clio update`
+        // never asks (it does not come here), nor does `--yes`.
+        if steps.contains(&Step::Mcp) {
             self.ask_mcp();
         }
         if steps.contains(&Step::System) {
@@ -316,9 +322,10 @@ impl Run<'_> {
 
     // ---- Clio's MCP catalog -------------------------------------------------------------------
 
-    /// The catalog as a checklist with nothing ticked (what is installed as the catalog has it is
-    /// not offered again), then each ticked server's token, masked, or Esc for later. Playwright
-    /// adds what Chromium needs to the sudo moment, or is left out where that cannot be done.
+    /// The catalog as a checklist (what is installed as the catalog has it is not offered again):
+    /// web search ticked when it is not installed at all, the others not; then each ticked server's
+    /// token the vault lacks, masked, or Esc for later. Playwright adds what Chromium needs to the
+    /// sudo moment, or is left out where that cannot be done.
     fn ask_mcp(&mut self) {
         use crate::cli::mcp_servers;
         if self.opts.yes || !self.sys.linux {
@@ -340,10 +347,18 @@ impl Run<'_> {
                 .iter()
                 .map(|e| format!("{}: {}", say(&e.title), say(&e.description))),
         );
+        let root = mcp_servers::root(&self.dirs);
         let q = Ask::Checks {
             title: self.t(M::McpTitle),
             lines,
             options: offer.iter().map(|e| say(&e.title)).collect(),
+            checked: offer
+                .iter()
+                .map(|e| {
+                    TICKED.contains(&e.name.as_str())
+                        && clio_toolhost::mcp::load_state(&root, &e.name).is_none()
+                })
+                .collect(),
         };
         let Some(Answer::Checks(ticked)) = self.ui.ask(q) else {
             return;
@@ -359,6 +374,8 @@ impl Run<'_> {
                 }
             }
             let token = match e.secrets.first() {
+                // Already in the vault for it: nothing to ask.
+                Some(sec) if vault::allows(&self.dirs, &sec.name, "mcp", &sec.host) => None,
                 Some(sec) if self.vault_coming() => {
                     let q = Ask::Secret {
                         title: self.f(M::McpTokenTitle, &[&say(&e.title)]),
@@ -396,13 +413,14 @@ impl Run<'_> {
     /// A server that fails is a warning, never a failed install.
     fn mcp(&mut self, i: usize) -> Out {
         use crate::cli::mcp_servers;
-        if self.opts.update {
-            return self.mcp_update(i);
-        }
+        let update = self.opts.update.then(|| self.mcp_update(i));
         let chosen = std::mem::take(&mut self.answers.mcp);
         let mut warn: Vec<String> = self.answers.mcp_left.take().into_iter().collect();
         if chosen.is_empty() && warn.is_empty() {
-            return Out::Skip(self.t(M::NoteNone));
+            return update.unwrap_or_else(|| Out::Skip(self.t(M::NoteNone)));
+        }
+        if let Some(Out::Warn(n)) = update {
+            warn.push(n);
         }
         let mut done = Vec::new();
         for (name, token) in chosen {

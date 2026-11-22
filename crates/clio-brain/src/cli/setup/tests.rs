@@ -76,6 +76,8 @@ struct FakeUi {
     rows: BTreeMap<usize, St>,
     answers: VecDeque<Answer>,
     asked: Vec<String>,
+    /// What each checklist came with ticked.
+    checks: Vec<Vec<bool>>,
 }
 
 impl Ui for FakeUi {
@@ -83,6 +85,9 @@ impl Ui for FakeUi {
         self.rows.insert(i, st);
     }
     fn ask(&mut self, q: Ask) -> Option<Answer> {
+        if let Ask::Checks { checked, .. } = &q {
+            self.checks.push(checked.clone());
+        }
         let (Ask::Choice { title, .. }
         | Ask::Secret { title, .. }
         | Ask::Text { title, .. }
@@ -1311,4 +1316,142 @@ fn the_mcp_checklist_comes_first_and_chromiums_needs_go_into_the_sudo_moment() {
         assert!(!r.failed);
     }
     assert_eq!(ui.rows[&0], St::Warn(en(M::NoteMcpNoLibs)));
+}
+
+// S-70: the catalog's checklist comes with web search ticked (only it, and only when it is not
+// installed at all); a ticked server's token is asked, masked, when the vault lacks it and not at
+// all when the vault has it for that server's host; an update the person started offers the
+// catalog too (`clio update` never asks: it does not come here).
+#[test]
+fn web_search_comes_ticked_and_its_token_is_asked_only_when_the_vault_lacks_it() {
+    let t = tempfile::tempdir().unwrap();
+    let sys = fake_sys(t.path());
+    let en = |m: M| m.get(Lang::En).to_owned();
+    let token_title = M::McpTokenTitle.fill(Lang::En, &["Web search (Tavily)"]);
+    let names: Vec<String> = clio_toolhost::catalog::catalog()
+        .servers
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    let ticked: Vec<bool> = names.iter().map(|n| n == "tavily").collect();
+    assert_eq!(ticked.iter().filter(|t| **t).count(), 1);
+    // No token yet: the tick is web search's, and its token is asked.
+    let mut ui = FakeUi {
+        answers: [
+            Answer::Secret(SecretValue::new(PASS.into())),
+            Answer::Checks(ticked.clone()),
+            Answer::Secret(SecretValue::new("tvly-made-up-0123456789".into())),
+        ]
+        .into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys.clone(), &mut ui);
+        r.ask_all(&[Step::Vault, Step::Mcp]);
+        let got: Vec<_> = r
+            .answers
+            .mcp
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.is_some()))
+            .collect();
+        assert_eq!(got, [("tavily", true)]);
+    }
+    assert_eq!(ui.checks, std::slice::from_ref(&ticked));
+    assert_eq!(
+        ui.asked,
+        [en(M::VaultNewTitle), en(M::McpTitle), token_title.clone()]
+    );
+    // The vault has its token, bound to its host: ticked, nothing asked.
+    let rt = dirs(t.path()).runtime.unwrap();
+    std::fs::create_dir_all(&rt).unwrap();
+    let (v, cap) = clio_vault::Vault::init(
+        None,
+        "correct horse battery staple",
+        std::sync::Arc::new(clio_core::SystemClock),
+    )
+    .unwrap();
+    v.put(
+        &cap,
+        clio_vault::SecretSpec {
+            name: "tavily-api-key".into(),
+            value: "tvly-made-up-0123456789".into(),
+            kind: clio_vault::Kind::ApiKey,
+            destinations: vec![clio_vault::Dest::new("mcp", "api.tavily.com")],
+            scope: clio_vault::Scope::Personal,
+            rotate_every_ms: None,
+            expires_at_ms: None,
+        },
+    )
+    .unwrap();
+    let (g, p) = (rt.join("vault-gateway.sock"), rt.join("vault-person.sock"));
+    let gw = g.clone();
+    std::thread::spawn(move || clio_vault::server::serve(std::sync::Arc::new(v), &g, &p));
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !gw.exists() && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut ui = FakeUi {
+        answers: [
+            Answer::Secret(SecretValue::new(PASS.into())),
+            Answer::Checks(ticked.clone()),
+        ]
+        .into(),
+        ..FakeUi::default()
+    };
+    {
+        let mut r = run_on(t.path(), sys.clone(), &mut ui);
+        r.ask_all(&[Step::Vault, Step::Mcp]);
+        let got: Vec<_> = r
+            .answers
+            .mcp
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.is_some()))
+            .collect();
+        assert_eq!(got, [("tavily", false)]);
+    }
+    assert!(!ui.asked.contains(&token_title), "{:?}", ui.asked);
+    // An update the person started offers it as well; once something of that name is
+    // installed it is offered unticked.
+    let root = crate::cli::mcp_servers::root(&dirs(t.path()));
+    std::fs::create_dir_all(root.join("state")).unwrap();
+    let st = clio_toolhost::mcp::State {
+        name: "tavily".into(),
+        package: "tavily-mcp".into(),
+        version: "0.0.1".into(),
+        entry: "x".into(),
+        tree: "t".into(),
+        integrity: "sha512-x".into(),
+        packages: 1,
+        lock: String::new(),
+        confirmed: true,
+        tools: vec![],
+    };
+    clio_toolhost::mcp::save_state(&root, &st).unwrap();
+    let mut ui = FakeUi::default();
+    {
+        let opts = Opts {
+            bin: t.path().join(".local/bin"),
+            update: true,
+            ..Opts::default()
+        };
+        let pins = super::fetch::Pins {
+            node: None,
+            memory: None,
+            model: None,
+            browser: None,
+        };
+        let mut r = super::run_with(&dirs(t.path()), Lang::En, sys, pins, opts, &mut ui);
+        r.ask_all(&[Step::Mcp]);
+        // What the person ticked there is installed on that update too (one not in the catalog
+        // here, so it is only said).
+        r.answers.mcp = vec![("not-in-catalog".into(), None)];
+        r.all(&[Step::Mcp]);
+    }
+    assert_eq!(ui.asked, [en(M::McpTitle)]);
+    assert_eq!(ui.checks, [vec![false; names.len()]]);
+    assert!(
+        matches!(&ui.rows[&0], St::Warn(n) if n.contains("not-in-catalog")),
+        "{:?}",
+        ui.rows
+    );
 }

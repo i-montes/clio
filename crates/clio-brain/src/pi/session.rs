@@ -76,8 +76,8 @@ pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@15";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@15.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@16";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@16.md");
 /// The prompt of a subagent (S-73), reader or writer.
 pub const SUBAGENT_PROMPT_NAME: &str = "clio-subagent@1";
 pub const SUBAGENT_PROMPT: &str = include_str!("../../../../prompts/system/clio-subagent@1.md");
@@ -623,7 +623,7 @@ mod tests {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
         assert!(PROMPT.starts_with("version: 30\n"));
-        assert!(HOST_PROMPT.starts_with("version: 15\n"));
+        assert!(HOST_PROMPT.starts_with("version: 16\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -864,12 +864,15 @@ mod tests {
     // client's step runs (alone) to reach its store; nothing else changed.
     #[test]
     fn the_host_prompt_only_adds_the_walls_line() {
-        let was = std::fs::read_to_string(format!(
-            "{}/../../prompts/system/clio-host@14.md",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        let mut n: Vec<&str> = HOST_PROMPT.lines().collect();
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let (new, was) = (old("clio-host@15.md"), old("clio-host@14.md"));
+        let mut n: Vec<&str> = new.lines().collect();
         let w: Vec<&str> = was.lines().collect();
         assert_eq!((n[0], w[0]), ("version: 15", "version: 14"));
         let at = n
@@ -879,6 +882,36 @@ mod tests {
         let line = n.remove(at);
         assert!(line.contains("nothing but its own client") && line.contains("of its own"));
         assert_eq!(n[1..], w[1..]);
+    }
+
+    // S-70: `clio-host@16` is `@15` plus one line in MCP servers: web search and page reading are
+    // the catalog's `tavily`, proposed from the catalog when it is missing, and its token is
+    // Clio's to ask for, never the model's; nothing else changed.
+    #[test]
+    fn the_host_prompt_only_adds_the_web_search_line() {
+        let was = std::fs::read_to_string(format!(
+            "{}/../../prompts/system/clio-host@15.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut n: Vec<&str> = HOST_PROMPT.lines().collect();
+        let w: Vec<&str> = was.lines().collect();
+        assert_eq!((n[0], w[0]), ("version: 16", "version: 15"));
+        let at = n
+            .iter()
+            .position(|l| l.starts_with("- Searching the web and reading a web page"))
+            .expect("the web search line");
+        let line = n.remove(at);
+        for want in [
+            "`tavily`",
+            "mcp_propose",
+            "catalog: \"tavily\"",
+            "never ask for it yourself",
+        ] {
+            assert!(line.contains(want), "{want}");
+        }
+        assert_eq!(n[1..], w[1..]);
+        assert!(clio_toolhost::catalog::entry("tavily").is_some());
     }
 
     // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,
