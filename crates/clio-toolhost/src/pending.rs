@@ -285,6 +285,88 @@ pub fn set_aside_added(
     )
 }
 
+/// The tool of a request for a catalog server's token (S-70): class `secret`, answered in the chat's
+/// box as any secret, every word of it from Clio's catalog.
+pub const TOKEN_TOOL: &str = "mcp_token";
+
+/// Leaves, for `session` of `run`, the request for secret `s` of catalog server `e`, bound to
+/// `mcp:<its host>`: one waits per secret (this session's is kept; another's gives way to it).
+pub fn request_token(
+    state: &Path,
+    (run, session): (&str, &str),
+    e: &crate::catalog::Entry,
+    s: &crate::catalog::Secret,
+) -> Result<Pending, String> {
+    for o in list(state) {
+        if o.tool == TOKEN_TOOL
+            && o.state == State::Waiting
+            && o.args["name"] == s.name.as_str()
+            && (o.run != run || o.session != session)
+        {
+            let _ = reject(state, &o.id);
+        }
+    }
+    let now = now_ms();
+    set_aside(
+        state,
+        Pending {
+            id: String::new(),
+            class: Class::Secret,
+            tool: TOKEN_TOOL.into(),
+            args: json!({
+                "name": s.name,
+                "destination": format!("mcp:{}", s.host),
+                "why": crate::catalog::token_why(e, s),
+                "server": e.name,
+            }),
+            hash: String::new(),
+            what: s.name.clone(),
+            run: run.to_owned(),
+            session: session.to_owned(),
+            created_ms: now,
+            seq: 0,
+            expires_ms: now + DAY_MS,
+            state: State::Waiting,
+            reason: None,
+            granted: None,
+        },
+    )
+}
+
+/// The names the vault on the person's socket holds; `Err`: why nothing can be stored now.
+pub(crate) fn vault_names(cfg: &SecretCfg) -> Result<Vec<String>, String> {
+    // The person's socket, and only to ask whether the vault is open and what names it has.
+    let vault =
+        clio_vault::VaultClient::new(&cfg.person).with_timeout(std::time::Duration::from_secs(5));
+    let open = vault
+        .call(&clio_vault::proto::Request::Status)
+        .ok()
+        .and_then(|r| r.data)
+        .map(|d| d["locked"].as_bool() == Some(false));
+    match open {
+        None => return Err(
+            "the vault is not running, so nothing can be stored: ask the person to start it (`clio vault start`)".into(),
+        ),
+        Some(false) => return Err(
+            "the vault is locked, so nothing can be stored: ask the person to unlock it (`clio vault start`)".into(),
+        ),
+        Some(true) => {}
+    }
+    vault
+        .call(&clio_vault::proto::Request::List)
+        .ok()
+        .filter(|r| r.ok)
+        .and_then(|r| r.data)
+        .and_then(|d| {
+            d.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|m| m["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .ok_or_else(|| "the vault did not say which secrets it has: try again later".into())
+}
+
 /// An MCP server the model proposed, with npm's facts (S-70): it always waits for the person.
 pub fn set_aside_mcp(
     state: &Path,
@@ -1235,39 +1317,11 @@ impl ToolHost {
         if why.trim().is_empty() {
             return refuse("`why` must say in one line what the secret is for".into());
         }
-        // The person's socket, and only to ask whether the vault is open and what names it has.
-        let vault = clio_vault::VaultClient::new(&cfg.person)
-            .with_timeout(std::time::Duration::from_secs(5));
-        let open = vault
-            .call(&clio_vault::proto::Request::Status)
-            .ok()
-            .and_then(|r| r.data)
-            .map(|d| d["locked"].as_bool() == Some(false));
-        match open {
-            None => {
-                return refuse(
-                    "the vault is not running, so nothing can be stored: ask the person to start it (`clio vault start`)".into(),
-                );
-            }
-            Some(false) => {
-                return refuse(
-                    "the vault is locked, so nothing can be stored: ask the person to unlock it (`clio vault start`)".into(),
-                );
-            }
-            Some(true) => {}
-        }
-        let names = vault
-            .call(&clio_vault::proto::Request::List)
-            .ok()
-            .filter(|r| r.ok)
-            .and_then(|r| r.data);
-        let Some(names) = names else {
-            return refuse("the vault did not say which secrets it has: try again later".into());
+        let names = match vault_names(cfg) {
+            Ok(n) => n,
+            Err(why) => return refuse(why),
         };
-        if names
-            .as_array()
-            .is_some_and(|a| a.iter().any(|m| m["name"] == name))
-        {
+        if names.iter().any(|n| n == name) {
             return refuse(format!(
                 "a secret named {name} already exists: pick another name, or ask the person to run `clio vault put {name}`"
             ));

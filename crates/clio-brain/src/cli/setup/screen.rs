@@ -647,8 +647,9 @@ impl Ui for Tui {
                 title,
                 lines,
                 options,
+                checked,
             } => Page::Checks {
-                checked: vec![false; options.len()],
+                checked,
                 title,
                 lines,
                 options,

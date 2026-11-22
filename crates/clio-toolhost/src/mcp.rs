@@ -1556,6 +1556,14 @@ impl ToolHost {
         // A copy turned off, removed or updated meanwhile stops before anything else.
         prune(&self.mcp_pool.servers, &root);
         if !is_on(&root, server) {
+            if let Some(line) = self.mcp_token(req, &root, server) {
+                return self.mcp_answer(
+                    req,
+                    false,
+                    "mcp/token",
+                    format!("mcp_call failed: {line}"),
+                );
+            }
             return fail(&format!(
                 "no MCP server «{}» is on (mcp_tools lists them)",
                 one_line(server)
@@ -1617,6 +1625,59 @@ impl ToolHost {
             eprintln!("clio-toolhost: the action log lost a line: {e}");
         }
         self.mcp_outside(req, ok, "mcp/call", &raw, &format!("{server} {tool}"))
+    }
+
+    /// `server` is off: when it is a catalog server installed exactly as the catalog has it and off
+    /// only for a token the vault lacks, the person is asked for that token in the chat (the
+    /// catalog's name, host and words, never the model's; one request a secret) and the model's
+    /// line says so. `None`: an ordinary server that is off.
+    fn mcp_token(&self, req: &Request, root: &Path, server: &str) -> Option<String> {
+        let e = crate::catalog::entry(server)?;
+        if current_manifest(root, server)? != crate::catalog::manifest(&e, root) {
+            return None;
+        }
+        let off = record(root, server)?["off"].as_str()?.to_owned();
+        if off.starts_with(crate::catalog::OFF_DECLINED) {
+            return Some(format!(
+                "«{server}» is off: the person declined its token. Do not ask them for it; go on without it (they add it with `clio mcp add {server}` or `clio setup` when they want it)."
+            ));
+        }
+        if !off.starts_with(crate::catalog::OFF_TOKEN) {
+            return None;
+        }
+        let asked = (|| {
+            let cfg = self
+                .secrets
+                .as_ref()
+                .ok_or("nobody can be asked from here")?;
+            // Outside text the judge flagged opens no way to ask the person for a secret.
+            if self.is_suspect(&req.session) {
+                return Err(format!(
+                    "{SUSPECT_REASON}, so nothing is asked from this session"
+                ));
+            }
+            let names = crate::pending::vault_names(cfg)?;
+            let missing: Vec<_> = e
+                .secrets
+                .iter()
+                .filter(|s| !names.contains(&s.name))
+                .collect();
+            if missing.is_empty() {
+                return Err(format!(
+                    "its token is in the vault already: the person turns it on with `/mcp on {server}`"
+                ));
+            }
+            for s in missing {
+                crate::pending::request_token(&cfg.state, (&cfg.run, &req.session), &e, s)?;
+            }
+            Ok(())
+        })();
+        Some(match asked {
+            Ok(()) => crate::catalog::token_asked(server),
+            Err(why) => format!(
+                "«{server}» is off until the person gives its token, and they are not asked now: {why}. Go on without it."
+            ),
+        })
     }
 
     /// Runs `tool` of `server` in this host's process of it, started on first use (and its tools

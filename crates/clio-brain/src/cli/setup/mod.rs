@@ -63,11 +63,12 @@ pub enum Ask {
         value: String,
         error: Option<String>,
     },
-    /// A checklist: nothing ticked; each option the person's to take or leave.
+    /// A checklist: `checked` ticked at first, one per option; each the person's to take or leave.
     Checks {
         title: String,
         lines: Vec<String>,
         options: Vec<String>,
+        checked: Vec<bool>,
     },
 }
 

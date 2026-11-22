@@ -659,6 +659,103 @@ fn an_approval_in_the_chat_starts_a_turn_that_carries_what_came_of_it() {
     w.assert_key_nowhere();
 }
 
+/// Catalog server `tavily` installed in `w` exactly as the catalog has it (no package files: it is
+/// never started here), off waiting for its token, as `clio mcp add` and the setup leave it.
+fn tavily_waiting(w: &World) -> PathBuf {
+    use clio_toolhost::{catalog, mcp};
+    let root = w.home().join(".local/share/clio/mcp");
+    let e = catalog::entry("tavily").unwrap();
+    let m = catalog::manifest(&e, &root);
+    let v = root.join("versions/tavily/1");
+    std::fs::create_dir_all(&v).unwrap();
+    std::fs::write(v.join(mcp::MANIFEST), mcp::compose(&m)).unwrap();
+    std::fs::create_dir_all(root.join("records")).unwrap();
+    std::fs::write(
+        root.join("records/tavily.json"),
+        json!({"name": "tavily", "description": m.description, "enabled": false,
+            "off": catalog::off_waiting(&e, &["tavily-api-key"]), "current": 1,
+            "versions": [{"n": 1, "sha256": "x", "at_ms": 1, "by": "person", "verdict": "approved"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let st = mcp::State {
+        name: "tavily".into(),
+        package: m.package.clone(),
+        version: m.version.clone(),
+        entry: "node_modules/tavily-mcp/build/index.js".into(),
+        tree: "t".into(),
+        integrity: e.integrity.clone(),
+        packages: 126,
+        lock: String::new(),
+        confirmed: true,
+        tools: vec![],
+    };
+    mcp::save_state(&root, &st).unwrap();
+    root
+}
+
+// S-70: web search with its token missing, in the chat: the model's call reaches the catalog
+// server that waits for its token, the turn ends, and the chat's own masked box asks the person
+// for it (no terminal, no command); the value typed goes to the vault bound to
+// `mcp:api.tavily.com` only, reaches no screen and no file, and the server is on at once.
+#[test]
+fn a_search_without_its_token_asks_for_it_in_the_chats_box_and_turns_it_on() {
+    if can_run("token", true).is_none() {
+        return;
+    }
+    // The MCP side of a chat needs bubblewrap (S-70): where it cannot run, MCP servers are not
+    // there to call.
+    if let Err(why) = clio_node::HostJail::with(clio_node::Launcher::Bwrap) {
+        assert!(
+            std::env::var_os("CLIO_REQUIRE_JAIL").is_none(),
+            "CLIO_REQUIRE_JAIL is set and bwrap is not available: {why}"
+        );
+        eprintln!("SKIPPED token: bwrap is not available here: {why}");
+        return;
+    }
+    let token = format!("tvly-{}-{}", "made-up", "7f3a9c2e");
+    let w = World::new_with(
+        r#"[{"tool_calls":[{"name":"mcp_call","arguments":{"reason":"buscar en la web","server":"tavily","tool":"tavily_search","arguments":{"query":"clio news"}}}]},{"text":"asked for its token"},{"text":"search is ready"}]"#,
+        &["--log-body"],
+    );
+    let cfg_path = w.home().join(".config/clio/config.json");
+    let mut cfg: Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    cfg["mode"] = json!("host");
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
+    let root = tavily_waiting(&w);
+    let _vault = start_vault(&w, &decoy());
+    let v = w.pty_with(
+        "token",
+        json!({"ask": "busca noticias de clio", "answer": "asked for its token", "after": "search is ready"}),
+        &[("CLIO_JAIL", "off")],
+        &token,
+    );
+    ok(&v, &["opened", "answered", "box", "on", "after"]);
+    assert_eq!(v["code"], json!(0), "{v:#}");
+    let shown = v["box_text"].as_str().unwrap();
+    assert!(
+        shown.contains("mcp:api.tavily.com") && shown.contains("app.tavily.com"),
+        "{shown}"
+    );
+    // What the model read of its call: the one fixed line, nothing of the box.
+    let body = body_with(&w._provider, "Clio asks them for it in the chat");
+    assert!(!body.to_string().contains(&token));
+    let rec: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("records/tavily.json")).unwrap())
+            .unwrap();
+    assert_eq!(rec["enabled"], json!(true), "{rec}");
+    let gw = clio_vault::VaultClient::new(&w.root().join("run/clio/vault-gateway.sock"));
+    let got = gw.resolve("tavily-api-key", "mcp", "api.tavily.com", "");
+    assert_eq!(got.unwrap().expose(), token);
+    assert!(
+        gw.resolve("tavily-api-key", "http_fetch", "api.tavily.com", "")
+            .is_err()
+    );
+    w.assert_nowhere(&token);
+    w.assert_key_nowhere();
+}
+
 /// A skill in `~/.agents/skills` that a look refuses before any judge reads it (its name is not
 /// one Clio takes): a look leaves its trace (`shared.json`, `.shared.lock` in Clio's skills
 /// folder), and no box.

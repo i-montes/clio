@@ -157,7 +157,7 @@ table! {
     NoteTimerLater: "más tarde: no hay sesión de systemd para tu usuario", "later: there is no systemd session for your user";
     NoteNone: "ninguno", "none";
     NoteMcpLater: "{}: termina más tarde (clio mcp add {})", "{}: finishes later (clio mcp add {})";
-    NoteMcpToken: "{}: apagado hasta tener su token (clio mcp add {})", "{}: off until it has its token (clio mcp add {})";
+    NoteMcpToken: "{}: apagado hasta tener su token (el chat lo pide; también clio mcp add {})", "{}: off until it has its token (the chat asks for it; clio mcp add {} too)";
     NoteMcpNewer: "{} tiene una versión nueva en el catálogo, {}: clio mcp add {}", "{} has a newer version in the catalog, {}: clio mcp add {}";
     NoteMcpBrowser: "{}: el catálogo cambió su Chromium ({} → {}); no arranca hasta clio mcp add {}", "{}: the catalog changed its Chromium ({} → {}); it does not start until clio mcp add {}";
     NoteMcpNoLibs: "Playwright queda fuera: a este sistema le faltan bibliotecas que no sé instalar aquí", "Playwright is left out: this system lacks libraries I cannot install here";
@@ -226,7 +226,7 @@ table! {
     SudoSkip: "Omitir", "Skip";
 
     McpTitle: "¿Qué servidores MCP quieres?", "Which MCP servers do you want?";
-    McpHint: "Cada uno da a Clio más herramientas y se ejecuta en su jaula. Ninguno está marcado: elige los que quieras, o ninguno.", "Each gives Clio more tools and runs in its jail. None is ticked: choose the ones you want, or none.";
+    McpHint: "Cada uno da a Clio más herramientas y se ejecuta en su jaula. Lo marcado es lo que Clio sugiere: marca o desmarca los que quieras, o ninguno.", "Each gives Clio more tools and runs in its jail. What is ticked is what Clio suggests: tick or untick the ones you want, or none.";
     McpTokenTitle: "Pega tu token de {}", "Paste your {} token";
     McpTokenHint: "Va directamente al baúl. Esc: más tarde (el servidor queda apagado).", "It goes straight into the vault. Esc: later (the server stays off).";
     FieldToken: "Token", "Token";

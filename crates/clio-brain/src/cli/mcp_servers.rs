@@ -1418,6 +1418,15 @@ pub fn finish_catalog(
         Some(id) => super::pending::outcome(&super::pending::approve(d, id)?),
         None => format!("«{}» is installed already", e.name),
     };
+    Ok(match turn_on_catalog(d, e)? {
+        None => done,
+        Some(why) => format!("{done}\nbut «{}» is turned {why}", e.name),
+    })
+}
+
+/// Turns catalog server `e` on when the vault lets each of its secrets go to its host, else off,
+/// waiting for the ones it lacks (`Some`: why, and their names).
+fn turn_on_catalog(d: &Dirs, e: &clio_toolhost::catalog::Entry) -> Res<Option<String>> {
     let missing: Vec<&str> = e
         .secrets
         .iter()
@@ -1428,19 +1437,90 @@ pub fn finish_catalog(
         if !m::is_on(&root(d), &e.name) {
             set_on(d, &e.name, true)?;
         }
-        return Ok(done);
+        return Ok(None);
     }
-    let why = format!(
-        "off: waiting for its token {} (clio mcp add {} asks for it)",
-        missing.join(", "),
-        e.name
-    );
+    let why = clio_toolhost::catalog::off_waiting(e, &missing);
     set_on_by(d, &e.name, false, &why)?;
-    Ok(format!(
-        "{done}
-but «{}» is turned {why}",
+    Ok(Some(why))
+}
+
+/// The catalog entry a token request `p` (`pending::TOKEN_TOOL`) is for, when the catalog still
+/// has that secret, with that host, for an installed copy of exactly that server.
+fn token_entry(d: &Dirs, p: &Pending) -> Option<clio_toolhost::catalog::Entry> {
+    let (name, dest, _) = clio_toolhost::pending::secret_of(p)?;
+    let e = clio_toolhost::catalog::entry(p.args["server"].as_str()?)?;
+    (p.tool == clio_toolhost::pending::TOKEN_TOOL
+        && e.secrets
+            .iter()
+            .any(|s| s.name == name && format!("mcp:{}", s.host) == dest)
+        && installed_as_catalog(d, &e))
+    .then_some(e)
+}
+
+/// Whether catalog server `name` is off waiting for its token (not turned off by the person).
+fn waits_for_token(d: &Dirs, name: &str) -> bool {
+    skills::record(&root(d), name)
+        .and_then(|r| r.off)
+        .is_some_and(|o| o.starts_with(clio_toolhost::catalog::OFF_TOKEN))
+}
+
+/// Token request `p` was answered with a value the vault took: its server turns on when each of
+/// its secrets may now reach its host. What the model is told besides.
+pub fn token_given(d: &Dirs, p: &Pending) -> String {
+    let Some(e) = token_entry(d, p).filter(|e| waits_for_token(d, &e.name)) else {
+        return String::new();
+    };
+    match turn_on_catalog(d, &e) {
+        Ok(None) => format!("; the MCP server «{}» is on now: call it again", e.name),
+        Ok(Some(_)) | Err(_) => String::new(),
+    }
+}
+
+/// The person declined token request `p`: its server stays off and says so, and nothing asks
+/// for that token again (a call, a chat) until `clio mcp add` or `clio setup`.
+pub fn token_declined(d: &Dirs, p: &Pending) {
+    if let Some(e) = token_entry(d, p).filter(|e| waits_for_token(d, &e.name)) {
+        let names: Vec<&str> = e.secrets.iter().map(|s| s.name.as_str()).collect();
+        let _ = set_on_by(
+            d,
+            &e.name,
+            false,
+            &clio_toolhost::catalog::off_declined(&e, &names),
+        );
+    }
+}
+
+/// After the person's yes installed `p` (`text`: what came of it): a catalog server whose token
+/// the vault lacks is turned off, waiting for it, and the person is asked for it in the chat of
+/// the session that proposed it (`p`'s), the same request a call of it leaves. The person's own
+/// `clio mcp add` and the setup ask for it themselves (`finish_catalog`).
+pub fn after_install(d: &Dirs, p: &Pending, text: String) -> String {
+    let root = root(d);
+    // `install` checked the manifest against what was shown.
+    let Some(e) = clio_toolhost::pending::mcp_of(p)
+        .and_then(|(_, _, manifest, _)| serde_json::from_str::<Manifest>(manifest).ok())
+        .and_then(|mf| clio_toolhost::catalog::of(&mf, &root))
+        .filter(|_| p.run != PERSON)
+    else {
+        return text;
+    };
+    let Ok(Some(_)) = turn_on_catalog(d, &e) else {
+        return text;
+    };
+    let st = super::pending::state(d);
+    let asked: Vec<&str> = e
+        .secrets
+        .iter()
+        .filter(|s| !super::vault::allows(d, &s.name, "mcp", &s.host))
+        .filter(|s| clio_toolhost::pending::request_token(&st, (&p.run, &p.session), &e, s).is_ok())
+        .map(|s| s.name.as_str())
+        .collect();
+    format!(
+        "{text}\nbut «{}» stays off until its token {} is in the vault: the chat asks the person for it now (clio mcp add {} too)",
+        e.name,
+        asked.join(", "),
         e.name
-    ))
+    )
 }
 
 /// `clio mcp add <name>`: the same box as a proposal (`--yes` skips it), then each missing secret
