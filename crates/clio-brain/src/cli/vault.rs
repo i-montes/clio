@@ -230,7 +230,8 @@ pub fn start_before_chat(dirs: &Dirs) {
 
 fn ask_to_start(dirs: &Dirs, mut read: impl FnMut() -> Res<String>) {
     for _ in 0..3 {
-        if !matches!(state(dirs), State::Stopped | State::Locked) {
+        // A vault that answers unlocked on its socket is open, with or without its pid file.
+        if !matches!(state(dirs), State::Stopped | State::Locked) || open_now(dirs).is_ok() {
             return;
         }
         let Ok(pass) = read() else { return };
