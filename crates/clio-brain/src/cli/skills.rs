@@ -2736,20 +2736,40 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let repo = t.path().join("taste-skill");
         let src = taste(&repo);
         // The archive as codeload serves it: one top folder, the commit in a global header.
+        // Written here, not with the system's tar (BSD tar on macOS has no pax options).
         let archive = t.path().join("taste.tar.gz");
-        let o = std::process::Command::new("tar")
-            .args([
-                "--format=pax",
-                "--pax-option=comment=0123456789abcdef0123456789abcdef01234567",
-            ])
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(t.path())
-            .arg("taste-skill")
-            .output()
+        let mut tar = vec![];
+        let mut push = |name: &str, kind: u8, body: &[u8]| {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..107].copy_from_slice(b"0000644");
+            h[124..135].copy_from_slice(format!("{:011o}", body.len()).as_bytes());
+            h[156] = kind;
+            h[257..262].copy_from_slice(b"ustar");
+            tar.extend(h);
+            tar.extend(body);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        };
+        let rec = "comment=0123456789abcdef0123456789abcdef01234567\n";
+        push(
+            "pax_global_header",
+            b'g',
+            format!("{} {rec}", rec.len() + 3).as_bytes(),
+        );
+        for (p, b, _) in tree(&repo) {
+            push(&format!("taste-skill/{}", p.display()), b'0', &b);
+        }
+        tar.extend([0u8; 1024]);
+        let mut gz = std::process::Command::new("gzip")
+            .arg("-c")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
-        assert!(o.status.success(), "{o:?}");
+        let mut stdin = gz.stdin.take().unwrap();
+        let w = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar));
+        fs::write(&archive, gz.wait_with_output().unwrap().stdout).unwrap();
+        w.join().unwrap().unwrap();
         assert!(fs::metadata(&archive).unwrap().len() > 20 << 20);
         let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
         let clean = |t: &str| Some(t.to_owned());
