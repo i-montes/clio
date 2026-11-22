@@ -78,7 +78,26 @@ fn env_full(verdict: TextVerdict, host: bool, slow: Duration, exec: bool) -> Env
     env_judge(judge, host, exec)
 }
 
+/// Host mode with no judge at all (`jev.enabled` off); `judge` is there but never asked.
+fn env_without_judge() -> Env {
+    env_with(
+        Judge {
+            verdict: TextVerdict::Injection,
+            slow: Duration::ZERO,
+            asked: Mutex::default(),
+            flag_if: None,
+        },
+        false,
+        true,
+        false,
+    )
+}
+
 fn env_judge(judge: Judge, host: bool, exec: bool) -> Env {
+    env_with(judge, true, host, exec)
+}
+
+fn env_with(judge: Judge, wired: bool, host: bool, exec: bool) -> Env {
     let t = tempfile::tempdir().unwrap();
     let r = t.path().canonicalize().unwrap();
     let (home, data) = (r.join("home"), r.join("clio/data"));
@@ -88,7 +107,7 @@ fn env_judge(judge: Judge, host: bool, exec: bool) -> Env {
     let judge = Arc::new(judge);
     let mut c = Config::new(&home, &r.join("scratch"), &data.join("runs/r1"));
     c.jail = if exec { JailMode::Auto } else { JailMode::Off };
-    c.memory = Some(judge.clone());
+    c.memory = wired.then(|| judge.clone() as Arc<dyn MemoryPort>);
     if host {
         c.host = Some(HostCfg {
             home,
@@ -512,6 +531,256 @@ fn the_brain_has_an_approved_actions_output_judged_before_the_model_reads_it() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// S-77: another agent's instruction files, and what a clone brought in.
+// ---------------------------------------------------------------------------------------------
+
+/// The corpus the spec measured the real judge with: `(the file's real name, its text)`.
+fn corpus(prefix: &str) -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/instruction-files");
+    let mut v: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(prefix))
+        .map(|n| {
+            let real = n.splitn(3, '-').nth(2).unwrap().to_owned();
+            (real, std::fs::read_to_string(dir.join(&n)).unwrap())
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Reads `name` (written with `text` in a folder of the home that nothing marks) and filters it.
+fn read_standing(e: &Env, session: &str, name: &str, text: &str) -> (Response, Response) {
+    let dir = e.r.join(format!("home/{session}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join(name);
+    std::fs::write(&f, text).unwrap();
+    let r = call(e, session, "c1", "fs_read", json!({"path": p(&f)}));
+    (r.clone(), filter(e, session, "c1", text))
+}
+
+// S-77: an ordinary instruction file in the person's own folders is read, under Clio's notice,
+// with the session marked as for any outside text: never withheld, never `suspect`, and not put
+// to the judge (here one that would flag anything), which cannot tell it from the lure.
+#[test]
+fn an_ordinary_instruction_file_in_a_standing_folder_is_read_under_the_notice() {
+    let benign = corpus("benign-");
+    assert_eq!(benign.len(), 10);
+    for (n, (name, text)) in benign.iter().enumerate() {
+        let e = env(TextVerdict::Injection, true);
+        let (r, f) = read_standing(&e, &format!("s{n}"), name, text);
+        assert!(r.ok && r.tainted, "{name}: {r:?}");
+        let shown = f.data["items"][0].as_str().unwrap();
+        assert!(
+            shown.contains(clio_toolhost::AGENT_NOTICE),
+            "{name}: {shown}"
+        );
+        assert!(
+            !shown.contains(clio_toolhost::AGENT_CONCEALS.trim()),
+            "{name}"
+        );
+        assert!(
+            shown.contains(text.lines().nth(2).unwrap()),
+            "{name}: {shown}"
+        );
+        assert!(f.data.get("withheld").is_none(), "{name}: {:?}", f.data);
+        assert!(e.judge.asked.lock().unwrap().is_empty(), "{name}");
+        assert!(sources(&e).contains(&json!("foreign")), "{name}");
+        assert!(!sources(&e).contains(&json!("suspect")), "{name}");
+    }
+    // The same text under another name is the person's file: neither marked nor wrapped in the
+    // notice (`what_does_not_mark_the_session_is_not_judged_and_clean_text_passes`).
+    let e = env(TextVerdict::Injection, true);
+    let (r, f) = read_standing(&e, "s", "conventions.md", &benign[0].1);
+    assert!(r.ok && !r.tainted, "{r:?}");
+    assert!(
+        !f.data["items"][0]
+            .as_str()
+            .unwrap()
+            .contains(clio_toolhost::AGENT_NOTICE)
+    );
+}
+
+// S-77: the reported lure and its rewordings, from a standing folder, reach the model under the
+// notice and its warning, and the session is `suspect`: what it asks to run with the network
+// would wait for the person. The action log says why. No judge is needed for it.
+#[test]
+fn the_lure_in_a_standing_folder_makes_the_session_suspect_under_the_notice() {
+    let lures = corpus("lure-");
+    assert_eq!(lures.len(), 4);
+    for judge in [true, false] {
+        for (name, text) in &lures {
+            let e = if judge {
+                env(TextVerdict::Clean, true)
+            } else {
+                env_without_judge()
+            };
+            let (r, f) = read_standing(&e, "s", name, text);
+            assert!(r.ok, "{name}: {r:?}");
+            let shown = f.data["items"][0].as_str().unwrap();
+            assert!(
+                shown.contains(clio_toolhost::AGENT_NOTICE)
+                    && shown.contains(clio_toolhost::AGENT_CONCEALS.trim()),
+                "{name}: {shown}"
+            );
+            assert!(shown.contains("scripts/setup.js"), "{name}: {shown}");
+            assert!(
+                f.tainted && sources(&e).contains(&json!("suspect")),
+                "{name}"
+            );
+            assert!(e.judge.asked.lock().unwrap().is_empty(), "{name}");
+            let log = std::fs::read_to_string(e.r.join("clio/data/host/actions.jsonl")).unwrap();
+            let line: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+            assert_eq!(
+                (line["outcome"].as_str(), line["rule"].as_str()),
+                (Some("flagged"), Some("S-77/conceals")),
+                "{name}"
+            );
+        }
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(ok.status.success(), "git {args:?}: {ok:?}");
+}
+
+// S-77: what a clone of this run brought in is outside text for the rest of the run: every file
+// read there (by a file tool or a command) is judged in full, with today's consequences (an
+// injection is withheld and the session `suspect`); an instruction file there is judged and then
+// read under the notice, and the lure makes the session `suspect` though the judge passed it.
+// A standing folder's file is still not judged.
+#[test]
+fn what_a_clone_of_this_run_brought_in_is_judged_as_outside_text() {
+    let e = env_judge(
+        Judge {
+            verdict: TextVerdict::Clean,
+            slow: Duration::ZERO,
+            asked: Mutex::default(),
+            flag_if: Some("AI AGENT"),
+        },
+        true,
+        true,
+    );
+    if !exec_ok(&e) {
+        return;
+    }
+    let src = e.r.join("src/proj");
+    std::fs::create_dir_all(&src).unwrap();
+    let lure = &corpus("lure-0")[0].1;
+    std::fs::write(src.join("README.md"), LETTER).unwrap();
+    std::fs::write(src.join("AGENTS.md"), lure).unwrap();
+    std::fs::write(src.join("notes.txt"), "just notes").unwrap();
+    git(&src, &["init", "-q"]);
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-qm", "x"]);
+    let asked = || e.judge.asked.lock().unwrap().len();
+    let r = call(
+        &e,
+        "s",
+        "c0",
+        "exec",
+        json!({"command": format!("cd ~ && git clone -q {} work", p(&src))}),
+    );
+    assert!(r.ok && r.data["exit_code"] == 0, "{r:?}");
+    let work = e.r.join("home/work");
+    // A plain file of the clone: judged, read as it is, the session marked.
+    let r = call(
+        &e,
+        "a",
+        "c1",
+        "fs_read",
+        json!({"path": p(&work.join("notes.txt"))}),
+    );
+    assert!(r.ok && r.tainted, "{r:?}");
+    let f = filter(&e, "a", "c1", "just notes");
+    assert_eq!(asked(), 1);
+    assert!(f.data["items"][0].as_str().unwrap().contains("just notes"));
+    assert!(
+        !f.data["items"][0]
+            .as_str()
+            .unwrap()
+            .contains(clio_toolhost::AGENT_NOTICE)
+    );
+    // The same, read by a command that runs there.
+    let r = call(
+        &e,
+        "a",
+        "c2",
+        "exec",
+        json!({"command": "cd work && cat notes.txt"}),
+    );
+    assert!(r.ok && r.tainted, "{r:?}");
+    filter(&e, "a", "c2", &r.content);
+    assert_eq!(asked(), 2);
+    // An injection in the clone's README: withheld, the session suspect.
+    call(
+        &e,
+        "b",
+        "c1",
+        "fs_read",
+        json!({"path": p(&work.join("README.md"))}),
+    );
+    let f = filter(&e, "b", "c1", LETTER);
+    assert!(
+        f.data["items"][0]
+            .as_str()
+            .unwrap()
+            .contains("[withheld by Clio]")
+    );
+    assert!(f.data.get("withheld").is_some() && asked() == 3);
+    // The lure: the judge passes it (as the real one does, see the spec), so it is read under the
+    // notice, and its signs make the session suspect.
+    call(
+        &e,
+        "c",
+        "c1",
+        "fs_read",
+        json!({"path": p(&work.join("AGENTS.md"))}),
+    );
+    let f = filter(&e, "c", "c1", lure);
+    assert_eq!(asked(), 4);
+    let shown = f.data["items"][0].as_str().unwrap();
+    assert!(
+        shown.contains(clio_toolhost::AGENT_CONCEALS.trim()) && shown.contains("setup.js"),
+        "{shown}"
+    );
+    // An instruction file of the person's own, read by a command: not judged, under the notice.
+    std::fs::create_dir_all(e.r.join("home/mine")).unwrap();
+    std::fs::write(e.r.join("home/mine/CLAUDE.md"), "Use pnpm.").unwrap();
+    let r = call(
+        &e,
+        "d",
+        "c1",
+        "exec",
+        json!({"command": "cat mine/CLAUDE.md"}),
+    );
+    assert!(r.ok && r.tainted, "{r:?}");
+    let f = filter(&e, "d", "c1", &r.content);
+    assert_eq!(asked(), 4);
+    let shown = f.data["items"][0].as_str().unwrap();
+    assert!(shown.contains(clio_toolhost::AGENT_NOTICE) && shown.contains("Use pnpm."));
+    // A file outside the clone is the person's, as before.
+    std::fs::write(e.r.join("home/notes.txt"), "mine").unwrap();
+    let r = call(&e, "d", "c2", "fs_read", json!({"path": "notes.txt"}));
+    filter(&e, "d", "c2", "mine");
+    assert!(r.ok && asked() == 4, "{r:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
 // The battery (docs/security.md): the judge is scripted, as the model is in the other targets.
 // ---------------------------------------------------------------------------------------------
 
@@ -520,7 +789,7 @@ fn held(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
     std::panic::catch_unwind(f).is_ok()
 }
 
-const OURS: [&str; 2] = ["attack-63", "attack-64"];
+const OURS: [&str; 3] = ["attack-63", "attack-64", "attack-67"];
 
 struct JudgeTarget;
 
@@ -535,13 +804,21 @@ impl clio_attacks::Target for JudgeTarget {
                 held(a_suspect_session_asks_before_it_reaches_out)
                     && held(a_session_that_becomes_suspect_stops_its_jobs_with_the_network)
             }
+            // The clone's part needs the launcher too.
+            "attack-67" => {
+                held(the_lure_in_a_standing_folder_makes_the_session_suspect_under_the_notice)
+                    && held(what_a_clone_of_this_run_brought_in_is_judged_as_outside_text)
+                    && held(
+                        an_ordinary_instruction_file_in_a_standing_folder_is_read_under_the_notice,
+                    )
+            }
             other => panic!("{other} is active but this target has no scenario for it"),
         };
         clio_attacks::Observed { refused }
     }
 }
 
-// S-05 S-06: attacks 63 and 64
+// S-05 S-06 S-77: attacks 63, 64 and 67
 #[test]
 fn the_judge_cases_are_active_and_refused() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/attacks/cases");

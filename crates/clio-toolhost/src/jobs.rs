@@ -22,6 +22,7 @@ use clio_vault::count_masks;
 use serde_json::{Map, Value, json};
 
 use crate::host::{Host, log_line, private_dir};
+use crate::judge::Agent;
 use crate::{DecisionOut, Request, Response, ToolHost, lock};
 
 /// Background commands running at once in one session.
@@ -97,8 +98,11 @@ struct End {
 struct Job {
     session: String,
     what: String,
-    /// It reached out or read a foreign folder: what it wrote is judged when it is read.
+    /// It reached out or read a foreign folder, a clone or another agent's file: what it wrote
+    /// is judged when it is read.
     judge: bool,
+    /// Whether it read another agent's file, and from where (S-77).
+    agent: Agent,
     /// It has the network (asked for, or a program that reaches out by itself).
     web: bool,
     stop: Arc<AtomicBool>,
@@ -195,11 +199,11 @@ impl ToolHost {
             ));
         }
         let web = network || h.cfg.rules.reaches_out(command);
-        let foreign = h.cfg.rules.reads_foreign(command);
+        let (foreign, agent_file) = self.reads_outside(h, command);
         if web {
             self.mark(&req.session, "web");
         }
-        if foreign {
+        if foreign || agent_file {
             self.mark(&req.session, "foreign");
         }
         let job = HostJob {
@@ -271,7 +275,8 @@ impl ToolHost {
             Job {
                 session: req.session.clone(),
                 what,
-                judge: web || foreign,
+                judge: web || foreign || agent_file,
+                agent: Agent::of(agent_file, web || foreign),
                 web,
                 stop,
                 suspect,
@@ -371,7 +376,7 @@ impl ToolHost {
             job.read += buf.len() as u64;
             (buf, note, job.read < out.written)
         };
-        let judge = job.judge;
+        let (judge, agent) = (job.judge, job.agent);
         let what = job.what.clone();
         drop(map);
         let raw = String::from_utf8_lossy(&raw).into_owned();
@@ -387,7 +392,7 @@ impl ToolHost {
             ""
         };
         if judge {
-            self.judge_later(req, &what);
+            self.judge_later_as(req, &what, agent);
         }
         self.job_answer(
             req,

@@ -61,7 +61,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub use host::HostCfg;
-pub use judge::{REFUSING, SUSPECT_REASON, UNJUDGED, verdict};
+pub use judge::{AGENT_CONCEALS, AGENT_NOTICE, REFUSING, SUSPECT_REASON, UNJUDGED, verdict};
 pub use memory::{
     BLOCK_NAMES, BLOCK_TAINTED, BlockEdit, CATEGORIES, Found, Judging, MemoryItem, MemoryPort,
     NOT_WORTH_REMEMBERING, Near, Origin, ProposalDraft, ProposalKind, Proposed, Saved, TextVerdict,

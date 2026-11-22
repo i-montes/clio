@@ -224,6 +224,7 @@ impl ToolHost {
             let w = ToJudge {
                 tool: "subagent",
                 source: name.clone(),
+                agent: crate::judge::Agent::No,
             };
             let mut out = [Value::String(self.clean(r["text"].as_str().unwrap_or("")))];
             let judged = self.judge_texts(req, &mut out, &[0], &w);

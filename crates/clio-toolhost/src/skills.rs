@@ -782,6 +782,7 @@ impl ToolHost {
                 let w = ToJudge {
                     tool: "skill_write",
                     source,
+                    agent: crate::judge::Agent::No,
                 };
                 let mut out = [Value::String(text.clone())];
                 self.withhold(req, &mut out, &[0], &w, &text);
