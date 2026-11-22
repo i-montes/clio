@@ -1,0 +1,8 @@
+# Documentation site rules
+
+- This repository is a MkDocs site. Write in British English.
+- Build with `mkdocs build --strict` and fix every warning before you finish.
+- One H1 per page; headings in sentence case.
+- Images go in `docs/assets/` and every image needs alt text.
+- Do not rename existing pages: other sites link to them. Add a redirect in `mkdocs.yml` if you must move one.
+- The generated `site/` folder is build output: do not read or edit it, run `mkdocs build` instead.

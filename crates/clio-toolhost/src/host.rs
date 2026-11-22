@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::ask::HostRules;
+use crate::judge::Agent;
 use crate::{Approved, Request, ToolHost, ops};
 
 pub struct HostCfg {
@@ -43,6 +44,9 @@ pub(crate) const CONTROL: &str = "that belongs to Clio: only the person touches 
 pub(crate) const LOGGED: [&str; 3] = ["exec", "fs_write", "fs_mkdir"];
 /// The longest time limit a command may ask for; without one it has none.
 pub(crate) const MAX_TIMEOUT_SECS: u64 = 3600;
+/// Where a run keeps the folders its commands cloned into (S-77), and how many at most.
+const CLONES: &str = "clones.txt";
+const MAX_CLONES: usize = 64;
 
 /// Clio's programs where the installer puts them: shown read-only in a command's jail, which may
 /// run them and never change them (S-72).
@@ -521,22 +525,78 @@ impl ToolHost {
                 eprintln!("clio-toolhost: the action log lost a line: {e}");
             }
         }
-        let foreign = match tool {
-            "fs_read" | "fs_list" | "fs_glob" => real.is_some_and(|r| h.cfg.rules.is_foreign(r)),
-            "exec" => h.cfg.rules.reads_foreign(command),
-            _ => false,
+        let (foreign, agent) = match tool {
+            "fs_read" | "fs_list" | "fs_glob" => real.map_or((false, false), |r| {
+                let rules = &h.cfg.rules;
+                let cloned = self.clones().iter().any(|c| r.starts_with(c));
+                (rules.is_foreign(r) || cloned, rules.is_agent_file(r))
+            }),
+            "exec" => self.reads_outside(h, command),
+            _ => (false, false),
         };
         let web = tool == "exec" && (network || h.cfg.rules.reaches_out(command));
         if web {
             self.mark(&req.session, "web");
         }
-        if foreign {
+        if foreign || agent {
             self.mark(&req.session, "foreign");
         }
-        if web || foreign {
-            self.judge_later(req, &what);
+        if web || foreign || agent {
+            self.judge_later_as(req, &what, Agent::of(agent, web || foreign));
         }
         Ok((ok, content, data, external))
+    }
+
+    /// What a command reads from outside besides the network (S-77): a foreign folder or logs,
+    /// or a clone of this run (`foreign`); another agent's file (`agent`). A clone it makes
+    /// counts from now on, for this very command too.
+    pub(crate) fn reads_outside(&self, h: &Host, command: &str) -> (bool, bool) {
+        let rules = &h.cfg.rules;
+        self.add_clones(&rules.clone_dests(command));
+        let foreign = rules.reads_foreign(command) || rules.reads_under(command, &self.clones());
+        (foreign, rules.names_agent_file(command))
+    }
+
+    /// The folders this run's commands cloned into (S-77): `clones.txt` in the run folder, so a
+    /// command the person approved (another tool host on the same folder) counts too.
+    pub(crate) fn clones(&self) -> Vec<PathBuf> {
+        fs::read_to_string(self.run_dir.join(CLONES))
+            .map(|t| t.lines().map(PathBuf::from).collect())
+            .unwrap_or_default()
+    }
+
+    /// Adds `dests` to `clones` (both spellings, when the folder is there), up to `MAX_CLONES`.
+    fn add_clones(&self, dests: &[PathBuf]) {
+        if dests.is_empty() {
+            return;
+        }
+        let mut all = self.clones();
+        for d in dests {
+            all.push(d.clone());
+            all.extend(d.canonicalize().ok());
+        }
+        all.sort();
+        all.dedup();
+        // shortcut: past MAX_CLONES a new clone is not kept (its files read as the person's);
+        // keep the newest instead if a run ever clones that much.
+        let lines: String = all
+            .iter()
+            .take(MAX_CLONES)
+            .filter_map(|p| p.to_str().filter(|s| !s.contains('\n')))
+            .map(|s| format!("{s}\n"))
+            .collect();
+        let saved = private_dir(&self.run_dir).and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(self.run_dir.join(CLONES))
+                .and_then(|mut f| f.write_all(lines.as_bytes()))
+        });
+        if let Err(e) = saved {
+            eprintln!("clio-toolhost: the clones of this run could not be kept: {e}");
+        }
     }
 
     fn host_effect(

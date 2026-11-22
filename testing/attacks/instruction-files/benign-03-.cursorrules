@@ -1,0 +1,9 @@
+You are working on a React Native app written in TypeScript.
+
+- Always use functional components and hooks; never class components.
+- Do not use `any`. Prefer `unknown` and narrow it.
+- Use the existing `api/` client for network calls; do not call fetch directly.
+- Keep components under 200 lines; split them when they grow.
+- Write tests with Jest and React Native Testing Library next to the component (`Foo.test.tsx`).
+- Run `yarn tsc --noEmit` and `yarn test` before saying a task is done.
+- Do not touch `ios/Pods` or `android/app/build`.
