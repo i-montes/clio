@@ -17,8 +17,9 @@ ponytail], so I expect Clio to be able to use them." Clio ships none of them; it
   ("name a branch or a tag"). It is fetched over https only, at most 20 MiB, and read in memory
   with the checks the installer's downloads have (nothing of it runs or is unpacked to disk). The
   record keeps where it came from and the commit named in the archive's own header.
-- **Who.** `clio skills add <source> [name…]` at a terminal (a folder only this way: the model
-  can write folders), and in the chat the person just asks: the model proposes a GitHub repository
+- **Who.** `clio skills add <source> [name…]` at a terminal and in the chat the person just asks: the model proposes a GitHub repository, or a folder of
+  the home that the jail does not hide from its commands (since 0.8.1; the model can write a
+  folder, so the yes is to the text the box shows),
   with `skill_add {source, names?, reason}`, which sets each skill aside as class `skill`. The box
   shows each skill (name, description, files, sizes, scripts, origin, ref and commit, what the
   judge said, what of a plugin is not installed), where to read exactly what would be installed

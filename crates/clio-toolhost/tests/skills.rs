@@ -942,7 +942,8 @@ fn add(e: &Env, session: &str, args: Value) -> Response {
 // skills, has the judge read every file and sets each one aside for the person (class `skill`,
 // tool `skill_add`): a flag is kept for the box, with where to read it at that commit, a plugin's
 // hooks and commands are named and not taken, and nothing is written to the skills folder. The
-// model reads none of their text, never adds a folder, and is promised no later turn.
+// model reads none of their text and is promised no later turn. A folder of the home is taken
+// the same way, never one the jail hides from Clio's commands (S-75).
 #[test]
 fn skill_add_sets_each_skill_aside_judged_and_writes_nothing() {
     let e = env(true);
@@ -1048,12 +1049,34 @@ fn skill_add_sets_each_skill_aside_judged_and_writes_nothing() {
         json!({"source": repo, "names": ["nope"], "reason": "r"}),
     );
     assert!(!r.ok && r.content.contains("it has: evil, hello"), "{r:?}");
-    // A folder, any folder: only the person adds one, in fixed words.
-    for f in [p(&src), "~/src/plugin".into(), "./x".into()] {
-        let r = add(&e, "s2", json!({"source": f, "reason": "r"}));
+    // A folder of the home, as a repository: set aside for the person's yes, its origin the path.
+    let r = add(
+        &e,
+        "s3",
+        json!({"source": p(&src), "names": ["hello"], "reason": "r"}),
+    );
+    assert!(r.ok && r.content.contains("«hello»"), "{r:?}");
+    let items = clio_toolhost::pending::list(&e.data.join("host"));
+    let folder = items.iter().find(|i| i.session == "s3").unwrap();
+    assert_eq!(folder.args["origin"], p(&src.canonicalize().unwrap()));
+    assert_eq!(folder.args["commit"], Value::Null);
+    // One the jail hides from commands (a credential store, Clio's own folders), and one that
+    // is not there: the same fixed words, so the answer says nothing of what a store holds.
+    let ssh = e.home.join(".ssh/skill");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("SKILL.md"), "---\nname: k\ndescription: d\n---\n").unwrap();
+    std::os::unix::fs::symlink(e.home.join(".ssh"), e.home.join("door")).unwrap();
+    for f in [
+        "~/.ssh/skill".to_owned(),
+        "~/door/skill".into(),
+        "~/.ssh/nothing".into(),
+        "~/nothing".into(),
+        p(&e.skills.join("live/demo")),
+    ] {
+        let r = add(&e, "s3", json!({"source": f, "reason": "r"}));
         assert!(
-            !r.ok && r.content.contains(clio_toolhost::skill_add::FOLDER_PERSON),
-            "{r:?}"
+            !r.ok && r.content.contains(clio_toolhost::skill_add::FOLDER_CLOSED),
+            "{f}: {r:?}"
         );
     }
     // A repository with no skill; a commit hash, never a branch or a tag here.
