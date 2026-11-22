@@ -220,6 +220,30 @@ fn start(dirs: &Dirs) -> Res<()> {
     Ok(())
 }
 
+/// Before the chat opens: a vault that is there but stopped or locked asks for its passphrase at
+/// the terminal, so the chat does not open without its keys and a new conversation in place of
+/// the last one. An empty answer goes on without it, and so do three wrong ones: the chat then
+/// says what is missing. With no vault yet nothing is asked: making one is `clio setup`'s.
+pub fn start_before_chat(dirs: &Dirs) {
+    ask_to_start(dirs, || read_secret("vault passphrase (Enter to skip)"));
+}
+
+fn ask_to_start(dirs: &Dirs, mut read: impl FnMut() -> Res<String>) {
+    for _ in 0..3 {
+        // A vault that answers unlocked on its socket is open, with or without its pid file.
+        if !matches!(state(dirs), State::Stopped | State::Locked) || open_now(dirs).is_ok() {
+            return;
+        }
+        let Ok(pass) = read() else { return };
+        if pass.is_empty() {
+            return;
+        }
+        if let Err(e) = start_with(dirs, &SecretValue::new(pass)) {
+            eprintln!("{e}");
+        }
+    }
+}
+
 /// Creates the vault if there is none, starts its server if it is not running and unlocks it,
 /// all with `pass`, which goes from this process to the vault's file or its socket and nowhere
 /// else (no argument, no other process's input). Returns the server's pid.
@@ -538,6 +562,30 @@ mod tests {
             runtime: Some(root.join("run/clio")),
             home: root.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn the_chat_asks_for_the_passphrase_only_of_a_vault_that_is_there() {
+        let d = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(d.path());
+        // No vault yet: nothing is asked.
+        ask_to_start(&dirs, || panic!("asked with no vault"));
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        std::fs::write(dirs.data.join("vault.bin"), b"not a vault").unwrap();
+        // Stopped: it asks; an empty answer is "not now" and it does not ask again.
+        let mut asked = 0;
+        ask_to_start(&dirs, || {
+            asked += 1;
+            Ok(String::new())
+        });
+        assert_eq!(asked, 1);
+        // A passphrase that does not open it: three tries, then the chat opens without it.
+        let mut asked = 0;
+        ask_to_start(&dirs, || {
+            asked += 1;
+            Ok("wrong".into())
+        });
+        assert_eq!(asked, 3);
     }
 
     #[test]

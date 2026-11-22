@@ -114,6 +114,7 @@ fn dispatch(argv: Vec<String>) -> Res<i32> {
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let dirs = Dirs::from_env()?;
             let h = harness_for(harness.as_deref(), mode, &dirs)?;
+            vault::start_before_chat(&dirs);
             return tui::run(dirs, dbg, h, mode, new);
         }
         println!("{USAGE}");

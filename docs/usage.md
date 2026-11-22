@@ -655,6 +655,8 @@ clio vault upgrade-kdf      # raises the cost of your passphrase (see below); wi
 clio vault stop
 ```
 
+Opening `clio` at a terminal does the same for a vault that is stopped or locked: it asks for the passphrase before the chat opens, so the last conversation comes back with its keys. Enter with nothing typed skips it, and so do three wrong passphrases; it never creates a vault.
+
 **The passphrase's cost.** The vault stretches your passphrase with Argon2id and keeps that cost in its file. New vaults use 64 MiB and 3 passes; one you made earlier uses 19 MiB and 2 and still opens, but `clio doctor` warns that its cost is old (for whoever gets the file, guessing the passphrase is cheaper). `clio vault upgrade-kdf` migrates it without changing your passphrase or your secrets: it asks for it, seals everything again with a new salt and key, and leaves a copy of the old file as `vault.pre-argon2` (mode 0600, and it holds all your secrets at the old cost: delete it once you check that `clio vault start` opens fine). If something cannot be opened, it writes nothing.
 
 It is a wrapper around the `clio-vault` binary (it looks for it next to `clio`, or at the absolute path in `CLIO_VAULT_BIN`; never on the `PATH`, because it gets your master passphrase). The two sockets are in `$XDG_RUNTIME_DIR/clio/` with mode 0600; the vault's file is `~/.local/share/clio/vault.bin`.
