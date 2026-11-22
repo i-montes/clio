@@ -8,17 +8,22 @@
 //!
 //! - GitHub only over https (`codeload.github.com`), at a branch or a tag of that repository (or
 //!   its default branch), never a commit hash: GitHub serves a fork's commits through the parent's
-//!   name. The archive at most `MAX_ARCHIVE`, at most `MAX_UNPACKED` unpacked, read here in
-//!   memory: nothing in it runs and nothing of it is written but the download itself, in a
-//!   staging folder under Clio's data, removed at once. The commit is the archive's own.
+//!   name. The download at most `MAX_ARCHIVE`, in a staging folder under Clio's data, removed at
+//!   once; streamed through `gzip -dc` (at most `MAX_UNPACKED`), never whole in memory: once for
+//!   the names, once to keep the skills' folders (at most `MAX_KEPT`). Nothing in it runs. The
+//!   commit is the archive's own. curl's answer says which failure it was: no such repository or
+//!   ref, too large, or no network.
 //! - A folder only for the person (`clio skills add`): the model can write folders. It is walked
 //!   from a handle on its top folder, no link followed even if one is swapped in while it is read.
-//! - Every file goes through the vault's filter: a secret shape refuses the skill.
+//! - Every text goes through the vault's filter: a secret shape refuses the skill.
 //! - A path outside the archive's folder, or an entry that is not a file, a folder or a link,
 //!   refuses the whole archive. A link is never followed or kept: one inside a skill refuses it.
-//! - In a skill, a file that is not text, whose name Clio does not take (`valid_path`) or that
-//!   holds characters the box would not show as written is skipped, and the box says so; the rest
-//!   is held to `MAX_ADDED_FILES` and `MAX_ADDED_BYTES` (`skills::check_added`).
+//! - A skill is its instructions and its resources (design `2026-11-22-skills-resources-design.md`):
+//!   SKILL.md and its documents (`skills::instruction_kind`, text, within `MAX_ADDED_FILES` and
+//!   `MAX_ADDED_BYTES`) are judged and shown; everything else is a resource, stored byte for byte
+//!   (staged until the yes, named by its SHA-256) and never read as Clio's own text. A file whose
+//!   name Clio does not take (`valid_added_path`) is skipped, and the box says so; the whole is
+//!   held to `MAX_SKILL_FILES` and `MAX_SKILL_BYTES` (`skills::check_added`).
 //! - Only skills are taken: a plugin's hooks, commands and agents are named, never installed.
 
 use std::collections::BTreeMap;
@@ -38,11 +43,16 @@ pub const TOOL: &str = "skill_add";
 /// Why each item waits: a skill is text the model will read as Clio's own.
 pub const WAITS: &str =
     "a skill from outside is text Clio will read as her own: only you add it, every time";
-/// The downloaded archive, at most.
-pub const MAX_ARCHIVE: u64 = 20 << 20;
-/// What the archive unpacks to, or what is read of a folder, at most.
-const MAX_UNPACKED: usize = 100 << 20;
-/// Entries of an archive or a folder read at most.
+/// The downloaded archive, at most (on disk, compressed).
+pub const MAX_ARCHIVE: u64 = 256 << 20;
+/// What the archive unpacks to, at most: streamed, never held.
+const MAX_UNPACKED: u64 = 2 << 30;
+/// Entries of an archive, at most (only their names are looked at).
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+/// What is kept of an archive (the skills' folders), or read of a folder, at most: what is held
+/// in memory while the skills are found (two whole skills).
+const MAX_KEPT: usize = 128 << 20;
+/// Entries kept of an archive, or read of a folder, at most.
 const MAX_ENTRIES: usize = 20_000;
 /// The parts of a plugin that are not skills: named, never installed.
 const PLUGIN_PARTS: [&str; 3] = ["hooks", "commands", "agents"];
@@ -61,6 +71,8 @@ pub enum Source {
         repo: String,
         /// A branch or a tag; `HEAD` (the default branch) when none is given.
         reference: String,
+        /// The folder of the repository to read (a link to one skill's folder); empty: all of it.
+        path: String,
     },
 }
 
@@ -80,9 +92,14 @@ impl Source {
     }
 }
 
+/// What to type, said when a source is not one.
+const TYPE: &str = "type owner/repo (or owner/repo@branch-or-tag, https://github.com/owner/repo, or a link to one skill's folder like https://github.com/owner/repo/tree/main/skills/name), or a folder (/…, ./… or ~/…)";
+
 /// `source` as the person or the model gave it: a folder (`/…`, `./…`, `../…`, `~/…`; relative
-/// to `base`), or a GitHub repository, `owner/repo` or `https://github.com/owner/repo`, with
-/// `@ref` or not.
+/// to `base`), or a GitHub repository: `owner/repo`, `https://github.com/owner/repo` (also with
+/// `www.`, without the scheme, with `.git` or a trailing `/`), with `@ref` or not, or a link to
+/// one folder of it (`…/tree/<ref>/<folder>`, or `…/blob/<ref>/<folder>/SKILL.md`). The rest is
+/// refused with a sentence that says what to type.
 pub fn parse(source: &str, home: &Path, base: &Path) -> Result<Source, String> {
     let s = source.trim();
     if s == "~" || s.starts_with("~/") {
@@ -91,24 +108,46 @@ pub fn parse(source: &str, home: &Path, base: &Path) -> Result<Source, String> {
     if s.starts_with('/') || s.starts_with("./") || s.starts_with("../") || s == "." {
         return Ok(Source::Folder(base.join(s)));
     }
-    let bad = || {
-        Err(format!(
-            "{:?} is not a source: a folder (/…, ./… or ~/…) or a GitHub repository (owner/repo, or https://github.com/owner/repo, with @ref or not); only GitHub, only over https",
-            one_line(s)
-        ))
+    let say = |why: &str| Err(format!("{:?} {why}: {TYPE}", one_line(s)));
+    if s.starts_with("git@") || s.starts_with("ssh://") || s.starts_with("git://") {
+        return say("is a git address; Clio fetches GitHub only over https");
+    }
+    if s.starts_with("http://") {
+        return say("is not https; Clio fetches GitHub only over https");
+    }
+    let rest = s.strip_prefix("https://").unwrap_or(s);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let rest = match rest.strip_prefix("github.com/") {
+        Some(r) => r,
+        None if s.contains("://") || rest.split('/').next().is_some_and(|h| h.contains('.')) => {
+            return say("is not on GitHub; Clio fetches skills only from GitHub");
+        }
+        None => rest,
     };
-    let (repo_at, reference) = match s.rsplit_once('@') {
-        Some((r, at)) => (r, at),
-        None => (s, "HEAD"),
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (repo_at, at) = match rest.rsplit_once('@') {
+        Some((r, at)) => (r, Some(at)),
+        None => (rest, None),
     };
-    let path = repo_at
-        .strip_prefix("https://github.com/")
-        .unwrap_or(repo_at)
-        .trim_end_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let Some((owner, repo)) = path.split_once('/') else {
-        return bad();
+    let parts: Vec<&str> = repo_at.trim_end_matches('/').split('/').collect();
+    let (owner, repo, linked, path) = match parts.as_slice() {
+        [o, r] => (*o, *r, None, String::new()),
+        [o, r, "tree", rf, folder @ ..] => (*o, *r, Some(*rf), folder.join("/")),
+        [o, r, "blob", rf, folder @ .., last] if last.eq_ignore_ascii_case("SKILL.md") => {
+            (*o, *r, Some(*rf), folder.join("/"))
+        }
+        [_, _, "blob", ..] => {
+            return say(
+                "is a link to a file; link the skill's folder (…/tree/<branch>/<folder>) or its SKILL.md",
+            );
+        }
+        _ => return say("is not a GitHub repository or a folder of one"),
     };
+    if linked.is_some() && at.is_some() {
+        return say("gives the ref twice");
+    }
+    let reference = linked.or(at).unwrap_or("HEAD");
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
     let word = |w: &str, max: usize, more: &[u8]| {
         !w.is_empty()
             && w.len() <= max
@@ -120,13 +159,25 @@ pub fn parse(source: &str, home: &Path, base: &Path) -> Result<Source, String> {
         && !reference.contains("..")
         && !reference.contains("//")
         && !reference.ends_with('/');
-    if !(word(owner, 39, b"-") && word(repo, 100, b"._-") && ref_ok) {
-        return bad();
+    // A folder's parts: plain names (a dot first is a folder like `.claude`, never `.` or `..`).
+    let path_ok = path.is_empty()
+        || (path.len() <= 300
+            && path.split('/').all(|p| {
+                !p.is_empty()
+                    && p != "."
+                    && p != ".."
+                    && !p.starts_with('-')
+                    && p.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            }));
+    if !(word(owner, 39, b"-") && word(repo, 100, b"._-") && ref_ok && path_ok) {
+        return say("is not a GitHub repository or a folder of one");
     }
     Ok(Source::GitHub {
         owner: owner.to_owned(),
         repo: repo.to_owned(),
         reference: reference.to_owned(),
+        path,
     })
 }
 
@@ -187,10 +238,11 @@ fn read_folder(top: &Path) -> Result<Tree, String> {
 /// Every entry under `fd` (`pi`: as Pi finds skills, every name but what `left_behind` names;
 /// else `relevant`), no link followed.
 fn walk(fd: &rustix::fd::OwnedFd, whole: bool, pi: bool) -> Result<Tree, String> {
-    walk_within(fd, whole, pi, (MAX_ENTRIES, MAX_UNPACKED))
+    walk_within(fd, whole, pi, (MAX_ENTRIES, MAX_KEPT))
 }
 
-/// `walk`, refused before anything past `files` files or `bytes` bytes (by their size) is read.
+/// `walk`, refused when it holds more than `files` files or `bytes` bytes (by their size): past
+/// either, nothing more is read, the rest is only counted, and the refusal says by how much.
 fn walk_within(
     fd: &rustix::fd::OwnedFd,
     whole: bool,
@@ -206,6 +258,21 @@ fn walk_within(
         pi,
     };
     w.dir(fd, "", 0)?;
+    if w.files > files {
+        return Err(format!(
+            "{} files, past the limit of {files} by {}: nothing of it was taken",
+            w.files,
+            w.files - files
+        ));
+    }
+    if w.bytes > bytes {
+        return Err(format!(
+            "{}, past the limit of {} by {}: nothing of it was taken",
+            skills::size_text(w.bytes as u64),
+            skills::size_text(bytes as u64),
+            skills::size_text((w.bytes - bytes) as u64)
+        ));
+    }
     Ok(w.tree)
 }
 
@@ -322,16 +389,13 @@ impl Walk {
                     self.bytes = self
                         .bytes
                         .saturating_add(usize::try_from(st.st_size).unwrap_or(usize::MAX));
+                    // Past a limit: only counted from here, so the refusal can say by how much.
                     if self.files > self.most.0 || self.bytes > self.most.1 {
-                        return Err(format!(
-                            "more than {} files or {} KiB to read: nothing of it was read",
-                            self.most.0,
-                            self.most.1 >> 10
-                        ));
+                        continue;
                     }
                     let mut b = Vec::new();
                     fs::File::from(f)
-                        .take(MAX_UNPACKED as u64)
+                        .take(self.most.1 as u64)
                         .read_to_end(&mut b)
                         .map_err(|e| failed(&rel, &e))?;
                     Item::File(b, mtime(&st))
@@ -399,97 +463,178 @@ fn cstr(b: &[u8]) -> String {
     String::from_utf8_lossy(&b[..b.iter().position(|c| *c == 0).unwrap_or(b.len())]).into_owned()
 }
 
-/// An unpacked tar (as GitHub makes them: one top folder, pax headers): the commit its global
-/// header names, and its relevant entries under the top folder. Read here, nothing written.
-fn untar(tar: &[u8]) -> Result<(Option<String>, Tree), String> {
+/// Fills `buf` from `r`: `false` at the end of the stream before any byte.
+fn fill(r: &mut dyn Read, buf: &mut [u8]) -> Result<bool, String> {
+    let damaged = || "the archive is damaged: nothing of it was taken".to_owned();
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) if n == 0 => return Ok(false),
+            Ok(0) => return Err(damaged()),
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(damaged()),
+        }
+    }
+    Ok(true)
+}
+
+/// What is done with each entry of an archive: `(rel, kind, body)`.
+type Each<'a> = dyn FnMut(&str, u8, &mut dyn Read) -> Result<(), String> + 'a;
+
+/// A tar stream (as GitHub makes them: one top folder, pax headers), read entry by entry and
+/// never held: `each(rel, kind, body)` for every entry under the top folder and, when `under` is
+/// given, under that folder of it (`rel` then under it); what `each` leaves unread of a body is
+/// skipped. A path outside the top folder, or an entry that is not a file, a folder or a link,
+/// refuses it all. The commit its global header names.
+fn untar(r: &mut dyn Read, under: &str, each: &mut Each) -> Result<Option<String>, String> {
     let damaged = || "the archive is damaged: nothing of it was taken".to_owned();
     let outside =
         || "the archive has a path outside its folder: nothing of it was taken".to_owned();
-    let (mut at, mut commit, mut long) = (0usize, None, None::<String>);
-    let mut all: Vec<(String, u8, std::ops::Range<usize>)> = vec![];
-    let mut top: Option<String> = None;
-    while at + 512 <= tar.len() {
-        let h = &tar[at..at + 512];
+    let (mut commit, mut long) = (None, None::<String>);
+    let (mut top, mut read, mut entries): (Option<String>, u64, usize) = (None, 0, 0);
+    let mut h = [0u8; 512];
+    while fill(r, &mut h)? {
         if h.iter().all(|b| *b == 0) {
             break;
         }
-        let size = octal(&h[124..136]).ok_or_else(damaged)?;
-        let start = at + 512;
-        let end = start
-            .checked_add(size)
-            .filter(|e| *e <= tar.len())
-            .ok_or_else(damaged)?;
-        at = start + size.div_ceil(512) * 512;
+        let size = octal(&h[124..136]).ok_or_else(damaged)? as u64;
+        let padded = size.div_ceil(512) * 512;
+        read = read.saturating_add(512 + padded);
+        entries += 1;
+        if read > MAX_UNPACKED {
+            return Err(format!(
+                "the archive unpacks to more than {}: nothing of it was taken",
+                skills::size_text(MAX_UNPACKED)
+            ));
+        }
+        if entries > MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "the archive has more than {MAX_ARCHIVE_ENTRIES} entries: nothing of it was taken"
+            ));
+        }
         let kind = h[156];
+        let mut body = (&mut *r).take(size);
         if matches!(kind, b'g' | b'x') {
-            for (k, v) in pax(&tar[start..end]) {
+            if size > 1 << 20 {
+                return Err(damaged());
+            }
+            let mut b = Vec::new();
+            body.read_to_end(&mut b).map_err(|_| damaged())?;
+            for (k, v) in pax(&b) {
                 match (kind, k.as_str()) {
                     (b'g', "comment") => commit = Some(v),
                     (b'x', "path") => long = Some(v),
                     _ => {}
                 }
             }
-            continue;
-        }
-        if !matches!(kind, b'0' | 0 | b'7' | b'5' | b'1' | b'2') {
-            return Err(
-                "the archive has an entry that is not a file, a folder or a link: nothing of it was taken"
-                    .into(),
-            );
-        }
-        let name = long.take().unwrap_or_else(|| {
-            let (name, prefix) = (cstr(&h[..100]), cstr(&h[345..500]));
-            if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
+        } else {
+            if !matches!(kind, b'0' | 0 | b'7' | b'5' | b'1' | b'2') {
+                return Err(
+                    "the archive has an entry that is not a file, a folder or a link: nothing of it was taken"
+                        .into(),
+                );
             }
-        });
-        let name = name.trim_end_matches('/').to_owned();
-        if name.starts_with('/') || name.split('/').any(|p| p == ".." || p.is_empty()) {
-            return Err(outside());
+            let name = long.take().unwrap_or_else(|| {
+                let (name, prefix) = (cstr(&h[..100]), cstr(&h[345..500]));
+                if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                }
+            });
+            let name = name.trim_end_matches('/').to_owned();
+            if name.starts_with('/') || name.split('/').any(|p| p == ".." || p.is_empty()) {
+                return Err(outside());
+            }
+            let (first, rest) = name.split_once('/').unwrap_or((&name, ""));
+            match &top {
+                None => top = Some(first.to_owned()),
+                Some(t) if t != first => return Err(outside()),
+                Some(_) => {}
+            }
+            let rel = if under.is_empty() {
+                Some(rest)
+            } else {
+                rest.strip_prefix(under).and_then(|x| x.strip_prefix('/'))
+            };
+            if let Some(rel) = rel.filter(|x| !x.is_empty()) {
+                each(rel, kind, &mut body)?;
+            }
         }
-        let (first, rest) = name.split_once('/').unwrap_or((&name, ""));
-        match &top {
-            None => top = Some(first.to_owned()),
-            Some(t) if t != first => return Err(outside()),
-            Some(_) => {}
+        // What was not read of it, and the padding to the next header.
+        std::io::copy(&mut body, &mut std::io::sink()).map_err(|_| damaged())?;
+        if body.limit() > 0 {
+            return Err(damaged());
         }
-        if !rest.is_empty() {
-            all.push((rest.to_owned(), kind, start..end));
-        }
-        if all.len() > MAX_ENTRIES {
-            return Err(format!("the archive has more than {MAX_ENTRIES} entries"));
-        }
+        std::io::copy(&mut (&mut *r).take(padded - size), &mut std::io::sink())
+            .map_err(|_| damaged())?;
     }
-    let whole = all
-        .iter()
-        .any(|(n, k, _)| n == "SKILL.md" && matches!(k, b'0' | 0 | b'7'));
+    Ok(commit.filter(|c| c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit())))
+}
+
+/// The archive `file` (gzip), streamed through `untar` (`under` as there) twice: once for its
+/// names (is the folder read a skill itself?), once to keep what is relevant (`relevant`), at
+/// most `MAX_KEPT` and `MAX_ENTRIES` (top-level files of a folder that is not one skill are kept
+/// by name only). The commit, and the tree. Nothing is written.
+fn read_archive(file: &Path, under: &str) -> Result<(Option<String>, Tree), String> {
+    let mut whole = false;
+    let mut any = false;
+    gunzip_each(file, under, &mut |rel, kind, _| {
+        any = true;
+        whole |= rel == "SKILL.md" && matches!(kind, b'0' | 0 | b'7');
+        Ok(())
+    })?;
+    if !under.is_empty() && !any {
+        return Err(format!("it has no folder {}", shown(under)));
+    }
     let mut tree = Tree::new();
-    for (n, k, r) in all {
+    let mut kept = 0usize;
+    let commit = gunzip_each(file, under, &mut |rel, kind, body| {
         // The folders on its way that can matter (a plugin's `hooks/`), even when it does not.
-        let mut up = n.as_str();
+        let mut up = rel;
         while let Some((dir, _)) = up.rsplit_once('/') {
             if relevant(dir, whole) {
                 tree.entry(dir.to_owned()).or_insert(Item::Dir);
             }
             up = dir;
         }
-        if relevant(&n, whole) {
-            let item = match k {
-                b'5' => Item::Dir,
-                b'1' | b'2' => Item::Link,
-                _ => Item::File(tar[r].to_vec(), 0),
-            };
-            tree.insert(n, item);
+        if !relevant(rel, whole) {
+            return Ok(());
         }
-    }
-    let commit = commit.filter(|c| c.len() == 40 && c.bytes().all(|b| b.is_ascii_hexdigit()));
+        let item = match kind {
+            b'5' => Item::Dir,
+            b'1' | b'2' => Item::Link,
+            // A file at the top of a folder that is no skill is never part of one.
+            _ if !whole && !rel.contains('/') => Item::File(vec![], 0),
+            _ => {
+                let mut b = Vec::new();
+                body.take((MAX_KEPT - kept) as u64 + 1)
+                    .read_to_end(&mut b)
+                    .map_err(|_| "the archive is damaged: nothing of it was taken".to_owned())?;
+                kept += b.len();
+                if kept > MAX_KEPT {
+                    return Err(format!(
+                        "its skills' folders hold more than {}: nothing of it was taken (link one skill's folder, https://github.com/<owner>/<repo>/tree/<branch>/<folder>)",
+                        skills::size_text(MAX_KEPT as u64)
+                    ));
+                }
+                Item::File(b, 0)
+            }
+        };
+        tree.insert(rel.to_owned(), item);
+        if tree.len() > MAX_ENTRIES {
+            return Err(format!(
+                "its skills' folders have more than {MAX_ENTRIES} entries: nothing of it was taken"
+            ));
+        }
+        Ok(())
+    })?;
     Ok((commit, tree))
 }
 
-/// `file` gunzipped, at most `MAX_UNPACKED`.
-fn gunzip(file: &Path) -> Result<Vec<u8>, String> {
+/// `untar` of `gzip -dc file`: gzip must end well too (else the download is no gzip archive).
+fn gunzip_each(file: &Path, under: &str, each: &mut Each) -> Result<Option<String>, String> {
     let mut child = Command::new("gzip")
         .arg("-dc")
         .arg(file)
@@ -498,35 +643,50 @@ fn gunzip(file: &Path) -> Result<Vec<u8>, String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("gzip could not start: {e}"))?;
-    let mut out = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .map(|o| o.take(MAX_UNPACKED as u64 + 1).read_to_end(&mut out));
-    if out.len() > MAX_UNPACKED {
+    let Some(mut out) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!(
-            "the archive unpacks to more than {} MiB: nothing of it was taken",
-            MAX_UNPACKED >> 20
-        ));
+        return Err("gzip could not start".into());
+    };
+    let r = untar(&mut out, under, each).and_then(|c| {
+        // What follows the end of the archive (its padding) is read, so gzip ends by itself.
+        std::io::copy(&mut (&mut out).take(MAX_KEPT as u64), &mut std::io::sink())
+            .map(|_| c)
+            .map_err(|_| "the download is not a gzip archive".to_owned())
+    });
+    drop(out);
+    if r.is_err() {
+        let _ = child.kill();
     }
     let ok = child.wait().is_ok_and(|s| s.success());
-    match read {
-        Some(Ok(_)) if ok => Ok(out),
-        _ => Err("the download is not a gzip archive".into()),
+    match r {
+        Ok(_) if !ok => Err("the download is not a gzip archive".into()),
+        r => r,
     }
 }
 
-/// Downloads `url` into `file`: whether the server gave it (curl, https only, at most
-/// `MAX_ARCHIVE`, the installer's flags).
-pub type Get<'a> = &'a dyn Fn(&str, &Path) -> bool;
+/// Why a download did not happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Miss {
+    /// The server has no such thing (HTTP 404): no repository, branch or tag of that name, or a
+    /// private one.
+    NotFound,
+    /// Past `MAX_ARCHIVE` (its size, when it was said).
+    TooLarge(Option<u64>),
+    /// Anything else: no network, a timeout, another answer of the server (in a few words).
+    Failed(String),
+}
 
-/// curl, as `Get`.
-pub fn curl(url: &str, file: &Path) -> bool {
-    Command::new("curl")
+/// Downloads `url` into `file` (curl, https only, at most `MAX_ARCHIVE`, the installer's flags),
+/// or says why it did not.
+pub type Get<'a> = &'a dyn Fn(&str, &Path) -> Result<(), Miss>;
+
+/// curl, as `Get`: its exit code and the HTTP status it saw say which `Miss` it was.
+pub fn curl(url: &str, file: &Path) -> Result<(), Miss> {
+    let out = Command::new("curl")
         .args([
-            "-fsSL",
+            "-sSL",
+            "--fail",
             "--retry",
             "3",
             "--connect-timeout",
@@ -536,7 +696,7 @@ pub fn curl(url: &str, file: &Path) -> bool {
             "-Y",
             "1",
             "--max-time",
-            "300",
+            "600",
             "--proto",
             "=https",
             "--proto-redir",
@@ -544,15 +704,38 @@ pub fn curl(url: &str, file: &Path) -> bool {
             "--tlsv1.2",
             "--max-filesize",
             &MAX_ARCHIVE.to_string(),
+            "-w",
+            "%{http_code}",
             "-o",
         ])
         .arg(file)
         .arg(url)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .map_err(|e| Miss::Failed(format!("curl could not start: {e}")))?;
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    match out.status.code() {
+        Some(0) => Ok(()),
+        Some(63) => Err(Miss::TooLarge(None)),
+        Some(22) if code == "404" => Err(Miss::NotFound),
+        Some(22) => Err(Miss::Failed(format!(
+            "GitHub answered HTTP {}",
+            shown(&code)
+        ))),
+        _ => {
+            // curl's own line, as plain words: `curl: (6) Could not resolve host: …`.
+            let err = String::from_utf8_lossy(&out.stderr);
+            let line: String = err
+                .lines()
+                .rfind(|l| !l.trim().is_empty())
+                .unwrap_or("curl failed")
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .take(160)
+                .collect();
+            Err(Miss::Failed(line))
+        }
+    }
 }
 
 /// The archive URLs of `owner/repo` at `reference`, in order: a branch, then a tag of that
@@ -571,43 +754,75 @@ pub fn archive_urls(owner: &str, repo: &str, reference: &str) -> Vec<String> {
 }
 
 /// The archive of `owner/repo` at `reference` (`archive_urls`, through `get`), downloaded into
-/// `staging` and removed there, unpacked.
+/// `staging`: the file, which the caller removes. Each failure has its own sentence: no such
+/// repository or ref, too large (with the size when known, and the limit), or no network (which
+/// stops at once, a tag is not tried after it).
 fn fetch(
     owner: &str,
     repo: &str,
     reference: &str,
     staging: &Path,
     get: Get,
-) -> Result<Vec<u8>, String> {
+) -> Result<PathBuf, String> {
     crate::host::private_dir(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
     let file = staging.join(format!(
         "{}-{}.tar.gz",
         std::process::id(),
         crate::host::now_ms()
     ));
-    let got = archive_urls(owner, repo, reference)
-        .iter()
-        .any(|u| get(u, &file));
-    let hex = reference.len() >= 7 && reference.bytes().all(|b| b.is_ascii_hexdigit());
-    let r = if !got && hex {
-        Err(format!(
-            "{reference} is not a branch or a tag of {owner}/{repo}: name a branch or a tag"
-        ))
-    } else if !got {
-        Err(format!(
-            "GitHub did not give the archive of {owner}/{repo} at {reference} (no such repository, branch or tag, larger than {} MiB, or no network)",
-            MAX_ARCHIVE >> 20
-        ))
-    } else if !fs::metadata(&file).is_ok_and(|m| m.len() <= MAX_ARCHIVE) {
-        Err(format!(
-            "the archive is larger than {} MiB: nothing of it was taken",
-            MAX_ARCHIVE >> 20
-        ))
-    } else {
-        gunzip(&file)
-    };
+    let mut miss = Miss::NotFound;
+    for u in archive_urls(owner, repo, reference) {
+        miss = match get(&u, &file) {
+            Ok(()) => {
+                let size = fs::metadata(&file).map(|m| m.len()).unwrap_or(u64::MAX);
+                if size <= MAX_ARCHIVE {
+                    return Ok(file);
+                }
+                Miss::TooLarge(Some(size))
+            }
+            Err(m) => m,
+        };
+        if miss != Miss::NotFound {
+            break;
+        }
+    }
     let _ = fs::remove_file(&file);
-    r
+    let at = if reference == "HEAD" {
+        String::new()
+    } else {
+        format!(" at {reference}")
+    };
+    let hex = reference.len() >= 7 && reference.bytes().all(|b| b.is_ascii_hexdigit());
+    Err(match miss {
+        Miss::NotFound if hex => {
+            format!(
+                "{reference} is not a branch or a tag of {owner}/{repo}: name a branch or a tag"
+            )
+        }
+        Miss::NotFound if reference == "HEAD" => format!(
+            "GitHub has no repository {owner}/{repo} (or it is private): check the name, as owner/repo"
+        ),
+        Miss::NotFound => format!(
+            "GitHub has no branch or tag «{reference}» in {owner}/{repo}, or no such repository (or it is private): check both"
+        ),
+        Miss::TooLarge(size) => format!(
+            "the archive of {owner}/{repo}{at} is {}, more than the {} Clio downloads: nothing of it was taken (clone it and add the skill's folder: clio skills add ./<folder>)",
+            size.map_or_else(|| "larger".to_owned(), skills::size_text),
+            skills::size_text(MAX_ARCHIVE)
+        ),
+        Miss::Failed(why) => format!(
+            "GitHub could not be reached for {owner}/{repo}{at} ({}): no network? nothing was taken; try again when it is back",
+            shown_words(&why)
+        ),
+    })
+}
+
+/// Words from outside as an error may carry them: printable, short.
+fn shown_words(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(160)
+        .collect()
 }
 
 /// The folders of `tree` that hold a skill, and the layouts they were found in.
@@ -664,9 +879,29 @@ pub struct Found {
     /// Its folder in the source (empty: the source's top).
     pub from: String,
     pub skill_md: String,
+    /// Its instructions besides SKILL.md: judged, shown, read as Clio's own text.
     pub files: Vec<SkillFile>,
+    /// Its resources, with their bytes: stored as they came, never read as Clio's own text.
+    pub resources: Vec<(skills::Resource, Vec<u8>)>,
     /// What of its folder is not installed, and why.
     pub skipped: Vec<String>,
+}
+
+impl Found {
+    /// Its resources as shown and digested.
+    pub fn manifest(&self) -> Vec<skills::Resource> {
+        self.resources.iter().map(|(r, _)| r.clone()).collect()
+    }
+
+    /// One value for all of it (`skills::digest_all`).
+    pub fn digest(&self) -> String {
+        skills::digest_all(&self.skill_md, &self.files, &self.manifest())
+    }
+
+    /// What the judge reads of it (`skills::judged_text`).
+    pub fn judged(&self) -> String {
+        skills::judged_text(&self.skill_md, &self.files, &self.manifest())
+    }
 }
 
 /// The name of the skill in `dir`: its front matter's `name`, or the folder's, made Clio's.
@@ -691,7 +926,11 @@ fn name_in(tree: &Tree, dir: &str, top: &str) -> String {
     }
 }
 
-fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
+/// The skill in folder `dir` of `tree`, as Clio's rule reads it: SKILL.md; its documents
+/// (`skills::instruction_kind`, text the box shows as written) as instructions while they fit
+/// `MAX_ADDED_FILES` and `MAX_ADDED_BYTES` (by path); every other file a resource (its bytes are
+/// moved out of `tree`, never copied). Nothing the skill says decides which is which.
+fn build(tree: &mut Tree, dir: &str, name: &str) -> Result<Found, String> {
     let who = |why: String| {
         format!(
             "the skill «{}» ({}): {why}",
@@ -708,47 +947,71 @@ fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
     } else {
         format!("{dir}/")
     };
-    let (mut md, mut files, mut skipped) = (None, vec![], vec![]);
-    for (k, v) in tree.range(prefix.clone()..) {
-        let Some(rel) = k.strip_prefix(&prefix) else {
-            break;
+    let md = match tree.get(&format!("{prefix}SKILL.md")) {
+        Some(Item::File(b, _)) => text(b).ok_or_else(|| who("its SKILL.md is not text".into()))?,
+        _ => return Err(who("no SKILL.md".into())),
+    };
+    let (mut files, mut resources, mut skipped) = (vec![], vec![], vec![]);
+    let mut taken = md.len();
+    let keys: Vec<String> = tree
+        .range(prefix.clone()..)
+        .map_while(|(k, _)| k.starts_with(&prefix).then(|| k.clone()))
+        .collect();
+    for k in keys {
+        let rel = &k[prefix.len()..];
+        let Some(item) = tree.get_mut(&k) else {
+            continue;
         };
-        match v {
-            Item::Dir => {}
+        let b = match item {
+            Item::Dir => continue,
             Item::Link => {
                 return Err(who(format!(
                     "{} is a link: a skill with a link is not taken",
                     shown(rel)
                 )));
             }
-            Item::File(b, _) if rel == "SKILL.md" => {
-                md = Some(text(b).ok_or_else(|| who("its SKILL.md is not text".into()))?);
-            }
-            Item::File(..) if skills::valid_path(rel).is_err() => {
+            Item::File(..) if rel == "SKILL.md" => continue,
+            Item::File(..) if skills::valid_added_path(rel).is_err() => {
                 skipped.push(format!("{rel} (a name Clio does not take)"));
+                continue;
             }
-            Item::File(b, _) => match text(b) {
-                Some(t) if !t.chars().any(skills::hidden) => files.push(SkillFile {
+            Item::File(b, _) => std::mem::take(b),
+        };
+        let doc = skills::instruction_kind(rel)
+            .then(|| text(&b))
+            .flatten()
+            .filter(|t| {
+                !t.chars().any(skills::hidden)
+                    && files.len() + 2 <= skills::MAX_ADDED_FILES
+                    && taken + t.len() <= skills::MAX_ADDED_BYTES
+            });
+        match doc {
+            Some(t) => {
+                taken += t.len();
+                files.push(SkillFile {
                     path: rel.to_owned(),
                     content: t,
-                }),
-                Some(_) => {
-                    skipped.push(format!(
-                        "{rel} (characters the box would not show as written)"
-                    ));
-                }
-                None => skipped.push(format!("{rel} (not text)")),
-            },
+                });
+            }
+            None => resources.push((
+                skills::Resource {
+                    path: rel.to_owned(),
+                    size: b.len() as u64,
+                    sha256: skills::sha256_hex(&b),
+                    script: b.starts_with(b"#!") || skills::script_name(rel),
+                },
+                b,
+            )),
         }
     }
-    let md = md.ok_or_else(|| who("no SKILL.md".into()))?;
     if !skills::valid_name(name) {
         return Err(who(
             "its name is not one Clio takes (lowercase letters, digits and single hyphens, at most 64)"
                 .into(),
         ));
     }
-    skills::check_added(name, &md, &files).map_err(who)?;
+    let manifest: Vec<skills::Resource> = resources.iter().map(|(r, _)| r.clone()).collect();
+    skills::check_added(name, &md, &files, &manifest).map_err(who)?;
     let description = skills::added_front_matter(&md)
         .map_err(who)?
         .1
@@ -760,8 +1023,68 @@ fn build(tree: &Tree, dir: &str, name: &str) -> Result<Found, String> {
         from: dir.to_owned(),
         skill_md: md,
         files,
+        resources,
         skipped,
     })
+}
+
+/// How long a staged skill is kept: an item waits a day at most.
+const STAGED_MS: i64 = 2 * 86_400_000;
+
+/// The resources of `f` written into `<staging>/skill-<digest>/`, each once and named by its
+/// SHA-256 (one already there is kept: the name is its content); the folder, which the item
+/// names. The person's `clio` registers only bytes with the SHA-256 and size the item lists.
+/// `None`: it has no resources.
+fn stage(f: &Found, digest: &str, staging: &Path) -> Result<Option<PathBuf>, String> {
+    if f.resources.is_empty() {
+        return Ok(None);
+    }
+    let dir = staging.join(format!("skill-{digest}"));
+    let fail = |e: std::io::Error| format!("{}: {e}", dir.display());
+    crate::host::private_dir(staging).map_err(fail)?;
+    crate::host::private_dir(&dir).map_err(fail)?;
+    // Written in again now: not pruned while its item waits.
+    let touch = dir.join(".touch");
+    fs::write(&touch, b"")
+        .and_then(|()| fs::remove_file(&touch))
+        .map_err(fail)?;
+    for (r, b) in &f.resources {
+        let at = dir.join(&r.sha256);
+        if at.exists() {
+            continue;
+        }
+        let tmp = dir.join(format!(".tmp-{}", r.sha256));
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(&tmp)
+                .and_then(|mut w| w.write_all(b))
+        }
+        .and_then(|()| fs::rename(&tmp, &at))
+        .map_err(fail)?;
+    }
+    Ok(Some(dir))
+}
+
+/// Removes the staged skills (`skill-*`) of `staging` not written in for `STAGED_MS`.
+fn prune_staged(staging: &Path) {
+    let now = std::time::SystemTime::now();
+    for e in fs::read_dir(staging).into_iter().flatten().flatten() {
+        let old = e.metadata().ok().filter(|m| m.is_dir()).and_then(|m| {
+            now.duration_since(m.modified().ok()?)
+                .ok()
+                .map(|d| d.as_millis() > STAGED_MS as u128)
+        });
+        if e.file_name().to_string_lossy().starts_with("skill-") && old == Some(true) {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Who holds a skill's name: `None` nobody, `Some(None)` Clio's own (written by her, or shipped),
@@ -811,7 +1134,8 @@ const SECRET: &str = "it holds something shaped like a secret (a key, a token, a
 /// judged whole: each one the arguments of its item, in the source's order. One that fails a
 /// check refuses the whole add, saying which and why (the others can be named).
 pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, String> {
-    let (src, tree, commit, top) = match parse(source, cx.home, cx.base)? {
+    prune_staged(cx.staging);
+    let (src, mut tree, commit, top) = match parse(source, cx.home, cx.base)? {
         Source::Folder(p) => {
             let p = p
                 .canonicalize()
@@ -837,20 +1161,29 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             owner,
             repo,
             reference,
+            path,
         } => {
-            let tar = fetch(&owner, &repo, &reference, cx.staging, cx.get)?;
-            let (commit, tree) = untar(&tar)?;
+            let file = fetch(&owner, &repo, &reference, cx.staging, cx.get)?;
+            let read = read_archive(&file, &path);
+            let _ = fs::remove_file(&file);
+            let (commit, tree) = read.map_err(|e| format!("{owner}/{repo} at {reference}: {e}"))?;
             // The yes is to that repository at that commit: an archive that does not say which
             // is not taken.
             if commit.is_none() {
                 return Err("the archive does not name its commit: nothing of it was taken".into());
             }
-            let top = repo.clone();
+            let top = path
+                .rsplit('/')
+                .next()
+                .filter(|t| !t.is_empty())
+                .unwrap_or(&repo)
+                .to_owned();
             (
                 Source::GitHub {
                     owner,
                     repo,
                     reference,
+                    path,
                 },
                 tree,
                 commit,
@@ -909,6 +1242,16 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             chosen.len()
         ));
     }
+    // A link to one folder of a repository: the skills' folders are in it.
+    let in_repo = |dir: &str| match &src {
+        Source::GitHub { path, .. } if !path.is_empty() => [path.as_str(), dir]
+            .iter()
+            .filter(|x| !x.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => dir.to_owned(),
+    };
     // Every skill found and checked before the judge reads any.
     let mut found = vec![];
     for (name, dir) in chosen {
@@ -919,12 +1262,15 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             return Err(format!("{origin} has two skills named «{}»", shown(&name)));
         }
         let f = if shared.is_some() {
-            build(&sub_tree(&tree, dir), "", &name).map(|f| Found {
+            build(&mut sub_tree(&tree, dir), "", &name).map(|f| Found {
                 from: dir.clone(),
                 ..f
             })?
         } else {
-            build(&tree, dir, &name)?
+            build(&mut tree, dir, &name).map(|f| Found {
+                from: in_repo(dir),
+                ..f
+            })?
         };
         no_secret(&f, cx)?;
         let update = update_of(cx.root, &f.name, &origin_of(dir)).map_err(|o| {
@@ -933,7 +1279,7 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
                 f.name
             )
         })?;
-        let whole = skills::whole_text(&f.skill_md, &f.files);
+        let whole = f.judged();
         found.push((f, update, whole));
     }
     let bytes: usize = found.iter().map(|(.., w)| w.len()).sum();
@@ -959,14 +1305,24 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
             )),
             _ => None,
         };
+        let digest = f.digest();
+        let staged = stage(&f, &digest, cx.staging)?;
+        // A shared skill's origin is by its folder there; a repository's is the repository.
+        let origin = if shared.is_some() {
+            origin_of(&f.from)
+        } else {
+            origin.clone()
+        };
         out.push(json!({
             "name": f.name,
             "description": f.description,
             "skill_md": f.skill_md,
             "files": f.files,
-            "sha256": skills::digest(&f.skill_md, &f.files),
+            "resources": f.manifest(),
+            "staged": staged,
+            "sha256": digest,
             "update": update,
-            "origin": origin_of(&f.from),
+            "origin": origin,
             "commit": commit,
             "ref": match &src { Source::GitHub { reference, .. } => Some(reference.as_str()), Source::Folder(_) => None },
             "from": f.from,
@@ -980,14 +1336,34 @@ pub fn prepare(source: &str, names: &[String], cx: &Ctx) -> Result<Vec<Value>, S
     Ok(out)
 }
 
-/// Every text of `f` is as the vault's filter leaves it: a secret's shape refuses it.
+/// Every text of `f` (its instructions, and each resource that is text) is as the vault's filter
+/// leaves it: a secret's shape refuses it, naming the file. An instruction must come through
+/// unchanged (it is shown and read as Clio's own); a resource is never shown, so only a mask
+/// counts there: a character the display would clean (a BOM in a script, say) is no secret.
 fn no_secret(f: &Found, cx: &Ctx) -> Result<(), String> {
-    for t in std::iter::once(f.skill_md.as_str()).chain(f.files.iter().map(|x| x.content.as_str()))
-    {
+    let texts = std::iter::once(("SKILL.md", f.skill_md.as_str(), true))
+        .chain(
+            f.files
+                .iter()
+                .map(|x| (x.path.as_str(), x.content.as_str(), true)),
+        )
+        .chain(
+            f.resources
+                .iter()
+                .filter_map(|(r, b)| Some((r.path.as_str(), std::str::from_utf8(b).ok()?, false))),
+        );
+    for (path, t, instruction) in texts {
         match (cx.clean)(t) {
             None => return Err("the vault could not filter the text: nothing was added".into()),
-            Some(c) if c != t || clio_vault::count_masks(&c) > clio_vault::count_masks(t) => {
-                return Err(format!("the skill «{}»: {SECRET}", shown(&f.name)));
+            Some(c)
+                if (instruction && c != t)
+                    || clio_vault::count_masks(&c) > clio_vault::count_masks(t) =>
+            {
+                return Err(format!(
+                    "the skill «{}», {}: {SECRET}",
+                    shown(&f.name),
+                    shown(path)
+                ));
             }
             Some(_) => {}
         }
@@ -1182,9 +1558,13 @@ fn line_diff(old: &str, new: &str) -> Vec<String> {
     out
 }
 
+/// Lines of resources added, removed or changed shown per skill, at most: the rest is counted.
+const MAX_RESOURCE_LINES: usize = 30;
+
 /// What changed in `f` (read from `sub`, which says when each file was written) since version
-/// `n` of `name` (its folder in the skills folder): files added, removed and changed, by name,
-/// size and time written, then a line diff of each changed text file (`MAX_DIFF_LINES` in all).
+/// `n` of `name` (its folder in the skills folder): instructions added, removed and changed, by
+/// name, size and time written, with a line diff of each changed one (`MAX_DIFF_LINES` in all);
+/// resources only by name and size (`MAX_RESOURCE_LINES`), never a diff of their bytes.
 fn change(root: &Path, name: &str, n: u64, f: &Found, sub: &Tree) -> Vec<String> {
     let dir = root.join(skills::VERSIONS).join(name).join(n.to_string());
     let old = match rustix::fs::open(&dir, dir_flags(), rustix::fs::Mode::empty())
@@ -1194,44 +1574,59 @@ fn change(root: &Path, name: &str, n: u64, f: &Found, sub: &Tree) -> Vec<String>
         Ok(t) => t,
         Err(_) => return vec!["changed (the files of your last yes could not be read)".into()],
     };
-    let new: BTreeMap<&str, &str> = std::iter::once(("SKILL.md", f.skill_md.as_str()))
+    // Every file now, with whether it is an instruction.
+    let new: BTreeMap<&str, (&[u8], bool)> = std::iter::once(("SKILL.md", f.skill_md.as_bytes()))
         .chain(
             f.files
                 .iter()
-                .map(|x| (x.path.as_str(), x.content.as_str())),
+                .map(|x| (x.path.as_str(), x.content.as_bytes())),
+        )
+        .map(|(p, b)| (p, (b, true)))
+        .chain(
+            f.resources
+                .iter()
+                .map(|(r, b)| (r.path.as_str(), (b.as_slice(), false))),
         )
         .collect();
     let written = |path: &str| match sub.get(path) {
         Some(Item::File(_, t)) => format!("written {}", clio_core::utc_stamp(*t)),
         _ => "written ?".into(),
     };
-    let (mut out, mut diff) = (vec![], vec![]);
-    for (path, text) in &new {
-        match old.get(*path) {
-            Some(Item::File(b, _)) if b == text.as_bytes() => {}
+    let (mut out, mut res, mut diff) = (vec![], vec![], vec![]);
+    for (path, (now, doc)) in &new {
+        let what = if *doc { "" } else { "resource " };
+        let line = match old.get(*path) {
+            Some(Item::File(b, _)) if b == now => continue,
             Some(Item::File(b, _)) => {
-                out.push(format!(
-                    "changed: {path} ({} bytes, was {}; {})",
-                    text.len(),
+                if let (true, Some(was), Some(text)) = (*doc, self::text(b), self::text(now)) {
+                    diff.push(format!("{path}:"));
+                    diff.extend(line_diff(&was, &text).into_iter().map(|l| format!("  {l}")));
+                }
+                format!(
+                    "changed: {what}{path} ({} bytes, was {}; {})",
+                    now.len(),
                     b.len(),
                     written(path)
-                ));
-                if let Some(was) = self::text(b) {
-                    diff.push(format!("{path}:"));
-                    diff.extend(line_diff(&was, text).into_iter().map(|l| format!("  {l}")));
-                }
+                )
             }
-            _ => out.push(format!(
-                "added: {path} ({} bytes; {})",
-                text.len(),
+            _ => format!(
+                "added: {what}{path} ({} bytes; {})",
+                now.len(),
                 written(path)
-            )),
-        }
+            ),
+        };
+        if *doc { out.push(line) } else { res.push(line) }
     }
     for (path, item) in &old {
         if matches!(item, Item::File(..)) && !new.contains_key(path.as_str()) {
-            out.push(format!("removed: {path}"));
+            res.push(format!("removed: {path}"));
         }
+    }
+    let more_res = res.len().saturating_sub(MAX_RESOURCE_LINES);
+    res.truncate(MAX_RESOURCE_LINES);
+    out.extend(res);
+    if more_res > 0 {
+        out.push(format!("and {more_res} more resources changed"));
     }
     let more = diff.len().saturating_sub(MAX_DIFF_LINES);
     diff.truncate(MAX_DIFF_LINES);
@@ -1276,6 +1671,33 @@ fn tree_digest(tree: &Tree) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The digest a yes had before resources existed, when the reading of then would have taken all
+/// of `f`, every file as an instruction (each text shown as written, at most four deep): `None`
+/// when it would have skipped any (then the person never said yes to all of it).
+fn legacy_digest(f: &Found) -> Option<String> {
+    let mut all = f.files.clone();
+    for (r, b) in &f.resources {
+        let t = text(b).filter(|t| !t.chars().any(skills::hidden))?;
+        all.push(SkillFile {
+            path: r.path.clone(),
+            content: t,
+        });
+    }
+    if all.iter().any(|x| skills::valid_path(&x.path).is_err()) {
+        return None;
+    }
+    all.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(skills::digest(&f.skill_md, &all))
+}
+
+/// What the judge read of an item `a` (as `prepare` or a look made it): `skills::judged_text`.
+pub fn judged(a: &Value) -> String {
+    let files: Vec<SkillFile> = serde_json::from_value(a["files"].clone()).unwrap_or_default();
+    let resources: Vec<skills::Resource> =
+        serde_json::from_value(a["resources"].clone()).unwrap_or_default();
+    skills::judged_text(a["skill_md"].as_str().unwrap_or(""), &files, &resources)
+}
+
 /// What a look already knows, from what it remembered and what waits.
 pub struct Known<'a> {
     /// `(origin, seen)`: the person said no to it, or was told why it is not asked.
@@ -1288,19 +1710,22 @@ pub struct Known<'a> {
 
 /// Looks at the shared folder (`~/.agents/skills`), each folder at its top on its own (one that
 /// cannot be read is said, with why, and counts as there; it never stops the others), read with a
-/// skill's limits before anything is read (`MAX_ADDED_FILES`, `MAX_ADDED_BYTES`, 16 deep; no link
+/// skill's limits before anything is read (`MAX_SKILL_FILES`, `MAX_SKILL_BYTES`, 16 deep; no link
 /// followed; what `left_behind` names skipped). Every folder with a `SKILL.md` in it is a skill
 /// as Pi finds them (not under another skill), read as `clio skills add <that folder>` reads it,
-/// checked and compared by digest with the person's last yes to it. Unchanged, or `quiet` for
-/// what is there, it is left alone; new or changed, it is asked (`ask`, each with `seen`: what is
-/// there) once judged clean: by the judge (at most an add's `MAX_JUDGED` in all, and as many as
-/// can wait; none once the judge refuses calls, nor what it did not answer for today), or before,
-/// when it waits already (`waiting`, not counted). Else it is listed apart. Nothing is written. A
-/// home without the folder: an empty look. `Err`: the folder could not be opened.
+/// checked and compared by digest with the person's last yes to it (a yes from before resources
+/// existed, to a folder with nothing the old reading skipped, by the digest it had then).
+/// Unchanged, or `quiet` for what is there, it is left alone; new or changed, it is asked (`ask`,
+/// each with `seen`: what is there, its resources staged) once judged clean: by the judge (at most
+/// an add's `MAX_JUDGED` in all, and as many as can wait; none once the judge refuses calls, nor
+/// what it did not answer for today), or before, when it waits already (`waiting`, not counted).
+/// Else it is listed apart. Nothing is written but the staged resources of what is asked. A home
+/// without the folder: an empty look. `Err`: the folder could not be opened.
 // shortcut: a folder at the top holding several skills is read with one skill's limits; read
 // each nested skill on its own if groups in ~/.agents/skills turn out to be common.
 pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
     use rustix::fs::{AtFlags, FileType, Mode, openat, statat};
+    prune_staged(cx.staging);
     let mut look = Look::default();
     let Some(fd) = open_shared(cx.home)? else {
         return Ok(look);
@@ -1337,7 +1762,7 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                                 &sub,
                                 false,
                                 true,
-                                (skills::MAX_ADDED_FILES, skills::MAX_ADDED_BYTES),
+                                (skills::MAX_SKILL_FILES, skills::MAX_SKILL_BYTES),
                             )
                         })
                 })
@@ -1392,7 +1817,7 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                 format!("{top}/{dir}")
             };
             let origin = shared_origin(&shown(&path));
-            let sub = sub_tree(&tree, &dir);
+            let mut sub = sub_tree(&tree, &dir);
             let seen = tree_digest(&sub);
             if (known.quiet)(&origin, &seen) {
                 look.found.push((origin, None));
@@ -1403,7 +1828,7 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                 look.apart.push(line);
             };
             let name = name_in(&sub, "", path.rsplit('/').next().unwrap_or(&path));
-            let f = match build(&sub, "", &name).and_then(|f| no_secret(&f, cx).map(|()| f)) {
+            let f = match build(&mut sub, "", &name).and_then(|f| no_secret(&f, cx).map(|()| f)) {
                 Ok(f) => f,
                 Err(why) => {
                     look.found.push((origin.clone(), None));
@@ -1411,7 +1836,11 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                     continue;
                 }
             };
-            let digest = skills::digest(&f.skill_md, &f.files);
+            // A yes from before resources existed is known by the digest it had then.
+            let digest = match (last_yes(cx.root, &f.name, &origin), legacy_digest(&f)) {
+                (Some((_, d)), Some(old)) if d == old => old,
+                _ => f.digest(),
+            };
             look.found.push((origin.clone(), Some(digest.clone())));
             if names.contains(&f.name) {
                 look.apart.push(format!(
@@ -1442,7 +1871,7 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                 continue;
             }
             let by_name = format!("`clio skills add {origin}` adds it on its own");
-            let whole = skills::whole_text(&f.skill_md, &f.files);
+            let whole = f.judged();
             // What waits was judged clean already: not judged again, not counted.
             if !(known.waiting)(&whole) {
                 if (known.silent)(&origin, &seen) {
@@ -1509,11 +1938,23 @@ pub fn look_shared(cx: &Ctx, known: &Known) -> Result<Look, String> {
                 Some((n, _)) => (change(cx.root, &f.name, n, &f, &sub), String::new()),
                 None => (vec![], newest.map(clio_core::utc_stamp).unwrap_or_default()),
             };
+            let staged = match stage(&f, &digest, cx.staging) {
+                Ok(s) => s,
+                Err(e) => {
+                    look.apart.push(format!(
+                        "{origin}: its files could not be kept for your answer ({}): {by_name}",
+                        shown_words(&e)
+                    ));
+                    continue;
+                }
+            };
             look.ask.push(json!({
                 "name": f.name,
                 "description": f.description,
                 "skill_md": f.skill_md,
                 "files": f.files,
+                "resources": f.manifest(),
+                "staged": staged,
                 "sha256": digest,
                 "update": update,
                 "origin": origin,
@@ -1674,7 +2115,7 @@ mod tests {
 
     /// A tar of `entries` (`path`, type, bytes) under `top/`, with a pax global header naming
     /// `commit`, as GitHub makes them.
-    fn tar(top: &str, commit: &str, entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
+    pub(crate) fn tar(top: &str, commit: &str, entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
         fn header(name: &str, kind: u8, size: usize) -> Vec<u8> {
             let mut h = vec![0u8; 512];
             h[..name.len()].copy_from_slice(name.as_bytes());
@@ -1712,8 +2153,33 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        c.stdin.take().unwrap().write_all(b).unwrap();
-        c.wait_with_output().unwrap().stdout
+        let mut i = c.stdin.take().unwrap();
+        let input = b.to_vec();
+        let w = std::thread::spawn(move || i.write_all(&input));
+        let out = c.wait_with_output().unwrap().stdout;
+        w.join().unwrap().unwrap();
+        out
+    }
+
+    /// `tar` read as an archive is (gzipped into a file, streamed back), under `under`.
+    fn read(tar: &[u8], under: &str) -> Result<(Option<String>, Tree), String> {
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join("a.tar.gz");
+        fs::write(&f, gz(tar)).unwrap();
+        read_archive(&f, under)
+    }
+
+    /// `n` bytes no compressor shrinks (an image's), from `seed`.
+    fn noise(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
     }
 
     // S-68: a ref is a branch or a tag of that repository, asked for as one (`refs/heads/`, then
@@ -1739,11 +2205,17 @@ mod tests {
         let asked = std::sync::Mutex::new(vec![]);
         let get = |url: &str, file: &Path| {
             asked.lock().unwrap().push(url.to_owned());
-            served.contains(&url.to_owned()) && fs::write(file, &body).is_ok()
+            if served.contains(&url.to_owned()) {
+                fs::write(file, &body).map_err(|e| Miss::Failed(e.to_string()))
+            } else {
+                Err(Miss::NotFound)
+            }
         };
         let t = tempfile::tempdir().unwrap();
         for r in ["main", "v1", "HEAD"] {
-            let (commit, tree) = untar(&fetch("o", "r", r, t.path(), &get).unwrap()).unwrap();
+            let file = fetch("o", "r", r, t.path(), &get).unwrap();
+            let (commit, tree) = read_archive(&file, "").unwrap();
+            fs::remove_file(file).unwrap();
             assert_eq!(commit.as_deref(), Some(c.as_str()));
             assert!(tree.contains_key("skills/hello/SKILL.md"), "{r}");
         }
@@ -1761,7 +2233,7 @@ mod tests {
         assert!(
             fetch("o", "r", "nope", t.path(), &get)
                 .unwrap_err()
-                .contains("no such")
+                .contains("no branch or tag «nope»")
         );
         assert!(
             !asked
@@ -1774,6 +2246,61 @@ mod tests {
             0,
             "the download is removed"
         );
+    }
+
+    // S-68: no such repository or ref, too large and no network each get their own sentence (the
+    // size and the limit, when known); a network failure stops at once, a tag is not tried after.
+    #[test]
+    fn a_missing_a_too_large_and_an_unreachable_repository_each_say_so() {
+        let t = tempfile::tempdir().unwrap();
+        let asked = std::sync::Mutex::new(0);
+        let with = |m: Miss| move |_: &str, _: &Path| -> Result<(), Miss> { Err(m.clone()) };
+        let missing = fetch("o", "r", "HEAD", t.path(), &with(Miss::NotFound)).unwrap_err();
+        assert_eq!(
+            missing,
+            "GitHub has no repository o/r (or it is private): check the name, as owner/repo"
+        );
+        let no_ref = fetch("o", "r", "dev", t.path(), &with(Miss::NotFound)).unwrap_err();
+        assert!(
+            no_ref.starts_with("GitHub has no branch or tag «dev» in o/r, or no such repository"),
+            "{no_ref}"
+        );
+        let big = fetch("o", "r", "HEAD", t.path(), &with(Miss::TooLarge(None))).unwrap_err();
+        assert!(
+            big.contains("is larger, more than the 256.0 MiB Clio downloads: nothing of it was taken (clone it and add the skill's folder"),
+            "{big}"
+        );
+        let net = |url: &str, _: &Path| -> Result<(), Miss> {
+            *asked.lock().unwrap() += 1;
+            assert!(
+                url.contains("refs/heads/"),
+                "a tag is not tried after no network"
+            );
+            Err(Miss::Failed(
+                "curl: (6) Could not resolve host: codeload.github.com".into(),
+            ))
+        };
+        let e = fetch("o", "r", "main", t.path(), &net).unwrap_err();
+        assert!(
+            e.contains(
+                "GitHub could not be reached for o/r at main (curl: (6) Could not resolve host"
+            ) && e.ends_with("no network? nothing was taken; try again when it is back"),
+            "{e}"
+        );
+        assert_eq!(*asked.lock().unwrap(), 1);
+        // A download past the limit, with its size: said with both, and removed.
+        let huge = |_: &str, f: &Path| -> Result<(), Miss> {
+            let file = fs::File::create(f).unwrap();
+            file.set_len(MAX_ARCHIVE + 1).unwrap();
+            Ok(())
+        };
+        let sized = fetch("o", "r", "HEAD", t.path(), &huge).unwrap_err();
+        assert!(
+            sized.contains("is 256.0 MiB, more than the 256.0 MiB"),
+            "{sized}"
+        );
+        assert!(missing != big && big != e && e != missing);
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 0);
     }
 
     // S-68: a repository that is one skill (SKILL.md at its top): its hooks, commands and agents
@@ -1792,46 +2319,92 @@ mod tests {
                 ("agents/a.md", b'0', b"a"),
             ],
         );
-        let (_, tree) = untar(&t).unwrap();
-        let f = build(&tree, "", "hello-world").unwrap();
+        let (_, mut tree) = read(&t, "").unwrap();
+        assert_eq!(plugin_parts(&tree), ["hooks", "commands", "agents"]);
+        let f = build(&mut tree, "", "hello-world").unwrap();
         let paths: Vec<&str> = f.files.iter().map(|x| x.path.as_str()).collect();
         assert_eq!(paths, ["ref.md"]);
-        assert_eq!(plugin_parts(&tree), ["hooks", "commands", "agents"]);
+        assert!(f.resources.is_empty());
     }
 
     #[test]
     fn sources_are_folders_or_github_over_https() {
         let (h, b) = (Path::new("/h"), Path::new("/w"));
+        let gh = |o: &str, r: &str, rf: &str, p: &str| Source::GitHub {
+            owner: o.into(),
+            repo: r.into(),
+            reference: rf.into(),
+            path: p.into(),
+        };
         assert_eq!(
             parse("obra/superpowers", h, b).unwrap(),
-            Source::GitHub {
-                owner: "obra".into(),
-                repo: "superpowers".into(),
-                reference: "HEAD".into()
-            }
+            gh("obra", "superpowers", "HEAD", "")
         );
         let g = parse("https://github.com/Obra/SuperPowers.git@v1.2/x", h, b).unwrap();
         assert_eq!(g.origin(), "github.com/obra/superpowers");
         assert!(matches!(g, Source::GitHub { ref reference, .. } if reference == "v1.2/x"));
+        // The spellings people paste.
+        for (typed, want) in [
+            ("o/r@main", gh("o", "r", "main", "")),
+            ("https://github.com/o/r", gh("o", "r", "HEAD", "")),
+            ("https://github.com/o/r/", gh("o", "r", "HEAD", "")),
+            ("https://github.com/o/r.git", gh("o", "r", "HEAD", "")),
+            ("https://www.github.com/o/r", gh("o", "r", "HEAD", "")),
+            ("github.com/o/r", gh("o", "r", "HEAD", "")),
+            (
+                "https://github.com/Leonxlnx/taste-skill/tree/main/skills/taste-skill",
+                gh("Leonxlnx", "taste-skill", "main", "skills/taste-skill"),
+            ),
+            (
+                "https://github.com/o/r/tree/v2/.claude/skills/x/",
+                gh("o", "r", "v2", ".claude/skills/x"),
+            ),
+            ("https://github.com/o/r/tree/dev", gh("o", "r", "dev", "")),
+            (
+                "https://github.com/o/r/blob/main/skills/x/SKILL.md",
+                gh("o", "r", "main", "skills/x"),
+            ),
+            (
+                "https://github.com/o/r/tree/main/skills/x?tab=readme#top",
+                gh("o", "r", "main", "skills/x"),
+            ),
+        ] {
+            assert_eq!(parse(typed, h, b).unwrap(), want, "{typed}");
+        }
         assert_eq!(parse("~/s", h, b).unwrap(), Source::Folder("/h/s".into()));
         assert_eq!(parse("./s", h, b).unwrap(), Source::Folder("/w/./s".into()));
-        for bad in [
-            "http://github.com/a/b",
-            "https://gitlab.com/a/b",
-            "git@github.com:a/b",
-            "a/b@../x",
-            "a/b@-x",
-            "a/b/c",
-            "a",
-            "-a/b",
-            "a/b@x y",
-            "a/..",
+        // What fails says what to type, and why.
+        for (bad, why) in [
+            ("http://github.com/a/b", "not https"),
+            ("https://gitlab.com/a/b", "not on GitHub"),
+            ("gitlab.com/a/b", "not on GitHub"),
+            ("git@github.com:a/b", "a git address"),
+            (
+                "https://github.com/a/b/blob/main/README.md",
+                "a link to a file",
+            ),
+            ("https://github.com/a/b/tree/main/x@v1", "the ref twice"),
+            (
+                "https://github.com/a/b/tree/main/../x",
+                "not a GitHub repository",
+            ),
+            ("a/b@../x", "not a GitHub repository"),
+            ("a/b@-x", "not a GitHub repository"),
+            ("a/b/c", "not a GitHub repository"),
+            ("a", "not a GitHub repository"),
+            ("-a/b", "not a GitHub repository"),
+            ("a/b@x y", "not a GitHub repository"),
+            ("a/..", "not a GitHub repository"),
         ] {
-            assert!(parse(bad, h, b).is_err(), "{bad}");
+            let e = parse(bad, h, b).unwrap_err();
+            assert!(
+                e.contains(why) && e.contains("type owner/repo"),
+                "{bad}: {e}"
+            );
         }
     }
 
-    // S-68: an archive is read whole in memory: the commit from its pax header, and a path
+    // S-68: an archive is streamed, never held whole: the commit from its pax header, and a path
     // outside its folder, or an entry that is neither a file, a folder nor a link, refuses it all.
     #[test]
     fn an_archive_is_read_without_writing_and_refused_when_it_escapes() {
@@ -1847,9 +2420,14 @@ mod tests {
                 ("CLAUDE.md", b'2', b""),
             ],
         );
-        let (commit, tree) = untar(&t).unwrap();
+        let (commit, tree) = read(&t, "").unwrap();
         assert_eq!(commit, Some(c.clone()));
         assert!(tree.contains_key("skills/hello/run.sh") && tree.contains_key("README.md"));
+        assert_eq!(
+            tree.get("README.md"),
+            Some(&Item::File(vec![], 0)),
+            "a top-level file of a repository that is no skill is kept by name only"
+        );
         assert!(
             !tree.contains_key("docs/big.bin"),
             "only what can matter is kept"
@@ -1860,21 +2438,169 @@ mod tests {
             tar("o", &c, &[("a/../../x", b'0', b"x")]),
             tar("o", &c, &[("dev", b'3', b"")]),
         ] {
-            assert!(untar(&bad).is_err());
+            assert!(read(&bad, "").is_err());
         }
         let mut two = tar("o", &c, &[("a", b'0', b"x")]);
         let other = tar("p", &c, &[("b", b'0', b"y")]);
         two.truncate(two.len() - 1024);
         two.extend(&other[1024..]);
-        assert!(untar(&two).unwrap_err().contains("outside its folder"));
+        assert!(read(&two, "").unwrap_err().contains("outside its folder"));
+        // Not gzip, or cut short: refused.
+        let tdir = tempfile::tempdir().unwrap();
+        let f = tdir.path().join("x");
+        fs::write(&f, b"not gzip").unwrap();
+        assert!(read_archive(&f, "").is_err());
+        let g = gz(&t);
+        fs::write(&f, &g[..g.len() / 2]).unwrap();
+        assert!(read_archive(&f, "").is_err());
     }
 
-    // S-68: a skill's files are held to the added limits; a link in it refuses it; a binary is
-    // skipped and said; hooks, commands and agents are named, never taken.
+    // S-68: what is kept is the skills' folders, not the repository around them: 30 MiB beside a
+    // small skill (more than the old 20 MiB cap) is skipped unread; a link to one folder reads
+    // only it; what is kept is held to its limit, saying it.
+    #[test]
+    fn the_limits_are_on_what_is_kept_not_on_the_repository_around_it() {
+        let c = "e".repeat(40);
+        let junk = noise(30 << 20, 7);
+        let t = tar(
+            "o",
+            &c,
+            &[
+                ("site/video.bin", b'0', &junk),
+                ("skills/hello/SKILL.md", b'0', MD.as_bytes()),
+                ("skills/other/SKILL.md", b'0', MD.as_bytes()),
+            ],
+        );
+        let (_, tree) = read(&t, "").unwrap();
+        assert!(!tree.contains_key("site/video.bin"));
+        assert!(tree.contains_key("skills/hello/SKILL.md"));
+        let (_, one) = read(&t, "skills/hello").unwrap();
+        assert_eq!(one.keys().collect::<Vec<_>>(), ["SKILL.md"]);
+        assert!(
+            read(&t, "skills/none")
+                .unwrap_err()
+                .contains("no folder skills/none")
+        );
+        // Past what may be kept.
+        let big = noise(MAX_KEPT + 1, 9);
+        let t = tar(
+            "o",
+            &c,
+            &[
+                ("skills/x/SKILL.md", b'0', MD.as_bytes()),
+                ("skills/x/a.bin", b'0', &big),
+            ],
+        );
+        let e = read(&t, "").unwrap_err();
+        assert!(e.contains("more than 128.0 MiB"), "{e}");
+    }
+
+    // S-68: SKILL.md and its documents are instructions while they fit; scripts, images, data,
+    // documents past the limit and a document with hidden characters are resources, moved byte
+    // for byte; nothing the skill says (its front matter, a file's name) widens that; a path too
+    // deep or with a name Clio does not take is skipped and said.
+    #[test]
+    fn instructions_and_resources_are_told_apart_by_clios_rule() {
+        let c = "f".repeat(40);
+        let png = noise(5000, 3);
+        let md = "---\nname: s\ndescription: Says hi.\ninstructions: [scripts/run.sh, assets/logo.png]\n---\nHi.\n";
+        let mut entries: Vec<(String, u8, Vec<u8>)> = vec![
+            ("SKILL.md".into(), b'0', md.as_bytes().to_vec()),
+            ("references/a.md".into(), b'0', b"# A\n".to_vec()),
+            ("notes.TXT".into(), b'0', b"plain\n".to_vec()),
+            (
+                "scripts/run.sh".into(),
+                b'0',
+                b"#!/bin/sh\necho hi\n".to_vec(),
+            ),
+            ("scripts/lib.mjs".into(), b'0', b"export {}\n".to_vec()),
+            ("assets/logo.png".into(), b'0', png.clone()),
+            ("assets/a/b/c/d/deep.svg".into(), b'0', b"<svg/>".to_vec()),
+            (
+                "assets/a/b/c/d/e/f/g/h/too-deep.txt".into(),
+                b'0',
+                b"x".to_vec(),
+            ),
+            ("assets/bad name.md".into(), b'0', b"x".to_vec()),
+            ("references/tab.md".into(), b'0', b"a\tb\n".to_vec()),
+            ("SKILL.md.png".into(), b'0', b"not one".to_vec()),
+        ];
+        // More documents than instructions may be: the rest are resources, not a refusal.
+        for i in 0..skills::MAX_ADDED_FILES {
+            entries.push((
+                format!("references/many/r{i:03}.md"),
+                b'0',
+                b"doc\n".to_vec(),
+            ));
+        }
+        let view: Vec<(String, u8, &[u8])> = entries
+            .iter()
+            .map(|(p, k, b)| (format!("skills/s/{p}"), *k, b.as_slice()))
+            .collect();
+        let view: Vec<(&str, u8, &[u8])> =
+            view.iter().map(|(p, k, b)| (p.as_str(), *k, *b)).collect();
+        let (_, mut tree) = read(&tar("o", &c, &view), "").unwrap();
+        let f = build(&mut tree, "skills/s", "s").unwrap();
+        let instr: Vec<&str> = f.files.iter().map(|x| x.path.as_str()).collect();
+        let res: Vec<&str> = f.resources.iter().map(|(r, _)| r.path.as_str()).collect();
+        assert_eq!(f.files.len() + 1, skills::MAX_ADDED_FILES);
+        for i in ["notes.TXT", "references/a.md", "references/many/r000.md"] {
+            assert!(instr.contains(&i), "{i}: {instr:?}");
+        }
+        for r in [
+            "scripts/run.sh",
+            "scripts/lib.mjs",
+            "assets/logo.png",
+            "assets/a/b/c/d/deep.svg",
+            "references/tab.md",
+            "SKILL.md.png",
+            "references/many/r099.md",
+        ] {
+            assert!(res.contains(&r), "{r}: {res:?}");
+            assert!(!instr.contains(&r), "{r}");
+        }
+        let (logo, bytes) = f
+            .resources
+            .iter()
+            .find(|(r, _)| r.path == "assets/logo.png")
+            .unwrap();
+        assert_eq!(bytes, &png);
+        assert_eq!(
+            (logo.size, logo.sha256.as_str()),
+            (5000, skills::sha256_hex(&png).as_str())
+        );
+        let run = &f
+            .resources
+            .iter()
+            .find(|(r, _)| r.path == "scripts/run.sh")
+            .unwrap()
+            .0;
+        assert!(run.script && !logo.script);
+        assert_eq!(
+            f.skipped,
+            [
+                "assets/a/b/c/d/e/f/g/h/too-deep.txt (a name Clio does not take)",
+                "assets/bad name.md (a name Clio does not take)",
+            ]
+        );
+        // The judge reads every instruction whole and every resource's name, never its bytes.
+        let j = f.judged();
+        assert!(
+            j.contains("--- file references/a.md ---\n# A") && j.contains("\nassets/logo.png\n")
+        );
+        assert!(!j.contains("echo hi"));
+        // The digest is of all of it.
+        assert_eq!(
+            f.digest(),
+            skills::digest_all(&f.skill_md, &f.files, &f.manifest())
+        );
+        assert_ne!(f.digest(), skills::digest(&f.skill_md, &f.files));
+    }
+
+    // S-68: a skill's limits are on the whole of it; a link inside refuses it.
     #[test]
     fn skills_are_found_checked_and_only_skills_are_taken() {
         let c = "b".repeat(40);
-        let big = "x".repeat(skills::MAX_ADDED_BYTES);
         let t = tar(
             "o",
             &c,
@@ -1886,7 +2612,7 @@ mod tests {
                 ("commands/x.md", b'0', b"x"),
             ],
         );
-        let (_, tree) = untar(&t).unwrap();
+        let (_, mut tree) = read(&t, "").unwrap();
         let (dirs, layouts) = skill_dirs(&tree);
         assert_eq!(
             (dirs, layouts),
@@ -1895,39 +2621,24 @@ mod tests {
         assert_eq!(plugin_parts(&tree), ["hooks", "commands"]);
         let name = name_in(&tree, "skills/hello", "o");
         assert_eq!(name, "hello-world");
-        let f = build(&tree, "skills/hello", &name).unwrap();
+        let f = build(&mut tree, "skills/hello", &name).unwrap();
         assert!(f.files.is_empty());
-        assert_eq!(
-            f.skipped,
-            [
-                ".DS_Store (a name Clio does not take)",
-                "logo.png (not text)"
-            ]
+        assert_eq!(f.manifest()[0].path, "logo.png");
+        assert_eq!(f.skipped, [".DS_Store (a name Clio does not take)"]);
+        let t = tar(
+            "o",
+            &c,
+            &[
+                ("skills/s/SKILL.md", b'0', MD.as_bytes()),
+                ("skills/s/x", b'2', b""),
+            ],
         );
-        let mut many: Vec<(String, u8, Vec<u8>)> =
-            vec![("s/SKILL.md".into(), b'0', MD.as_bytes().to_vec())];
-        for (case, extra) in [
-            ("link", vec![("s/x".to_owned(), b'2', vec![])]),
-            (
-                "large",
-                vec![("s/big.md".to_owned(), b'0', big.into_bytes())],
-            ),
-            (
-                "many",
-                (0..skills::MAX_ADDED_FILES)
-                    .map(|i| (format!("s/f{i}.md"), b'0', b"x".to_vec()))
-                    .collect(),
-            ),
-        ] {
-            many.truncate(1);
-            many.extend(extra);
-            let entries: Vec<(&str, u8, &[u8])> = many
-                .iter()
-                .map(|(p, k, b)| (format!("skills/{p}").leak() as &str, *k, b.as_slice()))
-                .collect();
-            let (_, tree) = untar(&tar("o", &c, &entries)).unwrap();
-            assert!(build(&tree, "skills/s", "s").is_err(), "{case}");
-        }
+        let (_, mut tree) = read(&t, "").unwrap();
+        assert!(
+            build(&mut tree, "skills/s", "s")
+                .unwrap_err()
+                .contains("link")
+        );
     }
 
     #[test]
@@ -1942,15 +2653,64 @@ mod tests {
         // A folder that is a link (what a swap mid-read would leave): kept as a link, not entered.
         std::os::unix::fs::symlink(t.path().join("elsewhere"), t.path().join("skills/two"))
             .unwrap();
-        let tree = read_folder(t.path()).unwrap();
+        let mut tree = read_folder(t.path()).unwrap();
         assert_eq!(tree.get("skills/one/pw"), Some(&Item::Link));
         assert_eq!(tree.get("skills/two"), Some(&Item::Link));
         assert!(!tree.keys().any(|k| k.starts_with("skills/two/")));
         assert!(!tree.contains_key("elsewhere/deep/x"));
         assert!(
-            build(&tree, "skills/one", "one")
+            build(&mut tree, "skills/one", "one")
                 .unwrap_err()
                 .contains("link")
         );
+    }
+
+    // S-68: a folder past what is read says by how much; nothing of it is taken.
+    #[test]
+    fn a_folder_past_its_limit_says_by_how_much() {
+        let t = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fs::write(t.path().join(format!("f{i}")), "x").unwrap();
+        }
+        let fd = rustix::fs::open(t.path(), dir_flags(), rustix::fs::Mode::empty()).unwrap();
+        let e = walk_within(&fd, true, true, (3, 1 << 20)).unwrap_err();
+        assert!(e.contains("5 files, past the limit of 3 by 2"), "{e}");
+        let fd = rustix::fs::open(t.path(), dir_flags(), rustix::fs::Mode::empty()).unwrap();
+        let e = walk_within(&fd, true, true, (10, 2)).unwrap_err();
+        assert!(e.contains("5 B, past the limit of 2 B by 3 B"), "{e}");
+    }
+
+    // S-68: resources are staged once each, named by their SHA-256, in a folder of the skill's
+    // digest; staged folders older than two days are pruned, newer ones kept.
+    #[test]
+    fn resources_are_staged_by_digest_and_old_stages_pruned() {
+        let t = tempfile::tempdir().unwrap();
+        let c = "9".repeat(40);
+        let tr = tar(
+            "o",
+            &c,
+            &[
+                ("SKILL.md", b'0', MD.as_bytes()),
+                ("a.png", b'0', &[1, 2, 3]),
+            ],
+        );
+        let (_, mut tree) = read(&tr, "").unwrap();
+        let f = build(&mut tree, "", "hello-world").unwrap();
+        let dir = stage(&f, &f.digest(), t.path()).unwrap().unwrap();
+        assert_eq!(dir, t.path().join(format!("skill-{}", f.digest())));
+        let blob = dir.join(skills::sha256_hex(&[1, 2, 3]));
+        assert_eq!(fs::read(&blob).unwrap(), [1, 2, 3]);
+        // Again: kept as it is.
+        stage(&f, &f.digest(), t.path()).unwrap();
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let old = t.path().join("skill-old");
+        fs::create_dir(&old).unwrap();
+        let three_days = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+        fs::File::open(&old)
+            .unwrap()
+            .set_modified(three_days)
+            .unwrap();
+        prune_staged(t.path());
+        assert!(!old.exists() && dir.exists());
     }
 }
