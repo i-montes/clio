@@ -41,7 +41,7 @@ It puts `clio` and `clio-vault` of the latest release in `~/.local/bin` (and tha
 By hand, from a checkout:
 
 1. Install: `just install` (or `cargo build --release -p clio-brain -p clio-vault` and copy `target/release/clio*` to `~/.local/bin`). Then `clio init`.
-2. Start the vault once per boot: `clio vault start`. The model key lives there. On a server, `loginctl enable-linger $USER` keeps the vault's runtime folder across logouts.
+2. Start the vault once per boot: `clio vault start`, or just open `clio`, which asks for the passphrase when the vault is stopped or locked. The model key lives there. On a server, `loginctl enable-linger $USER` keeps the vault's runtime folder across logouts.
 3. Pick a model connector: `clio connect opencode`, `clio connect claude` or `clio connect anthropic-api`. `claude` uses your Claude subscription through the official Claude Code, which `clio pi install` brings (about 400 MB, once); the token comes from `claude setup-token`, it uses your plan's quota like Claude Code, and the bridge package warns that Anthropic could change how it bills the Agent SDK. `anthropic-api` takes an Anthropic API key, billed per token.
 4. Type `clio` to open the chat, or `clio run "instruction"` for one job without the interface.
 
