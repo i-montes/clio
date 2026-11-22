@@ -96,7 +96,10 @@ pub struct HostJob {
     pub timeout: Option<Duration>,
     /// Bytes kept per stream (the tail).
     pub max_output: usize,
-    /// Clio's folders: shown empty and read-only. Absolute; one that does not exist is skipped.
+    /// Clio's folders and the person's credential stores (S-75): a folder shown empty and
+    /// read-only, a file or a socket as an empty one (`/dev/null` with `Bwrap`, inaccessible with
+    /// `Systemd`). Absolute; one that does not exist is skipped. One inside a shown path is
+    /// applied after it.
     pub masks: Vec<PathBuf>,
     /// Paths shown as they are, read-only: inside a mask, a window into it (Clio's registered
     /// skills); outside one, what a command may run but not change (Clio's programs in
@@ -110,6 +113,10 @@ pub struct HostJob {
     /// Unix sockets can be made, so `systemctl status` and the like read through them; the rest
     /// of `read_only` holds (read-only root, its own `/tmp`, no new privileges).
     pub sockets: bool,
+    /// `bash -lc` (the person's login files, their `PATH`); `false`: `bash -c` with the system's
+    /// `PATH` only, for a line that runs with a credential store open (S-75): no file an earlier
+    /// command could write runs before it. A service's run never reads them.
+    pub login: bool,
 }
 
 /// A service's run (stage 3, S-69): `job` (its command, its files' folder as `cwd`, masks, the
@@ -459,7 +466,12 @@ impl HostJail {
         env.extend(svc.iter().flat_map(|s| s.env.iter().cloned()));
         let mut shell = vec![
             self.bash.to_string_lossy().into_owned(),
-            if svc.is_some() { "-c" } else { "-lc" }.into(),
+            if svc.is_some() || !job.login {
+                "-c"
+            } else {
+                "-lc"
+            }
+            .into(),
             job.command.clone(),
         ];
         // Bwrap has no cgroup of its own: in a scope the cgroup holds the limits; without one each
@@ -533,7 +545,17 @@ impl HostJail {
                 if !job.network {
                     a.push("--unshare-net".into());
                 }
-                for m in &masks {
+                // A mask inside a shown path (an agent's credentials in its read-only home, S-75)
+                // goes after it: bound later, the shown path would cover it again.
+                let (late, early): (Vec<&String>, Vec<&String>) = masks
+                    .iter()
+                    .partition(|m| shows.iter().any(|s| s != *m && Path::new(m).starts_with(s)));
+                let mask = |a: &mut Vec<String>, m: &String| {
+                    if !Path::new(m).is_dir() {
+                        // A file or a socket reads as empty and connects to nothing.
+                        a.extend(["--ro-bind".into(), "/dev/null".into(), m.clone()]);
+                        return;
+                    }
                     a.extend(["--tmpfs".into(), m.clone()]);
                     // A window into the mask, made while the mask can still take its mount point.
                     for w in shows.iter().filter(|w| Path::new(w).starts_with(m)) {
@@ -543,12 +565,18 @@ impl HostJail {
                         a.extend(["--bind".into(), w.clone(), w.clone()]);
                     }
                     a.extend(["--remount-ro".into(), m.clone()]);
+                };
+                for m in early {
+                    mask(&mut a, m);
                 }
                 for w in writable.iter().filter(|w| !inside(w)) {
                     a.extend(["--bind".into(), w.clone(), w.clone()]);
                 }
                 for w in shows.iter().filter(|w| !inside(w)) {
                     a.extend(["--ro-bind".into(), w.clone(), w.clone()]);
+                }
+                for m in late {
+                    mask(&mut a, m);
                 }
                 for (k, v) in env {
                     a.extend(["--setenv".into(), k, v]);
@@ -626,7 +654,13 @@ impl HostJail {
                     }
                 }
                 for m in &masks {
-                    a.extend(["-p".into(), format!("TemporaryFileSystem={m}:ro")]);
+                    // systemd orders the mounts by path: one inside a shown path comes after it.
+                    let p = if Path::new(m).is_dir() {
+                        format!("TemporaryFileSystem={m}:ro")
+                    } else {
+                        format!("InaccessiblePaths={m}")
+                    };
+                    a.extend(["-p".into(), p]);
                 }
                 // systemd mounts these after the temporary file systems: a window into a mask.
                 for w in shows
@@ -781,24 +815,33 @@ impl HostJail {
         )
     }
 
-    /// Proves, inside `scratch`, that a masked folder is empty and read-only, that the network
-    /// is cut unless asked for, and (with `Systemd`) that `sudo` works. An error means no `exec`.
+    /// Proves, inside `scratch`, that a masked folder is empty and read-only, that a masked file
+    /// (a credential store, S-75) reads empty, by its path and through a link the command makes,
+    /// also inside a shown folder, that a shown folder (another agent's home, S-76) is read-only,
+    /// that the network is cut unless asked for, and (with `Systemd`) that `sudo` works. An error
+    /// means no `exec`.
     pub fn self_test(&self, scratch: &Path) -> Result<(), String> {
         let mask = scratch.join("clio-mask");
+        let shown = scratch.join("clio-home");
         // Private like everything under Clio's data, whatever the umask (S-23).
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&mask)
-            .map_err(|e| format!("{}: {e}", mask.display()))?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(mask.join("decoy"))
-            .and_then(|mut f| std::io::Write::write_all(&mut f, b"decoy"))
-            .map_err(|e| format!("decoy: {e}"))?;
+        for d in [&mask, &shown] {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(d)
+                .map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        let (store, cred) = (scratch.join("clio-store"), shown.join("clio-cred"));
+        for f in [mask.join("decoy"), store.clone(), cred.clone()] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&f)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, b"decoy"))
+                .map_err(|e| format!("decoy: {e}"))?;
+        }
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("listen: {e}"))?;
         let port = listener
@@ -811,7 +854,10 @@ impl HostJail {
             ""
         };
         let command = format!(
-            "test -e clio-mask/decoy && exit 10; touch clio-mask/new 2>/dev/null && exit 11; {sudo}\
+            "test -e clio-mask/decoy && exit 10; touch clio-mask/new 2>/dev/null && exit 11; \
+             grep -qs decoy clio-store && exit 12; ln -sfn \"$PWD/clio-store\" clio-link; \
+             grep -qs decoy clio-link && exit 12; grep -qs decoy clio-home/clio-cred && exit 12; \
+             touch clio-home/new 2>/dev/null && exit 14; {sudo}\
              (echo > /dev/tcp/127.0.0.1/{port}) 2>/dev/null && exit 20; exit 21"
         );
         for network in [false, true] {
@@ -822,15 +868,18 @@ impl HostJail {
                 network,
                 timeout: Some(Duration::from_secs(20)),
                 max_output: 4096,
-                masks: vec![mask.clone()],
-                shows: vec![],
+                masks: vec![mask.clone(), store.clone(), cred.clone()],
+                shows: vec![shown.clone()],
                 read_only: false,
                 sockets: false,
+                login: true,
             })?;
             let why = match (out.exit_code, network) {
                 (Some(21), false) | (Some(20), true) => continue,
                 (Some(10), _) => "a masked folder is visible",
                 (Some(11), _) => "a masked folder is writable",
+                (Some(12), _) => "a masked file is readable",
+                (Some(14), _) => "a shown folder is writable",
                 (Some(13), _) => "sudo does not work inside",
                 (Some(20), false) => "the network is not cut",
                 (Some(21), true) => "the network is not reachable when asked for",

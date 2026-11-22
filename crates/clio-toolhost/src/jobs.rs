@@ -202,8 +202,9 @@ impl ToolHost {
         if foreign {
             self.mark(&req.session, "foreign");
         }
+        let walls = self.job_walls(h, command, false);
         let job = HostJob {
-            command: command.into(),
+            command: format!("{}{command}", walls.prefix),
             cwd: h.cfg.home.clone(),
             home: h.cfg.home.clone(),
             network,
@@ -212,14 +213,11 @@ impl ToolHost {
                 .and_then(Value::as_u64)
                 .map(|s| Duration::from_secs(s.clamp(1, crate::host::MAX_TIMEOUT_SECS))),
             max_output: Limits::default().max_output,
-            masks: h.cfg.control.clone(),
+            masks: [h.cfg.control.clone(), walls.hidden].concat(),
             read_only: self.review || self.unattended,
             sockets: self.unattended,
-            shows: [
-                self.windows(),
-                crate::host::read_only_paths(&h.cfg.home, false),
-            ]
-            .concat(),
+            shows: [self.windows(), walls.read_only].concat(),
+            login: walls.login,
         };
         let out = Arc::new(Mutex::new(Out {
             file,
