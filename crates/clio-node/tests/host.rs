@@ -34,6 +34,7 @@ fn job(dir: &Path, command: &str) -> HostJob {
         shows: vec![],
         read_only: false,
         sockets: false,
+        login: true,
     }
 }
 
@@ -406,6 +407,91 @@ fn real(h: &HostJail) {
     gone(&m, "a stop");
 }
 
+// S-75 S-76: a masked file reads empty (`/dev/null` with `Bwrap`, inaccessible with `Systemd`); a
+// mask inside a shown folder is applied after the folder is bound, so the folder does not cover
+// it; a line run without login files is `bash -c`.
+#[test]
+fn a_masked_file_reads_empty_and_a_mask_inside_a_shown_folder_comes_after_it() {
+    let d = TempDir::new().unwrap();
+    let home = d.path().canonicalize().unwrap().join("agent");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(home.join("cred.json"), "DECOY").unwrap();
+    std::fs::write(home.join("settings.json"), "{}").unwrap();
+    let store = d.path().canonicalize().unwrap().join("npmrc");
+    std::fs::write(&store, "DECOY").unwrap();
+    let (cred, h_, s_) = (
+        home.join("cred.json").to_string_lossy().into_owned(),
+        home.to_string_lossy().into_owned(),
+        store.to_string_lossy().into_owned(),
+    );
+    let mut j = job(d.path(), "true");
+    j.masks = vec![home.join("cred.json"), store.clone()];
+    j.shows = vec![home.clone()];
+    if let Some(h) = with(Launcher::Bwrap) {
+        let (_, a) = h.args(&j).unwrap();
+        let at = |x: &str, v: &str| {
+            a.windows(3)
+                .position(|y| y[0] == x && y[2] == v)
+                .unwrap_or_else(|| panic!("{x} {v}: {a:?}"))
+        };
+        assert!(
+            at("--ro-bind", &cred)
+                > a.windows(2)
+                    .position(|y| y[0] == "--ro-bind" && y[1] == h_)
+                    .unwrap()
+        );
+        assert_eq!(a[at("--ro-bind", &s_) + 1], "/dev/null");
+        assert!(a.contains(&"-lc".to_owned()));
+        let mut j = j.clone();
+        j.login = false;
+        let (_, a) = h.args(&j).unwrap();
+        assert!(a.contains(&"-c".to_owned()) && !a.contains(&"-lc".to_owned()));
+    }
+    if let Some(h) = with(Launcher::Systemd) {
+        let (_, a) = h.args(&j).unwrap();
+        let props = after(&a, "-p");
+        for p in [
+            format!("InaccessiblePaths={cred}"),
+            format!("InaccessiblePaths={s_}"),
+            format!("ReadOnlyPaths={h_}"),
+        ] {
+            assert!(props.contains(&p.as_str()), "{p}: {props:?}");
+        }
+    }
+    let Some(h) = bwrap() else { return };
+    let mut j = job(
+        d.path(),
+        &format!(
+            "cat {cred} {s_}; ln -s {s_} l; cat l; echo x > {h_}/settings.json 2>/dev/null; \
+             touch {h_}/new 2>/dev/null; true"
+        ),
+    );
+    j.masks = vec![home.join("cred.json"), store.clone()];
+    j.shows = vec![home.clone()];
+    let o = h.run(&j).unwrap();
+    assert!(!o.stdout.contains("DECOY"), "{o:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join("settings.json")).unwrap(),
+        "{}"
+    );
+    assert!(!home.join("new").exists());
+    // A socket hidden the same way connects to nothing.
+    let sock = d.path().canonicalize().unwrap().join("s.sock");
+    let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let mut j = job(
+        d.path(),
+        &format!(
+            "python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect(\"{}\"); print(\"CONNECTED\")' 2>/dev/null; true",
+            sock.display()
+        ),
+    );
+    let o = h.run(&j).unwrap();
+    assert!(o.stdout.contains("CONNECTED"), "the probe itself: {o:?}");
+    j.masks = vec![sock.clone()];
+    let o = h.run(&j).unwrap();
+    assert!(!o.stdout.contains("CONNECTED"), "{o:?}");
+}
+
 fn gone(m: &str, what: &str) {
     let until = Instant::now() + Duration::from_secs(5);
     while host_procs_with(m) > 0 && Instant::now() < until {
@@ -414,6 +500,8 @@ fn gone(m: &str, what: &str) {
     assert_eq!(host_procs_with(m), 0, "a child outlived {what}");
 }
 
+// S-75: the self-test (no `exec` without it) proves a masked file, a link to it and a mask inside
+// a shown folder read empty, and the shown folder is read-only.
 #[test]
 fn bwrap_for_real_hides_the_mask_cuts_the_network_on_request_and_kills_on_timeout() {
     let Some(h) = bwrap() else { return };
@@ -716,6 +804,7 @@ fn service(d: &Path, command: &str) -> ServiceRun {
             shows: vec![c(files)],
             read_only: false,
             sockets: false,
+            login: true,
         },
         writable: vec![c(state), c(d.join("out"))],
         cpu_percent: 50,

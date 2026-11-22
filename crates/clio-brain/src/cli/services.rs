@@ -803,6 +803,7 @@ impl Runner<'_> {
                 shows,
                 read_only: false,
                 sockets: false,
+                login: true,
             },
             writable,
             cpu_percent: s.cpu_percent,
@@ -1487,6 +1488,7 @@ pub(crate) mod tests {
             shows: vec![],
             read_only: false,
             sockets: false,
+            login: true,
         };
         match h.run(&j) {
             Ok(o) if o.success() => Some(h),

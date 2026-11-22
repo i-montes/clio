@@ -344,14 +344,16 @@ fn spellings(home: &Path, paths: &[PathBuf]) -> Vec<String> {
     out
 }
 
-/// The home's `~/.agents` (S-74: the shared skills folder is in it), as a command may name it:
-/// absolute, `~/`, `~user/`, `$HOME/`, `${HOME…}/`, after a `..` or the home's own name (`cd / &&
-/// … home/u/.agents`), glued to a short option, or by a glob a shell would expand to it
-/// (`names_by_glob`); and, while the command stays in the home where it runs, bare, `./`,
-/// `$PWD/`, `$(pwd)/` or `/proc/self/cwd/`. A word match: what it misses, the jail stops (the
-/// folder is read-only to every command the person did not approve for it).
+/// A row of the home's walls (`walls::WALLS`, S-74/S-75/S-76: `~/.agents`, `~/.ssh`, `~/.claude`…)
+/// as a command may name it: absolute (as written and where it really is), `~/`, `~user/`,
+/// `$HOME/`, `${HOME…}/`, after the home's own name (`cd / && … home/u/.ssh`), glued to a short
+/// option, or by a glob a shell would expand to it (`names_by_glob`); and, for a row named `here`
+/// too (S-74's `~/.agents`, the credential stores), after a `..` and, while the command stays in
+/// the home where it runs, bare, `./`, `$PWD/`, `$(pwd)/` or `/proc/self/cwd/`. An agent's home is
+/// not named bare: a project has its own `.claude` or `.cursor`. A word match: what it misses,
+/// the jail stops.
 #[derive(Debug, Clone)]
-struct Agents {
+struct Named {
     home: Vec<PathBuf>,
     dirs: Vec<PathBuf>,
     /// The same, by component, for `names_by_glob`.
@@ -359,15 +361,26 @@ struct Agents {
     /// Wherever the command is.
     rooted: Regex,
     /// From the home.
-    here: Regex,
+    here: Option<Regex>,
 }
 
-impl Agents {
-    fn new(home: &Path) -> Self {
+impl Named {
+    fn new(home: &Path, path: &Path, here: bool) -> Self {
         let mut homes = vec![home.to_path_buf()];
         homes.extend(home.canonicalize().ok());
         homes.dedup();
-        let dirs: Vec<PathBuf> = homes.iter().map(|h| h.join(".agents")).collect();
+        let rel = path
+            .strip_prefix(home)
+            .ok()
+            .filter(|r| !r.as_os_str().is_empty());
+        let mut dirs: Vec<PathBuf> = rel.map_or_else(
+            || vec![path.to_path_buf()],
+            |r| homes.iter().map(|h| h.join(r)).collect(),
+        );
+        // A row that is a link, by where it leads.
+        let real: Vec<PathBuf> = dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
+        dirs.extend(real);
+        dirs.dedup();
         let abs: Vec<String> = dirs
             .iter()
             .map(|d| regex::escape(&d.to_string_lossy()))
@@ -379,18 +392,31 @@ impl Agents {
             .collect();
         let pre = r"(^|[^\w.~/$-]|(^|\s)-[A-Za-z0-9]+)";
         let end = r"($|[^\w.-])";
-        let rooted = format!(
-            r"{pre}({abs}|(~/|\$HOME/|\$\{{HOME[^}}]*\}}/|~({names})/)\.agents){end}|(^|[^\w.-])({names})/\.agents{end}|\.\./\.agents{end}",
-            abs = abs.join("|"),
-            names = names.join("|"),
-        );
-        let here = format!(
-            r"{pre}(\./|\$PWD/|\$\{{PWD\}}/|\$\(pwd\)/|`pwd`/|/proc/(self|[0-9]+)/cwd/)?\.agents{end}"
-        );
+        let (abs, names) = (abs.join("|"), names.join("|"));
+        let (rooted, here) = match rel.map(|r| regex::escape(&r.to_string_lossy())) {
+            Some(r) => {
+                let up = if here {
+                    format!(r"|\.\./{r}{end}")
+                } else {
+                    String::new()
+                };
+                (
+                    format!(
+                        r"{pre}({abs}|(~/|\$HOME/|\$\{{HOME[^}}]*\}}/|~({names})/){r}){end}|(^|[^\w.-])({names})/{r}{end}{up}"
+                    ),
+                    here.then(|| {
+                        format!(
+                            r"{pre}(\./|\$PWD/|\$\{{PWD\}}/|\$\(pwd\)/|`pwd`/|/proc/(self|[0-9]+)/cwd/)?{r}{end}"
+                        )
+                    }),
+                )
+            }
+            None => (format!(r"{pre}({abs}){end}"), None),
+        };
         Self {
             paths: dirs.iter().map(|d| components(d)).collect(),
             rooted: Regex::new(&rooted).expect("escaped paths"),
-            here: Regex::new(&here).expect("a fixed pattern"),
+            here: here.map(|h| Regex::new(&h).expect("escaped paths")),
             home: homes,
             dirs,
         }
@@ -589,8 +615,10 @@ pub struct HostRules {
     /// Clio's own paths, by component, and the home they may be spelled under (`names_by_glob`).
     control_paths: Vec<Vec<String>>,
     home: PathBuf,
-    /// The shared skills folder's parent, `~/.agents` (S-74): what writes under it is `control`.
-    agents: Option<Agents>,
+    /// The home's walls (S-74, S-75, S-76), each with its row in `walls::WALLS`: what names a
+    /// store, or writes in an agent's home (`~/.agents` among them), is `control` unless the
+    /// command is nothing but that row's client.
+    walls: Vec<(usize, Named)>,
     backup: Regex,
     /// A `>` onto a file that looks like a backup.
     overwrite: Regex,
@@ -628,7 +656,7 @@ impl HostRules {
             window_any: None,
             control_paths: Vec::new(),
             home: PathBuf::new(),
-            agents: None,
+            walls: Vec::new(),
             backup: re(BACKUP),
             overwrite: re(r"(^|[^>])>\s*[^\s>&]*{B}"),
             sudo: re(r"(^|[^\w.-])sudo($|[^\w.-])"),
@@ -649,8 +677,49 @@ impl HostRules {
         });
         self.control_paths = control.iter().map(|p| components(p)).collect();
         self.home = home.to_path_buf();
-        self.agents = Some(Agents::new(home));
+        self.walls = crate::walls::WALLS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let here = w.closed == crate::walls::Closed::Hidden || w.path == "~/.agents";
+                crate::walls::path_of(w, home).map(|p| (i, Named::new(home, &p, here)))
+            })
+            .collect();
         self
+    }
+
+    /// The rows of the home's walls `text` names (S-74, S-75, S-76), as written, without quotes
+    /// and backslashes, or by a glob. A bare name counts only while the command stays in the
+    /// home, where it runs.
+    pub fn named_walls(&self, text: &str) -> Vec<usize> {
+        let text = squash(text);
+        let moved = simple_commands(&text).iter().any(|w| {
+            matches!(w[0].as_str(), "cd" | "pushd")
+                && w.get(1).is_some_and(|d| {
+                    !d.starts_with('-') && !self.walls.first().is_some_and(|(_, n)| n.is_home(d))
+                })
+        });
+        let texts = [text.clone(), bare(&text)];
+        self.walls
+            .iter()
+            .filter(|(_, n)| {
+                texts.iter().any(|t| {
+                    n.rooted.is_match(t)
+                        || (!moved && n.here.as_ref().is_some_and(|h| h.is_match(t)))
+                        || self.names_by_glob_of(&n.paths, t)
+                })
+            })
+            .map(|(i, _)| *i)
+            .collect()
+    }
+
+    /// The row of the home's walls `path` (already resolved) lies in, hidden ones only when
+    /// `hidden`.
+    fn in_wall(&self, path: &Path, hidden: bool) -> bool {
+        self.walls.iter().any(|(i, n)| {
+            (!hidden || crate::walls::WALLS[*i].closed == crate::walls::Closed::Hidden)
+                && n.dirs.iter().any(|d| path.starts_with(d))
+        })
     }
 
     /// `text` names one of Clio's paths through a glob (`~/.config/cl?o/x`, `/home/u/.loc*/share/
@@ -706,20 +775,8 @@ impl HostRules {
 
     /// `text` names `~/.agents` (S-74), as written, without quotes and backslashes, or by a glob.
     pub fn names_agents(&self, text: &str) -> bool {
-        self.agents.as_ref().is_some_and(|a| {
-            let text = squash(text);
-            // A bare `.agents` is the home's only while the command stays there (where it runs).
-            let moved = simple_commands(&text).iter().any(|w| {
-                matches!(w[0].as_str(), "cd" | "pushd")
-                    && w.get(1)
-                        .is_some_and(|d| !d.starts_with('-') && !a.is_home(d))
-            });
-            [text.as_str(), bare(&text).as_str()].iter().any(|t| {
-                a.rooted.is_match(t)
-                    || (!moved && a.here.is_match(t))
-                    || self.names_by_glob_of(&a.paths, t)
-            })
-        })
+        self.named_walls(text)
+            .contains(&crate::walls::index("~/.agents"))
     }
 
     /// A `control` command (or the path of a write) that acts on the machine alone, not on Clio's
@@ -734,7 +791,7 @@ impl HostRules {
         let text = &squash(text);
         !starts_outside(text)
             && !self.names_by_glob(text)
-            && !self.names_agents(text)
+            && self.named_walls(text).is_empty()
             && ![text, bare(text).as_str()].iter().any(|t| {
                 self.control.as_ref().is_some_and(|r| r.is_match(t))
                     || t.to_lowercase().contains("clio")
@@ -975,14 +1032,27 @@ impl HostRules {
         {
             return Some(Control);
         }
-        // The shared skills folder (S-74), named by anything but a reader or `cd`.
-        if self.names_agents(&seen)
-            && (command.contains('>')
+        // The home's walls (S-74, S-75, S-76): a store named at all, an agent's home (the shared
+        // skills folder among them) named by anything but a reader or `cd`, unless the command
+        // is nothing but that row's own client.
+        let named = self.named_walls(&seen);
+        if !named.is_empty() {
+            let open = crate::walls::line(command, &self.home, false)
+                .map(|l| l.keys)
+                .unwrap_or_default();
+            let writes = command.contains('>')
                 || simple_commands(command)
                     .iter()
-                    .any(|w| w[0] != "cd" && !READERS.contains(&w[0].as_str())))
-        {
-            return Some(Control);
+                    .any(|w| w[0] != "cd" && !READERS.contains(&w[0].as_str()));
+            for i in named {
+                let row = &crate::walls::WALLS[i];
+                if row.opens.iter().any(|k| open.contains(k)) {
+                    continue;
+                }
+                if row.closed == crate::walls::Closed::Hidden || writes {
+                    return Some(Control);
+                }
+            }
         }
         // A start-up file, a unit folder or Clio's programs, named by anything but a reader.
         if LAUNCH_PATHS.is_match(command)
@@ -1011,10 +1081,7 @@ impl HostRules {
         if p.starts_with("/etc/sudoers")
             || p.contains("authorized_keys")
             || LAUNCH_PATHS.is_match(&p)
-            || self
-                .agents
-                .as_ref()
-                .is_some_and(|a| a.dirs.iter().any(|d| path.starts_with(d)))
+            || self.in_wall(path, false)
         {
             Some(Control)
         } else if path.exists()
@@ -1026,6 +1093,13 @@ impl HostRules {
         } else {
             None
         }
+    }
+
+    /// A file tool reading (`fs_read`, `fs_list`, `fs_glob`) inside one of the person's
+    /// credential stores (S-75): `control`, as a write in an agent's home is (S-76). `path` is
+    /// resolved already.
+    pub fn classify_read(&self, path: &Path) -> Option<Class> {
+        self.in_wall(path, true).then_some(Control)
     }
 
     /// `path` is taken as given: the caller resolves `..` and links first.
@@ -1341,7 +1415,7 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
 
 /// A shell line cut into simple commands at `;`, `&`, `|`, new lines, backticks and parentheses
 /// outside quotes. What a double-quoted text runs (`$(…)`, backticks) is a command of its own too.
-fn split(line: &str) -> Vec<Vec<String>> {
+pub(crate) fn split(line: &str) -> Vec<Vec<String>> {
     let (mut cmds, mut words, mut word) = (Vec::new(), Vec::new(), None::<String>);
     let mut nested = Vec::new();
     let mut chars = line.chars();

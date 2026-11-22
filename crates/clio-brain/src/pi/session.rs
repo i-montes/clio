@@ -76,8 +76,8 @@ pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@14";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@14.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@15";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@15.md");
 /// The prompt of a subagent (S-73), reader or writer.
 pub const SUBAGENT_PROMPT_NAME: &str = "clio-subagent@1";
 pub const SUBAGENT_PROMPT: &str = include_str!("../../../../prompts/system/clio-subagent@1.md");
@@ -623,7 +623,7 @@ mod tests {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
         assert!(PROMPT.starts_with("version: 30\n"));
-        assert!(HOST_PROMPT.starts_with("version: 14\n"));
+        assert!(HOST_PROMPT.starts_with("version: 15\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -676,8 +676,8 @@ mod tests {
             .unwrap()
         };
         for (new, was) in [
-            (PROMPT, old("clio-agent@29.md")),
-            (HOST_PROMPT, old("clio-host@13.md")),
+            (PROMPT.to_owned(), old("clio-agent@29.md")),
+            (old("clio-host@14.md"), old("clio-host@13.md")),
         ] {
             let start = new.find("\nSubagents\n").expect("a Subagents section");
             let end = start + new[start..].find("\n\nRules\n").unwrap() + 1;
@@ -858,6 +858,27 @@ mod tests {
             assert!(p.contains("nor to turn bypass on (that is theirs alone)"));
         }
         assert!(crate::pi::envelope::BYPASS_ON.starts_with("approvals: bypass on"));
+    }
+
+    // S-75: `clio-host@15` is `@14` plus one line on what a command does not see, and how a
+    // client's step runs (alone) to reach its store; nothing else changed.
+    #[test]
+    fn the_host_prompt_only_adds_the_walls_line() {
+        let was = std::fs::read_to_string(format!(
+            "{}/../../prompts/system/clio-host@14.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut n: Vec<&str> = HOST_PROMPT.lines().collect();
+        let w: Vec<&str> = was.lines().collect();
+        assert_eq!((n[0], w[0]), ("version: 15", "version: 14"));
+        let at = n
+            .iter()
+            .position(|l| l.starts_with("- A command does not see the person's credential stores"))
+            .expect("the walls line");
+        let line = n.remove(at);
+        assert!(line.contains("nothing but its own client") && line.contains("of its own"));
+        assert_eq!(n[1..], w[1..]);
     }
 
     // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,

@@ -57,15 +57,47 @@ pub(crate) fn programs(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What a command's jail shows read-only besides the windows: Clio's programs and, unless the
-/// person approved this very command as `control` for it (`open_agents`), `~/.agents`, where
-/// other agents read their skills (S-74): no spelling of a path writes there unasked.
-pub(crate) fn read_only_paths(home: &Path, open_agents: bool) -> Vec<PathBuf> {
-    let mut p = programs(home);
-    if !open_agents {
-        p.push(home.join(".agents"));
+/// What a command's jail closes of the home's walls (S-74, S-75, S-76), and how it runs.
+pub(crate) struct JobWalls {
+    /// The credential stores (and daemons' sockets) it sees empty: added to the masks.
+    pub(crate) hidden: Vec<PathBuf>,
+    /// Clio's programs and the other agents' homes it sees read-only: added to the shows.
+    pub(crate) read_only: Vec<PathBuf>,
+    /// `false` for a credential client's line: no login files, the system's `PATH`.
+    pub(crate) login: bool,
+    /// What its command runs after (`walls::CRED_ENV` for a credential client's line).
+    pub(crate) prefix: &'static str,
+    /// It was nothing but clients: its stores were opened.
+    pub(crate) pure: bool,
+}
+
+impl ToolHost {
+    /// The walls of `command`'s jail: every row closed but those its own clients open (a line
+    /// that is nothing but them, `walls::line`) and, when the person approved this very command
+    /// (`approved`), those it names (S-74's `~/.agents` among them). A review, a round and a
+    /// subagent never have one opened.
+    pub(crate) fn job_walls(&self, h: &Host, command: &str, approved: bool) -> JobWalls {
+        let line = if self.review || self.unattended || self.child.is_some() {
+            None
+        } else {
+            crate::walls::line(command, &h.cfg.home, true)
+        };
+        let named = if approved {
+            h.cfg.rules.named_walls(command)
+        } else {
+            vec![]
+        };
+        let keys = line.as_ref().map(|l| l.keys.clone()).unwrap_or_default();
+        let (hidden, read_only) = crate::walls::closed(&h.cfg.home, &keys, &named);
+        let cred = line.as_ref().is_some_and(|l| l.cred);
+        JobWalls {
+            hidden,
+            read_only: [programs(&h.cfg.home), read_only].concat(),
+            login: !cred,
+            prefix: if cred { crate::walls::CRED_ENV } else { "" },
+            pure: line.is_some(),
+        }
     }
-    p
 }
 
 /// `~/.agents/skills`, empty and private, when it does not exist: a host-mode session starts
@@ -493,16 +525,15 @@ impl ToolHost {
             Some(r) => r.to_string_lossy().into_owned(),
             None => command.to_owned(),
         });
-        // The person's own yes to this command, `control` for `~/.agents`: it may write there.
-        let open_agents =
-            rule == "host/approved" && tool == "exec" && h.cfg.rules.names_agents(command);
+        // The person's own yes to this command: the walls it names open for it (S-74, S-75).
+        let approved = rule == "host/approved" && tool == "exec";
         if logged && let Err(e) = h.log(&req.session, tool, &what, network, "run", rule, None) {
             return Err(format!(
                 "[toolhost] {tool} was not run: the action log cannot be written ({e})"
             ));
         }
         let ran = catch_unwind(AssertUnwindSafe(|| {
-            self.host_effect(h, tool, &args, real, (action_id, open_agents), cancel)
+            self.host_effect(h, tool, &args, real, (action_id, approved), cancel)
         }))
         .unwrap_or_else(|_| Err("the tool panicked".into()));
         let (ok, content, data, external) = match ran {
@@ -605,7 +636,7 @@ impl ToolHost {
         tool: &str,
         args: &Map<String, Value>,
         real: Option<&Path>,
-        (action_id, open_agents): (String, bool),
+        (action_id, approved): (String, bool),
         cancel: &dyn Fn() -> bool,
     ) -> Result<Value, String> {
         if tool == "exec" {
@@ -616,24 +647,35 @@ impl ToolHost {
                 .and_then(Value::as_u64)
                 .map(|s| s.clamp(1, MAX_TIMEOUT_SECS));
             let stop = || cancel() || self.stopping.load(std::sync::atomic::Ordering::SeqCst);
+            let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+            let walls = self.job_walls(h, command, approved);
             let job = HostJob {
-                command: args
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
+                command: format!("{}{command}", walls.prefix),
                 cwd: h.cfg.home.clone(),
                 home: h.cfg.home.clone(),
                 network: args.get("network").and_then(Value::as_bool) == Some(true),
                 timeout: secs.map(Duration::from_secs),
                 max_output: Limits::default().max_output,
-                masks: h.cfg.control.clone(),
+                masks: [h.cfg.control.clone(), walls.hidden].concat(),
                 read_only: self.review || self.unattended,
                 sockets: self.unattended,
-                shows: [self.windows(), read_only_paths(&h.cfg.home, open_agents)].concat(),
+                shows: [self.windows(), walls.read_only].concat(),
+                login: walls.login,
             };
             let out = jail.run_until(&job, &stop)?;
-            return Ok(ops::exec_result(&out, secs));
+            let mut result = ops::exec_result(&out, secs);
+            // A failure a closed wall likely caused: one fixed line on what to do (S-75).
+            if !out.success()
+                && let Some(o) = result.get_mut("output")
+                && crate::walls::needs_hint(command, walls.pure, o.as_str().unwrap_or(""))
+            {
+                *o = Value::from(format!(
+                    "{}\n{}",
+                    o.as_str().unwrap_or(""),
+                    crate::walls::HINT
+                ));
+            }
+            return Ok(result);
         }
         let real = real.ok_or("a file tool needs a path")?;
         if matches!(tool, "fs_write" | "fs_mkdir") {
@@ -650,10 +692,13 @@ impl ToolHost {
             Value::from(rel.to_string_lossy().into_owned()),
         );
         if tool == "fs_glob" {
+            // Clio's folders, and the credential stores (S-75).
+            let (stores, _) = crate::walls::closed(&h.cfg.home, &[], &[]);
             let skip: Vec<Value> = h
                 .cfg
                 .control
                 .iter()
+                .chain(&stores)
                 .map(|c| Value::from(c.to_string_lossy().into_owned()))
                 .collect();
             args.insert("skip".into(), Value::Array(skip));

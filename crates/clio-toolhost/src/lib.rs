@@ -41,6 +41,7 @@ pub mod services;
 pub mod skill_add;
 pub mod skills;
 pub mod subagent;
+pub mod walls;
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1105,6 +1106,10 @@ impl ToolHost {
                 // A folder made is a write too (S-74: under `~/.agents` it asks).
                 "fs_write" | "fs_mkdir" => {
                     real.as_deref().and_then(|r| h.cfg.rules.classify_write(r))
+                }
+                // A credential store's contents reach the model only with the person's yes (S-75).
+                "fs_read" | "fs_list" | "fs_glob" => {
+                    real.as_deref().and_then(|r| h.cfg.rules.classify_read(r))
                 }
                 _ => None,
             };
