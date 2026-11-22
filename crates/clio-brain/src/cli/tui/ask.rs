@@ -348,6 +348,99 @@ fn size(n: usize) -> String {
     }
 }
 
+/// Scripts named, at most, in a skill's box: the rest are counted (`--show` lists every file).
+const SCRIPTS_SHOWN: usize = 12;
+
+/// What kind of file a resource is, for its box, by its name.
+fn kind_of(r: &clio_toolhost::skills::Resource) -> &'static str {
+    let p = r.path.to_ascii_lowercase();
+    let ext = p.rsplit_once('.').map_or("", |(_, e)| e);
+    match ext {
+        _ if r.script => "scripts",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "bmp" | "ico" | "tif" | "tiff" => {
+            "images"
+        }
+        "svg" => "svg",
+        "html" | "htm" => "web pages",
+        "css" | "scss" | "less" => "styles",
+        "json" | "yaml" | "yml" | "toml" | "csv" | "xml" | "tsv" => "data",
+        "md" | "markdown" | "txt" | "pdf" | "rst" => "documents",
+        "woff" | "woff2" | "ttf" | "otf" | "eot" => "fonts",
+        _ => "other",
+    }
+}
+
+/// The resources of a skill in its box: how many and how large, by folder and by kind, the
+/// scripts named (those outside `assets/` first), and plainly what Clio does and does not do with
+/// them. Nothing when there are none.
+fn resource_rows(res: &[clio_toolhost::skills::Resource]) -> Vec<(Part, String)> {
+    use clio_toolhost::skills::size_text;
+    if res.is_empty() {
+        return vec![];
+    }
+    let total: u64 = res.iter().map(|r| r.size).sum();
+    let mut rows = vec![
+        (
+            Part::Label,
+            format!(
+                "its other files, stored as they came: {}, {}",
+                super::app::plural(res.len(), "file", "files"),
+                size_text(total)
+            ),
+        ),
+        (
+            Part::Warn,
+            "the judge did not read these files, only their names; Clio reads one only as outside text (it marks the conversation), and a script among them runs as any command does, in the jail".into(),
+        ),
+    ];
+    let groups = |key: &dyn Fn(&clio_toolhost::skills::Resource) -> String| {
+        let mut by: std::collections::BTreeMap<String, (usize, u64)> = Default::default();
+        for r in res {
+            let e = by.entry(key(r)).or_default();
+            e.0 += 1;
+            e.1 += r.size;
+        }
+        let mut v: Vec<(String, (usize, u64))> = by.into_iter().collect();
+        v.sort_by(|a, b| b.1.1.cmp(&a.1.1).then(a.0.cmp(&b.0)));
+        v.iter()
+            .map(|(k, (n, s))| format!("{k} {n} ({})", size_text(*s)))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let folder = groups(&|r| match r.path.split_once('/') {
+        Some((f, _)) => format!("{}/", sanitize::line(f).trim()),
+        None => "(top)".into(),
+    });
+    let kind = groups(&|r| kind_of(r).to_owned());
+    rows.push((Part::Text, format!("by folder: {folder}")));
+    rows.push((Part::Text, format!("by kind: {kind}")));
+    let mut scripts: Vec<&clio_toolhost::skills::Resource> =
+        res.iter().filter(|r| r.script).collect();
+    scripts.sort_by_key(|r| (r.path.starts_with("assets/"), r.path.clone()));
+    if !scripts.is_empty() {
+        let named: Vec<String> = scripts
+            .iter()
+            .take(SCRIPTS_SHOWN)
+            .map(|r| sanitize::line(&r.path).trim().to_owned())
+            .collect();
+        let more = scripts.len().saturating_sub(SCRIPTS_SHOWN);
+        rows.push((
+            Part::Text,
+            format!(
+                "scripts ({}): {}{}",
+                scripts.len(),
+                named.join(", "),
+                if more > 0 {
+                    format!(", and {more} more (--show lists every file)")
+                } else {
+                    String::new()
+                }
+            ),
+        ));
+    }
+    rows
+}
+
 /// A skill the person adds from outside (`skill_add`'s item, `a`), as its box and `clio skills
 /// add` show it: what it is, where from (origin, ref, commit, folder) and where to read it at that
 /// commit, that the conversation read outside text, what the judge said in plain words, every
@@ -418,10 +511,16 @@ pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
             "this conversation read text from outside before Clio proposed this".into(),
         ));
     }
+    let resources: Vec<clio_toolhost::skills::Resource> =
+        serde_json::from_value(a["resources"].clone()).unwrap_or_default();
     rows.push(match a["judge"].as_str().unwrap_or("") {
-        "clean" => (
+        "clean" if resources.is_empty() => (
             Part::Label,
             "the judge read every file: nothing in it tries to give Clio orders".into(),
+        ),
+        "clean" => (
+            Part::Label,
+            "the judge read every instruction file and the names of the other files: nothing in them tries to give Clio orders".into(),
         ),
         "flagged" => (
             Part::Warn,
@@ -453,15 +552,18 @@ pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
     let total: usize = files.iter().map(|(_, c)| c.len()).sum();
     rows.push((
         Part::Label,
-        format!("{} files, {}:", files.len(), size(total)),
+        if resources.is_empty() {
+            format!("{} files, {}:", files.len(), size(total))
+        } else {
+            format!(
+                "instructions, which Clio reads as her own: {}, {}:",
+                super::app::plural(files.len(), "file", "files"),
+                size(total)
+            )
+        },
     ));
     for (path, content) in &files {
-        let script = content.starts_with("#!")
-            || [
-                ".sh", ".py", ".js", ".mjs", ".ts", ".rb", ".pl", ".ps1", ".bash",
-            ]
-            .iter()
-            .any(|e| path.ends_with(e));
+        let script = content.starts_with("#!") || clio_toolhost::skills::script_name(path);
         rows.push((
             Part::Text,
             format!(
@@ -476,6 +578,7 @@ pub fn added_rows(a: &serde_json::Value) -> Vec<(Part, String)> {
             ),
         ));
     }
+    rows.extend(resource_rows(&resources));
     let list = |k: &str| -> Vec<String> {
         a[k].as_array()
             .into_iter()

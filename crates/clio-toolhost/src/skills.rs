@@ -115,28 +115,61 @@ pub fn compose(name: &str, description: &str, body: &str, verify: &str) -> Strin
 /// Over SKILL.md and every file, path and content, each length-prefixed: one value for exactly
 /// these bytes.
 pub fn digest(skill_md: &str, files: &[SkillFile]) -> String {
+    digest_all(skill_md, files, &[])
+}
+
+/// `digest`, then every resource (its path and its bytes' SHA-256) past a separator no path can
+/// spell: one value for a whole added skill. Without resources it is `digest`, so a skill
+/// registered before resources existed keeps its digest.
+pub fn digest_all(skill_md: &str, files: &[SkillFile], resources: &[Resource]) -> String {
     let mut h = Sha256::new();
-    for part in std::iter::once(("SKILL.md", skill_md))
+    let mut part = |s: &str| {
+        h.update((s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    };
+    for (path, content) in std::iter::once(("SKILL.md", skill_md))
         .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
     {
-        for s in [part.0, part.1] {
-            h.update((s.len() as u64).to_le_bytes());
-            h.update(s.as_bytes());
+        part(path);
+        part(content);
+    }
+    if !resources.is_empty() {
+        part("\0resources");
+        for r in resources {
+            part(&r.path);
+            part(&r.sha256);
         }
     }
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The SHA-256 of `b`, in hex.
+pub fn sha256_hex(b: &[u8]) -> String {
+    Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
 /// A file's path inside the skill: relative, plain names (`A-Z a-z 0-9 . _ -`, none starting with
 /// a dot, so no `..`), at most four deep, never SKILL.md itself.
 pub fn valid_path(p: &str) -> Result<(), String> {
+    path_within(p, MAX_DEPTH)
+}
+
+/// `valid_path` for a skill the person adds: at most `MAX_ADDED_DEPTH` deep.
+pub fn valid_added_path(p: &str) -> Result<(), String> {
+    path_within(p, MAX_ADDED_DEPTH)
+}
+
+fn path_within(p: &str, depth: usize) -> Result<(), String> {
     let bad = |why: &str| Err(format!("file path {:?}: {why}", one_line(p)));
     if p.is_empty() || p.len() > MAX_PATH {
         return bad("empty or too long");
     }
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() > MAX_DEPTH {
-        return bad("more than four folders deep");
+    if parts.len() > depth {
+        return bad(&format!("more than {depth} folders deep"));
     }
     for part in &parts {
         if part.is_empty()
@@ -284,10 +317,72 @@ pub fn check_stored(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(
     Ok(())
 }
 
-/// A skill the person adds from outside (`skill_add`, `clio skills add`), SKILL.md included: at
-/// most this many files and bytes. `skill_write`'s limits are the ones above.
+/// The instructions of a skill the person adds from outside (`skill_add`, `clio skills add`),
+/// SKILL.md included: at most this many files and bytes (what the judge reads and the box shows).
+/// `skill_write`'s limits are the ones above.
 pub const MAX_ADDED_FILES: usize = 100;
 pub const MAX_ADDED_BYTES: usize = 1 << 20;
+/// A whole added skill, instructions and resources: at most this many files and bytes. About
+/// 2.5 times the files and 1.8 times the bytes of the largest real skill measured (taste-skill:
+/// 1 631 files, 34.9 MiB), and held once in memory while it is read.
+pub const MAX_SKILL_FILES: usize = 4000;
+pub const MAX_SKILL_BYTES: usize = 64 << 20;
+/// Folders deep, at most, in an added skill (taste-skill goes 5 deep).
+pub const MAX_ADDED_DEPTH: usize = 8;
+
+/// A file of an added skill that is not an instruction (S-68): stored byte for byte, never read
+/// as Clio's own text. Its bytes travel apart (staged); this is what is shown and digested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resource {
+    pub path: String,
+    pub size: u64,
+    /// Of its bytes, hex.
+    pub sha256: String,
+    /// It starts with `#!` or its name is a script's: the box names it.
+    #[serde(default)]
+    pub script: bool,
+}
+
+/// A name an instruction may have: a document of markdown or plain text. Anything else of an
+/// added skill is a resource, whatever it holds or says.
+pub fn instruction_kind(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    path.eq_ignore_ascii_case("SKILL.md")
+        || [".md", ".markdown", ".txt"].iter().any(|e| p.ends_with(e))
+}
+
+/// A script's name, by its extension.
+pub fn script_name(path: &str) -> bool {
+    [
+        ".sh", ".bash", ".py", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1",
+    ]
+    .iter()
+    .any(|e| path.to_ascii_lowercase().ends_with(e))
+}
+
+/// `n` bytes for a person: B, KiB or MiB.
+pub fn size_text(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1 << 20 {
+        format!("{:.1} KiB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", n as f64 / f64::from(1 << 20))
+    }
+}
+
+/// What a limit refuses, in fixed words: what was found, the limit and by how much it is over.
+fn over(what: &str, found: u64, limit: u64, bytes: bool) -> String {
+    let n = |v: u64| {
+        if bytes { size_text(v) } else { v.to_string() }
+    };
+    format!(
+        "{} {what}: past the limit of {} by {}",
+        n(found),
+        n(limit),
+        n(found - limit)
+    )
+}
 
 /// `name` and `description` of a SKILL.md's front matter (the YAML between its first two `---`
 /// lines): top-level keys only, each a plain, quoted or block (`>`, `|`) scalar, as plain text.
@@ -537,10 +632,42 @@ pub fn clio_name(s: &str) -> String {
 }
 
 /// A skill the person adds, as found in its source (SKILL.md as written there, not composed):
-/// Clio's name, a description in its front matter, its paths, `MAX_ADDED_FILES` and
-/// `MAX_ADDED_BYTES`, and no character the box would not show as written. Checked when it is
-/// found and again by whoever registers it.
-pub fn check_added(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(), String> {
+/// Clio's name, a description in its front matter, its paths, instructions only of an
+/// instruction's kind, held to `MAX_ADDED_FILES` and `MAX_ADDED_BYTES` and with no character the
+/// box would not show as written; resources with paths of their own (none an instruction's), and
+/// the whole held to `MAX_SKILL_FILES` and `MAX_SKILL_BYTES`. Checked when it is found and again
+/// by whoever registers it.
+pub fn check_added(
+    name: &str,
+    skill_md: &str,
+    files: &[SkillFile],
+    resources: &[Resource],
+) -> Result<(), String> {
+    check_instructions(name, skill_md, files)?;
+    let mut seen: std::collections::HashSet<&str> = files.iter().map(|f| f.path.as_str()).collect();
+    let mut bytes = (skill_md.len() + files.iter().map(|f| f.content.len()).sum::<usize>()) as u64;
+    for r in resources {
+        valid_added_path(&r.path)?;
+        if !seen.insert(r.path.as_str()) {
+            return Err(format!("file {:?} is given twice", one_line(&r.path)));
+        }
+        if r.sha256.len() != 64 || !r.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("file {:?}: no digest", one_line(&r.path)));
+        }
+        bytes = bytes.saturating_add(r.size);
+    }
+    let count = (files.len() + 1 + resources.len()) as u64;
+    if count > MAX_SKILL_FILES as u64 {
+        return Err(over("files", count, MAX_SKILL_FILES as u64, false));
+    }
+    if bytes > MAX_SKILL_BYTES as u64 {
+        return Err(over("in all", bytes, MAX_SKILL_BYTES as u64, true));
+    }
+    Ok(())
+}
+
+/// The instructions of `check_added`.
+fn check_instructions(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<(), String> {
     if !valid_name(name) {
         return Err(format!("{:?} is not a skill name", one_line(name)));
     }
@@ -557,33 +684,36 @@ pub fn check_added(name: &str, skill_md: &str, files: &[SkillFile]) -> Result<()
         ));
     }
     if files.len() + 1 > MAX_ADDED_FILES {
-        return Err(format!(
-            "{} files: a skill takes at most {MAX_ADDED_FILES}",
-            files.len() + 1
+        return Err(over(
+            "instruction files",
+            (files.len() + 1) as u64,
+            MAX_ADDED_FILES as u64,
+            false,
         ));
     }
     let mut seen = std::collections::HashSet::new();
     let mut total = skill_md.len();
     for f in files {
-        valid_path(&f.path)?;
+        valid_added_path(&f.path)?;
+        // Clio's rule decides what is an instruction, never the skill: a script, an image or a
+        // template is never registered as one.
+        if !instruction_kind(&f.path) {
+            return Err(format!(
+                "{:?} is not a document (.md, .markdown, .txt): only a resource, never an instruction",
+                one_line(&f.path)
+            ));
+        }
         if !seen.insert(f.path.as_str()) {
             return Err(format!("file {:?} is given twice", one_line(&f.path)));
         }
         total += f.content.len();
     }
     if total > MAX_ADDED_BYTES {
-        let big = files
-            .iter()
-            .max_by_key(|f| f.content.len())
-            .map_or_else(String::new, |f| {
-                format!(
-                    " (the largest, {}, {} bytes)",
-                    one_line(&f.path),
-                    f.content.len()
-                )
-            });
-        return Err(format!(
-            "{total} bytes{big}: a skill takes at most {MAX_ADDED_BYTES} bytes in all"
+        return Err(over(
+            "of instructions",
+            total as u64,
+            MAX_ADDED_BYTES as u64,
+            true,
         ));
     }
     for (what, t) in std::iter::once(("SKILL.md", skill_md))
@@ -606,6 +736,38 @@ pub fn whole_text(skill_md: &str, files: &[SkillFile]) -> String {
         t.push_str(&format!("\n--- file {} ---\n{}", f.path, f.content));
     }
     t
+}
+
+/// What the judge reads of an added skill: its instructions whole (`whole_text`), then the name of
+/// every resource, never its bytes (a listing of the skill's folder is Clio's own text, so every
+/// name in it has been read).
+pub fn judged_text(skill_md: &str, files: &[SkillFile], resources: &[Resource]) -> String {
+    let mut t = whole_text(skill_md, files);
+    if !resources.is_empty() {
+        t.push_str("\n--- the names of its other files (not read as instructions) ---\n");
+        for r in resources {
+            t.push_str(&r.path);
+            t.push('\n');
+        }
+    }
+    t
+}
+
+/// Whether `rel` (a path under the skill's folder) of registered skill `record` is one of its
+/// instructions: its current version lists it in `instructions`. A version without that list
+/// (written before resources existed, or by Clio) had every file judged and shown: all of it.
+pub fn is_instruction(record: &Value, rel: &str) -> bool {
+    let current = &record["current"];
+    let listed = record["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|v| v["n"] == *current)
+        .map(|v| &v["instructions"]);
+    match listed {
+        Some(Value::Array(a)) => a.iter().any(|p| p.as_str() == Some(rel)),
+        _ => true,
+    }
 }
 
 /// `records/<name>.json` of the skills folder `root`, if the skill is registered.
@@ -915,6 +1077,46 @@ impl ToolHost {
         )
     }
 
+    /// `read` of a resource of a registered, enabled skill (`p`, `rel` under skill `name`): never
+    /// Clio's own text (S-05). Served from the skills folder as outside text: cleaned, marked
+    /// `external` (the guard wraps it as data), the session marked as by a foreign file, and the
+    /// text left for the judge, as a foreign file's is.
+    fn skill_resource(&self, req: &Request, p: &Path, name: &str, rel: &str) -> Response {
+        let refuse = |why: String| self.skill_answer(req, false, "skills/resource", why);
+        if !fs::symlink_metadata(p).is_ok_and(|m| m.is_file()) {
+            return refuse(format!("{}: not a file of the skill", req.tool));
+        }
+        let text = match fs::read(p) {
+            Ok(b) if b.len() <= crate::MAX_RAW_BYTES => String::from_utf8_lossy(&b).into_owned(),
+            Ok(b) => {
+                return refuse(format!(
+                    "[withheld] the output is {} bytes, more than the {} allowed",
+                    b.len(),
+                    crate::MAX_RAW_BYTES
+                ));
+            }
+            Err(e) => return refuse(format!("{}: {e}", req.tool)),
+        };
+        let clean = self.clean(&text);
+        let masked = count_masks(&clean).saturating_sub(count_masks(&text));
+        self.mark(&req.session, "foreign");
+        let what = format!("{rel} (a file of the skill «{name}» that is not its instructions)");
+        self.judge_later_as(req, &what, crate::judge::Agent::No);
+        Response {
+            id: req.id.clone(),
+            ok: true,
+            content: clean,
+            data: json!({ "masked": masked }),
+            decision: DecisionOut {
+                outcome: "allow".into(),
+                rule: "skills/resource".into(),
+                reason: "a skill's resource is outside text, never Clio's own".into(),
+            },
+            tainted: self.is_tainted(&req.session),
+            external: true,
+        }
+    }
+
     /// `read`/`ls` of a file of a registered, enabled skill (`live/<name>/...`): served from the
     /// skills folder, cleaned but not marked as outside text (only the person's `clio` writes that
     /// folder, after the judge and a review). `None`: not such a path, and the call goes on as
@@ -933,8 +1135,14 @@ impl ToolHost {
             Some(Component::Normal(n)) => n.to_str()?,
             _ => return None,
         };
-        if record(root, name).is_none_or(|r| r["enabled"] != Value::Bool(true)) {
+        let rec = record(root, name)?;
+        if rec["enabled"] != Value::Bool(true) {
             return None;
+        }
+        // A resource of the skill (S-05, S-68): outside text, as a foreign file is.
+        let rel = rest.strip_prefix(name).ok()?.to_str()?;
+        if req.tool == "fs_read" && !is_instruction(&rec, rel) {
+            return Some(self.skill_resource(req, &p, name, rel));
         }
         let refuse = |why: &str| {
             Some(self.skill_answer(req, false, "skills/read", format!("{}: {why}", req.tool)))
@@ -1180,11 +1388,11 @@ mod tests {
         // The name, when given, is exactly the one registered.
         let md = "---\nname: other\ndescription: d\n---\n";
         assert!(
-            check_added("mine", md, &[])
+            check_added("mine", md, &[], &[])
                 .unwrap_err()
                 .contains("exactly «mine»")
         );
-        assert!(check_added("other", md, &[]).is_ok());
+        assert!(check_added("other", md, &[], &[]).is_ok());
     }
 
     #[test]
@@ -1236,5 +1444,105 @@ mod tests {
         assert_ne!(a, digest("md", &[f("ab", "c")]));
         assert_ne!(a, digest("md ", &[f("a", "bc")]));
         assert_ne!(a, digest("md", &[]));
+    }
+
+    fn res(path: &str, sha: char, size: u64) -> Resource {
+        Resource {
+            path: path.into(),
+            size,
+            sha256: sha.to_string().repeat(64),
+            script: false,
+        }
+    }
+
+    // S-68: the digest covers every resource (its path and its bytes' SHA-256); a skill without
+    // resources keeps the digest it had before them; and an instruction whose text is a
+    // resource's hash never digests like that resource (a separator no path can spell).
+    #[test]
+    fn the_digest_covers_every_resource_and_keeps_the_old_one_without_them() {
+        let md = "---\nname: x\ndescription: d\n---\n";
+        let doc = SkillFile {
+            path: "a.md".into(),
+            content: "doc".into(),
+        };
+        let base = digest_all(md, std::slice::from_ref(&doc), &[]);
+        assert_eq!(base, digest(md, std::slice::from_ref(&doc)));
+        let one = digest_all(md, std::slice::from_ref(&doc), &[res("a.png", 'a', 1)]);
+        assert_ne!(one, base);
+        assert_ne!(
+            one,
+            digest_all(md, std::slice::from_ref(&doc), &[res("a.png", 'b', 1)])
+        );
+        assert_ne!(
+            one,
+            digest_all(md, std::slice::from_ref(&doc), &[res("b.png", 'a', 1)])
+        );
+        let as_text = SkillFile {
+            path: "a.png".into(),
+            content: "a".repeat(64),
+        };
+        assert_ne!(one, digest(md, &[doc, as_text]));
+    }
+
+    // S-68: an added skill's limits say what was over and by how much; a non-document is never
+    // an instruction; a resource's path is checked as an instruction's (eight deep).
+    #[test]
+    fn an_added_skills_limits_say_what_was_over_and_by_how_much() {
+        let md = "---\nname: x\ndescription: d\n---\n";
+        let many: Vec<Resource> = (0..MAX_SKILL_FILES)
+            .map(|i| res(&format!("r{i}"), 'a', 1))
+            .collect();
+        let e = check_added("x", md, &[], &many).unwrap_err();
+        assert_eq!(e, "4001 files: past the limit of 4000 by 1");
+        assert!(check_added("x", md, &[], &many[1..]).is_ok());
+        let big = [res("a.bin", 'a', MAX_SKILL_BYTES as u64)];
+        let e = check_added("x", md, &[], &big).unwrap_err();
+        assert!(
+            e.starts_with("64.0 MiB in all: past the limit of 64.0 MiB by"),
+            "{e}"
+        );
+        let docs: Vec<SkillFile> = (0..MAX_ADDED_FILES)
+            .map(|i| SkillFile {
+                path: format!("d{i}.md"),
+                content: String::new(),
+            })
+            .collect();
+        let e = check_added("x", md, &docs, &[]).unwrap_err();
+        assert_eq!(e, "101 instruction files: past the limit of 100 by 1");
+        let script = SkillFile {
+            path: "run.sh".into(),
+            content: "echo".into(),
+        };
+        let e = check_added("x", md, &[script], &[]).unwrap_err();
+        assert!(e.contains("never an instruction"), "{e}");
+        assert!(check_added("x", md, &[], &[res("a/b/c/d/e/f/g/h", 'a', 1)]).is_ok());
+        assert!(check_added("x", md, &[], &[res("a/b/c/d/e/f/g/h/i", 'a', 1)]).is_err());
+        assert!(check_added("x", md, &[], &[res("../x", 'a', 1)]).is_err());
+        assert!(check_added("x", md, &[], &[res("/etc/x", 'a', 1)]).is_err());
+        let twice = SkillFile {
+            path: "a.md".into(),
+            content: String::new(),
+        };
+        assert!(check_added("x", md, &[twice], &[res("a.md", 'a', 1)]).is_err());
+        let mut nohash = res("a.png", 'a', 1);
+        nohash.sha256 = "zz".into();
+        assert!(check_added("x", md, &[], &[nohash]).is_err());
+    }
+
+    // S-05 S-68: the record decides what is Clio's own text: the current version's list of
+    // instructions; a version without one (from before resources) had every file judged.
+    #[test]
+    fn only_a_listed_instruction_is_clios_own_text() {
+        let r = json!({"current": 2, "versions": [
+            {"n": 1},
+            {"n": 2, "instructions": ["SKILL.md", "references/a.md"]},
+        ]});
+        assert!(is_instruction(&r, "SKILL.md") && is_instruction(&r, "references/a.md"));
+        for not in ["scripts/run.sh", "assets/evil.md", "references", ""] {
+            assert!(!is_instruction(&r, not), "{not}");
+        }
+        let old = json!({"current": 1, "versions": [{"n": 1}, {"n": 2, "instructions": []}]});
+        assert!(is_instruction(&old, "scripts/run.sh"));
+        assert!(is_instruction(&json!({"enabled": true}), "x.sh"));
     }
 }

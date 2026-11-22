@@ -141,6 +141,12 @@ pub struct Version {
     pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// A skill added from outside: the paths of its instructions (SKILL.md and its documents),
+    /// the only files of it the model reads as Clio's own text; every other file is a resource,
+    /// outside text (S-05). `None` (a version written by Clio, shipped, or added before resources
+    /// existed): every file was judged and shown, so all of it is instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,19 +367,27 @@ pub fn register(root: &Path, s: &New<'_>) -> Res<u32> {
 }
 
 fn register_locked(root: &Path, s: &New<'_>) -> Res<u32> {
-    register_kind(root, Kind::Skill, s, None)
+    register_kind(root, Kind::Skill, s, None, &[])
 }
 
 /// `register` into a skills or a services folder (`kind`).
 pub(crate) fn register_in(root: &Path, kind: Kind, s: &New<'_>) -> Res<u32> {
     let _l = lock_in(root, kind)?;
-    register_kind(root, kind, s, None)
+    register_kind(root, kind, s, None, &[])
 }
 
-/// Registers a skill the person added from `origin` (at `commit`), as found there: under the
-/// lock, a name first registered from elsewhere (or Clio's own) is refused, and the same origin
-/// again is a new version.
-pub fn register_added(root: &Path, s: &New<'_>, origin: &str, commit: Option<&str>) -> Res<u32> {
+/// A resource of an added skill and its bytes.
+pub type Resource = (th::Resource, Vec<u8>);
+
+/// Registers a skill the person added from `origin` (at `commit`), as found there, with its
+/// `resources`: under the lock, a name first registered from elsewhere (or Clio's own) is
+/// refused, and the same origin again is a new version.
+pub fn register_added(
+    root: &Path,
+    s: &New<'_>,
+    (origin, commit): (&str, Option<&str>),
+    resources: &[Resource],
+) -> Res<u32> {
     let _l = lock(root)?;
     if let Some(r) = record(root, s.name) {
         let first = r.versions.iter().min_by_key(|v| v.n);
@@ -386,7 +400,7 @@ pub fn register_added(root: &Path, s: &New<'_>, origin: &str, commit: Option<&st
             ));
         }
     }
-    register_kind(root, Kind::Skill, s, Some((origin, commit)))
+    register_kind(root, Kind::Skill, s, Some((origin, commit)), resources)
 }
 
 fn register_kind(
@@ -394,11 +408,23 @@ fn register_kind(
     kind: Kind,
     s: &New<'_>,
     from: Option<(&str, Option<&str>)>,
+    resources: &[Resource],
 ) -> Res<u32> {
+    let manifest: Vec<th::Resource> = resources.iter().map(|(r, _)| r.clone()).collect();
     match from {
-        // As found in its source: its own front matter and the added limits.
-        Some(_) => th::check_added(s.name, s.skill_md, s.files)?,
-        None => kind.check(s.name, s.skill_md, s.files)?,
+        // As found in its source: its own front matter, the added limits, and each resource's
+        // bytes exactly the ones listed.
+        Some(_) => {
+            th::check_added(s.name, s.skill_md, s.files, &manifest)?;
+            if let Some((r, _)) = resources
+                .iter()
+                .find(|(r, b)| b.len() as u64 != r.size || th::sha256_hex(b) != r.sha256)
+            {
+                return Err(format!("{}: not the file that was shown", r.path));
+            }
+        }
+        None if resources.is_empty() => kind.check(s.name, s.skill_md, s.files)?,
+        None => return Err("only a skill added from outside has resources".into()),
     }
     let old = record(root, s.name);
     // One more than any version the record or the folder has: a folder a failed registration
@@ -427,18 +453,25 @@ fn register_kind(
     let tmp = dir.with_file_name(format!(".tmp-{n}-{}", std::process::id()));
     clear(&tmp)?;
     let built = write_tree_named(&tmp, kind.main(), s.skill_md, s.files)
+        .and_then(|()| write_resources(&tmp, resources))
         .and_then(|()| fs::rename(&tmp, &dir).map_err(|e| io_err(&dir, &e)));
     if let Err(e) = built {
         return Err(also(e, clear(&tmp)));
     }
     let version = Version {
         n,
-        sha256: th::digest(s.skill_md, s.files),
+        sha256: th::digest_all(s.skill_md, s.files, &manifest),
         at_ms: now_ms(),
         by: s.by.into(),
         verdict: s.verdict.into(),
         origin: from.map(|f| f.0.to_owned()),
         commit: from.and_then(|f| f.1.map(str::to_owned)),
+        // What the model reads as Clio's own text: the instructions, by path (S-05).
+        instructions: from.map(|_| {
+            std::iter::once("SKILL.md".to_owned())
+                .chain(s.files.iter().map(|f| f.path.clone()))
+                .collect()
+        }),
     };
     let mut r = old.clone().unwrap_or_else(|| Record {
         name: s.name.into(),
@@ -531,12 +564,38 @@ pub(crate) fn write_tree_named(
     files: &[SkillFile],
 ) -> Res<()> {
     new_dir(dir)?;
+    write_files(
+        dir,
+        std::iter::once((main, skill_md.as_bytes(), true)).chain(
+            files
+                .iter()
+                .map(|f| (f.path.as_str(), f.content.as_bytes(), false)),
+        ),
+    )
+}
+
+/// The resources of an added skill, byte for byte, into `dir` (made by `write_tree_named`).
+fn write_resources(dir: &Path, resources: &[Resource]) -> Res<()> {
+    write_files(
+        dir,
+        resources
+            .iter()
+            .map(|(r, b)| (r.path.as_str(), b.as_slice(), false)),
+    )
+}
+
+/// Files into `dir`, a folder this process just made: each path checked (but the main file's),
+/// every folder on its way made here one level at a time (one there already is one made here, a
+/// folder and never a link), every file new; a script (`#!`) 0700, the rest 0600.
+fn write_files<'a>(
+    dir: &Path,
+    entries: impl Iterator<Item = (&'a str, &'a [u8], bool)>,
+) -> Res<()> {
     let mut made = HashSet::new();
-    for (i, (path, content)) in std::iter::once((main, skill_md))
-        .chain(files.iter().map(|f| (f.path.as_str(), f.content.as_str())))
-        .enumerate()
-    {
-        th::valid_path(path).or_else(|e| if i == 0 { Ok(()) } else { Err(e) })?;
+    for (path, content, main) in entries {
+        if !main {
+            th::valid_added_path(path)?;
+        }
         let mut at = dir.to_path_buf();
         for part in Path::new(path)
             .parent()
@@ -545,15 +604,19 @@ pub(crate) fn write_tree_named(
         {
             at.push(part);
             if made.insert(at.clone()) {
-                new_dir(&at)?;
+                match fs::symlink_metadata(&at) {
+                    Ok(m) if m.is_dir() => {}
+                    Ok(_) => return Err(format!("{}: not a folder", at.display())),
+                    Err(_) => new_dir(&at)?,
+                }
             }
         }
-        let mode = if content.starts_with("#!") {
+        let mode = if content.starts_with(b"#!") {
             0o700
         } else {
             0o600
         };
-        new_file(&dir.join(path), mode, content.as_bytes())?;
+        new_file(&dir.join(path), mode, content)?;
     }
     Ok(())
 }
@@ -913,11 +976,31 @@ pub fn register_found(root: &Path, a: &Value) -> Res<String> {
     let s = |k: &str| a[k].as_str().unwrap_or("");
     let files: Vec<SkillFile> =
         serde_json::from_value(a["files"].clone()).map_err(|e| format!("its files: {e}"))?;
-    if a["sha256"].as_str() != Some(&th::digest(s("skill_md"), &files)) {
+    let manifest: Vec<th::Resource> = match &a["resources"] {
+        Value::Null => vec![],
+        r => serde_json::from_value(r.clone()).map_err(|e| format!("its resources: {e}"))?,
+    };
+    if a["sha256"].as_str() != Some(&th::digest_all(s("skill_md"), &files, &manifest)) {
         return Err(format!(
             "the skill «{}» is not what was shown: nothing was added",
             s("name")
         ));
+    }
+    // Its resources, as they were kept for this yes (named by their SHA-256): each exactly the
+    // bytes shown, or nothing is added.
+    let staged = Path::new(s("staged"));
+    let mut resources = Vec::with_capacity(manifest.len());
+    for r in manifest {
+        let b = fs::read(staged.join(&r.sha256))
+            .ok()
+            .filter(|b| b.len() as u64 == r.size && th::sha256_hex(b) == r.sha256);
+        let Some(b) = b else {
+            return Err(format!(
+                "the files of the skill «{}» kept for your answer are gone or changed: nothing was added (add it again)",
+                s("name")
+            ));
+        };
+        resources.push((r, b));
     }
     let n = register_added(
         root,
@@ -929,9 +1012,15 @@ pub fn register_found(root: &Path, a: &Value) -> Res<String> {
             by: "added",
             verdict: &format!("added (judge: {})", s("judge")),
         },
-        s("origin"),
-        a["commit"].as_str(),
+        (s("origin"), a["commit"].as_str()),
+        &resources,
     )?;
+    if staged
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("skill-"))
+    {
+        let _ = fs::remove_dir_all(staged);
+    }
     // A yes to a skill of the shared folder (S-74): what was said of it before is forgotten.
     if s("origin").starts_with(&clio_toolhost::skill_add::shared_origin("")) {
         let _ = remember(root, |r| {
@@ -1115,7 +1204,7 @@ fn shared_look(
         judge,
         most: None,
         clean,
-        get: &|_, _| false,
+        get: &|_, _| Err(clio_toolhost::skill_add::Miss::NotFound),
     };
     let known = sa::Known {
         quiet: &|o, seen| !ignore && mem.quiet.get(o).is_some_and(|x| x == seen),
@@ -1251,17 +1340,8 @@ fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
     // What waits was judged already: it is not judged again, nor counted.
     let texts: Vec<String> = waiting
         .iter()
-        .filter_map(|p| {
-            let (_, _, md, files) = clio_toolhost::pending::skill_of(p)?;
-            let files: Vec<SkillFile> = files
-                .into_iter()
-                .map(|(path, content)| SkillFile {
-                    path: path.into(),
-                    content: content.into(),
-                })
-                .collect();
-            Some(th::whole_text(md, &files))
-        })
+        .filter(|p| clio_toolhost::pending::skill_of(p).is_some())
+        .map(|p| clio_toolhost::skill_add::judged(&p.args))
         .collect();
     let (mut notes, ask) = shared_look(d, io, false, &|t| texts.iter().any(|w| w == t));
     // The folder could not be read: what waits keeps waiting.
@@ -1496,6 +1576,18 @@ fn add_with(
             {
                 println!("--- {} ---", super::tui::sanitize::line(path));
                 println!("{}", super::tui::sanitize::multiline(text));
+            }
+            // Every resource by name and size: stored as it came, never shown as text.
+            let res = a["resources"].as_array().cloned().unwrap_or_default();
+            if !res.is_empty() {
+                println!("--- resources (stored as they came; not read as instructions) ---");
+            }
+            for r in &res {
+                println!(
+                    "{}  {}",
+                    super::tui::sanitize::line(r["path"].as_str().unwrap_or("")),
+                    th::size_text(r["size"].as_u64().unwrap_or(0))
+                );
             }
             println!();
             continue;
@@ -2332,15 +2424,28 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         );
     }
 
-    fn added(name: &str, origin: &str, body: &str) -> Value {
+    /// An item as `skill_add` sets it aside: one instruction file, and a script as a resource
+    /// kept in `staged` under its SHA-256.
+    fn added(name: &str, origin: &str, body: &str, staged: &Path) -> Value {
         let md = format!("---\nname: {name}\ndescription: >\n  Says hello.\n---\n{body}\n");
         let files = vec![SkillFile {
+            path: "ref.md".into(),
+            content: "Ref.\n".into(),
+        }];
+        let script = b"#!/bin/sh\necho hi\n";
+        let sha = th::sha256_hex(script);
+        fs::create_dir_all(staged).unwrap();
+        fs::write(staged.join(&sha), script).unwrap();
+        let res = vec![th::Resource {
             path: "scripts/a.sh".into(),
-            content: "#!/bin/sh\necho hi\n".into(),
+            size: script.len() as u64,
+            sha256: sha,
+            script: true,
         }];
         serde_json::json!({
             "name": name, "description": "Says hello.", "skill_md": md, "files": files,
-            "sha256": th::digest(&md, &files), "origin": origin,
+            "resources": res, "staged": staged,
+            "sha256": th::digest_all(&md, &files, &res), "origin": origin,
             "commit": "0123456789abcdef0123456789abcdef01234567", "judge": "clean",
         })
     }
@@ -2352,7 +2457,8 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("skills");
         let gh = "github.com/o/r";
-        register_found(&root, &added("hi", gh, "One.")).unwrap();
+        let st = t.path().join("staged");
+        register_found(&root, &added("hi", gh, "One.", &st)).unwrap();
         let first = fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap();
         let v = &record(&root, "hi").unwrap().versions[0];
         assert_eq!((v.origin.as_deref(), v.by.as_str()), (Some(gh), "added"));
@@ -2364,22 +2470,45 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             "{l}"
         );
         // Another origin, or Clio's own, holds the name: refused, nothing changes.
-        let e = register_found(&root, &added("hi", "/elsewhere", "Two.")).unwrap_err();
+        let e = register_found(&root, &added("hi", "/elsewhere", "Two.", &st)).unwrap_err();
         assert!(e.contains("taken by github.com/o/r"), "{e}");
         register(&root, &new("mine", &md("mine", "Mine."), &[])).unwrap();
-        let e = register_found(&root, &added("mine", gh, "Two.")).unwrap_err();
+        let e = register_found(&root, &added("mine", gh, "Two.", &st)).unwrap_err();
         assert!(e.contains("a skill of Clio's own"), "{e}");
         assert_eq!(record(&root, "hi").unwrap().versions.len(), 1);
         // What was shown, or nothing.
-        let mut a = added("hi", gh, "Two.");
+        let mut a = added("hi", gh, "Two.", &st);
         a["skill_md"] = "---\nname: hi\ndescription: x\n---\nOther.\n".into();
         assert!(
             register_found(&root, &a)
                 .unwrap_err()
                 .contains("not what was shown")
         );
+        // A resource kept for the yes that is gone or not the bytes shown: nothing is added.
+        let kept = added("hi", gh, "Two.", &st);
+        let sha = kept["resources"][0]["sha256"].as_str().unwrap().to_owned();
+        fs::write(st.join(&sha), "#!/bin/sh\nrm -rf ~\n").unwrap();
+        let e = register_found(&root, &kept).unwrap_err();
+        assert!(e.contains("gone or changed"), "{e}");
+        fs::remove_file(st.join(&sha)).unwrap();
+        let e = register_found(&root, &kept).unwrap_err();
+        assert!(e.contains("gone or changed"), "{e}");
+        assert_eq!(record(&root, "hi").unwrap().versions.len(), 1);
+        // S-68: nothing turns a resource into an instruction: a script listed among the files
+        // Clio reads as her own is refused at the yes, even with a digest that matches.
+        let mut a = added("hi", gh, "Two.", &st);
+        let files = vec![SkillFile {
+            path: "scripts/a.sh".into(),
+            content: "#!/bin/sh\necho hi\n".into(),
+        }];
+        let md = a["skill_md"].as_str().unwrap().to_owned();
+        a["files"] = serde_json::to_value(&files).unwrap();
+        a["resources"] = serde_json::json!([]);
+        a["sha256"] = th::digest_all(&md, &files, &[]).into();
+        let e = register_found(&root, &a).unwrap_err();
+        assert!(e.contains("only a resource, never an instruction"), "{e}");
         // The same origin: a new version; undo goes back.
-        register_found(&root, &added("hi", gh, "Two.")).unwrap();
+        register_found(&root, &added("hi", gh, "Two.", &st)).unwrap();
         assert_eq!(record(&root, "hi").unwrap().current, 2);
         undo(&root, "hi").unwrap();
         assert_eq!(
@@ -2422,7 +2551,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             })
         };
         let clean = |t: &str| Some(t.to_owned());
-        let get = |_: &str, _: &Path| false;
+        let get = |_: &str, _: &Path| Err(clio_toolhost::skill_add::Miss::NotFound);
         let io: AddIo = (&judge, &clean, &get);
         let args = |more: &[&str]| -> Vec<String> {
             std::iter::once(src.display().to_string())
@@ -2450,7 +2579,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert_eq!(records(&root(&d)).len(), 2, "--yes adds without asking");
         // The rows: the judge's words, the plugin's parts not installed, where to read it at
         // that commit and that the conversation read outside text.
-        let mut a = added("x", "/src", "Body.");
+        let mut a = added("x", "/src", "Body.", t.path());
         a["left"] = serde_json::json!(["hooks"]);
         let url = "https://github.com/o/r/tree/0123/skills/x";
         a["url"] = url.into();
@@ -2483,14 +2612,240 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
                 .any(|(p, r)| *p == Part::Warn && r.contains("No is the default"));
             assert_eq!(warn, warns, "{word}: {rows:?}");
             let all: Vec<&str> = rows.iter().map(|(_, r)| r.as_str()).collect();
-            assert!(
-                all.contains(&"scripts/a.sh  18 B  script: runs only if Clio runs it"),
-                "{all:?}"
-            );
+            // Instructions are shown as before; the rest is summed up, its scripts named, and
+            // the box says plainly the judge did not read them and a script runs in the jail.
+            for row in [
+                "instructions, which Clio reads as her own: 2 files, 56 B:",
+                "its other files, stored as they came: 1 file, 18 B",
+                "by folder: scripts/ 1 (18 B)",
+                "by kind: scripts 1 (18 B)",
+                "scripts (1): scripts/a.sh",
+            ] {
+                assert!(all.contains(&row), "{row}: {all:?}");
+            }
+            assert!(rows.iter().any(|(p, r)| *p == Part::Warn
+                && r.starts_with("the judge did not read these files, only their names")
+                && r.ends_with("runs as any command does, in the jail")));
             assert!(
                 all.iter()
                     .any(|r| r.starts_with("not installed: the plugin's hooks"))
             );
         }
+    }
+
+    /// A skill shaped like a large real one (Leonxlnx/taste-skill: 28 documents, scripts,
+    /// templates, about 1,600 data files, over 20 MiB of images nothing compresses) in
+    /// `<dir>/skills/design-taste-frontend`, beside an `install.sh` and plugin parts.
+    fn taste(dir: &Path) -> PathBuf {
+        let s = dir.join("skills/design-taste-frontend");
+        let put = |rel: &str, b: &[u8]| {
+            let p = s.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, b).unwrap();
+        };
+        put(
+            "SKILL.md",
+            b"---\nname: design-taste-frontend\ndescription: Frontend with taste.\n---\nRead references/.\n",
+        );
+        for i in 0..22 {
+            put(
+                &format!("references/r{i:02}.md"),
+                format!("Ref {i}.\n").as_bytes(),
+            );
+        }
+        for i in 0..5 {
+            put(&format!("assets/a{i}.md"), b"An asset note.\n");
+        }
+        for i in 0..10 {
+            put(
+                &format!("scripts/s{i}.mjs"),
+                format!("#!/usr/bin/env node\nconsole.log({i});\n").as_bytes(),
+            );
+        }
+        put("templates/page.html", b"<html></html>\n");
+        put("templates/page.css", b"body{}\n");
+        for i in 0..1600 {
+            put(
+                &format!("library/item-{i:04}.json"),
+                format!("{{\"n\":{i}}}\n").as_bytes(),
+            );
+        }
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in 0..36 {
+            let img: Vec<u8> = (0..600 * 1024)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect();
+            put(&format!("assets/img/i{i:02}.png"), &img);
+        }
+        fs::write(dir.join("install.sh"), "#!/bin/sh\necho never run\n").unwrap();
+        fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+        fs::write(dir.join(".claude-plugin/plugin.json"), "{}").unwrap();
+        s
+    }
+
+    /// The store's copy of `name` as it reads from disk: instructions, resources, digest.
+    fn stored_digest(root: &Path, name: &str) -> String {
+        let live = root.join("live").join(name);
+        let r = record(root, name).unwrap();
+        let v = r.versions.iter().find(|v| v.n == r.current).unwrap();
+        let listed = v.instructions.clone().unwrap();
+        let files: Vec<SkillFile> = listed[1..]
+            .iter()
+            .map(|p| SkillFile {
+                path: p.clone(),
+                content: fs::read_to_string(live.join(p)).unwrap(),
+            })
+            .collect();
+        let resources: Vec<th::Resource> = tree(&live)
+            .into_iter()
+            .map(|(p, b, _)| (p.to_string_lossy().into_owned(), b))
+            .filter(|(p, _)| !listed.contains(p))
+            .map(|(path, b)| th::Resource {
+                path,
+                size: b.len() as u64,
+                sha256: th::sha256_hex(&b),
+                script: false,
+            })
+            .collect();
+        let md = fs::read_to_string(live.join("SKILL.md")).unwrap();
+        th::digest_all(&md, &files, &resources)
+    }
+
+    // S-68: a skill shaped like a large real one installs whole, from a GitHub archive and from
+    // a folder: every file byte for byte (images and scripts too, a `#!` script runnable), its
+    // instructions listed, every file in the version's digest; a changed resource is a new
+    // version with another digest; what is beside the skill (`install.sh`, plugin parts) is not
+    // taken.
+    #[test]
+    fn a_large_real_skill_installs_whole_from_an_archive_and_from_a_folder() {
+        use clio_toolhost::TextVerdict;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("data");
+        let d = Dirs {
+            config: t.path().join("config"),
+            runs: data.join("runs"),
+            data,
+            runtime: None,
+            home: t.path().to_path_buf(),
+        };
+        let repo = t.path().join("taste-skill");
+        let src = taste(&repo);
+        // The archive as codeload serves it: one top folder, the commit in a global header.
+        // Written here, not with the system's tar (BSD tar on macOS has no pax options).
+        let archive = t.path().join("taste.tar.gz");
+        let mut tar = vec![];
+        let mut push = |name: &str, kind: u8, body: &[u8]| {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..107].copy_from_slice(b"0000644");
+            h[124..135].copy_from_slice(format!("{:011o}", body.len()).as_bytes());
+            h[156] = kind;
+            h[257..262].copy_from_slice(b"ustar");
+            tar.extend(h);
+            tar.extend(body);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        };
+        let rec = "comment=0123456789abcdef0123456789abcdef01234567\n";
+        push(
+            "pax_global_header",
+            b'g',
+            format!("{} {rec}", rec.len() + 3).as_bytes(),
+        );
+        for (p, b, _) in tree(&repo) {
+            push(&format!("taste-skill/{}", p.display()), b'0', &b);
+        }
+        tar.extend([0u8; 1024]);
+        let mut gz = std::process::Command::new("gzip")
+            .arg("-c")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = gz.stdin.take().unwrap();
+        let w = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &tar));
+        fs::write(&archive, gz.wait_with_output().unwrap().stdout).unwrap();
+        w.join().unwrap().unwrap();
+        assert!(fs::metadata(&archive).unwrap().len() > 20 << 20);
+        let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
+        let clean = |t: &str| Some(t.to_owned());
+        let urls = std::cell::RefCell::new(vec![]);
+        let get = |url: &str, to: &Path| {
+            urls.borrow_mut().push(url.to_owned());
+            fs::copy(&archive, to)
+                .map(|_| ())
+                .map_err(|e| clio_toolhost::skill_add::Miss::Failed(e.to_string()))
+        };
+        let io: AddIo = (&judge, &clean, &get);
+        let name = "design-taste-frontend";
+        let want: Vec<(PathBuf, Vec<u8>)> =
+            tree(&src).into_iter().map(|(p, b, _)| (p, b)).collect();
+        assert!(want.len() > 1_650, "{}", want.len());
+        let check = |n: u32| {
+            let root = root(&d);
+            let live = root.join("live").join(name);
+            let got = tree(&live);
+            let bytes: Vec<(PathBuf, Vec<u8>)> =
+                got.iter().map(|(p, b, _)| (p.clone(), b.clone())).collect();
+            assert!(
+                bytes == want,
+                "the store holds the skill whole, byte for byte"
+            );
+            for (p, _, mode) in &got {
+                let script = p.starts_with("scripts");
+                assert_eq!(*mode == 0o700, script, "{}", p.display());
+            }
+            let r = record(&root, name).unwrap();
+            assert_eq!(r.current, n);
+            let v = r.versions.iter().find(|v| v.n == n).unwrap();
+            let listed = v.instructions.clone().unwrap();
+            assert_eq!(listed.len(), 28);
+            assert_eq!(listed[0], "SKILL.md");
+            assert!(listed.iter().all(|p| p.ends_with(".md")));
+            assert_eq!(v.sha256, stored_digest(&root, name));
+            assert!(!live.join("install.sh").exists() && !root.join("live/install.sh").exists());
+            v.sha256.clone()
+        };
+        let gh = "https://github.com/o/taste-skill".to_owned();
+        add_with(&d, &[gh, "--yes".into()], io, false, |_| false).unwrap();
+        assert_eq!(urls.borrow().len(), 1, "{:?}", urls.borrow());
+        let first = check(1);
+        // Nothing staged is left behind once added.
+        let staged = fs::read_dir(root(&d).join("staging"))
+            .map(|r| {
+                r.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("skill-"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(staged, 0);
+        // From the folder, after one image changed: a new version, another digest.
+        let mut img = fs::read(src.join("assets/img/i07.png")).unwrap();
+        img[100] ^= 0xff;
+        fs::write(src.join("assets/img/i07.png"), &img).unwrap();
+        let want_now: Vec<(PathBuf, Vec<u8>)> =
+            tree(&src).into_iter().map(|(p, b, _)| (p, b)).collect();
+        assert_ne!(want_now, want);
+        let folder = src.display().to_string();
+        // The folder is another origin: added under the GitHub one's name it is refused, so
+        // the folder's version goes in under a fresh store.
+        let e = add_with(&d, &[folder.clone(), "--yes".into()], io, false, |_| false).unwrap_err();
+        assert!(e.contains("taken by"), "{e}");
+        fs::remove_dir_all(root(&d)).unwrap();
+        add_with(&d, &[folder, "--yes".into()], io, false, |_| false).unwrap();
+        let live = root(&d).join("live").join(name);
+        let got: Vec<(PathBuf, Vec<u8>)> =
+            tree(&live).into_iter().map(|(p, b, _)| (p, b)).collect();
+        assert!(got == want_now, "the folder's copy is whole too");
+        let r = record(&root(&d), name).unwrap();
+        assert_ne!(
+            r.versions[0].sha256, first,
+            "a changed resource changes the digest"
+        );
+        assert_eq!(r.versions[0].sha256, stored_digest(&root(&d), name));
     }
 }

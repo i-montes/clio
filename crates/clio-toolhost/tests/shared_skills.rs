@@ -62,7 +62,7 @@ fn look_knowing(
         }
     };
     let clean = |t: &str| Some(t.to_owned());
-    let get = |_: &str, _: &Path| false;
+    let get = |_: &str, _: &Path| Err(clio_toolhost::skill_add::Miss::NotFound);
     let cx = Ctx {
         home,
         base: home,
@@ -94,6 +94,13 @@ fn register(root: &Path, a: &Value) {
     let files: Vec<SkillFile> = serde_json::from_value(a["files"].clone()).unwrap();
     for f in &files {
         put(&dir.join(&f.path), &f.content);
+    }
+    let staged = Path::new(a["staged"].as_str().unwrap_or(""));
+    for r in a["resources"].as_array().into_iter().flatten() {
+        let b = fs::read(staged.join(r["sha256"].as_str().unwrap())).unwrap();
+        let p = dir.join(r["path"].as_str().unwrap());
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, b).unwrap();
     }
     put(
         &root.join("records").join(format!("{name}.json")),
@@ -347,7 +354,7 @@ fn no_link_is_followed_and_no_folder_is_nothing() {
     assert!(l.ask.is_empty() && l.apart.is_empty() && l.found.is_empty() && read.is_empty());
     let clean = |t: &str| Some(t.to_owned());
     let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
-    let get = |_: &str, _: &Path| false;
+    let get = |_: &str, _: &Path| Err(clio_toolhost::skill_add::Miss::NotFound);
     let err = |home: &Path| {
         let cx = Ctx {
             home,
@@ -495,6 +502,64 @@ fn writing_under_the_shared_folder_always_asks() {
     assert!(!r.machine_only("clio skills sync"));
 }
 
+// S-74, S-68: a skill's resources are part of what the person said yes to: a changed image or
+// script asks again, said by name and size (never a diff of its bytes); a skill a yes took
+// before resources existed (its script then one of its files, under the old digest) is not
+// asked again while it stays as it was.
+#[test]
+fn a_changed_resource_asks_again_and_a_skill_taken_before_resources_does_not() {
+    let t = tempfile::tempdir().unwrap();
+    let (home, root) = (t.path().join("home"), t.path().join("data/skills"));
+    let s = shared(&home);
+    put(&s.join("pics/SKILL.md"), &md("pics", "Pictures."));
+    put(&s.join("pics/ref.md"), "Ref.\n");
+    put(&s.join("pics/scripts/run.sh"), "#!/bin/sh\necho run\n");
+    fs::write(s.join("pics/logo.png"), [0x89, b'P', b'N', b'G', 0, 1]).unwrap();
+    let (l, _) = look(&home, &root, false, &[]);
+    let a = &l.ask[0];
+    let res: Vec<&str> = a["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(res, ["logo.png", "scripts/run.sh"]);
+    let files: Vec<SkillFile> = serde_json::from_value(a["files"].clone()).unwrap();
+    let manifest: Vec<skills::Resource> = serde_json::from_value(a["resources"].clone()).unwrap();
+    assert_eq!(
+        a["sha256"].as_str().unwrap(),
+        skills::digest_all(a["skill_md"].as_str().unwrap(), &files, &manifest)
+    );
+    register(&root, a);
+    let (l, read) = look(&home, &root, false, &[]);
+    assert!(l.ask.is_empty() && read.is_empty(), "{l:?}");
+    // One byte of the image changes: asked again, with what changed by name and size.
+    fs::write(s.join("pics/logo.png"), [0x89, b'P', b'N', b'G', 0, 2, 3]).unwrap();
+    let (l, _) = look(&home, &root, false, &[]);
+    assert_eq!(names(&l), ["pics"]);
+    let change = l.ask[0]["change"].to_string();
+    assert!(
+        change.contains("changed: resource logo.png (7 bytes, was 6;"),
+        "{change}"
+    );
+    assert!(!change.contains("ref.md"), "{change}");
+    // A skill a yes took before: its script was one of its files, its digest the old one.
+    put(&s.join("old/SKILL.md"), &md("old", "Old."));
+    put(&s.join("old/scripts/go.sh"), "#!/bin/sh\necho go\n");
+    let old_md = md("old", "Old.");
+    let old_files = [SkillFile {
+        path: "scripts/go.sh".into(),
+        content: "#!/bin/sh\necho go\n".into(),
+    }];
+    register(
+        &root,
+        &json!({"name": "old", "skill_md": old_md, "files": old_files,
+            "sha256": skills::digest(&old_md, &old_files), "origin": shared_origin("old")}),
+    );
+    let (l, _) = look(&home, &root, false, &[]);
+    assert!(!names(&l).contains(&"old"), "{:?}", names(&l));
+}
+
 #[test]
 fn the_digest_is_the_one_the_yes_checks() {
     let t = tempfile::tempdir().unwrap();
@@ -583,7 +648,7 @@ fn each_skill_is_read_on_its_own_and_the_look_and_an_add_agree() {
         put(&s.join("good").join(junk), "junk");
     }
     put(&s.join("good/scripts/run.sh"), "echo good\n");
-    for k in 0..=skills::MAX_ADDED_FILES {
+    for k in 0..skills::MAX_SKILL_FILES {
         put(&s.join(format!("big/f{k}.md")), "x");
     }
     put(&s.join("big/SKILL.md"), &md("big", "Big."));
@@ -593,7 +658,7 @@ fn each_skill_is_read_on_its_own_and_the_look_and_an_add_agree() {
     let (l, _) = look(&home, &root, false, &[]);
     fs::set_permissions(s.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(names(&l), ["good"]);
-    let files: Vec<&str> = l.ask[0]["files"]
+    let files: Vec<&str> = l.ask[0]["resources"]
         .as_array()
         .unwrap()
         .iter()
@@ -602,7 +667,7 @@ fn each_skill_is_read_on_its_own_and_the_look_and_an_add_agree() {
     assert_eq!(files, ["scripts/run.sh"]);
     let apart = l.apart.join("\n");
     assert!(
-        apart.contains("~/.agents/skills/big: more than 100 files"),
+        apart.contains("~/.agents/skills/big: 4001 files, past the limit of 4000 by 1"),
         "{apart}"
     );
     for o in ["~/.agents/skills/big", "~/.agents/skills/good"] {
@@ -618,7 +683,7 @@ fn each_skill_is_read_on_its_own_and_the_look_and_an_add_agree() {
     // `clio skills add` of that skill, and of the whole folder: the same content and origin.
     let judge = |_: &str, _: &str| Ok(TextVerdict::Clean);
     let clean = |t: &str| Some(t.to_owned());
-    let get = |_: &str, _: &Path| false;
+    let get = |_: &str, _: &Path| Err(clio_toolhost::skill_add::Miss::NotFound);
     let cx = Ctx {
         home: &home,
         base: &home,

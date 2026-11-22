@@ -676,8 +676,9 @@ fn save(state: &Path, p: &Pending) -> Result<(), String> {
         && p.state != State::Waiting
         && let Some(a) = p.args.as_object_mut()
     {
-        a.remove("skill_md");
-        a.remove("files");
+        for k in ["skill_md", "files", "resources", "staged"] {
+            a.remove(k);
+        }
     }
     let text = serde_json::to_string_pretty(&p).map_err(|e| e.to_string())?;
     write_private(&file(state, &p.id)?, &text)

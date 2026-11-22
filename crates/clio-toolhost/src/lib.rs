@@ -89,7 +89,7 @@ pub const MAX_REQUEST_BYTES: usize = 4 << 20;
 const MAX_WRITE_BYTES: usize = 1 << 20;
 /// What a tool may produce before it is cleaned: above this the output is withheld, not cut, so
 /// a secret is never split by a cut before the scrubber saw it whole.
-const MAX_RAW_BYTES: usize = 2 << 20;
+pub(crate) const MAX_RAW_BYTES: usize = 2 << 20;
 /// A command longer than this is refused.
 const MAX_COMMAND_BYTES: usize = 8192;
 /// Breaker: this many denials in a row and the session stops being let through on its own.
@@ -255,7 +255,7 @@ pub struct Config {
     /// A chat's tool host (`--subagents`, S-73): it holds `subagent` calls for the brain.
     pub subagents: bool,
     /// How `skill_add` downloads a repository's archive (`skill_add::curl`; a test serves it).
-    pub archive_get: fn(&str, &Path) -> bool,
+    pub archive_get: fn(&str, &Path) -> Result<(), skill_add::Miss>,
 }
 
 impl Config {
@@ -323,7 +323,7 @@ pub struct ToolHost {
     host: Option<host::Host>,
     secrets: Option<pending::SecretCfg>,
     review: bool,
-    archive_get: fn(&str, &Path) -> bool,
+    archive_get: fn(&str, &Path) -> Result<(), skill_add::Miss>,
     unattended: bool,
     /// Calls that read outside text, waiting for the judge when the guard filters their result.
     to_judge: Mutex<HashMap<String, judge::ToJudge>>,
