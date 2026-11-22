@@ -1,0 +1,10 @@
+Project: Django 5 monolith with Celery workers.
+
+Rules for the assistant:
+- Run `python manage.py test` before proposing a change as finished.
+- Use `python manage.py makemigrations` for model changes and include the migration in the same commit.
+- Never run migrations against production settings.
+- Views go in `views/`, one module per feature; templates in `templates/<app>/`.
+- Use the ORM; raw SQL only with a comment explaining why.
+- Keep Celery tasks idempotent.
+- Do not print the contents of `.env` or `secrets/` in the chat.

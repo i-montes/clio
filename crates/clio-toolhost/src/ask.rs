@@ -440,6 +440,52 @@ const FOREIGN: [&str; 6] = [
     "Descargas",
 ];
 
+/// Another agent's instruction and configuration files, by name (S-77). A list: a name it misses
+/// is read as any other file.
+const AGENT_FILES: [&str; 12] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "GEMINI.md",
+    "SKILL.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".clinerules",
+    "copilot-instructions.md",
+    ".mcp.json",
+    "mcp.json",
+    ".aider.conf.yml",
+];
+
+/// Folders whose every file is another agent's (S-77).
+const AGENT_DIRS: [&str; 5] = [".claude", ".cursor", ".gemini", ".codex", ".agents"];
+
+/// The options of `git clone` that take a value.
+const CLONE_VALUED: [&str; 22] = [
+    "-o",
+    "--origin",
+    "-b",
+    "--branch",
+    "-u",
+    "--upload-pack",
+    "--reference",
+    "--reference-if-able",
+    "--separate-git-dir",
+    "--depth",
+    "--shallow-since",
+    "--shallow-exclude",
+    "-j",
+    "--jobs",
+    "-c",
+    "--config",
+    "--template",
+    "--filter",
+    "--server-option",
+    "--bundle-uri",
+    "--ref-format",
+    "--revision",
+];
+
 /// Wrappers that run the command after them: their options that take a value, and how many plain
 /// words (`timeout`'s duration) come before the command.
 const WRAPPERS: [(&str, &[&str], usize); 11] = [
@@ -1080,6 +1126,209 @@ impl HostRules {
                 self.is_foreign(Path::new(a.trim_start_matches('<')))
             })
         })
+    }
+
+    /// Another agent's instruction or configuration file (S-77): one of `AGENT_FILES` by name
+    /// (without case), `.vscode/tasks.json`, or anything in a folder of `AGENT_DIRS`. Not a file
+    /// of Clio's read-only window of her skills, and not the code of a worktree kept in such a
+    /// folder (`.claude/worktrees/<name>/…`: only what is inside it counts). `path` as given.
+    pub fn is_agent_file(&self, path: &Path) -> bool {
+        let p = path.to_string_lossy();
+        if self.window_any.as_ref().is_some_and(|w| w.is_match(&p))
+            && !path.components().any(|c| c == Component::ParentDir)
+        {
+            return false;
+        }
+        let names: Vec<&str> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        let is = |n: &str, of: &[&str]| of.iter().any(|f| n.eq_ignore_ascii_case(f));
+        let start = names
+            .windows(3)
+            .rposition(|w| is(w[0], &AGENT_DIRS) && w[1] == "worktrees")
+            .map_or(0, |i| i + 3);
+        let names = names.get(start..).unwrap_or_default();
+        names.last().is_some_and(|n| is(n, &AGENT_FILES))
+            || names.iter().any(|n| is(n, &AGENT_DIRS))
+            || names.ends_with(&[".vscode", "tasks.json"])
+    }
+
+    /// The command names another agent's file (`is_agent_file`), as `reads_foreign` looks at
+    /// words; also after a `:` (`git show HEAD:AGENTS.md`).
+    pub fn names_agent_file(&self, command: &str) -> bool {
+        simple_commands(command).iter().flatten().any(|a| {
+            let a = a.rsplit('=').next().unwrap_or(a).trim_start_matches('<');
+            let a = a.rsplit(':').next().unwrap_or(a);
+            self.is_agent_file(Path::new(a))
+        })
+    }
+
+    /// Where each `git clone` and `gh repo clone` of `command` puts the repository, as far as the
+    /// command line tells it (S-77): the folder given, or the repository's name, under where the
+    /// command is then (`cd`, `git -C`). Never the home, nor a folder above it: that would make
+    /// the person's whole home outside text. A list, not a parse: a variable, a script or an
+    /// alias hides it.
+    pub fn clone_dests(&self, command: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for (cwd, w) in self.walk(command) {
+            let (mut base, mut i) = (cwd, 1);
+            let rest = match w[0].as_str() {
+                "git" => {
+                    while let Some(o) = w.get(i).filter(|o| o.starts_with('-')) {
+                        if o == "-C"
+                            && let Some(d) = w.get(i + 1)
+                        {
+                            base = self.resolve(&base, d);
+                        }
+                        i += if matches!(o.as_str(), "-C" | "-c") {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                    match w.get(i..) {
+                        Some([c, rest @ ..]) if c == "clone" => rest,
+                        _ => continue,
+                    }
+                }
+                "gh" => {
+                    while let Some(o) = w.get(i).filter(|o| o.starts_with('-')) {
+                        i += if matches!(o.as_str(), "-R" | "--repo") {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                    match w.get(i..) {
+                        Some([r, c, rest @ ..]) if r == "repo" && c == "clone" => rest,
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+            let gh = w[0] == "gh";
+            let mut pos = Vec::new();
+            let mut j = 0;
+            while let Some(a) = rest.get(j) {
+                j += 1;
+                if a == "--" {
+                    // gh: what follows is git's options; git: only names follow.
+                    if !gh {
+                        pos.extend(rest[j..].iter());
+                    }
+                    break;
+                }
+                if a.starts_with('-') {
+                    let valued: &[&str] = if gh {
+                        &["-u", "--upstream-remote-name"]
+                    } else {
+                        &CLONE_VALUED
+                    };
+                    if takes_value(a, valued) {
+                        j += 1;
+                    }
+                } else {
+                    pos.push(a);
+                }
+            }
+            let Some(repo) = pos.first() else { continue };
+            let dir = match pos.get(1) {
+                Some(d) => (*d).clone(),
+                None => {
+                    let r = repo.trim_end_matches('/');
+                    let r = r.strip_suffix(".git").unwrap_or(r).trim_end_matches('/');
+                    r.rsplit(['/', ':']).next().unwrap_or(r).to_owned()
+                }
+            };
+            if dir.is_empty() {
+                continue;
+            }
+            let dest = self.resolve(&base, &dir);
+            if !self.home.starts_with(&dest) {
+                out.push(dest);
+            }
+        }
+        out
+    }
+
+    /// The command runs in one of `dirs` (after a `cd`) or names a path in one (S-77).
+    /// A `cd` names the folder it goes to, so a word is enough.
+    pub fn reads_under(&self, command: &str, dirs: &[PathBuf]) -> bool {
+        let under = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        !dirs.is_empty()
+            && self.walk(command).iter().any(|(cwd, w)| {
+                w.iter().skip(1).any(|a| {
+                    let a = a.rsplit('=').next().unwrap_or(a).trim_start_matches('<');
+                    !a.is_empty() && !a.starts_with('-') && under(&self.resolve(cwd, a))
+                })
+            })
+    }
+
+    /// Each simple command of `command` (quotes dropped, wrappers peeled, a shell's `-c` looked
+    /// into, the program by its bare name; its options kept) with the folder it runs in: the
+    /// home, then wherever a `cd` or `pushd` before it went.
+    fn walk(&self, command: &str) -> Vec<(PathBuf, Vec<String>)> {
+        let mut out = Vec::new();
+        self.walk_into(&command.replace("\\\n", ""), self.home.clone(), &mut out);
+        out
+    }
+
+    fn walk_into(
+        &self,
+        command: &str,
+        mut cwd: PathBuf,
+        out: &mut Vec<(PathBuf, Vec<String>)>,
+    ) -> PathBuf {
+        for words in split(command) {
+            let mut w = unwrap(&words).to_vec();
+            let Some(p) = w.first_mut() else { continue };
+            if !p.contains(['<', '>']) {
+                *p = p.rsplit('/').next().unwrap_or(p).to_owned();
+            }
+            if let Some(s) = script(&w) {
+                cwd = self.walk_into(s, cwd, out);
+                continue;
+            }
+            if matches!(w[0].as_str(), "cd" | "pushd") {
+                cwd = match w.get(1) {
+                    None => self.home.clone(),
+                    Some(d) if d.starts_with('-') => cwd,
+                    Some(d) => self.resolve(&cwd, d),
+                };
+            }
+            out.push((cwd.clone(), w));
+        }
+        cwd
+    }
+
+    /// `word` as a path from `cwd`: `~`, `$HOME` and `${HOME}` are the home; `.` and `..` are
+    /// taken out by name (no link is followed).
+    fn resolve(&self, cwd: &Path, word: &str) -> PathBuf {
+        let p = if matches!(word, "~" | "$HOME" | "${HOME}") {
+            self.home.clone()
+        } else if let Some(r) = ["~/", "$HOME/", "${HOME}/"]
+            .iter()
+            .find_map(|h| word.strip_prefix(h))
+        {
+            self.home.join(r)
+        } else {
+            cwd.join(word)
+        };
+        let mut out = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                c => out.push(c),
+            }
+        }
+        out
     }
 
     /// A command that reaches past the launcher's network cut by itself (Unix sockets are not cut):
@@ -2414,6 +2663,144 @@ mod tests {
                 .unwrap();
             assert_eq!(r.classify_command("frobnicate x"), Some(class), "{old}");
         }
+    }
+
+    // S-77: another agent's instruction and configuration files are known by name, wherever they
+    // are, and by the folder they are in; a command that names one reads it. A registered skill
+    // of Clio's (its read-only window) and a Claude Code worktree's own code are not such files.
+    #[test]
+    fn another_agents_files_are_known_by_name_and_by_folder() {
+        let live = PathBuf::from("/home/u/.local/share/clio/skills/live");
+        let r = rules().with_window(Path::new("/home/u"), std::slice::from_ref(&live));
+        for p in [
+            "/home/u/app/AGENTS.md",
+            "/home/u/app/agents.md",
+            "/home/u/app/CLAUDE.md",
+            "/home/u/app/CLAUDE.local.md",
+            "/home/u/app/GEMINI.md",
+            "/home/u/app/skills/x/SKILL.md",
+            "/home/u/app/.cursorrules",
+            "/home/u/app/.windsurfrules",
+            "/home/u/app/.clinerules",
+            "/home/u/app/.github/copilot-instructions.md",
+            "/home/u/app/.mcp.json",
+            "/home/u/app/mcp.json",
+            "/home/u/app/.aider.conf.yml",
+            "/home/u/app/.vscode/tasks.json",
+            "/home/u/app/.claude/settings.json",
+            "/home/u/.claude",
+            "/home/u/app/.cursor/rules/setup.mdc",
+            "/home/u/.gemini/settings.json",
+            "/home/u/.codex/config.toml",
+            "/home/u/.agents/skills/x/SKILL.md",
+            "/home/u/app/.claude/worktrees/w/AGENTS.md",
+        ] {
+            assert!(r.is_agent_file(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/home/u/app/README.md",
+            "/home/u/app/src/agents.rs",
+            "/home/u/app/AGENTS.md.bak",
+            "/home/u/app/.vscode/settings.json",
+            "/home/u/app/tasks.json",
+            "/home/u/.local/share/clio/skills/live/demo/SKILL.md",
+            "/home/u/app/.claude/worktrees/w/src/main.rs",
+        ] {
+            assert!(!r.is_agent_file(Path::new(p)), "{p}");
+        }
+        for c in [
+            "cat AGENTS.md",
+            "head -n 50 ~/app/.cursor/rules/setup.mdc",
+            "git show HEAD:CLAUDE.md",
+            "less app/.vscode/tasks.json",
+            "grep -r token .claude",
+            "bash -c 'cat ~/app/.mcp.json'",
+            "cat ~/.agents/skills/x/SKILL.md",
+            "cat /home/u/.local/share/clio/skills/live/../../../../../app/SKILL.md",
+        ] {
+            assert!(r.names_agent_file(c), "{c}");
+        }
+        for c in [
+            "cat README.md",
+            "ls",
+            "cargo test",
+            "cat /home/u/.local/share/clio/skills/live/demo/SKILL.md",
+        ] {
+            assert!(!r.names_agent_file(c), "{c}");
+        }
+    }
+
+    // S-77: the destination of a clone, as far as the command line tells it, wherever the command
+    // is when it clones (`cd`, `git -C`, a shell's `-c`). Never the home or above it.
+    #[test]
+    fn a_clones_destination_is_told_from_the_command_line() {
+        let r = rules();
+        for (c, want) in [
+            ("git clone https://github.com/o/repo.git", "/home/u/repo"),
+            ("git clone git@github.com:o/repo.git dest", "/home/u/dest"),
+            ("git clone https://github.com/o/repo/", "/home/u/repo"),
+            ("cd /tmp && git clone https://x.example/o/r", "/tmp/r"),
+            (
+                "git -C ~/src clone https://x.example/o/r x",
+                "/home/u/src/x",
+            ),
+            (
+                "git clone --depth 1 -b main https://x.example/o/r ~/w/r",
+                "/home/u/w/r",
+            ),
+            (
+                "git clone -- https://x.example/o/r -weird",
+                "/home/u/-weird",
+            ),
+            ("gh repo clone o/repo", "/home/u/repo"),
+            ("gh repo clone o/repo d -- --depth 1", "/home/u/d"),
+            (
+                "bash -c 'cd src && git clone /srv/git/r.git'",
+                "/home/u/src/r",
+            ),
+            ("sudo git clone https://x.example/o/r /opt/r", "/opt/r"),
+            ("cd app; git clone ../r.git lib", "/home/u/app/lib"),
+        ] {
+            assert_eq!(r.clone_dests(c), [PathBuf::from(want)], "{c}");
+        }
+        for c in [
+            "git clone https://x.example/o/r .",
+            "git clone https://x.example/o/r ~",
+            "git clone https://x.example/o/r /",
+            "git status",
+            "git clone",
+            "echo git clone x",
+        ] {
+            assert!(r.clone_dests(c).is_empty(), "{c}");
+        }
+    }
+
+    // S-77: a command reads under a folder when it runs there or names a path in it.
+    #[test]
+    fn a_command_reads_under_a_folder_when_it_runs_there_or_names_it() {
+        let r = rules();
+        let dirs = [PathBuf::from("/home/u/repo")];
+        for c in [
+            "cat repo/README.md",
+            "cd repo && npm test",
+            "cd ~/repo; ls",
+            "grep -r x /home/u/repo/src",
+            "bash -c 'cd repo && cat setup.js'",
+            "wc -l <repo/a.txt",
+            "cd src && cat ../repo/setup.js",
+        ] {
+            assert!(r.reads_under(c, &dirs), "{c}");
+        }
+        for c in [
+            "cat /tmp/x",
+            "ls",
+            "cd repo2 && ls",
+            "cat ~/repository",
+            "cd /tmp && cat repo/a",
+        ] {
+            assert!(!r.reads_under(c, &dirs), "{c}");
+        }
+        assert!(!r.reads_under("cat repo/a", &[]));
     }
 
     #[test]
