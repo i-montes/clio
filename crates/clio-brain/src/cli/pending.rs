@@ -2145,4 +2145,14 @@ mod tests {
         assert!(grant::summary_due(&st).is_none());
         assert!(grant::current(&st).is_none(), "a summary opens nothing");
     }
+
+    // S-68: what the person approves runs with the registered skills shown, as in the session
+    // that set it aside. Without them an approved `cp -r <skill>/assets …` found an empty folder.
+    #[test]
+    fn an_approved_command_sees_the_registered_skills() {
+        let t = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(&t.path().canonicalize().unwrap());
+        let host = host_for(&dirs, "r1").unwrap();
+        assert_eq!(host.windows(), vec![crate::cli::skills::live(&dirs)]);
+    }
 }

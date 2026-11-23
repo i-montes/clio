@@ -359,7 +359,7 @@ fn launch_of(
         },
         extra_env,
         helper: PathBuf::from(env!("CARGO_BIN_EXE_clio")),
-        skills: o.skills.as_ref().map(|r| r.join("live")),
+        skills: o.skills.as_deref().map(clio_toolhost::skills::live),
     })
 }
 

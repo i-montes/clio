@@ -183,14 +183,14 @@ pub fn register_approved(d: &Dirs, p: &clio_toolhost::pending::Pending) -> Res<S
     if let Some(why) = m
         .writes
         .iter()
-        .find_map(|w| sv::write_refused(w, &d.home, &d.control()))
+        .find_map(|w| sv::write_refused(w, &d.home, &d.closed()))
     {
         return Err(format!("writes: {why}: nothing was registered"));
     }
     if let Some(why) = m
         .reads
         .iter()
-        .find_map(|r| sv::read_refused(r, &d.home, &d.control()))
+        .find_map(|r| sv::read_refused(r, &d.home, &d.closed()))
     {
         return Err(format!("reads: {why}: nothing was registered"));
     }
@@ -661,7 +661,7 @@ impl Runner<'_> {
             return Err(NOT_SYSTEMD.into());
         }
         let d = self.dirs;
-        let control = d.control();
+        let control = d.closed();
         let mut writable = s.own.clone();
         for w in s.writes {
             if let Some(why) = sv::write_refused(w, &d.home, &control) {
@@ -1405,6 +1405,19 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("«{name}» is still locked after 2 s");
+    }
+
+    // S-68: no service is given the enabled skills, wherever the person keeps Clio's data.
+    #[test]
+    fn a_service_may_not_write_the_enabled_skills() {
+        let t = tmp();
+        let mut d = dirs_in(&t.path().canonicalize().unwrap());
+        d.data = d.home.join("store/clio");
+        let live = crate::cli::skills::live(&d);
+        fs::create_dir_all(&live).unwrap();
+        let p = live.to_string_lossy();
+        assert_eq!(sv::write_refused(&p, &d.home, &d.control()), None);
+        assert!(sv::write_refused(&p, &d.home, &d.closed()).is_some());
     }
 
     pub(crate) fn dirs_in(root: &Path) -> Dirs {

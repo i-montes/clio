@@ -132,13 +132,6 @@ const READERS: [&str; 18] = [
     "realpath",
 ];
 
-/// Besides `READERS`, programs that may name a file in a window (S-68) without writing it: they
-/// read it or run it (what a skill's script does is the jail's: the window is read-only to it).
-const WINDOW_USERS: [&str; 13] = [
-    "cd", "bash", "sh", "dash", "zsh", "python", "python3", "node", "source", ".", "jq", "cut",
-    "du",
-];
-
 /// `text` with `//` and `/./` in paths as one `/`, as the system reads them.
 fn squash(text: &str) -> String {
     static SLASHES: LazyLock<Regex> =
@@ -801,9 +794,12 @@ impl HostRules {
             })
     }
 
-    /// The read-only windows of Clio's folder (`<data>/skills/live`, a review's stage, S-68): a
+    /// The read-only windows (S-68). The enabled skills (`skills::live`) are beside Clio's
+    /// folders, so a command that names one is judged as for any folder. A review's stage is in
+    /// Clio's folder: a
     /// path to a file in one (plain names, none starting with a dot, so no `..`) is not, by
-    /// itself, a reason for `control`. Every other path of Clio's still is. The path must end
+    /// itself, a reason for `control`, with or without a last `/` or `/.` (`cp -r skill/assets/.`).
+    /// Every other path of Clio's still is. The path must end
     /// where the shell ends a word: a quote, `\`, `$`, a backtick or a glob character after it
     /// would join it to what follows, so the match does not end there.
     pub fn with_window(mut self, home: &Path, live: &[PathBuf]) -> Self {
@@ -811,7 +807,7 @@ impl HostRules {
         self.window = (!spellings.is_empty()).then(|| {
             let any = spellings.join("|");
             Regex::new(&format!(
-                r#"(?P<pre>^|[^\w.~/$=-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(?P<post>"?($|[^\w./\-"'\\$`*?\[\]{{}}~]))"#
+                r#"(?P<pre>^|[^\w.~/$=-])({any})(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+(/\.?)?(?P<post>"?($|[^\w./\-"'\\$`*?\[\]{{}}~]))"#
             ))
             .expect("escaped paths")
         });
@@ -921,10 +917,10 @@ impl HostRules {
             && !self.uses_sudo(command)
     }
 
-    /// Does `command` write in a window, or hand a path in one to something other than a program
-    /// that reads or runs it? A `>` onto it; a path in it glued to anything (an option, a
-    /// script); a program not in `READERS` or `WINDOW_USERS`; `sed` with anything but printing;
-    /// `cp` onto it. After a `cd` into it, any redirection and any `cp` or other program too.
+    /// Does `command` plainly write in a window? A `>` onto it; a path in it glued to anything
+    /// (an option, a script); `sed` with anything but printing; `cp` onto it. After a `cd` into
+    /// it, any redirection and any `cp` too. Any other program naming a file in it is not held
+    /// here: the window is read-only in the jail, whatever the program is.
     fn window_writes(&self, command: &str) -> bool {
         static REDIRECT: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"[0-9&]?>[>|]?\s*([^&\s]|&[^0-9\s-])").expect("a fixed pattern")
@@ -979,7 +975,9 @@ impl HostRules {
                             .skip(1)
                             .any(names)
                 }
-                _ => !(READERS.contains(&p) || WINDOW_USERS.contains(&p)),
+                // Any other program may name a file in a window: the jail binds it read-only
+                // (proved by the launcher's self-test), so `find`, `rsync` or `test` only read.
+                _ => false,
             }
         })
     }
@@ -1030,6 +1028,16 @@ impl HostRules {
             }
         }
         if self.control.as_ref().is_some_and(|r| r.is_match(&outside)) || self.names_by_glob(&seen)
+        {
+            return Some(Control);
+        }
+        // A window is read-only in the jail, and that is what keeps it (S-68): a command that
+        // names one and could act outside the jail's view of it (`sudo`, another process's root
+        // under `/proc`) waits for the person.
+        static PROC: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"/proc/[^/\s]+/(root|cwd)\b").expect("a fixed pattern"));
+        if self.window_any.as_ref().is_some_and(|w| w.is_match(&seen))
+            && (self.uses_sudo(&seen) || PROC.is_match(&seen))
         {
             return Some(Control);
         }
@@ -1837,6 +1845,49 @@ mod tests {
         }
     }
 
+    // S-68: the enabled skills are beside Clio's folders (`skills::live`), so a skill's steps
+    // are commands on a folder like any other, however the shell spells them (each of these
+    // waited for the person while the folder was in Clio's data; seen with taste-skill and
+    // superpowers). What could act outside the jail's read-only view of it still waits.
+    #[test]
+    fn a_skill_beside_clios_folders_is_a_folder_like_any_other() {
+        let live = "/home/u/.local/share/clio-skills";
+        let r = rules().with_window(Path::new("/home/u"), &[PathBuf::from(live)]);
+        let p = "/home/u/proj";
+        for ok in [
+            format!("ls {live}"),
+            format!("S={live}/demo; cp -r $S/assets/* {p}/public/assets/"),
+            format!(
+                "S={live}/demo; cd {p}; for f in lint check; do node $S/scripts/$f.mjs x; done"
+            ),
+            format!("S={live}/demo; node $S/scripts/shoot.mjs --out $(pwd)/shots; node -e '1'"),
+            format!("export SKILL_DIR={live}/demo; cat brief.json | python3 $SKILL_DIR/run.py"),
+            format!(
+                "PYTHONPATH={live}/demo/lib python3 -c 'import kit' --config={live}/demo/c.json"
+            ),
+            format!("cd {live}/demo && cat ../other/SKILL.md <<EOF\nx\nEOF"),
+            format!("find {live}/demo -name '*.md' | xargs wc -l"),
+        ] {
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
+        }
+        for bad in [
+            format!("sudo rm -rf {live}/demo"),
+            format!("S={live}; sudo mount -o remount,rw $S"),
+            format!("cp /tmp/x /proc/1234/root{live}/demo/SKILL.md"),
+            format!("cd /proc/self/root; cat x >> {live}/demo/SKILL.md"),
+            // The rest of Clio's is hers, a skill named or not.
+            format!("cat {live}/demo/SKILL.md /home/u/.local/share/clio/host/bypass.json"),
+        ] {
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
+        }
+        assert_eq!(
+            r.classify_write(Path::new(live).join("demo/x").as_path()),
+            None
+        );
+    }
+
+    // A window in Clio's own folder (a review's stage, S-68): a path in it is told apart from
+    // the rest of the folder word by word.
     #[test]
     fn a_skill_in_the_window_is_not_control_and_the_rest_of_clio_still_is() {
         let r = rules().with_window(
@@ -1898,9 +1949,6 @@ mod tests {
             format!("S={live}/demo; cp {home}/x $S/new.md"),
             format!("cp -t {live}/demo {home}/x"),
             format!("sed -i s/a/b/ {live}/demo/SKILL.md"),
-            format!("S={live}; tee $S/demo/SKILL.md < x"),
-            format!("rm {live}/demo/SKILL.md"),
-            format!("mv {live}/demo/a.md {home}/a.md"),
             // Leaving it, or the variable naming another folder of Clio's.
             format!("S={live}; cat $S/../records/demo.json"),
             format!("S={live}/demo; cd $S && cat ../../records/x"),
@@ -1909,6 +1957,32 @@ mod tests {
         ] {
             assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
             assert!(!r.machine_only(&bad), "{bad}");
+        }
+        // Any program may name a file in the window, as in any folder (seen in a real run of
+        // taste-skill: its kit copied whole, its folders listed and tested for). One that would
+        // write there is not held either: the jail refuses the write (`HostJail::self_test`).
+        for ok in [
+            format!("find {live}/demo/assets -maxdepth 2 | head -50"),
+            format!("rsync -a {live}/demo/assets/ {home}/public/assets/"),
+            format!("cp -r {live}/demo/assets/. {home}/public/assets/"),
+            format!("S={live}/demo; test -d $S/assets && echo $S"),
+            format!("S={live}/demo; tar -C $S -cf - assets | tar -C {home}/public -xf -"),
+            format!("S={live}/demo; cd {home} && bun $S/scripts/run.ts; ls $S/assets/"),
+            format!("rm {live}/demo/SKILL.md"),
+            format!("mv {live}/demo/a.md {home}/a.md"),
+            format!("S={live}; tee $S/demo/SKILL.md < x"),
+            format!("S={live}; sort -o $S/demo/a /tmp/x"),
+        ] {
+            assert_eq!(r.classify_command(&ok), None, "{ok}");
+        }
+        // A last `/` or `/.` ends the path; it starts no other.
+        for bad in [
+            format!("ls {live}/demo/.."),
+            format!("ls {live}/demo/./../../records"),
+            format!("ls {live}/demo/.hidden"),
+            format!("find {live}/demo/ -newer {live}/../records/x"),
+        ] {
+            assert_eq!(r.classify_command(&bad), Some(Control), "{bad}");
         }
         // What a review tried, to make the shell build a path the rules do not see: each one is
         // `control`, and never the machine's alone. `<L>` is the window.
@@ -1952,11 +2026,8 @@ mod tests {
             "S=<L>/demo; cat ${S%/*/*/*}/host/bypass.json",
             "sudo bash <L>/demo/run.sh",
             // Writes in the window.
-            "S=<L>; sort -o $S/demo/a /tmp/x",
             "S=<L>; sort --output=$S/demo/a /tmp/x",
             "S=<L>; sort /tmp/x -o$S/demo/a",
-            "S=<L>; uniq $S/demo/a $S/demo/b",
-            "S=<L>; tree -o $S/demo/a /tmp",
             "S=<L>; sed -Ei s/a/b/ $S/demo/a",
             "S=<L>; sed -ni p $S/demo/a",
             "S=<L>; sed -n 'w '$S/demo/b $S/demo/a",

@@ -71,6 +71,15 @@ impl Dirs {
         v
     }
 
+    /// `control` and the enabled skills beside the data (S-68): what no service or MCP server
+    /// may be given to read or write.
+    pub fn closed(&self) -> Vec<PathBuf> {
+        let live = super::skills::live(self);
+        let mut v = self.control();
+        v.push(live.canonicalize().unwrap_or(live));
+        v
+    }
+
     /// `host.json`, the person's additions to the host-mode rules, when there is one.
     pub fn host_rules(&self) -> Option<PathBuf> {
         Some(self.config.join("host.json")).filter(|p| p.is_file())

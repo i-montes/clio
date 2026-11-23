@@ -371,7 +371,7 @@ impl Port {
         let mf = m::check_stored(name, manifest, &[])?;
         let integrity = p.args["npm"]["integrity"].as_str().unwrap_or("");
         let root = root(&self.dirs);
-        m::check_paths(&mf, &self.dirs.home, &self.dirs.control(), &root)?;
+        m::check_paths(&mf, &self.dirs.home, &self.dirs.closed(), &root)?;
         // Another package under this name would inherit its data folder.
         if let Some(other) = m::current_manifest(&root, &mf.name)
             .map(|c| c.package)
@@ -1383,7 +1383,7 @@ pub fn propose_catalog(d: &Dirs, e: &clio_toolhost::catalog::Entry) -> Res<Pendi
     let args = m::proposal(
         &port,
         &mf,
-        (&d.home, &d.control()),
+        (&d.home, &d.closed()),
         &|t: &str| sanitize::line(t),
         &|| Ok(()),
     )?;
