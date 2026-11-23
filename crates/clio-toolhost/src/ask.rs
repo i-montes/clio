@@ -65,7 +65,8 @@ impl fmt::Display for Class {
 
 /// Why a `control` act on the machine alone waits (turning it off, its users, `sudoers`, a pattern
 /// of the person's): set where the item is classified (`HostRules::machine_only`), and the only
-/// `control` bypass may answer (`grant::bypass_answers`).
+/// `control` bypass answers by itself (`grant::bypass_answers`); any other only after the judge
+/// (`grant::bypass_judges`).
 pub const MACHINE: &str = "it acts on the machine (turning it off, its users or sudo), not on Clio, and starts nothing outside the jail";
 
 /// What makes code run outside the launcher, later or elsewhere: the service manager and D-Bus
@@ -98,8 +99,8 @@ fn bare(text: &str) -> String {
 
 /// A `control` command (or a write's path) that would make code run outside the jail: a launcher
 /// (`LAUNCHERS`), the person's own service manager (`systemctl --user`), a unit folder, a shell
-/// start-up file or Clio's programs (`LAUNCH_PATHS`). Never `MACHINE` (`machine_only`); why bypass
-/// leaves it to the person (`grant::bypass_keeps`).
+/// start-up file or Clio's programs (`LAUNCH_PATHS`). Never `MACHINE` (`machine_only`), so bypass
+/// answers it only after the judge (`grant::bypass_judges`).
 pub fn starts_outside(text: &str) -> bool {
     [text, bare(text).as_str()].iter().any(|t| {
         LAUNCHERS.is_match(t)

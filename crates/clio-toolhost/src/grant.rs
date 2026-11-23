@@ -24,9 +24,13 @@
 //! `<state>/bypass.json` and recorded in `<state>/bypass/<id>.jsonl` (`Kind::Bypass`): a window
 //! with no end or clock that outlives restarts, on only while its record starts with it (a file
 //! written by hand is off), turned on only by the chat's box (`bypass_on`), off by the person or
-//! the judge. It answers what a window does and more (`bypass_answers`), never what would change
-//! Clio's own guards or run new code outside the jail, a change to the person's blocks, a secret
-//! or a suspect session's act. While it is on no window opens.
+//! the judge. It answers what a window does and more (`bypass_answers`); what a window never
+//! answers and would change Clio's own guards, run code outside the jail, add a skill from outside
+//! or change the person's blocks from a marked conversation, it answers only after the judge read
+//! the act clean in the person's place (`bypass_judges`, `2026-11-22-bypass-asks-nothing-design.md`).
+//! It never answers a secret, nor acts in a suspect or unjudged conversation (there the act is
+//! refused: nothing waits). While it is on no window opens. A bypass turned on before that meaning
+//! (its record has no `asks_nothing`) is off: the person sees the new box once.
 
 use std::fs;
 use std::io::Write;
@@ -83,6 +87,10 @@ pub struct Window {
     /// Bypass, not a window: it has no end and outlives restarts (`Kind::Bypass`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bypass: bool,
+    /// Bypass turned on in the box that says it asks nothing (the judge answers in the person's
+    /// place): one without it was turned on before that meaning, and is off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asks_nothing: bool,
 }
 
 impl Window {
@@ -160,12 +168,27 @@ pub fn may_answer(w: &Window, p: &Pending) -> bool {
     covers(p) && p.created_ms >= w.opened_ms
 }
 
-/// May bypass answer `p` by itself: what a window answers and what a window never does (`control`
-/// on the machine, a new service or MCP server or a new version, `on` of what the person turned
-/// off, `remove` or `undo` of a shipped skill, a service's `undo`, a changed MCP tool, what waited
-/// from before). Never what `bypass_keeps` names, whatever the conversation.
+/// May bypass answer `p` by itself, with no judge asked now: what a window answers and what a
+/// window never does (`control` on the machine, a new service or MCP server or a new version, `on`
+/// of what the person turned off, `remove` or `undo` of a shipped skill, a service's `undo`, a
+/// changed MCP tool, what waited from before) and a skill from outside the judge read clean when
+/// the model proposed it. Never what `bypass_keeps` names, whatever the conversation.
 pub fn bypass_answers(p: &Pending) -> bool {
     bypass_keeps(p, Conversation::default()).is_none()
+}
+
+/// What bypass answers only once the judge read the act clean, in the person's place, right when
+/// it is asked (S-72): a `control` act not marked as the machine's alone (it starts code outside
+/// the jail, touches Clio's own setup, names a credential store or writes another agent's home), a
+/// change to the person's blocks from a marked conversation, and a skill from outside (its item
+/// holds the judge's verdict on all its files).
+pub fn bypass_judges(p: &Pending) -> bool {
+    match p.class {
+        Class::Skill => p.tool == crate::skill_add::TOOL,
+        Class::Control => p.reason.as_deref() != Some(crate::ask::MACHINE),
+        Class::Memory => true,
+        _ => false,
+    }
 }
 
 /// What the decision knows of the conversation an item belongs to (S-72): the judge flagged it,
@@ -177,9 +200,21 @@ pub struct Conversation {
     pub round: bool,
 }
 
-/// Why bypass leaves a skill from outside (`skill_add`) to the person.
-pub const SKILL_ADD_KEEPS: &str =
-    "it is text from outside that Clio would read as her own: only your yes adds it";
+/// Under bypass nothing waits for the person (S-72): what the model is told of an act refused in
+/// their place, in fixed words of at most 200 characters (a one-line answer keeps them whole).
+/// The judge flagged the act (the conversation is now `suspect`).
+pub const REFUSED_FLAGGED: &str = "Clio's judge, answering in the person's place under their bypass, flagged this as an attempt to give orders: not done, this conversation is marked and bypass is off";
+/// The judge did not answer for the act.
+pub const REFUSED_SILENT: &str = "Clio's judge did not answer for this, and under the person's bypass nothing waits for them: not done (do not ask the person to do it; try again later)";
+/// The conversation read text the judge flagged.
+pub const REFUSED_SUSPECT: &str = "this conversation read text Clio's judge flagged, and under the person's bypass nothing waits for them: not done (do not ask the person to do it)";
+/// The conversation read text the judge did not answer for.
+pub const REFUSED_UNJUDGED: &str = "this conversation read text Clio's judge did not answer for, and under the person's bypass nothing waits for them: not done (do not ask the person)";
+
+/// Why bypass leaves to the person an act the judge answers for that waits (it waited from before,
+/// or its run failed): the judge reads such an act only right when it is asked.
+pub const NOT_JUDGED_NOW: &str =
+    "bypass does this only right when it is asked, after the judge reads it in your place";
 
 /// Why bypass leaves `p` (of conversation `c`) to the person, in plain words; `None`: it answers
 /// it. The one place the reason comes from, for the tool host's answer, the chat's box and
@@ -196,21 +231,19 @@ pub fn bypass_keeps(p: &Pending, c: Conversation) -> Option<&'static str> {
         return Some("it is a round's item");
     }
     match p.class {
-        // A skill from outside: never bypass's, in any conversation.
-        Class::Skill if p.tool == crate::skill_add::TOOL => Some(SKILL_ADD_KEEPS),
-        // What the list marked as the machine's alone (`ask::MACHINE`) is bypass's; the rest of
-        // `control` either starts code outside the jail or touches Clio's own guards.
-        Class::Control if reason != Some(crate::ask::MACHINE) => {
-            Some(if crate::ask::starts_outside(crate::pending::shown(p)) {
-                "it would start new code outside the jail"
-            } else {
-                "it touches Clio's own setup"
-            })
-        }
-        Class::Memory => {
-            Some("it is a change to your blocks from a conversation that read outside text")
-        }
         Class::Secret => Some("it needs you by nature: a secret only you can type"),
+        // A skill from outside the model proposed holds the judge's verdict on every file: clean,
+        // bypass adds it. What the shared folder's look found nobody asked for (S-74).
+        Class::Skill if p.tool == crate::skill_add::TOOL => {
+            if p.run == crate::skill_add::SHARED_RUN {
+                Some("nobody asked for it: the look at the shared folder found it")
+            } else if p.args["judge"] != "clean" {
+                Some("the judge did not read it clean")
+            } else {
+                None
+            }
+        }
+        _ if bypass_judges(p) => Some(NOT_JUDGED_NOW),
         _ => None,
     }
 }
@@ -296,8 +329,12 @@ impl Kind {
             why: None,
             ..w.clone()
         };
-        (Self::of(&w) == self && (self == Self::Window || recorded() == Some(as_started)))
-            .then_some(w)
+        // Bypass turned on before it asked nothing (no `asks_nothing`) is off, as a damaged one.
+        let trusted = match self {
+            Self::Window => true,
+            Self::Bypass => w.asks_nothing && recorded() == Some(as_started),
+        };
+        (Self::of(&w) == self && trusted).then_some(w)
     }
 
     /// The one open (on) now, if any. Bypass has no end and no clock: on until it is closed.
@@ -467,6 +504,7 @@ pub fn open(state: &Path, hours: u64, by: &[String]) -> Result<Option<Window>, S
         closed_ms: None,
         why: None,
         bypass: false,
+        asks_nothing: false,
     };
     Kind::Window.start(state, &w)?;
     Ok(Some(w))
@@ -490,6 +528,7 @@ pub fn bypass_on(state: &Path) -> Result<Window, String> {
         closed_ms: None,
         why: None,
         bypass: true,
+        asks_nothing: true,
     };
     Kind::Bypass.start(state, &w)?;
     Ok(w)
@@ -675,6 +714,7 @@ mod tests {
             closed_ms: None,
             why: None,
             bypass: false,
+            asks_nothing: false,
         }
     }
 
@@ -810,31 +850,34 @@ mod tests {
         close(st, "closed by you").unwrap();
         assert!(summary_due(st).is_none());
     }
-    // S-72: bypass answers each class a window does and what a window never does (control on the
-    // machine, a service, an MCP server, `on` of what the person turned off, a changed tool, what
-    // waited from before), and never what would change Clio's own guards (control without the
-    // list's machine mark), a secret, a block change, a suspect session's act or a round's.
+    // S-72: bypass answers by itself each class a window does and what a window never does
+    // (control on the machine, a service, an MCP server, `on` of what the person turned off, a
+    // changed tool, what waited from before); what would change Clio's own guards (control
+    // without the list's machine mark), a block change and a skill from outside it answers only
+    // after the judge (`bypass_judges`); never a secret, a suspect session's act or a round's.
     #[test]
-    fn bypass_answers_more_than_a_window_and_never_clios_own_guards() {
+    fn bypass_answers_more_than_a_window_and_clios_own_guards_only_after_the_judge() {
         let mut p = crate::pending::tests_item("s");
         p.created_ms = 0;
-        for (class, yes) in [
-            (Class::Delete, true),
-            (Class::Spend, true),
-            (Class::Send, true),
-            (Class::Skill, true),
-            (Class::Service, true),
-            (Class::Mcp, true),
-            (Class::Control, false),
-            (Class::Secret, false),
-            (Class::Memory, false),
+        for (class, yes, judged) in [
+            (Class::Delete, true, false),
+            (Class::Spend, true, false),
+            (Class::Send, true, false),
+            (Class::Skill, true, false),
+            (Class::Service, true, false),
+            (Class::Mcp, true, false),
+            (Class::Control, false, true),
+            (Class::Secret, false, false),
+            (Class::Memory, false, true),
         ] {
             p.class = class;
             assert_eq!(bypass_answers(&p), yes, "{class}");
+            assert_eq!(bypass_judges(&p), judged, "{class}");
         }
         p.class = Class::Control;
         p.reason = Some(crate::ask::MACHINE.into());
         assert!(bypass_answers(&p), "control on the machine");
+        assert!(!bypass_judges(&p), "no judge asked for the machine's alone");
         assert!(!covers(&p), "never under a window");
         p.reason = Some("a round changes no service".into());
         assert!(!bypass_answers(&p));
@@ -849,16 +892,17 @@ mod tests {
             p.reason = Some(why.into());
             assert_eq!(bypass_answers(&p), yes, "{why}");
         }
-        p.class = Class::Memory;
+        p.class = Class::Skill;
         p.reason = None;
-        assert!(!bypass_answers(&p), "a marked session's block change");
+        p.tool = crate::skill_add::TOOL.into();
+        assert!(bypass_judges(&p), "a skill from outside");
     }
 
-    // S-72, S-68: why bypass leaves an item to the person comes from the facts it decided on, in plain
-    // words, one per case: the conversation (unjudged, flagged, a round) first, then the item
-    // (new code outside the jail, Clio's own setup, a block change, a secret, a skill from
-    // outside); what it answers
-    // has none, and `bypass_answers` is exactly "no reason".
+    // S-72, S-68: why bypass leaves an item to the person comes from the facts it decided on, in
+    // plain words, one per case: the conversation (unjudged, flagged, a round) first, then the
+    // item (a secret; an act the judge answers for that waits; a skill from outside the judge did
+    // not read clean, or the shared folder's look found); what it answers has none, and
+    // `bypass_answers` is exactly "no reason".
     #[test]
     fn bypass_says_why_it_leaves_each_item_to_the_person() {
         let mut p = crate::pending::tests_item("s");
@@ -884,32 +928,20 @@ mod tests {
         assert_eq!(why(&p, c), "it is a round's item");
         p.class = Class::Control;
         p.reason = None;
-        for (command, said) in [
-            (
-                "systemd-run --user x",
-                "it would start new code outside the jail",
-            ),
-            (
-                "systemctl --user enable x",
-                "it would start new code outside the jail",
-            ),
-            ("crontab -l", "it would start new code outside the jail"),
-            ("clio grant off", "it touches Clio's own setup"),
-            ("cat ~/.ssh/authorized_keys", "it touches Clio's own setup"),
+        for command in [
+            "systemd-run --user x",
+            "crontab -l",
+            "clio grant off",
+            "cat ~/.ssh/authorized_keys",
         ] {
             p.args = json!({ "command": command });
-            assert_eq!(why(&p, c), said, "{command}");
+            assert_eq!(why(&p, c), NOT_JUDGED_NOW, "{command}");
         }
-        p.args = json!({ "path": "/home/u/.config/systemd/user/x.service" });
-        assert_eq!(why(&p, c), "it would start new code outside the jail");
         p.reason = Some(crate::ask::MACHINE.into());
         assert_eq!(bypass_keeps(&p, c), None, "the machine's alone");
         p.reason = None;
         p.class = Class::Memory;
-        assert_eq!(
-            why(&p, c),
-            "it is a change to your blocks from a conversation that read outside text"
-        );
+        assert_eq!(why(&p, c), NOT_JUDGED_NOW);
         p.class = Class::Secret;
         assert_eq!(
             why(&p, c),
@@ -920,12 +952,20 @@ mod tests {
             assert_eq!(bypass_keeps(&p, c), None, "{class}");
             assert!(bypass_answers(&p));
         }
-        // S-68: a skill from outside, in any conversation.
+        // S-68: a skill from outside, by the verdict its item holds and who proposed it.
         p.class = Class::Skill;
         p.tool = crate::skill_add::TOOL.into();
+        p.args = json!({ "name": "x" });
+        assert_eq!(why(&p, c), "the judge did not read it clean");
+        p.args = json!({ "name": "x", "judge": "flagged" });
+        assert_eq!(why(&p, c), "the judge did not read it clean");
+        p.args = json!({ "name": "x", "judge": "clean" });
+        assert_eq!(bypass_keeps(&p, c), None);
+        assert!(bypass_answers(&p));
+        p.run = crate::skill_add::SHARED_RUN.into();
         assert_eq!(
             why(&p, c),
-            "it is text from outside that Clio would read as her own: only your yes adds it"
+            "nobody asked for it: the look at the shared folder found it"
         );
         assert!(!bypass_answers(&p));
     }
@@ -950,7 +990,7 @@ mod tests {
         );
         close(st, BY_PERSON).unwrap();
         let b = bypass_on(st).unwrap();
-        assert!(b.bypass && b.id.starts_with(BYPASS_ID) && b.by == [BY_BOX]);
+        assert!(b.bypass && b.asks_nothing && b.id.starts_with(BYPASS_ID) && b.by == [BY_BOX]);
         assert_eq!(bypass_on(st).unwrap(), b, "on already: as it is");
         assert!(b.open_at(now_ms() + 400 * 24 * H, Some(5), Some("another boot")));
         assert_eq!(Kind::Bypass.current(st).unwrap(), b);
@@ -973,7 +1013,10 @@ mod tests {
             "what waited from before too"
         );
         p.class = Class::Control;
-        assert!(answering(st, &p).is_none(), "Clio's own guards");
+        assert!(
+            answering(st, &p).is_none(),
+            "Clio's own guards: only after the judge, as they are asked"
+        );
         p.class = Class::Delete;
         let x = Kind::Bypass.begin(st, &p, "rm -r /srv/old").unwrap();
         done(st, &x, "c3", "done (exit 0)");

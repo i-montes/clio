@@ -786,6 +786,11 @@ impl ToolHost {
         let (Some(root), Some(h)) = (self.services_root(), self.host.as_ref()) else {
             return fail("services exist only in a chat on the person's machine (host mode)");
         };
+        // Under bypass nothing waits for the person (S-72): a flagged or unjudged conversation's
+        // service would.
+        if let Some(why) = self.bypass_refuses(&h.cfg.state, &req.session) {
+            return fail(why);
+        }
         let reason = args
             .get("reason")
             .and_then(Value::as_str)

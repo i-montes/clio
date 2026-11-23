@@ -886,6 +886,14 @@ impl ToolHost {
         let Some(root) = self.skills.as_deref() else {
             return fail("skills are not available in this session (only in a chat)");
         };
+        // Under bypass nothing waits for the person (S-72): a flagged or unjudged conversation's
+        // draft would.
+        if let Some(why) = self
+            .grant_state()
+            .and_then(|st| self.bypass_refuses(st, &req.session))
+        {
+            return fail(why);
+        }
         let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("");
         let (name, description) = (s("name"), s("description").trim());
         let files = match files_of(args) {

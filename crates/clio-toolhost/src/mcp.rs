@@ -1376,6 +1376,10 @@ impl ToolHost {
                 "{SUSPECT_REASON}: no server is proposed from this session"
             ));
         }
+        // Under bypass nothing waits for the person (S-72).
+        if let Some(why) = self.bypass_refuses(&h.cfg.state, &req.session) {
+            return fail(why);
+        }
         let reason = args
             .get("reason")
             .and_then(Value::as_str)

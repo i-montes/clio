@@ -2288,7 +2288,8 @@ mod tests {
     // S-74: only a person's chat looks at the shared folder (beside it, once it is open) and gets
     // its box: a `clio run` and a round never look (`tests/pi_chat.rs` checks it end to end), its
     // items are asked in a person's chat and nowhere else, never while a look runs, and bypass
-    // never answers one.
+    // never answers one (nobody asked for it); a skill from outside the model proposed and the
+    // judge read clean, it does (S-72).
     #[test]
     fn only_a_persons_chat_looks_at_the_shared_folder_and_bypass_never_answers_it() {
         let t = tempfile::tempdir().unwrap();
@@ -2318,8 +2319,34 @@ mod tests {
                 panic!("bypass never answers it")
             })
             .unwrap_err();
-        assert!(e.contains("only your yes adds it"), "{e}");
+        assert!(
+            e.ends_with("bypass leaves it to you: nobody asked for it: the look at the shared folder found it"),
+            "{e}"
+        );
         assert!(!grant::covers(&p) && !grant::bypass_answers(&p));
+        // S-72: one the model proposed in this conversation, every file judged clean, bypass
+        // adds through the person's path; one the judge did not read clean it leaves.
+        let st = pending::state(&d);
+        let md2 = "---\nname: hey\ndescription: Says hey.\n---\nHey.\n";
+        let mut b = json!({"name": "hey", "description": "Says hey.", "skill_md": md2,
+            "files": [], "sha256": clio_toolhost::skills::digest(md2, &[]),
+            "origin": "acme/skills", "why": "the person asked", "judge": "clean"});
+        let asked = clio_toolhost::pending::set_aside_added(&st, "r1", "s1", b.clone()).unwrap();
+        assert!(pending::answers_later(&d, &asked, false).is_some());
+        let said = h
+            .grant("s1", false, &asked.id, |_| Ok("added".into()))
+            .unwrap();
+        assert!(said.starts_with("approved under bypass: «skill»"), "{said}");
+        b["judge"] = "flagged".into();
+        b["origin"] = "acme/other".into();
+        let flagged = clio_toolhost::pending::set_aside_added(&st, "r1", "s1", b).unwrap();
+        assert!(pending::answers_later(&d, &flagged, false).is_none());
+        let e = h
+            .grant("s1", false, &flagged.id, |_| -> Result<String, String> {
+                panic!("bypass never answers it")
+            })
+            .unwrap_err();
+        assert!(e.ends_with("the judge did not read it clean"), "{e}");
         // A `clio run`'s side does not ask it.
         h.rounds = false;
         assert!(!h.mine(&p, "s1"));
@@ -2466,10 +2493,7 @@ mod tests {
             .collect();
         assert_eq!(
             keeps,
-            [vec![(
-                "own1".to_owned(),
-                "it touches Clio's own setup".to_owned()
-            )]]
+            [vec![("own1".to_owned(), grant::NOT_JUDGED_NOW.to_owned())]]
         );
         assert!(matches!(got.last(), Some(Input::Bg(Bg::ChatAsks(_)))));
     }
@@ -2640,9 +2664,10 @@ mod tests {
     }
 
     // S-72: the chat's bypass answers what waited from before it was turned on, control on the
-    // machine, and records each with a fixed outcome; never Clio's own guards (control without
-    // the machine's mark), a block change, a secret, a suspect session's item, one of a session
-    // whose judge did not answer, or a round's; `granted_news`
+    // machine, and records each with a fixed outcome; never, by itself, what the judge answers
+    // for only as it is asked (control without the machine's mark, a block change: the tool host
+    // does those inline), a secret, a suspect session's item, one of a session whose judge did
+    // not answer, or a round's; `granted_news`
     // says what the tool host did under it; the judge off turns it off at the next act.
     #[test]
     fn the_chats_bypass_answers_what_waits_but_never_clios_own_guards() {
@@ -2682,11 +2707,8 @@ mod tests {
         );
         // Why bypass leaves each to the person, from the same facts.
         for (id, why) in [
-            ("own1", "it touches Clio's own setup"),
-            (
-                "mem1",
-                "it is a change to your blocks from a conversation that read outside text",
-            ),
+            ("own1", grant::NOT_JUDGED_NOW),
+            ("mem1", grant::NOT_JUDGED_NOW),
             ("sec1", "it needs you by nature: a secret only you can type"),
         ] {
             let err = h.grant("s1", false, id, |_| ran(&h, id, 0)).unwrap_err();

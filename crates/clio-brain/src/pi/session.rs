@@ -76,8 +76,8 @@ pub fn scrub_json(key: &str) -> String {
     json!({ crate::connector::MODEL_KEY_NAME: key }).to_string()
 }
 
-pub const HOST_PROMPT_NAME: &str = "clio-host@16";
-pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@16.md");
+pub const HOST_PROMPT_NAME: &str = "clio-host@17";
+pub const HOST_PROMPT: &str = include_str!("../../../../prompts/system/clio-host@17.md");
 /// The prompt of a subagent (S-73), reader or writer.
 pub const SUBAGENT_PROMPT_NAME: &str = "clio-subagent@1";
 pub const SUBAGENT_PROMPT: &str = include_str!("../../../../prompts/system/clio-subagent@1.md");
@@ -623,7 +623,7 @@ mod tests {
         // The model once took "Jev" (the judge) for the person's name: the judge is not named to it.
         assert!(!PROMPT.contains("Jev"));
         assert!(PROMPT.starts_with("version: 30\n"));
-        assert!(HOST_PROMPT.starts_with("version: 16\n"));
+        assert!(HOST_PROMPT.starts_with("version: 17\n"));
         for t in ["skill_write", "skill_report"] {
             assert!(PROMPT.contains(&format!("`{t}`")) && HOST_PROMPT.contains(&format!("`{t}`")));
         }
@@ -889,12 +889,15 @@ mod tests {
     // Clio's to ask for, never the model's; nothing else changed.
     #[test]
     fn the_host_prompt_only_adds_the_web_search_line() {
-        let was = std::fs::read_to_string(format!(
-            "{}/../../prompts/system/clio-host@15.md",
-            env!("CARGO_MANIFEST_DIR")
-        ))
-        .unwrap();
-        let mut n: Vec<&str> = HOST_PROMPT.lines().collect();
+        let old = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../prompts/system/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let (new, was) = (old("clio-host@16.md"), old("clio-host@15.md"));
+        let mut n: Vec<&str> = new.lines().collect();
         let w: Vec<&str> = was.lines().collect();
         assert_eq!((n[0], w[0]), ("version: 16", "version: 15"));
         let at = n
@@ -912,6 +915,42 @@ mod tests {
         }
         assert_eq!(n[1..], w[1..]);
         assert!(clio_toolhost::catalog::entry("tavily").is_some());
+    }
+
+    // S-72: `clio-host@17` is `@16` with three sentences changed: under bypass Clio's own guards,
+    // code outside the jail, a credential store, a marked session's block change and a skill from
+    // outside run once the judge reads them clean, nothing waits, and the model never tells the
+    // person to do a step because of a permission; nothing else changed.
+    #[test]
+    fn the_host_prompt_only_changes_what_bypass_leaves_to_the_person() {
+        let was = std::fs::read_to_string(format!(
+            "{}/../../prompts/system/clio-host@16.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let n: Vec<&str> = HOST_PROMPT.lines().collect();
+        let w: Vec<&str> = was.lines().collect();
+        assert_eq!(
+            (n.len(), n[0], w[0]),
+            (w.len(), "version: 17", "version: 16")
+        );
+        let changed: Vec<usize> = (1..n.len()).filter(|&j| n[j] != w[j]).collect();
+        assert_eq!(changed.len(), 3, "{changed:?}");
+        let new = changed.iter().map(|&j| n[j]).collect::<Vec<_>>().join("\n");
+        for want in [
+            "run only once Clio's judge reads them clean in the person's place",
+            "a command that opens the person's credential stores",
+            "nothing waits for the person",
+            "never tell the person to do a step themselves because of a permission",
+            "only a secret and a question still wait for them",
+            "Clio's judge reads it in their place instead",
+            "Clio adds it by herself once her judge read every file clean",
+        ] {
+            assert!(new.contains(want), "{want}");
+        }
+        assert!(
+            !HOST_PROMPT.contains("bypass or not") && !HOST_PROMPT.contains("nor bypass writes")
+        );
     }
 
     // S-68: `clio-agent@29` and `clio-host@13` are `@28` and `@12` with one line more in Skills,

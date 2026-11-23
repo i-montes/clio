@@ -32,6 +32,9 @@ impl MemoryPort for Judge {
     fn get(&self, _: i64) -> Result<MemoryItem, String> {
         Err("no".into())
     }
+    fn judge_on(&self) -> bool {
+        true
+    }
     fn judge_text(&self, text: &str, _: &str) -> TextVerdict {
         self.asked.lock().unwrap().push(text.to_owned());
         if self.silent {
@@ -1226,6 +1229,86 @@ fn a_name_of_another_origin_is_refused_and_the_same_origin_is_a_new_version() {
     let (repo, _) = publish(&source(&c));
     let r = add(&c, "s", json!({"source": repo, "reason": "r"}));
     assert!(!r.ok && r.content.contains("clio skills add"), "{r:?}");
+}
+
+/// Host mode as a person's chat (it may be asked a secret, so its check answers what waits).
+fn chat_env(judge: Option<Judge>) -> Env {
+    env_full(true, false, judge, |c| {
+        c.secrets = Some(clio_toolhost::pending::SecretCfg {
+            state: c.host.as_ref().unwrap().state.clone(),
+            run: "r1".into(),
+            person: c.work.join("no-vault.sock"),
+        });
+    })
+}
+
+// S-72 S-68: under bypass the verdict a skill's item holds answers in the person's place. Every
+// file clean: it waits only for the chat's check, which adds it under bypass (the model is told
+// so, and not to ask the person); one flagged: nothing is set aside, the conversation becomes
+// `suspect` and bypass turns off for every conversation; not judged: refused, nothing waits.
+#[test]
+fn under_bypass_the_judges_reading_adds_a_skill_or_refuses_it() {
+    let e = chat_env(None);
+    let st = e.data.join("host");
+    let b = clio_toolhost::grant::bypass_on(&st).unwrap();
+    let src = source(&e);
+    std::fs::remove_dir_all(src.join("skills/evil")).unwrap();
+    let (repo, _) = publish(&src);
+    let r = add(
+        &e,
+        "s",
+        json!({"source": repo, "reason": "the person asked"}),
+    );
+    assert!(r.ok, "{r:?}");
+    assert!(
+        r.content
+            .contains("Clio adds each by herself when this turn ends")
+            && r.content.contains("Do not ask the person"),
+        "{r:?}"
+    );
+    let items = clio_toolhost::pending::list(&st);
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        clio_toolhost::grant::answering(&st, &items[0]).map(|w| w.id),
+        Some(b.id.clone())
+    );
+    // One file flagged: nothing of the add is set aside, and the flag path.
+    std::fs::remove_dir_all(&src).unwrap();
+    let (repo, _) = publish(&source(&e));
+    let r = add(
+        &e,
+        "s2",
+        json!({"source": repo, "reason": "the person asked"}),
+    );
+    assert!(!r.ok, "{r:?}");
+    assert!(
+        r.content.contains(clio_toolhost::grant::REFUSED_FLAGGED)
+            && r.content.ends_with("Nothing was set aside."),
+        "{r:?}"
+    );
+    assert_eq!(clio_toolhost::pending::list(&st).len(), 1, "none set aside");
+    assert!(tainted(&e, "s2"));
+    assert!(clio_toolhost::grant::Kind::Bypass.current(&st).is_none());
+    // Not judged (the judge silent): refused, nothing waits, bypass stays on.
+    let e = chat_env(Some(Judge {
+        flag: FLAG,
+        silent: true,
+        asked: Mutex::default(),
+    }));
+    let st = e.data.join("host");
+    clio_toolhost::grant::bypass_on(&st).unwrap();
+    let (repo, _) = publish(&source(&e));
+    let r = add(
+        &e,
+        "s",
+        json!({"source": repo, "reason": "the person asked"}),
+    );
+    assert!(
+        !r.ok && r.content.contains(clio_toolhost::grant::REFUSED_SILENT),
+        "{r:?}"
+    );
+    assert!(clio_toolhost::pending::list(&st).is_empty());
+    assert!(clio_toolhost::grant::Kind::Bypass.current(&st).is_some());
 }
 
 // S-68: `skill_add` is refused where nobody can be asked or the session is not to be trusted: a

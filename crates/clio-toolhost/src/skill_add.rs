@@ -3,8 +3,9 @@
 //! host's `skill_add` (the model proposes; each skill waits for the person) and the person's
 //! `clio skills add` (asked at the terminal). Nothing here writes the skills folder: it finds the
 //! skills, checks them, has the judge read every file, and gives each one as the arguments of an
-//! item of class `skill` (tool `skill_add`) that only the person's own yes registers: no
-//! permission window and no bypass answers it (`grant`).
+//! item of class `skill` (tool `skill_add`) that only the person's own yes registers, or, under
+//! their bypass, the judge's clean reading in their place (one flagged or not judged is refused
+//! then, never set aside); no permission window answers it (`grant`).
 //!
 //! - GitHub only over https (`codeload.github.com`), at a branch or a tag of that repository (or
 //!   its default branch), never a commit hash: GitHub serves a fork's commits through the parent's
@@ -42,8 +43,10 @@ use crate::skills::{self, SkillFile};
 /// The model's tool, and the tool of every item it sets aside.
 pub const TOOL: &str = "skill_add";
 /// Why each item waits: a skill is text the model will read as Clio's own.
-pub const WAITS: &str =
-    "a skill from outside is text Clio will read as her own: only you add it, every time";
+pub const WAITS: &str = "a skill from outside is text Clio will read as her own: you add it, or, under your bypass, the judge's clean reading of every file does";
+/// The run and session every item of the shared folder's look waits under (S-74): nobody asked
+/// for those, so bypass never adds one.
+pub const SHARED_RUN: &str = "shared-skills";
 /// The downloaded archive, at most (on disk, compressed).
 pub const MAX_ARCHIVE: u64 = 256 << 20;
 /// What the archive unpacks to, at most: streamed, never held.
@@ -1982,7 +1985,8 @@ const MAX_REASON: usize = 300;
 impl crate::ToolHost {
     /// `skill_add {source, names?, reason}`: finds, checks and judges the skills of `source` and
     /// sets each aside for the person (class `skill`, tool `skill_add`). Nothing is registered:
-    /// only the person's own yes does that, never a permission window or bypass. The guard waits
+    /// only the person's own yes does that, or bypass's once the judge read every file clean,
+    /// never a permission window. The guard waits
     /// for it with no limit: once `cancel` says the caller went away, no skill is judged further
     /// and nothing is set aside.
     pub(crate) fn skill_add(
@@ -2015,6 +2019,11 @@ impl crate::ToolHost {
                 "{}: no skill is added from this session",
                 crate::SUSPECT_REASON
             ));
+        }
+        // Under bypass nothing waits for the person (S-72): the judge answers in their place.
+        let bypass = self.bypass_here(&h.cfg.state);
+        if let Some(why) = self.bypass_refuses(&h.cfg.state, &req.session) {
+            return fail(why);
         }
         if let Some(k) = args
             .keys()
@@ -2082,6 +2091,16 @@ impl crate::ToolHost {
             Ok(i) => i,
             Err(why) => return fail(&why),
         };
+        // Under bypass the verdict each item holds answers in the person's place: one flagged
+        // takes the flag path, one not judged is refused; none of them is set aside.
+        if bypass && items.iter().any(|a| a["judge"] == "flagged") {
+            self.mark(&req.session, "suspect");
+            self.close_window_flagged();
+            return fail(crate::grant::REFUSED_FLAGGED);
+        }
+        if bypass && items.iter().any(|a| a["judge"] != "clean") {
+            return fail(crate::grant::REFUSED_SILENT);
+        }
         let origin = items
             .first()
             .and_then(|a| a["origin"].as_str())
@@ -2090,12 +2109,17 @@ impl crate::ToolHost {
         // The person is told when this conversation read text from outside before proposing it.
         let marked = self.is_tainted(&req.session) || self.is_unjudged(&req.session);
         let mut set = vec![];
+        let mut later = true;
         for mut a in items {
             a["why"] = Value::String(self.clean(reason));
             a["marked"] = Value::Bool(marked);
             let name = a["name"].as_str().unwrap_or("").to_owned();
             match crate::pending::set_aside_added(&h.cfg.state, &h.cfg.run, &req.session, a) {
-                Ok(p) => set.push(format!("{} «{name}»", p.id)),
+                Ok(p) => {
+                    later &=
+                        self.answered_later(&h.cfg.state, &p) == Some(crate::grant::Kind::Bypass);
+                    set.push(format!("{} «{name}»", p.id));
+                }
                 Err(e) => {
                     return fail(&format!(
                         "«{name}» could not be set aside ({e}){}",
@@ -2108,15 +2132,18 @@ impl crate::ToolHost {
                 }
             }
         }
-        self.skill_answer(
-            req,
-            true,
-            "skills/add",
+        let text = if later {
             format!(
-                "set aside for the person, from {origin}: {}. Each is added only if the person says yes to it (never a permission window or bypass); then it is available from the next session. Nothing is installed yet. Do not add them again meanwhile; go on with the rest and say so at the end.",
+                "set aside from {origin}: {}. The judge read every file clean in the person's place, so Clio adds each by herself when this turn ends, under the person's bypass; then it is available from the next session, and you hear what came of it in a turn she starts by herself. Nothing is installed yet. Do not ask the person for it, and do not add them again meanwhile; go on with the rest.",
                 set.join(", ")
-            ),
-        )
+            )
+        } else {
+            format!(
+                "set aside for the person, from {origin}: {}. Each is added only if the person says yes to it (never a permission window); then it is available from the next session. Nothing is installed yet. Do not add them again meanwhile; go on with the rest and say so at the end.",
+                set.join(", ")
+            )
+        };
+        self.skill_answer(req, true, "skills/add", text)
     }
 }
 

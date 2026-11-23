@@ -1496,7 +1496,7 @@ impl Ctx {
                             send_grant(d, &id, s.as_ref(), tx);
                         }
                         Ok::<_, String>(format!(
-                            "bypass is on: Clio approves by herself what would ask you, with no end, until /bypass off. {}",
+                            "bypass is on: Clio asks you nothing, her judge decides in your place, with no end, until /bypass off. {}",
                             super::pending::BYPASS_KEEPS
                         ))
                     },
