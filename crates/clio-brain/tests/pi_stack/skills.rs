@@ -16,7 +16,7 @@ const MD: &str = "---\nname: demo\ndescription: \"Says hello in the house style.
 /// `<data>/skills` with `demo` registered and enabled.
 fn skills_of(w: &World) -> PathBuf {
     let root = w.tmp.path().canonicalize().unwrap().join("data/skills");
-    let live = root.join("live/demo");
+    let live = clio_toolhost::skills::live(&root).join("demo");
     std::fs::create_dir_all(&live).unwrap();
     std::fs::create_dir_all(root.join("records")).unwrap();
     std::fs::write(
@@ -40,7 +40,7 @@ fn a_registered_skill_is_listed_and_reads_unwrapped_without_marking() {
     };
     let w = world();
     let root = skills_of(&w);
-    let skill = root.join("live/demo/SKILL.md");
+    let skill = clio_toolhost::skills::live(&root).join("demo/SKILL.md");
     w.put("notes.txt", "a note\n");
     let model = FakeModel::scripted(vec![
         call(
@@ -119,7 +119,7 @@ fn a_call_id_used_again_is_not_a_skill_read() {
     };
     let w = world();
     let root = skills_of(&w);
-    let skill = root.join("live/demo/SKILL.md");
+    let skill = clio_toolhost::skills::live(&root).join("demo/SKILL.md");
     w.put("notes.txt", "a note\n");
     let model = FakeModel::scripted(vec![
         call("read", json!({"path": p(&skill), "__id": "dup"})),
@@ -158,7 +158,7 @@ fn nothing_the_model_does_writes_the_skills_folder() {
     };
     let w = world();
     let root = skills_of(&w);
-    let skill = root.join("live/demo/SKILL.md");
+    let skill = clio_toolhost::skills::live(&root).join("demo/SKILL.md");
     let model = FakeModel::scripted(vec![
         call(
             "write",
@@ -184,5 +184,9 @@ fn nothing_the_model_does_writes_the_skills_folder() {
     assert_eq!(ends.len(), 3, "{ends:?}");
     assert!(ends.iter().all(|e| e.1), "every one refused: {ends:?}");
     assert_eq!(std::fs::read_to_string(&skill).unwrap(), MD);
-    assert!(!root.join("live/demo/owned").exists());
+    assert!(
+        !clio_toolhost::skills::live(&root)
+            .join("demo/owned")
+            .exists()
+    );
 }

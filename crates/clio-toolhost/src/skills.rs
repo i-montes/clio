@@ -29,7 +29,24 @@ use crate::host::{now_ms, private_dir, real};
 use crate::judge::{ToJudge, one_line};
 use crate::{DecisionOut, Request, Response, TextVerdict, ToolHost};
 
+/// The enabled skills' folder inside the skills folder, as it was up to 0.9.0: `live` moves it.
 pub const LIVE: &str = "live";
+
+/// Where the enabled skills are, for the skills folder `root` (`<data>/skills`): beside Clio's
+/// data (`<data>-skills`), not in it. A path in Clio's data is `control` wherever a command names
+/// it, so a skill's own folder had to be told apart from the rest word by word, and ordinary
+/// steps of a skill (a glob, `$(pwd)`, a pipe into its script) waited for the person. Out of it,
+/// a skill's folder is a folder like any other, read-only in every jail (S-68).
+pub fn live(root: &Path) -> PathBuf {
+    match root.parent().and_then(|d| Some((d, d.file_name()?))) {
+        Some((data, name)) => {
+            let mut n = name.to_owned();
+            n.push("-skills");
+            data.with_file_name(n)
+        }
+        None => root.join(LIVE),
+    }
+}
 pub const RECORDS: &str = "records";
 pub const VERSIONS: &str = "versions";
 /// The section every skill of Clio's ends with; `skill_write` adds it from `verify`.
@@ -1135,7 +1152,7 @@ impl ToolHost {
             return None;
         }
         let raw = map.get("path").and_then(Value::as_str)?;
-        let live = root.join(LIVE).canonicalize().ok()?;
+        let live = live(root).canonicalize().ok()?;
         // Copy mode: relative to the copy, so `../../skills/...` lands there too.
         let p = real(&self.work.join(raw))?;
         let rest = p.strip_prefix(&live).ok()?;

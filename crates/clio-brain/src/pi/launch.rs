@@ -118,7 +118,7 @@ pub struct Launch {
     /// The `clio` binary: inside Pi's jail it runs `clio pi-net`, the forwarder to the egress
     /// proxy (ADR 0009). It must be a binary that has that command.
     pub helper: PathBuf,
-    /// Clio's registered, enabled skills (`<data>/skills/live`, S-68): loaded with `--skill`
+    /// Clio's registered, enabled skills (`<data>-skills`, S-68): loaded with `--skill`
     /// (discovery stays off) and mounted read-only in the jail. `None`: no skills.
     pub skills: Option<PathBuf>,
 }

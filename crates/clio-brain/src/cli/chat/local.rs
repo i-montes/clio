@@ -2251,7 +2251,7 @@ mod tests {
     #[test]
     fn the_shipped_skill_and_a_removed_name_wait_for_the_person() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let bundled = kept_for_person(&root, crate::cli::skills::BUNDLED).unwrap();
         assert!(bundled.contains("ships with"), "{bundled}");
         assert_eq!(kept_for_person(&root, "pdf-tools"), None);

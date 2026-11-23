@@ -191,7 +191,7 @@ pub fn root(d: &Dirs) -> PathBuf {
 
 /// The folder Pi loads and commands see: the enabled skills.
 pub fn live(d: &Dirs) -> PathBuf {
-    root(d).join(th::LIVE)
+    th::live(&root(d))
 }
 
 fn record_path(root: &Path, name: &str) -> PathBuf {
@@ -241,10 +241,16 @@ fn lock(root: &Path) -> Res<fs::File> {
 
 /// `lock` of a skills or a services folder (a services folder has no `live/`).
 pub(crate) fn lock_in(root: &Path, kind: Kind) -> Res<fs::File> {
-    for d in [th::LIVE, th::VERSIONS, th::RECORDS] {
-        if d != th::LIVE || kind == Kind::Skill {
-            mkdir_private(&root.join(d))?;
+    for d in [th::VERSIONS, th::RECORDS] {
+        mkdir_private(&root.join(d))?;
+    }
+    if kind == Kind::Skill {
+        // Up to 0.9.0 the enabled skills were `<root>/live`: moved once, as they are.
+        let (old, live) = (root.join(th::LIVE), th::live(root));
+        if old.is_dir() && fs::symlink_metadata(&live).is_err() {
+            fs::rename(&old, &live).map_err(|e| io_err(&old, &e))?;
         }
+        mkdir_private(&live)?;
     }
     let p = root.join(".lock");
     let f = fs::OpenOptions::new()
@@ -644,7 +650,7 @@ fn copy_tree(from: &Path, to: &Path) -> Res<()> {
 /// `live/<name>` becomes version `n`, whole or not at all: built aside (a dot folder, which
 /// neither Pi nor the tool host takes for a skill), then put in place with renames.
 fn install(root: &Path, name: &str, n: u32) -> Res<()> {
-    let live = root.join(th::LIVE);
+    let live = th::live(root);
     let pid = std::process::id();
     let (tmp, old, at) = (
         live.join(format!(".tmp-{name}-{pid}")),
@@ -672,7 +678,7 @@ fn install(root: &Path, name: &str, n: u32) -> Res<()> {
 }
 
 fn uninstall(root: &Path, name: &str) -> Res<()> {
-    let at = root.join(th::LIVE).join(name);
+    let at = th::live(root).join(name);
     match fs::remove_dir_all(&at) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(&at, &e)),
         _ => Ok(()),
@@ -1797,12 +1803,31 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert!(o.status.success(), "{o:?}");
     }
 
+    // S-68: the enabled skills are beside Clio's data, where a command may name them like any
+    // folder; the ones an earlier version left in `skills/live` are moved there once, as they are.
+    #[test]
+    fn the_enabled_skills_are_beside_the_data_and_older_ones_are_moved_there() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("clio/skills");
+        assert_eq!(th::live(&root), t.path().join("clio-skills"));
+        let old = root.join("live/hi");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("SKILL.md"), "kept").unwrap();
+        assert_eq!(register(&root, &new("yo", &md("yo", "b"), &[])).unwrap(), 1);
+        let live = th::live(&root);
+        assert_eq!(
+            fs::read_to_string(live.join("hi/SKILL.md")).unwrap(),
+            "kept"
+        );
+        assert!(live.join("yo/SKILL.md").is_file() && !root.join("live").exists());
+    }
+
     // S-68: what is registered is byte for byte what was reviewed; `undo` brings the version
     // before back exactly; off takes it out of what Pi loads.
     #[test]
     fn register_undo_off_and_remove() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let one = [SkillFile {
             path: "scripts/a.sh".into(),
             content: "#!/bin/bash\necho one\n".into(),
@@ -1813,7 +1838,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         }];
         let (m1, m2) = (md("hi", "First."), md("hi", "Second."));
         assert_eq!(register(&root, &new("hi", &m1, &one)).unwrap(), 1);
-        let live = root.join("live/hi");
+        let live = th::live(&root).join("hi");
         let first = tree(&live);
         assert_eq!(first, tree(&root.join("versions/hi/1")));
         assert_eq!(fs::read_to_string(live.join("SKILL.md")).unwrap(), m1);
@@ -1896,13 +1921,13 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn an_orphan_version_folder_does_not_jam_the_name_and_a_failure_cleans_up() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let m1 = md("hi", "First.");
         fs::create_dir_all(root.join("versions/hi/1")).unwrap();
         fs::write(root.join("versions/hi/1/junk"), "left").unwrap();
         assert_eq!(register(&root, &new("hi", &m1, &[])).unwrap(), 2);
         assert_eq!(
-            fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap(),
+            fs::read_to_string(th::live(&root).join("hi/SKILL.md")).unwrap(),
             m1
         );
         // The record cannot be saved: nothing of version 3 stays, version 2 stays live.
@@ -1911,7 +1936,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert!(register(&root, &new("hi", &m2, &[])).is_err());
         assert!(!root.join("versions/hi/3").exists());
         assert_eq!(
-            fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap(),
+            fs::read_to_string(th::live(&root).join("hi/SKILL.md")).unwrap(),
             m1
         );
         assert_eq!(record(&root, "hi").unwrap().current, 2);
@@ -1919,7 +1944,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         // A new skill whose record cannot be saved is not left live.
         fs::create_dir_all(root.join("records/yo.json.tmp")).unwrap();
         assert!(register(&root, &new("yo", &md("yo", "b"), &[])).is_err());
-        assert!(!root.join("live/yo").exists() && !root.join("versions/yo/1").exists());
+        assert!(!th::live(&root).join("yo").exists() && !root.join("versions/yo/1").exists());
     }
 
     // S-68: the shipped skill is installed when missing, updated when what is installed is an
@@ -1928,7 +1953,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn the_shipped_skill_installs_updates_and_stays_out_when_removed() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let (description, files) = bundled();
         let shipped = th::digest(BUNDLED_FILES[0].1, &files);
         let current = |root: &Path| {
@@ -1987,7 +2012,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
                 .contains("installed again")
         );
         assert_eq!(current(&root).2, shipped);
-        assert!(root.join("live").join(BUNDLED).join("SKILL.md").is_file());
+        assert!(th::live(&root).join(BUNDLED).join("SKILL.md").is_file());
         assert!(set_enabled(&root, "ghost", true, "").is_err());
     }
 
@@ -2018,7 +2043,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn three_failed_reports_in_a_row_turn_a_skill_off() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let run = t.path().join("run");
         let m = md("hi", "b");
         register(&root, &new("hi", &m, &[])).unwrap();
@@ -2043,7 +2068,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         let notes = report(&["failed"]);
         assert_eq!(notes.len(), 1, "{notes:?}");
         let r = record(&root, "hi").unwrap();
-        assert!(!r.enabled && !root.join("live/hi").exists());
+        assert!(!r.enabled && !th::live(&root).join("hi").exists());
         assert!(r.reports.iter().all(|x| x.marked));
         // A reviewed new version turns it back on.
         register(&root, &new("hi", &m, &[])).unwrap();
@@ -2057,12 +2082,12 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn the_mcp_installer_ships_and_passes_its_own_check() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         ensure_in(&root).unwrap();
         let r = record(&root, MCP_INSTALLER).unwrap();
         assert!(r.enabled && r.versions[0].by == "bundled", "{r:?}");
         assert!(is_shipped(MCP_INSTALLER));
-        let live = root.join("live").join(MCP_INSTALLER);
+        let live = th::live(&root).join(MCP_INSTALLER);
         let md = fs::read_to_string(live.join("SKILL.md")).unwrap();
         let cmd = md
             .split("## How to verify")
@@ -2147,13 +2172,13 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn the_service_creator_ships_and_passes_its_own_check() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         ensure_in(&root).unwrap();
         for name in [BUNDLED, SERVICE_CREATOR] {
             let r = record(&root, name).unwrap();
             assert!(r.enabled && r.versions[0].by == "bundled", "{r:?}");
         }
-        let live = root.join("live").join(SERVICE_CREATOR);
+        let live = th::live(&root).join(SERVICE_CREATOR);
         let md = fs::read_to_string(live.join("SKILL.md")).unwrap();
         let verify = md.split("## How to verify").nth(1).unwrap();
         let cmd = verify
@@ -2499,11 +2524,11 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
     #[test]
     fn an_added_skill_keeps_its_origin_and_its_name() {
         let t = tempfile::tempdir().unwrap();
-        let root = t.path().join("skills");
+        let root = t.path().join("data/skills");
         let gh = "github.com/o/r";
         let st = t.path().join("staged");
         register_found(&root, &added("hi", gh, "One.", &st)).unwrap();
-        let first = fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap();
+        let first = fs::read_to_string(th::live(&root).join("hi/SKILL.md")).unwrap();
         let v = &record(&root, "hi").unwrap().versions[0];
         assert_eq!((v.origin.as_deref(), v.by.as_str()), (Some(gh), "added"));
         assert!(v.commit.as_deref().unwrap().starts_with("0123"));
@@ -2556,7 +2581,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert_eq!(record(&root, "hi").unwrap().current, 2);
         undo(&root, "hi").unwrap();
         assert_eq!(
-            fs::read_to_string(root.join("live/hi/SKILL.md")).unwrap(),
+            fs::read_to_string(th::live(&root).join("hi/SKILL.md")).unwrap(),
             first
         );
     }
@@ -2734,7 +2759,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
 
     /// The store's copy of `name` as it reads from disk: instructions, resources, digest.
     fn stored_digest(root: &Path, name: &str) -> String {
-        let live = root.join("live").join(name);
+        let live = th::live(root).join(name);
         let r = record(root, name).unwrap();
         let v = r.versions.iter().find(|v| v.n == r.current).unwrap();
         let listed = v.instructions.clone().unwrap();
@@ -2831,7 +2856,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert!(want.len() > 1_650, "{}", want.len());
         let check = |n: u32| {
             let root = root(&d);
-            let live = root.join("live").join(name);
+            let live = th::live(&root).join(name);
             let got = tree(&live);
             let bytes: Vec<(PathBuf, Vec<u8>)> =
                 got.iter().map(|(p, b, _)| (p.clone(), b.clone())).collect();
@@ -2851,7 +2876,9 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             assert_eq!(listed[0], "SKILL.md");
             assert!(listed.iter().all(|p| p.ends_with(".md")));
             assert_eq!(v.sha256, stored_digest(&root, name));
-            assert!(!live.join("install.sh").exists() && !root.join("live/install.sh").exists());
+            assert!(
+                !live.join("install.sh").exists() && !th::live(&root).join("install.sh").exists()
+            );
             v.sha256.clone()
         };
         let gh = "https://github.com/o/taste-skill".to_owned();
@@ -2881,7 +2908,7 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
         assert!(e.contains("taken by"), "{e}");
         fs::remove_dir_all(root(&d)).unwrap();
         add_with(&d, &[folder, "--yes".into()], io, false, |_| false).unwrap();
-        let live = root(&d).join("live").join(name);
+        let live = live(&d).join(name);
         let got: Vec<(PathBuf, Vec<u8>)> =
             tree(&live).into_iter().map(|(p, b, _)| (p, b)).collect();
         assert!(got == want_now, "the folder's copy is whole too");

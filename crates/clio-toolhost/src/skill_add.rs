@@ -2054,6 +2054,8 @@ impl crate::ToolHost {
             Ok(Source::Folder(p)) => {
                 let mut hidden = crate::walls::closed(home, &[], &[]).0;
                 hidden.extend(h.cfg.control.iter().filter_map(|c| c.canonicalize().ok()));
+                // Nor her own enabled skills, beside her folders: they are already hers.
+                hidden.extend(self.windows().iter().filter_map(|w| w.canonicalize().ok()));
                 let open = p
                     .canonicalize()
                     .is_ok_and(|p| p.is_dir() && !hidden.iter().any(|c| p.starts_with(c)));

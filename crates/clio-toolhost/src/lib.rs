@@ -346,14 +346,14 @@ pub struct ToolHost {
     calls: Option<subagent::Calls>,
 }
 
-/// The folders host-mode commands see read-only inside Clio's masked ones: the skills' `live/`
-/// and the configured `--show`s.
-fn windows(skills: Option<&Path>, shows: &[PathBuf]) -> Vec<PathBuf> {
-    skills
-        .map(|r| r.join(skills::LIVE))
-        .into_iter()
-        .chain(shows.iter().cloned())
-        .collect()
+/// The folders host-mode commands see read-only: the enabled skills (`skills::live`), beside the
+/// data `state` is in whether or not this session reads skills (S-68), and, inside Clio's masked
+/// folders, the configured `--show`s.
+fn windows(state: Option<&Path>, skills: Option<&Path>, shows: &[PathBuf]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = state.into_iter().chain(skills).map(skills::live).collect();
+    v.dedup();
+    v.extend(shows.iter().cloned());
+    v
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -415,7 +415,13 @@ impl ToolHost {
         let (host, exec_status) = match cfg.host {
             Some(h) => {
                 let (mut h, status) = host::Host::new(h, &cfg.scratch, cfg.jail == JailMode::Auto);
-                let windows = windows(cfg.skills.as_deref(), &cfg.shows);
+                let windows = windows(Some(&h.cfg.state), cfg.skills.as_deref(), &cfg.shows);
+                // There before any command runs: a folder that is missing is not mounted
+                // read-only, and a command could make it (S-68).
+                use std::os::unix::fs::DirBuilderExt;
+                let _ = std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(skills::live(&h.cfg.state));
                 if !windows.is_empty() {
                     let both: Vec<PathBuf> = windows
                         .iter()
@@ -612,7 +618,8 @@ impl ToolHost {
 
     /// The folders this host's commands see read-only inside Clio's masked ones (S-68).
     pub fn windows(&self) -> Vec<PathBuf> {
-        windows(self.skills.as_deref(), &self.shows)
+        let state = self.host.as_ref().map(|h| h.cfg.state.as_path());
+        windows(state, self.skills.as_deref(), &self.shows)
     }
 
     pub fn is_tainted(&self, session: &str) -> bool {
@@ -982,7 +989,24 @@ impl ToolHost {
             && let Some(h) = &self.host
             && let Some(p) = map.get("path").and_then(Value::as_str)
         {
+            // The enabled skills are beside Clio's folders, not in them: read as any folder,
+            // written by no tool (S-68).
+            let window = |r: &Path| {
+                matches!(req.tool.as_str(), "fs_write" | "fs_mkdir")
+                    && self
+                        .windows()
+                        .iter()
+                        .any(|w| r.starts_with(w.canonicalize().as_deref().unwrap_or(w)))
+            };
             match h.path(p) {
+                Ok(r) if window(&r) => {
+                    allowed = false;
+                    out = DecisionOut {
+                        outcome: "deny".into(),
+                        rule: "host/control".into(),
+                        reason: host::CONTROL.into(),
+                    };
+                }
                 Ok(r) => real = Some(r),
                 Err((rule, why)) => {
                     allowed = false;
