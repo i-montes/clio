@@ -587,6 +587,16 @@ impl ToolHost {
         args: Value,
         reason: Option<&str>,
     ) -> Response {
+        // Under bypass nothing waits for the person (S-72): a flagged or unjudged conversation's
+        // request is refused.
+        if let Some(why) = self.bypass_refuses(&h.cfg.state, &req.session) {
+            return self.manage_answer(
+                req,
+                false,
+                "bypass/refused",
+                format!("{} was not done: {why}", req.tool),
+            );
+        }
         let now = now_ms();
         let name = args["name"].as_str().unwrap_or("").to_owned();
         let p = Pending {

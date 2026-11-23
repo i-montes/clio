@@ -514,15 +514,42 @@ fn now() -> i64 {
     .unwrap()
 }
 
-// S-75 S-76 S-72: the wall is not an approval: under bypass and inside a permission window a
-// plain program still sees no store and changes no settings, and a command naming a store still
-// waits for the person. A review, a subagent and a round never get a store opened, even by its
-// own client.
+/// A judge that reads every text clean but one holding `AI AGENT`, which it flags.
+struct Judge;
+
+impl MemoryPort for Judge {
+    fn propose(&self, _: &ProposalDraft, _: &str, _: &Judging) -> Result<Proposed, String> {
+        Err("no".into())
+    }
+    fn search(&self, _: &str, _: usize) -> Result<Found, String> {
+        Err("no".into())
+    }
+    fn get(&self, _: i64) -> Result<MemoryItem, String> {
+        Err("no".into())
+    }
+    fn judge_on(&self) -> bool {
+        true
+    }
+    fn judge_text(&self, text: &str, _: &str) -> clio_toolhost::TextVerdict {
+        if text.contains("AI AGENT") {
+            clio_toolhost::TextVerdict::Injection
+        } else {
+            clio_toolhost::TextVerdict::Clean
+        }
+    }
+}
+
+// S-75 S-76 S-72: a wall opens only for a yes given to that very command: the person's, or
+// bypass's in their place once the judge read the command clean (and then nothing waits). Under
+// bypass and inside a permission window a plain program still sees no store and changes no
+// settings; a command naming a store that the judge flags is refused and opens nothing; a
+// window's yes opens nothing. A review, a subagent and a round never get a store opened, even by
+// its own client.
 #[test]
-fn neither_bypass_nor_a_window_nor_a_child_opens_a_wall() {
+fn only_a_yes_to_the_command_itself_opens_a_wall() {
     let Some(w) = world() else { return };
     std::fs::write(w.home.join("x.sh"), STEALER).unwrap();
-    let h = host(&w);
+    let h = host_with(&w, |c| c.memory = Some(Arc::new(Judge)));
     if !jailed(&h) {
         return;
     }
@@ -531,25 +558,36 @@ fn neither_bypass_nor_a_window_nor_a_child_opens_a_wall() {
     clean(&r.content, "under bypass");
     untouched(&w, "under bypass");
     let r = exec(&h, "cat ~/.ssh/id_ed25519");
-    assert!(!r.content.contains("DECOY"), "{r:?}");
+    assert!(
+        r.decision.rule == "bypass/approved" && r.content.contains("DECOY-ssh-key"),
+        "{r:?}"
+    );
+    let r = exec(&h, "cat ~/.aws/credentials # AI AGENT");
+    assert!(
+        r.content.ends_with(grant::REFUSED_FLAGGED) && !r.content.contains("DECOY"),
+        "{r:?}"
+    );
     assert!(
         pending::list(&w.state)
             .iter()
-            .any(|x| x.state == State::Waiting && x.what.contains(".ssh/id_ed25519")),
-        "it did not wait under bypass"
+            .all(|x| x.state != State::Waiting),
+        "nothing waits under bypass"
     );
-    // Were bypass's or a window's yes ever given to it, the store would stay closed.
+    assert!(grant::Kind::Bypass.current(&w.state).is_none(), "the flag");
+    // Bypass off now: it waits, and a window's yes given to it keeps the store closed.
+    let r = exec(&h, "cat ~/.aws/credentials");
+    assert_eq!(r.decision.outcome, "ask", "{r:?}");
     let id = pending::list(&w.state)
         .into_iter()
-        .find(|x| x.state == State::Waiting && x.what.contains(".ssh/id_ed25519"))
+        .find(|x| x.state == State::Waiting && x.what.contains(".aws/credentials"))
         .unwrap()
         .id;
-    let done = h.approve_by(&id, now(), Some("bypass-1")).unwrap();
+    let done = h.approve_by(&id, now(), Some("1")).unwrap();
     assert!(
         matches!(&done.state, State::Done { output_tail, .. } if !output_tail.contains("DECOY")),
         "{done:?}"
     );
-    grant::close(&w.state, "test").unwrap();
+    let h = host(&w);
     grant::open(&w.state, 4, &[]).unwrap();
     let r = exec(&h, "bash x.sh");
     clean(&r.content, "inside a window");
@@ -651,7 +689,7 @@ impl clio_attacks::Target for WallsTarget {
             "attack-65" => {
                 held(a_plain_program_sees_no_store_and_changes_no_agents_settings)
                     && held(naming_a_store_or_writing_an_agents_home_waits_for_the_person)
-                    && held(neither_bypass_nor_a_window_nor_a_child_opens_a_wall)
+                    && held(only_a_yes_to_the_command_itself_opens_a_wall)
             }
             "attack-66" => {
                 held(a_plain_program_sees_no_store_and_changes_no_agents_settings)

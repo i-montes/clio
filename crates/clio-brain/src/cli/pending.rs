@@ -156,10 +156,10 @@ pub fn bypass_keeps(dirs: &Dirs, p: &Pending, suspect: bool) -> Option<&'static 
 }
 
 /// What the `/bypass on` box says, word for word (the design's).
-pub const BYPASS_BOX: &str = "Clio will approve by herself everything that asks you, with no end, until `/bypass off`. It turns itself off if the judge flags an injection.";
+pub const BYPASS_BOX: &str = "With bypass on Clio asks you nothing, with no end, until `/bypass off`: her judge alone decides in your place. That includes changes to Clio's own setup (her folders, her `clio` commands, keys), programs that run outside the jail (systemd-run, D-Bus, cron, at, tmux, screen, a unit or shell start-up file), commands that open your credential stores (~/.ssh, ~/.aws, your browsers' profiles…), changes to your blocks and skills from outside. What the judge flags or does not answer for is not done, and its first flag turns bypass off.";
 
 /// What still asks under bypass, for the box and `/bypass`.
-pub const BYPASS_KEEPS: &str = "What still asks you: what would change Clio's own setup (her folders, her `clio` commands, keys), what would start new code outside the jail (systemd-run, D-Bus, cron, at, tmux, screen, a unit or shell start-up file), a change to your blocks from a session that read outside text, anything in a session the judge flagged or whose judge did not answer, a round's items, secrets and questions.";
+pub const BYPASS_KEEPS: &str = "What still asks you: a secret only you can type, and Clio's own questions. A round's items still wait for you; in a conversation the judge flagged or did not answer for, nothing is done by itself and nothing waits.";
 
 /// Why bypass is not turned on from a chat: the judge off, or a session the judge flagged.
 fn bypass_refused(dirs: &Dirs, suspect: bool) -> Res<()> {
@@ -214,7 +214,7 @@ pub fn bypass_line(dirs: &Dirs) -> String {
     let at = |ms: i64| pending::local(ms, "%Y-%m-%d %H:%M").unwrap_or_else(|| ms.to_string());
     match bypass_now(dirs) {
         Some(w) => format!(
-            "bypass is on since {}: Clio approves by herself what would ask you, with no end · /bypass off turns it off",
+            "bypass is on since {}: Clio asks you nothing, her judge decides in your place, with no end · /bypass off turns it off",
             at(w.opened_ms)
         ),
         None => match grant::Kind::Bypass.read(&state(dirs)) {
@@ -730,7 +730,8 @@ pub fn approve_as(dirs: &Dirs, id: &str, granted: Option<&str>) -> Res<Pending> 
 fn register_skill(dirs: &Dirs, p: &Pending) -> Res<String> {
     let (name, description, md, files) =
         pending::skill_of(p).ok_or_else(|| format!("{} is not a skill", p.id))?;
-    // One from outside: as found there, with its origin (only the person's own yes reaches here).
+    // One from outside: as found there, with its origin (the person's own yes reaches here, or
+    // bypass's for one the judge read clean in their place).
     if p.tool == clio_toolhost::skill_add::TOOL {
         return super::skills::register_found(&super::skills::root(dirs), &p.args);
     }
@@ -1256,8 +1257,64 @@ mod tests {
         grant::bypass_on(&state(&d)).unwrap();
         assert_eq!(
             listed(&d, &p, 0),
-            format!("{off}  · bypass leaves it to you: it touches Clio's own setup")
+            format!(
+                "{off}  · bypass leaves it to you: {}",
+                grant::NOT_JUDGED_NOW
+            )
         );
+    }
+
+    // S-72: a bypass turned on before it asked nothing (its record and file as they were written
+    // then, without `asks_nothing`) reads off in the status line, in the chat's envelope and in
+    // what answers an item; the box opens again, saying the new meaning, and its yes turns on one
+    // that asks nothing.
+    #[test]
+    fn a_bypass_from_before_it_asked_nothing_reads_off_and_the_box_asks_again() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
+        cfg.jev.enabled = true;
+        std::fs::create_dir_all(&d.config).unwrap();
+        std::fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        let st = state(&d);
+        std::fs::create_dir_all(st.join("bypass")).unwrap();
+        let old = json!({"id": "bypass-5", "opened_ms": 5, "ends_ms": i64::MAX,
+                         "by": [grant::BY_BOX], "bypass": true});
+        std::fs::write(
+            st.join("bypass/bypass-5.jsonl"),
+            format!("{}\n", json!({ "window": old })),
+        )
+        .unwrap();
+        std::fs::write(grant::Kind::Bypass.file(&st), old.to_string()).unwrap();
+        assert!(bypass_now(&d).is_none());
+        assert_eq!(bypass_line(&d), "bypass is off");
+        let p: Pending = serde_json::from_value(json!({"id": "c0", "class": "delete",
+            "tool": "exec", "args": {"command": "rm -r /srv/old.bak"}, "hash": "", "what": "",
+            "run": "r1", "session": "s1", "created_ms": 0, "expires_ms": 1, "state": "waiting"}))
+        .unwrap();
+        assert!(answering(&d, &p).is_none());
+        let c = bypass_ask(&d, false).unwrap();
+        let said: String = c
+            .block
+            .unwrap()
+            .parts()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            "Clio asks you nothing",
+            "her judge alone decides in your place",
+            "Clio's own setup",
+            "programs that run outside the jail",
+            "your credential stores",
+            "skills from outside",
+        ] {
+            assert!(said.contains(want), "{want}: {said}");
+        }
+        let b = bypass_on(&d, false).unwrap();
+        assert!(b.asks_nothing && b.id != "bypass-5");
+        assert_eq!(answering(&d, &p).map(|w| w.id), Some(b.id));
     }
 
     fn dirs_in(root: &Path) -> Dirs {

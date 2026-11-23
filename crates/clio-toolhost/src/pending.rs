@@ -492,10 +492,15 @@ fn approve_made(
     if p.class != class {
         return Err(format!("{id} is not a {class}"));
     }
-    // Second lock (`grant` is the first): a skill from outside is the person's own yes, always.
-    if p.tool == crate::skill_add::TOOL && granted.is_some() {
+    // Second lock (`grant` is the first): a skill from outside is the person's own yes, or
+    // bypass's for one the judge read clean in their place; never a window's.
+    let bypass = granted.is_some_and(|g| g.starts_with(crate::grant::BYPASS_ID));
+    if p.tool == crate::skill_add::TOOL
+        && granted.is_some()
+        && !(bypass && p.args["judge"] == "clean" && p.run != crate::skill_add::SHARED_RUN)
+    {
         return Err(format!(
-            "{id} is a skill from outside: only the person's own yes adds it"
+            "{id} is a skill from outside: only the person's own yes adds it, or bypass's once the judge read it clean"
         ));
     }
     if hash_of(&p.tool, &p.args) != p.hash {
@@ -593,6 +598,23 @@ pub fn shown(p: &Pending) -> &str {
         .or_else(|| p.args.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("")
+}
+
+/// What the judge reads of `p` when it answers in the person's place under bypass (S-72): what
+/// `shown` gives, then every other argument it carries (a block's new text and the entry it
+/// replaces, a write's content), as the box shows them.
+pub fn judged_text(p: &Pending) -> String {
+    let mut text = shown(p).to_owned();
+    if let Some(args) = p.args.as_object() {
+        for (k, v) in args {
+            if v.as_str() == Some(shown(p)) {
+                continue;
+            }
+            let v = v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+            text.push_str(&format!("\n{k}: {v}"));
+        }
+    }
+    text
 }
 
 /// `p` was taken for an answer that never wrote what came of it (Clio ended while it ran): it may
@@ -955,6 +977,20 @@ impl ToolHost {
             granted: None,
         };
         draft.what = self.clean(shown(&draft));
+        // Under bypass nothing waits for the person: the judge answers in their place, or the
+        // act is refused (S-72).
+        let judged = match self.bypass_stands_in(state, req, &draft) {
+            Ok(j) => j,
+            Err(why) => {
+                return self.refuse_in_review(
+                    Some((state, run)),
+                    req,
+                    &draft.args,
+                    "bypass/refused",
+                    why,
+                );
+            }
+        };
         let (content, rule) = match set_aside(state, draft) {
             Ok(p) => {
                 if let Err(e) = log_line(
@@ -970,7 +1006,7 @@ impl ToolHost {
                 ) {
                     eprintln!("clio-toolhost: the action log lost a line: {e}");
                 }
-                match self.granted(state, req, &p, cancel) {
+                match self.granted(state, req, &p, judged, cancel) {
                     Ok(done) => return done,
                     Err(None) => (self.kept_text(state, &p), "host/aside"),
                     Err(Some(why)) => (
@@ -1011,24 +1047,98 @@ impl ToolHost {
         }
     }
 
+    /// Bypass is on, the judge on, and this is a conversation it acts for (a person's chat or a
+    /// `clio run`; never a review, a round or a child, S-73), whatever this session read.
+    pub(crate) fn bypass_here(&self, state: &Path) -> bool {
+        !(self.review || self.writer() || self.unattended)
+            && self.memory.as_ref().is_some_and(|m| m.judge_on())
+            && crate::grant::Kind::Bypass.current(state).is_some()
+    }
+
+    /// Bypass is on here (`bypass_here`) and `session` is one the judge flagged or did not answer
+    /// for: what would wait is refused in these fixed words instead, never set aside (S-72).
+    pub(crate) fn bypass_refuses(&self, state: &Path, session: &str) -> Option<&'static str> {
+        if !self.bypass_here(state) {
+            None
+        } else if self.is_suspect(session) {
+            Some(crate::grant::REFUSED_SUSPECT)
+        } else if self.is_unjudged(session) {
+            Some(crate::grant::REFUSED_UNJUDGED)
+        } else {
+            None
+        }
+    }
+
+    /// Bypass is on here (`bypass_here`) and `draft` would wait (S-72): `Err` with the fixed words of its refusal when the
+    /// conversation is `suspect` or `unjudged`, or when it is an act the judge answers for in the
+    /// person's place (`grant::bypass_judges`) and the judge did not read it clean (a flag takes
+    /// the flag path: the conversation becomes `suspect` and bypass turns off everywhere).
+    /// `Ok(true)`: the judge read it clean, and bypass answers it as the person's own yes;
+    /// `Ok(false)`: bypass does not act here, or answers it with no judge asked.
+    fn bypass_stands_in(
+        &self,
+        state: &Path,
+        req: &Request,
+        draft: &Pending,
+    ) -> Result<bool, &'static str> {
+        if let Some(why) = self.bypass_refuses(state, &draft.session) {
+            return Err(why);
+        }
+        if !self.bypass_here(state) || !crate::grant::bypass_judges(draft) {
+            return Ok(false);
+        }
+        let source = format!("an act asked under the person's bypass ({})", draft.tool);
+        match self.verdict_of(&self.clean(&judged_text(draft)), &source) {
+            crate::TextVerdict::Clean => Ok(true),
+            crate::TextVerdict::Injection => {
+                self.mark(&req.session, "suspect");
+                self.close_window_flagged();
+                if let Err(e) = log_line(
+                    state,
+                    &draft.run,
+                    &req.session,
+                    &req.tool,
+                    &draft.what,
+                    false,
+                    "flagged",
+                    "bypass/flagged",
+                    None,
+                ) {
+                    eprintln!("clio-toolhost: the action log lost a line: {e}");
+                }
+                Err(crate::grant::REFUSED_FLAGGED)
+            }
+            crate::TextVerdict::NoJudge | crate::TextVerdict::NoAnswer => {
+                Err(crate::grant::REFUSED_SILENT)
+            }
+        }
+    }
+
     /// Bypass is on, or a permission window is open (`grant`): what was just set aside (`p`, for
-    /// call `req`) is approved by it at once when it may answer it (`grant::answering`: never
-    /// what changes Clio's own guards, a secret or a block change; a window, besides, never
-    /// control, a service or an MCP server), through the same path as the person's yes, recorded
-    /// in its record before it runs, and its real result goes back as the call's own. Never in a
-    /// `suspect` session, never in a review or a round, never with the judge off (it then
-    /// closes). `Err(None)`: it waits; `Err(Some(why))`: it could not do it, and it waits.
+    /// call `req`) is approved by it at once when it may answer it (`grant::answering`; or bypass,
+    /// for an act the judge just read clean in the person's place: `judged`; a window never
+    /// control, a block change, a service or an MCP server), through the same path as the person's
+    /// yes, recorded in its record before it runs, and its real result goes back as the call's
+    /// own. Never in a `suspect` session, never in a review or a round, never with the judge off
+    /// (it then closes). `Err(None)`: it waits; `Err(Some(why))`: it could not do it, and it waits.
     fn granted(
         &self,
         state: &Path,
         req: &Request,
         p: &Pending,
+        judged: bool,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Response, Option<String>> {
         if !self.acts_unasked(&req.session) {
             return Err(None);
         }
-        let w = crate::grant::answering(state, p).ok_or(None)?;
+        let w = crate::grant::answering(state, p)
+            .or_else(|| {
+                (judged && crate::grant::bypass_judges(p))
+                    .then(|| crate::grant::Kind::Bypass.current(state))
+                    .flatten()
+            })
+            .ok_or(None)?;
         let kind = crate::grant::Kind::of(&w);
         if !self.memory.as_ref().is_some_and(|m| m.judge_on()) {
             if let Err(e) = kind.close(state, crate::grant::JUDGE_OFF) {
@@ -1041,13 +1151,28 @@ impl ToolHost {
         }
         let w = kind.begin(state, p, &p.what).ok_or(None)?;
         let now = now_ms();
-        let (ok, content, data, external) = self
-            .approve_as(&p.id, now, Some(&w.id), Some((req, cancel)))
-            .map(|(_, ran)| ran)
-            .map_err(|e| {
-                crate::grant::done(state, &w, &p.id, crate::grant::NOT_RUN);
-                Some(e)
-            })?;
+        let ran = match (&self.memory, p.class) {
+            // A block change is written, not run: as the person's yes writes it.
+            (Some(port), Class::Memory) => {
+                let (st, id, by) = (state.to_owned(), p.id.clone(), w.id.clone());
+                self.ask_port_for(
+                    port,
+                    move |m| approve_block(&st, &id, now, m, Some(&by)),
+                    self.memory_timeout * 3,
+                )
+                .map(|q| match q.state {
+                    State::Done { output_tail, .. } => (true, output_tail, Value::Null, false),
+                    _ => (true, String::new(), Value::Null, false),
+                })
+            }
+            _ => self
+                .approve_as(&p.id, now, Some(&w.id), Some((req, cancel)))
+                .map(|(_, ran)| ran),
+        };
+        let (ok, content, data, external) = ran.map_err(|e| {
+            crate::grant::done(state, &w, &p.id, crate::grant::NOT_RUN);
+            Some(e)
+        })?;
         let code = data.get("exit_code").and_then(Value::as_i64);
         crate::grant::done(state, &w, &p.id, &crate::grant::outcome(ok, code));
         let rule = approved_rule(Some(&w.id), "");
@@ -1521,7 +1646,10 @@ mod tests {
             call_id: "c".into(),
             tainted: false,
         };
-        assert!(matches!(host.granted(&st, &req, &p, &|| false), Err(None)));
+        assert!(matches!(
+            host.granted(&st, &req, &p, true, &|| false),
+            Err(None)
+        ));
         assert!(
             crate::grant::record(&st, &crate::grant::read(&st).unwrap().id)
                 .unwrap()

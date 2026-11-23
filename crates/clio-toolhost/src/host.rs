@@ -525,8 +525,9 @@ impl ToolHost {
             Some(r) => r.to_string_lossy().into_owned(),
             None => command.to_owned(),
         });
-        // The person's own yes to this command: the walls it names open for it (S-74, S-75).
-        let approved = rule == "host/approved" && tool == "exec";
+        // The person's own yes to this command, or bypass's in their place (only a `control` the
+        // judge read clean names a wall, S-72): the walls it names open for it (S-74, S-75).
+        let approved = matches!(rule, "host/approved" | "bypass/approved") && tool == "exec";
         if logged && let Err(e) = h.log(&req.session, tool, &what, network, "run", rule, None) {
             return Err(format!(
                 "[toolhost] {tool} was not run: the action log cannot be written ({e})"

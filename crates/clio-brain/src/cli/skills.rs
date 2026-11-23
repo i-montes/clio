@@ -1090,7 +1090,7 @@ type Look<'a> = (Judge<'a>, &'a dyn Fn(&str) -> Option<String>);
 
 /// The run and session every item of the shared folder waits under (S-74): any person's chat
 /// asks it (`HostSide::mine`), and nothing else does.
-pub const SHARED_RUN: &str = "shared-skills";
+pub const SHARED_RUN: &str = clio_toolhost::skill_add::SHARED_RUN;
 /// Why a skill of the shared folder is off: it is gone from there.
 pub const GONE: &str = clio_toolhost::manage::OFF_GONE;
 
@@ -1348,6 +1348,19 @@ fn shared_open_with(d: &Dirs, io: Look) -> Vec<String> {
     let Some(ask) = ask else {
         return notes;
     };
+    // Under bypass nobody is asked (S-72, S-74): nothing waits, one note says what is there.
+    if super::pending::bypass_now(d).is_some() {
+        for p in &waiting {
+            let _ = clio_toolhost::pending::reject(&st, &p.id);
+        }
+        if !ask.is_empty() {
+            notes.push(format!(
+                "{} skill(s) in ~/.agents/skills are new or changed; bypass adds none by itself, since nobody asked for them · ask Clio for them, or run `clio skills add ~/.agents/skills`",
+                ask.len()
+            ));
+        }
+        return notes;
+    }
     for p in &waiting {
         let same = |a: &Value| a["origin"] == p.args["origin"] && a["sha256"] == p.args["sha256"];
         if !ask.iter().any(same) {
@@ -2198,6 +2211,37 @@ description: "How to choose and propose an MCP server with mcp_propose, and how 
             .filter(|p| p.run == SHARED_RUN)
             .collect();
         (notes, waiting, read.get())
+    }
+
+    // S-74 S-72: under bypass the look adds nothing by itself and opens no box: nobody asked for
+    // those skills. What waited from an earlier look is dropped, and one plain note says how many
+    // are new or changed and how to ask for them; bypass off, the next look asks them again.
+    #[test]
+    fn under_bypass_the_shared_look_adds_nothing_and_leaves_one_note() {
+        let t = tempfile::tempdir().unwrap();
+        let d = shared_dirs(t.path());
+        let mut cfg = crate::cli::home::Config::default_with(vec!["pi".into()]);
+        cfg.jev.enabled = true;
+        fs::create_dir_all(&d.config).unwrap();
+        fs::write(d.config_file(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        let s = d.home.join(".agents/skills");
+        put(&s.join("hi/SKILL.md"), &shared_md("hi", "Say hi."));
+        assert_eq!(open_chat(&d).1.len(), 1);
+        super::super::pending::bypass_on(&d, false).unwrap();
+        put(&s.join("yo/SKILL.md"), &shared_md("yo", "Say yo."));
+        let (notes, waiting, _) = open_chat(&d);
+        assert!(waiting.is_empty(), "{waiting:?}");
+        assert_eq!(
+            notes,
+            [
+                "2 skill(s) in ~/.agents/skills are new or changed; bypass adds none by itself, since nobody asked for them · ask Clio for them, or run `clio skills add ~/.agents/skills`"
+            ]
+        );
+        assert!(!live(&d).join("hi").exists() && !live(&d).join("yo").exists());
+        super::super::pending::bypass_off(&d).unwrap();
+        let (notes, waiting, _) = open_chat(&d);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(waiting.len(), 2);
     }
 
     // S-74: a chat that opens sets aside what is new in the shared folder for its box, and the

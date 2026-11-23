@@ -6,8 +6,9 @@
 //! and it may answer is approved by it (`Session::grant`); control, a secret, a block change, a
 //! service or an MCP server always asks, as in a `suspect` session or with the judge off. When
 //! the window ends Clio starts one turn to sum up what she did under it. Under bypass (`/bypass
-//! on`, its own box) what it may answer is approved by it the same way, and the box holds only
-//! what it never answers; the status line says `bypass on`.
+//! on`, its own box) what it may answer is approved by it the same way, what the judge reads in
+//! the person's place is answered as it is asked, and the box holds only what it leaves to the
+//! person; the status line says `bypass on`.
 
 use super::app::{Action, App, Cmd, Confirm, Screen, chat_waits};
 use super::ask::{BlockAsk, Part};

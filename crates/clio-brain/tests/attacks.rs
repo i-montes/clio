@@ -1488,8 +1488,9 @@ const MEMORY_CASES: [&str; 5] = [
 /// 62 (host mode) by `clio-toolhost/tests/host.rs`, 63 and 64 (the judge at the door) and 67
 /// (another agent's instruction file, S-77) by `clio-toolhost/tests/judge.rs`, 65 and 66 (the
 /// home's walls) by `clio-toolhost/tests/walls.rs`, 69 (an added skill's resources, S-68) by
-/// `clio-toolhost/tests/skills.rs`.
-const HARDENING_CASES: [&str; 13] = [
+/// `clio-toolhost/tests/skills.rs`, 70 (the judge in the person's place under bypass, S-72) by
+/// `clio-toolhost/tests/grant.rs`.
+const HARDENING_CASES: [&str; 14] = [
     "attack-50",
     "attack-51",
     "attack-52",
@@ -1503,6 +1504,7 @@ const HARDENING_CASES: [&str; 13] = [
     "attack-66",
     "attack-67",
     "attack-69",
+    "attack-70",
 ];
 
 /// Run by `clio-node/tests/jail.rs`: they attack the jail itself, not the agent.
