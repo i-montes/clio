@@ -13,7 +13,8 @@
 //!   the names, once to keep the skills' folders (at most `MAX_KEPT`). Nothing in it runs. The
 //!   commit is the archive's own. curl's answer says which failure it was: no such repository or
 //!   ref, too large, or no network.
-//! - A folder only for the person (`clio skills add`): the model can write folders. It is walked
+//! - A folder, for the person (`clio skills add`) and for the model (`skill_add`: never one the
+//!   jail hides from her commands; the person's yes is to the text the box shows). It is walked
 //!   from a handle on its top folder, no link followed even if one is swapped in while it is read.
 //! - Every text goes through the vault's filter: a secret shape refuses the skill.
 //! - A path outside the archive's folder, or an entry that is not a file, a folder or a link,
@@ -58,8 +59,8 @@ const MAX_ENTRIES: usize = 20_000;
 const PLUGIN_PARTS: [&str; 3] = ["hooks", "commands", "agents"];
 /// Folders deep, at most, in a folder read.
 const MAX_FOLDER_DEPTH: usize = 16;
-/// The model's `skill_add` never takes a folder: fixed words.
-pub const FOLDER_PERSON: &str = "a folder is added only by the person, with `clio skills add` at a terminal; skill_add takes a GitHub repository (owner/repo, owner/repo@branch-or-tag)";
+/// `skill_add` of a folder that is not there or that the jail hides: the same fixed words.
+pub const FOLDER_CLOSED: &str = "source: that is not a folder Clio's commands can read (it is not there, or it is one of the folders closed to them)";
 const WHERE: &str = "a folder with SKILL.md, skills/*/SKILL.md, .claude/skills/*/SKILL.md or plugins/*/skills/*/SKILL.md";
 
 /// Where skills come from.
@@ -2038,14 +2039,25 @@ impl crate::ToolHost {
             Some(_) => return fail("names must be a list of skill names"),
         };
         let home = h.cfg.home.as_path();
-        // A folder is something the model can write: only the person adds one (`clio skills add`).
-        if !matches!(parse(s("source"), home, home), Ok(Source::GitHub { .. })) {
-            return fail(match parse(s("source"), home, home) {
-                Ok(_) => FOLDER_PERSON,
-                Err(_) => {
-                    "source: a GitHub repository (owner/repo, owner/repo@branch-or-tag, or https://github.com/owner/repo); only GitHub, only over https"
+        match parse(s("source"), home, home) {
+            // What the jail hides from Clio's commands (S-75, her own folders) is not read on
+            // her word either, in the words of a folder that is not there.
+            Ok(Source::Folder(p)) => {
+                let mut hidden = crate::walls::closed(home, &[], &[]).0;
+                hidden.extend(h.cfg.control.iter().filter_map(|c| c.canonicalize().ok()));
+                let open = p
+                    .canonicalize()
+                    .is_ok_and(|p| p.is_dir() && !hidden.iter().any(|c| p.starts_with(c)));
+                if !open {
+                    return fail(FOLDER_CLOSED);
                 }
-            });
+            }
+            Ok(Source::GitHub { .. }) => {}
+            Err(_) => {
+                return fail(
+                    "source: a GitHub repository (owner/repo, owner/repo@branch-or-tag, or https://github.com/owner/repo; only over https) or a folder of the person's home (/… or ~/…)",
+                );
+            }
         }
         // `verdict`, not `verdict_of`: a port without a judge is "not judged" here, never clean.
         let judge = |t: &str, from: &str| match &self.memory {
